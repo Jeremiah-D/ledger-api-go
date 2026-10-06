@@ -77,6 +77,15 @@ go test -race ./...
 go run .                 # listens on :8080; override with PORT, e.g. PORT=9090 go run .
 ```
 
+Environment:
+
+- `PORT` — listen address (default `8080`).
+- `LEDGER_IDEMPOTENCY_TTL` — how long idempotency keys are retained, e.g.
+  `LEDGER_IDEMPOTENCY_TTL=72h`. Keys older than the TTL are evicted so the
+  replay-detection index can't grow forever in a long-running process; the
+  journal itself is append-only and never pruned. Pick a TTL longer than any
+  client retry window. Unset means keys never expire.
+
 ## Layout
 
 ```
@@ -84,6 +93,7 @@ go run .                 # listens on :8080; override with PORT, e.g. PORT=9090 
 ├── ledger/
 │   ├── ledger.go              # Ledger, JournalEntry, Post, Balance, Snapshot, ListEntries
 │   ├── ledger_test.go         # validation, idempotency, concurrency tests
+│   ├── ledger_idempotency_ttl_test.go# TTL eviction, lazy prune, interval guard
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics
 │   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts
 ├── main.go                    # net/http JSON API (thin assembly only)

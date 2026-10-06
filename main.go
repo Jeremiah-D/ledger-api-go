@@ -182,8 +182,20 @@ func main() {
 		addr = ":" + addr
 	}
 
+	// LEDGER_IDEMPOTENCY_TTL bounds the idempotency-key index in memory
+	// (e.g. "72h"). Unset or unparsable means keys never expire.
+	var opts []ledger.Option
+	if raw := os.Getenv("LEDGER_IDEMPOTENCY_TTL"); raw != "" {
+		if ttl, err := time.ParseDuration(raw); err != nil {
+			log.Printf("ledger-api-go: ignoring invalid LEDGER_IDEMPOTENCY_TTL %q: %v", raw, err)
+		} else if ttl > 0 {
+			opts = append(opts, ledger.WithIdempotencyTTL(ttl))
+			log.Printf("ledger-api-go: idempotency key TTL = %v", ttl)
+		}
+	}
+
 	log.Printf("ledger-api-go listening on %s", addr)
-	if err := http.ListenAndServe(addr, newRouter(ledger.New())); err != nil {
+	if err := http.ListenAndServe(addr, newRouter(ledger.New(opts...))); err != nil {
 		log.Fatal(err)
 	}
 }

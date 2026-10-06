@@ -46,27 +46,60 @@ var (
 // maxPageSize caps a single ListEntries page.
 const maxPageSize = 1000
 
+// defaultKeyPruneInterval is the minimum time between two lazy idempotency-key
+// sweeps when a TTL is configured. It keeps Post amortized O(1): without it,
+// every Post would scan the whole key table.
+const defaultKeyPruneInterval = time.Minute
+
 // Ledger is an in-memory double-entry ledger. It is safe for concurrent use.
 //
 // Every successful Post bumps the ledger's version, a monotonically
 // increasing sequence number. Versioned snapshots let reconciliation
 // consumers detect whether anything changed between two reads: if the
 // version is identical, the balance necessarily is too.
+//
+// Idempotency keys are kept in a separate index so replays can be detected
+// without scanning the journal. The index grows with every distinct key, so
+// a TTL can be configured (WithIdempotencyTTL): keys older than the TTL are
+// eligible for eviction, which bounds memory in long-running processes. A
+// zero TTL disables expiry entirely.
 type Ledger struct {
-	mu       sync.Mutex
-	balances map[AccountID]int64
-	entries  map[string]JournalEntry // by entry ID
-	byKey    map[string]JournalEntry // by idempotency key
-	version  uint64                  // bumped by every successful Post
+	mu             sync.Mutex
+	balances       map[AccountID]int64
+	entries        map[string]JournalEntry // by entry ID
+	byKey          map[string]JournalEntry // by idempotency key
+	version        uint64                  // bumped by every successful Post
+	idempotencyTTL time.Duration           // 0 = never expire idempotency keys
+	pruneInterval  time.Duration           // min gap between lazy key sweeps
+	lastKeyPrune   time.Time
 }
 
-// New returns an empty Ledger.
-func New() *Ledger {
-	return &Ledger{
-		balances: make(map[AccountID]int64),
-		entries:  make(map[string]JournalEntry),
-		byKey:    make(map[string]JournalEntry),
+// Option configures a Ledger.
+type Option func(*Ledger)
+
+// WithIdempotencyTTL sets how long an idempotency key is retained after the
+// entry was posted. Keys older than ttl are eligible for eviction via
+// ExpireIdempotencyKeys and via lazy pruning on Post. A non-positive ttl
+// disables expiry (the default).
+func WithIdempotencyTTL(ttl time.Duration) Option {
+	return func(l *Ledger) {
+		l.idempotencyTTL = ttl
 	}
+}
+
+// New returns an empty Ledger. Options configure behavior; by default
+// idempotency keys never expire.
+func New(opts ...Option) *Ledger {
+	l := &Ledger{
+		balances:      make(map[AccountID]int64),
+		entries:       make(map[string]JournalEntry),
+		byKey:         make(map[string]JournalEntry),
+		pruneInterval: defaultKeyPruneInterval,
+	}
+	for _, opt := range opts {
+		opt(l)
+	}
+	return l
 }
 
 // Post records a journal entry and applies its balance effects.
@@ -111,6 +144,8 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		e.CreatedAt = time.Now()
 	}
 
+	l.maybePruneIdempotencyKeys(time.Now())
+
 	l.entries[e.ID] = e
 	if e.IdempotencyKey != "" {
 		l.byKey[e.IdempotencyKey] = e
@@ -137,6 +172,50 @@ func (l *Ledger) GetByIdempotencyKey(key string) (JournalEntry, bool) {
 	defer l.mu.Unlock()
 	e, ok := l.byKey[key]
 	return e, ok
+}
+
+// ExpireIdempotencyKeys evicts idempotency keys whose entry was posted more
+// than the configured TTL ago, and returns how many were removed. It is a
+// no-op returning 0 when no TTL is configured. Expired keys are forgotten
+// entirely: reposting the same key afterwards books a brand-new entry
+// (duplicate == false), so callers must pick a TTL longer than any retry or
+// reconciliation window they rely on. The journal itself is untouched — only
+// the replay-detection index shrinks.
+func (l *Ledger) ExpireIdempotencyKeys() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.pruneIdempotencyKeysLocked(time.Now())
+}
+
+// maybePruneIdempotencyKeys runs a lazy key sweep at most once per
+// pruneInterval. It amortizes expiry across Posts so no background goroutine
+// is needed. Callers must hold l.mu.
+func (l *Ledger) maybePruneIdempotencyKeys(now time.Time) {
+	if l.idempotencyTTL <= 0 {
+		return
+	}
+	if now.Sub(l.lastKeyPrune) < l.pruneInterval {
+		return
+	}
+	l.lastKeyPrune = now
+	l.pruneIdempotencyKeysLocked(now)
+}
+
+// pruneIdempotencyKeysLocked removes keys older than the TTL. A non-positive
+// TTL disables pruning. Callers must hold l.mu.
+func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
+	if l.idempotencyTTL <= 0 {
+		return 0
+	}
+	cutoff := now.Add(-l.idempotencyTTL)
+	removed := 0
+	for key, e := range l.byKey {
+		if e.CreatedAt.Before(cutoff) {
+			delete(l.byKey, key)
+			removed++
+		}
+	}
+	return removed
 }
 
 // Entries returns a copy of all posted journal entries.
