@@ -92,11 +92,30 @@ func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSnapshot implements GET /accounts/{id}/snapshot.
+// Returns the account's balance together with the ledger version at read
+// time, so reconciliation consumers can tell whether anything changed
+// between two reads without comparing full entry logs.
+func (s *server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	balance, version := s.ledger.Snapshot(ledger.AccountID(id))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":       id,
+		"balance_cents": balance,
+		"version":       version,
+	})
+}
+
 func newRouter(l *ledger.Ledger) http.Handler {
 	s := &server{ledger: l}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
+	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
 	return mux
 }
 

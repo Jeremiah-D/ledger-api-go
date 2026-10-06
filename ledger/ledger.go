@@ -40,11 +40,17 @@ var (
 )
 
 // Ledger is an in-memory double-entry ledger. It is safe for concurrent use.
+//
+// Every successful Post bumps the ledger's version, a monotonically
+// increasing sequence number. Versioned snapshots let reconciliation
+// consumers detect whether anything changed between two reads: if the
+// version is identical, the balance necessarily is too.
 type Ledger struct {
 	mu       sync.Mutex
 	balances map[AccountID]int64
 	entries  map[string]JournalEntry // by entry ID
 	byKey    map[string]JournalEntry // by idempotency key
+	version  uint64                  // bumped by every successful Post
 }
 
 // New returns an empty Ledger.
@@ -104,6 +110,7 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	}
 	l.balances[e.DebitAccount] += e.AmountCents
 	l.balances[e.CreditAccount] -= e.AmountCents
+	l.version++
 
 	return e, false, nil
 }
@@ -134,4 +141,16 @@ func (l *Ledger) Entries() []JournalEntry {
 		out = append(out, e)
 	}
 	return out
+}
+
+// Snapshot returns the current net balance (in cents) of the given account
+// together with the ledger version at read time. Unknown accounts have a
+// zero balance. The version is bumped by every successful Post (idempotent
+// replays and rejected entries do not count), so two snapshots with the same
+// version are guaranteed to show the same balance — a cheap change detector
+// for reconciliation jobs.
+func (l *Ledger) Snapshot(a AccountID) (balance int64, version uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.balances[a], l.version
 }
