@@ -36,6 +36,37 @@ curl -s localhost:8080/accounts/cash/balance
 # {"account":"cash","balance_cents":1000}
 ```
 
+### `GET /accounts/{id}/snapshot`
+
+Balance plus the ledger version at read time. The version bumps on every
+successful post (idempotent replays and rejected entries don't count), so
+two snapshots with the same version are guaranteed to show the same
+balance — a cheap change detector for reconciliation jobs.
+
+```bash
+curl -s localhost:8080/accounts/cash/snapshot
+# {"account":"cash","balance_cents":1000,"version":3}
+```
+
+### `GET /entries`
+
+Time-windowed, cursor-paginated export of the journal, sorted by
+`(CreatedAt, ID)`.
+
+```bash
+curl -s 'localhost:8080/entries?since=2026-10-01T00:00:00Z&limit=100'
+# {"entries":[...],"next_cursor":"..."}   # empty next_cursor = last page
+```
+
+- `since` / `until`: RFC3339 timestamps filtering `CreatedAt` in
+  `[since, until)`. Omitted `since` means the beginning of time; omitted
+  `until` means no upper bound.
+- `limit`: page size, defaults to 100, capped at 1000.
+- `cursor`: opaque cursor from the previous response's `next_cursor`.
+  Resumption is keyed on entry ID, so entries posted between two pages are
+  never duplicated or skipped.
+- Malformed timestamps, cursors, or limits → `400` with an `{"error": ...}` body.
+
 ## Running
 
 Requires Go 1.27+.
@@ -51,9 +82,12 @@ go run .                 # listens on :8080; override with PORT, e.g. PORT=9090 
 ```
 .
 ├── ledger/
-│   ├── ledger.go       # Ledger, JournalEntry, Post, Balance, GetByIdempotencyKey
-│   └── ledger_test.go  # validation, idempotency, concurrency tests
-├── main.go             # net/http JSON API (thin assembly only)
+│   ├── ledger.go              # Ledger, JournalEntry, Post, Balance, Snapshot, ListEntries
+│   ├── ledger_test.go         # validation, idempotency, concurrency tests
+│   ├── ledger_snapshot_test.go# versioned snapshot semantics
+│   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts
+├── main.go                    # net/http JSON API (thin assembly only)
+├── main_test.go               # HTTP handler tests (httptest)
 └── .github/workflows/ci.yml
 ```
 

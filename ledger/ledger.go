@@ -12,7 +12,9 @@
 package ledger
 
 import (
+	"encoding/base64"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -37,7 +39,12 @@ var (
 	ErrEmptyCreditAccount = errors.New("ledger: credit account must not be empty")
 	ErrSameAccount        = errors.New("ledger: debit and credit accounts must differ")
 	ErrNonPositiveAmount  = errors.New("ledger: amount must be greater than zero")
+	ErrInvalidCursor      = errors.New("ledger: pagination cursor is invalid")
+	ErrInvalidLimit       = errors.New("ledger: limit must be between 1 and 1000")
 )
+
+// maxPageSize caps a single ListEntries page.
+const maxPageSize = 1000
 
 // Ledger is an in-memory double-entry ledger. It is safe for concurrent use.
 //
@@ -153,4 +160,74 @@ func (l *Ledger) Snapshot(a AccountID) (balance int64, version uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.balances[a], l.version
+}
+
+// ListEntries returns up to limit journal entries whose CreatedAt falls in
+// [since, until), sorted by (CreatedAt, ID). Pagination is cursor-based:
+// pass the nextCursor returned by the previous call to continue; an empty
+// cursor starts from the beginning. The returned nextCursor is empty when
+// the last page has been returned.
+//
+// The cursor is opaque (base64url of the last returned entry's ID) and the
+// resume position is defined by sort order, so entries posted between two
+// pages are never duplicated or skipped: the ledger is append-only, so an
+// entry named by a cursor can never move. A cursor naming an entry outside
+// the requested window is rejected with ErrInvalidCursor.
+func (l *Ledger) ListEntries(since, until time.Time, cursor string, limit int) (page []JournalEntry, nextCursor string, err error) {
+	if limit < 1 || limit > maxPageSize {
+		return nil, "", ErrInvalidLimit
+	}
+	var afterID string
+	if cursor != "" {
+		decoded, decErr := base64.RawURLEncoding.DecodeString(cursor)
+		if decErr != nil || len(decoded) == 0 {
+			return nil, "", ErrInvalidCursor
+		}
+		afterID = string(decoded)
+	}
+
+	l.mu.Lock()
+	filtered := make([]JournalEntry, 0, len(l.entries))
+	for _, e := range l.entries {
+		if e.CreatedAt.Before(since) {
+			continue
+		}
+		if !e.CreatedAt.Before(until) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	l.mu.Unlock()
+
+	sort.Slice(filtered, func(i, j int) bool {
+		if !filtered[i].CreatedAt.Equal(filtered[j].CreatedAt) {
+			return filtered[i].CreatedAt.Before(filtered[j].CreatedAt)
+		}
+		return filtered[i].ID < filtered[j].ID
+	})
+
+	start := 0
+	if afterID != "" {
+		found := false
+		for i, e := range filtered {
+			if e.ID == afterID {
+				start = i + 1
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, "", ErrInvalidCursor
+		}
+	}
+
+	end := start + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	page = filtered[start:end]
+	if end < len(filtered) {
+		nextCursor = base64.RawURLEncoding.EncodeToString([]byte(page[len(page)-1].ID))
+	}
+	return page, nextCursor, nil
 }

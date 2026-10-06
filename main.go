@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,9 +115,62 @@ func newRouter(l *ledger.Ledger) http.Handler {
 	s := &server{ledger: l}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
+	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
 	return mux
+}
+
+// handleListEntries implements GET /entries: time-windowed, cursor-paginated
+// export of the journal.
+//
+//	GET /entries?since=<rfc3339>&until=<rfc3339>&limit=100&cursor=<opaque>
+//
+// since/until are RFC3339 timestamps filtering CreatedAt in [since, until).
+// Omitted since means the beginning of time; omitted until means no upper
+// bound. limit defaults to 100 and is capped at 1000. The response is
+// {"entries":[...], "next_cursor":"..."}; an empty next_cursor marks the last
+// page. Malformed timestamps, cursors, or limits return 400.
+func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	since := time.Time{}
+	if v := q.Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since timestamp (want RFC3339)"})
+			return
+		}
+		since = t
+	}
+	until := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	if v := q.Get("until"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid until timestamp (want RFC3339)"})
+			return
+		}
+		until = t
+	}
+	limit := 100
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid limit (want integer)"})
+			return
+		}
+		limit = n
+	}
+
+	page, next, err := s.ledger.ListEntries(since, until, q.Get("cursor"), limit)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries":     page,
+		"next_cursor": next,
+	})
 }
 
 func main() {
