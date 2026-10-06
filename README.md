@@ -85,6 +85,10 @@ Environment:
   replay-detection index can't grow forever in a long-running process; the
   journal itself is append-only and never pruned. Pick a TTL longer than any
   client retry window. Unset means keys never expire.
+- `SHUTDOWN_TIMEOUT` — how long a graceful shutdown waits for in-flight
+  requests to drain after SIGINT/SIGTERM (default `10s`, e.g. `SHUTDOWN_TIMEOUT=30s`).
+  New connections are refused immediately; requests already being served run to
+  completion or until the timeout.
 
 ## Layout
 
@@ -98,6 +102,7 @@ Environment:
 │   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts
 ├── main.go                    # net/http JSON API (thin assembly only)
 ├── main_test.go               # HTTP handler tests (httptest)
+├── main_graceful_test.go      # SIGTERM drain: in-flight requests complete, listener closes
 └── .github/workflows/ci.yml
 ```
 

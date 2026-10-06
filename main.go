@@ -4,14 +4,18 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Jeremiah-D/ledger-api-go/ledger"
@@ -194,8 +198,67 @@ func main() {
 		}
 	}
 
-	log.Printf("ledger-api-go listening on %s", addr)
-	if err := http.ListenAndServe(addr, newRouter(ledger.New(opts...))); err != nil {
-		log.Fatal(err)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("ledger-api-go: listen %s: %v", addr, err)
+	}
+
+	// SIGINT/SIGTERM cancel the context; runServer then drains in-flight
+	// requests instead of dropping them.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	timeout := shutdownTimeout()
+	log.Printf("ledger-api-go listening on %s (shutdown timeout %v)", ln.Addr(), timeout)
+	if err := runServer(ctx, ln, newRouter(ledger.New(opts...)), timeout); err != nil {
+		log.Fatalf("ledger-api-go: %v", err)
+	}
+	log.Print("ledger-api-go shut down cleanly")
+}
+
+// shutdownTimeout reads SHUTDOWN_TIMEOUT (a Go duration string, e.g. "15s").
+// It defaults to 10s; invalid or non-positive values fall back to the default
+// with a log line.
+func shutdownTimeout() time.Duration {
+	const def = 10 * time.Second
+	raw := os.Getenv("SHUTDOWN_TIMEOUT")
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid SHUTDOWN_TIMEOUT %q, using %v", raw, def)
+		return def
+	}
+	return d
+}
+
+// runServer serves handler on ln until ctx is cancelled, then performs a
+// graceful shutdown: it stops accepting new connections and waits for
+// in-flight requests to finish, up to shutdownTimeout. It returns nil on a
+// clean shutdown, or the underlying server error.
+func runServer(ctx context.Context, ln net.Listener, handler http.Handler, shutdownTimeout time.Duration) error {
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second, // bound slowloris-style header drips
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ln) }()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		// Serve reports ErrServerClosed after a graceful Shutdown; that is
+		// the expected path, not an error.
+		if err := <-errCh; err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+	case err := <-errCh:
+		return err
 	}
 }
