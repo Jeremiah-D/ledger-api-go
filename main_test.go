@@ -70,6 +70,49 @@ func TestHandleSnapshot(t *testing.T) {
 	}
 }
 
+func TestHandleTrialBalance(t *testing.T) {
+	srv := seedHTTPServer(t)
+	defer srv.Close()
+
+	// The seed posts debit cash / credit equity 100 × 3.
+	code, body := getJSON(t, srv.URL+"/accounts/cash/trial-balance")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if body["account"] != "cash" {
+		t.Errorf("account = %v, want cash", body["account"])
+	}
+	if body["total_debits_cents"] != float64(300) {
+		t.Errorf("total_debits_cents = %v, want 300", body["total_debits_cents"])
+	}
+	if body["total_credits_cents"] != float64(0) {
+		t.Errorf("total_credits_cents = %v, want 0", body["total_credits_cents"])
+	}
+	if body["net_balance_cents"] != float64(300) {
+		t.Errorf("net_balance_cents = %v, want 300", body["net_balance_cents"])
+	}
+	if body["version"] != float64(3) {
+		t.Errorf("version = %v, want 3", body["version"])
+	}
+
+	// The credit side mirrors: equity was credited 300 across the same posts.
+	_, body = getJSON(t, srv.URL+"/accounts/equity/trial-balance")
+	if body["total_debits_cents"] != float64(0) ||
+		body["total_credits_cents"] != float64(300) ||
+		body["net_balance_cents"] != float64(-300) {
+		t.Errorf("equity trial balance = %v, want debits 0 credits 300 net -300", body)
+	}
+
+	// Unknown accounts report zero totals at the current ledger version.
+	_, body = getJSON(t, srv.URL+"/accounts/nobody/trial-balance")
+	if body["total_debits_cents"] != float64(0) ||
+		body["total_credits_cents"] != float64(0) ||
+		body["net_balance_cents"] != float64(0) ||
+		body["version"] != float64(3) {
+		t.Errorf("unknown account trial balance = %v, want zeros version 3", body)
+	}
+}
+
 func TestHandleListEntries(t *testing.T) {
 	srv := seedHTTPServer(t)
 	defer srv.Close()

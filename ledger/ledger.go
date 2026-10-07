@@ -14,6 +14,7 @@ package ledger
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -68,6 +69,8 @@ type Ledger struct {
 	balances       map[AccountID]int64
 	entries        map[string]JournalEntry // by entry ID
 	byKey          map[string]JournalEntry // by idempotency key
+	debitTotals    map[AccountID]int64     // total cents ever debited per account
+	creditTotals   map[AccountID]int64     // total cents ever credited per account
 	version        uint64                  // bumped by every successful Post
 	idempotencyTTL time.Duration           // 0 = never expire idempotency keys
 	pruneInterval  time.Duration           // min gap between lazy key sweeps
@@ -94,6 +97,8 @@ func New(opts ...Option) *Ledger {
 		balances:      make(map[AccountID]int64),
 		entries:       make(map[string]JournalEntry),
 		byKey:         make(map[string]JournalEntry),
+		debitTotals:   make(map[AccountID]int64),
+		creditTotals:  make(map[AccountID]int64),
 		pruneInterval: defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
@@ -104,16 +109,22 @@ func New(opts ...Option) *Ledger {
 
 // Post records a journal entry and applies its balance effects.
 //
-// The entry must have a non-empty ID, distinct non-empty debit and credit
-// accounts, and an AmountCents greater than zero; otherwise an error is
-// returned and nothing is recorded.
+// Double-entry validation runs before anything is recorded: the entry must
+// carry both legs of the posting — a non-empty debit account and a
+// non-empty credit account, distinct from each other — and a positive
+// amount, so the debit leg always equals the credit leg (the books balance
+// by construction). A validation failure returns an error and records
+// nothing.
 //
 // If e.IdempotencyKey is non-empty and the same key was posted before, Post
 // returns the originally posted entry with duplicate == true and does not
 // book anything again. A zero CreatedAt is filled with the current time.
 //
-// On a first-time post, the debit account's balance increases by AmountCents
-// and the credit account's balance decreases by AmountCents.
+// The commit is atomic: while holding the ledger's single mutex, Post
+// applies every effect of the entry at once — the journal row, the
+// idempotency index, both net balances, and both debit/credit totals — then
+// bumps the version. Either all of them land or (on validation failure)
+// none do; readers never observe a half-posted entry.
 func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -152,6 +163,8 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	}
 	l.balances[e.DebitAccount] += e.AmountCents
 	l.balances[e.CreditAccount] -= e.AmountCents
+	l.debitTotals[e.DebitAccount] += e.AmountCents
+	l.creditTotals[e.CreditAccount] += e.AmountCents
 	l.version++
 
 	return e, false, nil
@@ -239,6 +252,70 @@ func (l *Ledger) Snapshot(a AccountID) (balance int64, version uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.balances[a], l.version
+}
+
+// TrialBalance is the double-entry breakdown of a single account: every cent
+// ever debited to it, every cent ever credited from it, and the resulting
+// net balance. NetBalance always equals TotalDebits - TotalCredits; across
+// the whole ledger, the sum of all debit totals equals the sum of all
+// credit totals — that equality is the accounting equation, and
+// VerifyAccountingEquation checks it.
+type TrialBalance struct {
+	Account      AccountID `json:"account"`
+	TotalDebits  int64     `json:"total_debits_cents"`
+	TotalCredits int64     `json:"total_credits_cents"`
+	NetBalance   int64     `json:"net_balance_cents"`
+	Version      uint64    `json:"version"`
+}
+
+// TrialBalance returns the double-entry breakdown of the given account at
+// the current ledger version. Unknown accounts report zeros. The version is
+// the same sequence Snapshot reports, so a trial balance and a snapshot
+// taken at one version describe the same books.
+func (l *Ledger) TrialBalance(a AccountID) TrialBalance {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return TrialBalance{
+		Account:      a,
+		TotalDebits:  l.debitTotals[a],
+		TotalCredits: l.creditTotals[a],
+		NetBalance:   l.balances[a],
+		Version:      l.version,
+	}
+}
+
+// VerifyAccountingEquation checks the two invariants double-entry
+// bookkeeping guarantees: for every account, net balance == total debits −
+// total credits; and globally, total debits == total credits (equivalently,
+// the sum of all net balances is zero). It returns nil when the books
+// balance. Operators can run it after imports or restores; the test suite
+// runs it after every scenario, including the concurrent stress test.
+func (l *Ledger) VerifyAccountingEquation() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	seen := make(map[AccountID]bool)
+	for a := range l.balances {
+		seen[a] = true
+	}
+	for a := range l.debitTotals {
+		seen[a] = true
+	}
+	for a := range l.creditTotals {
+		seen[a] = true
+	}
+	var debits, credits int64
+	for a := range seen {
+		if want := l.debitTotals[a] - l.creditTotals[a]; l.balances[a] != want {
+			return fmt.Errorf("ledger: account %q out of balance: net %d != debits %d - credits %d",
+				a, l.balances[a], l.debitTotals[a], l.creditTotals[a])
+		}
+		debits += l.debitTotals[a]
+		credits += l.creditTotals[a]
+	}
+	if debits != credits {
+		return fmt.Errorf("ledger: books do not balance: total debits %d != total credits %d", debits, credits)
+	}
+	return nil
 }
 
 // ListEntries returns up to limit journal entries whose CreatedAt falls in

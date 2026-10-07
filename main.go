@@ -140,6 +140,21 @@ func (s *server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleTrialBalance implements GET /accounts/{id}/trial-balance.
+// Returns the account's double-entry breakdown — total debits, total
+// credits, and net balance — at the current ledger version. Net balance
+// always equals total debits minus total credits; the endpoint is the
+// read-side of the accounting equation for reconciliation tooling.
+// Like /balance and /snapshot, an unknown account reports zeros.
+func (s *server) handleTrialBalance(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.ledger.TrialBalance(ledger.AccountID(id)))
+}
+
 func newRouter(l *ledger.Ledger) http.Handler {
 	s := &server{ledger: l, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
 	mux := http.NewServeMux()
@@ -147,6 +162,7 @@ func newRouter(l *ledger.Ledger) http.Handler {
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
+	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /metrics", s.metrics.handleMetrics)
 	return mux
 }

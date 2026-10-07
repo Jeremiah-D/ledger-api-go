@@ -12,6 +12,8 @@ The design borrows its posting semantics from a publicly described concept: **"i
 - Money is represented as integer cents (`int64`); floating point is never used for amounts.
 - Every journal entry touches exactly two accounts: the debit account's balance increases by the amount, the credit account's decreases by the same amount, so the sum of all balances is always zero.
 - Entries are validated before booking: non-empty ID, distinct non-empty debit/credit accounts, and `amount_cents > 0`.
+- Every post commits atomically under one mutex: the journal row, the idempotency index, both net balances, and both per-account debit/credit totals land together — readers never see a half-posted entry.
+- The ledger tracks per-account total debits and total credits alongside net balances, so any account's trial balance is a single read. `VerifyAccountingEquation` checks the books: every account's net equals its debits minus its credits, and total debits equal total credits ledger-wide.
 - Posting is idempotent: submitting an entry with a previously used `IdempotencyKey` returns the original entry and books nothing again. All state is guarded by a mutex and safe for concurrent use.
 - A thin `net/http` JSON API exposes the ledger: no external dependencies.
 
@@ -49,6 +51,18 @@ balance — a cheap change detector for reconciliation jobs.
 ```bash
 curl -s localhost:8080/accounts/cash/snapshot
 # {"account":"cash","balance_cents":1000,"version":3}
+```
+
+### `GET /accounts/{id}/trial-balance`
+
+The account's double-entry breakdown at the current ledger version:
+every cent ever debited to it, every cent ever credited from it, and the
+net balance. `net_balance_cents` always equals `total_debits_cents` minus
+`total_credits_cents`; unknown accounts report zeros.
+
+```bash
+curl -s localhost:8080/accounts/cash/trial-balance
+# {"account":"cash","total_debits_cents":1500,"total_credits_cents":500,"net_balance_cents":1000,"version":3}
 ```
 
 ### `GET /entries`
