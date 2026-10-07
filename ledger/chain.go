@@ -96,6 +96,15 @@ func (l *Ledger) ChainHead() (head string, links uint64) {
 func (l *Ledger) VerifyChain() error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	return l.verifyChainLocked()
+}
+
+// verifyChainLocked recomputes the audit chain from the genesis and reports
+// the first inconsistency it finds (see VerifyChain). Callers must hold
+// l.mu; the read lock suffices because the check mutates nothing. The
+// reconciliation scan calls this directly so the chain check runs under the
+// same read lock as the rest of the report, keeping the snapshot consistent.
+func (l *Ledger) verifyChainLocked() error {
 	var prev [32]byte
 	for i, link := range l.chain {
 		if want := uint64(i + 1); link.seq != want {

@@ -119,6 +119,61 @@ curl -s localhost:8080/entries/verify
   missing journal row, spliced/reordered chain). This is an
   operator-level integrity incident, not a client error.
 
+### `POST /reconcile`
+
+The end-of-day reconciliation job. Runs a full read-only scan of the live
+ledger under a single read lock — one consistent snapshot — and returns
+the report as indented JSON in the response body, ready to archive. A
+reconcile run is always `200` even when it finds problems: the findings
+live inside the report, not the status code.
+
+```bash
+curl -s -X POST localhost:8080/reconcile | tee reconcile-$(date +%F).json
+```
+
+Report fields:
+
+| field                  | meaning |
+|------------------------|---------|
+| `generated_at`         | scan time (the server passes `time.Now()`) |
+| `version`              | ledger version at scan time |
+| `accounting_equation_ok` | full-ledger equation scan passed (every account: net == debits − credits; globally: debits == credits) |
+| `accounting_error`     | the first equation violation, if any (omitted when clean) |
+| `trial_balances`       | per-account trial balances for every account ever touched, sorted by account |
+| `discrepancies`        | accounts where net != debits − credits, each with `total_debits_cents`, `total_credits_cents`, `net_balance_cents`, `expected_net_cents`, `difference_cents` (`[]` on a healthy ledger) |
+| `total_debits_cents` / `total_credits_cents` | ledger-wide sums for at-a-glance balancing |
+| `idempotency_keys`     | `ttl_configured`, `ttl`, `total_keys`, and `expired_eligible` (keys older than the TTL, i.e. the next sweep's eviction set) |
+| `audit_chain`          | `verify_ok` / `verify_error`, `head`, `links`, plus `head_consistent` — the chain-length == ledger-version check with `consistency_error` when the counters desync |
+
+A clean run looks like (trimmed):
+
+```json
+{
+  "generated_at": "2026-10-07T18:00:00Z",
+  "version": 3,
+  "total_debits_cents": 1650,
+  "total_credits_cents": 1650,
+  "accounting_equation_ok": true,
+  "trial_balances": [
+    {"account": "cash", "total_debits_cents": 1500, "total_credits_cents": 150, "net_balance_cents": 1350, "version": 3},
+    {"account": "equity", "total_debits_cents": 0, "total_credits_cents": 1500, "net_balance_cents": -1500, "version": 3},
+    {"account": "fees", "total_debits_cents": 150, "total_credits_cents": 0, "net_balance_cents": 150, "version": 3}
+  ],
+  "discrepancies": [],
+  "idempotency_keys": {"ttl_configured": false, "ttl": "0s", "total_keys": 3, "expired_eligible": 0},
+  "audit_chain": {"verify_ok": true, "head": "9f2c…", "links": 3, "head_consistent": true}
+}
+```
+
+Daily cron example (midnight, keep 90 days of reports):
+
+```cron
+0 0 * * * curl -s -X POST localhost:8080/reconcile | tee /var/ledger-reconcile/reconcile-$(date +\%F).json && find /var/ledger-reconcile -name 'reconcile-*.json' -mtime +90 -delete
+```
+
+Reports from a healthy ledger are byte-identical when scanned at the same
+`generated_at`, so plain `diff` works for day-over-day comparisons.
+
 ### `GET /metrics`
 
 Prometheus-format counters, rendered by hand with the standard library
@@ -140,6 +195,7 @@ curl -s localhost:8080/metrics
 - `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
   served. Snapshot reads are not counted.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
+- `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
 
 ## Running
 
@@ -195,6 +251,8 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 .
 ├── ledger/
 │   ├── ledger.go              # Ledger, JournalEntry, Post, Balance, Snapshot, ListEntries
+│   ├── reconcile.go           # end-of-day reconciliation report (equation scan, trial-balance diffs, chain + idempotency checks)
+│   ├── ledger_reconcile_test.go # reconciliation report tests (healthy, tampered, TTL, determinism)
 │   ├── ledger_bench_test.go   # BenchmarkPost: throughput + p99 latency (numbers → README)
 │   ├── ledger_test.go         # validation, idempotency, concurrency tests
 │   ├── ledger_idempotency_ttl_test.go# TTL eviction, lazy prune, interval guard
@@ -204,6 +262,7 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 ├── metrics.go                 # Prometheus-format /metrics counters (stdlib only)
 ├── metrics_test.go            # /metrics exposition + counter semantics tests
 ├── main_test.go               # HTTP handler tests (httptest)
+├── main_reconcile_test.go     # POST /reconcile handler tests (httptest)
 ├── main_graceful_test.go      # SIGTERM drain: in-flight requests complete, listener closes
 └── .github/workflows/ci.yml
 ```

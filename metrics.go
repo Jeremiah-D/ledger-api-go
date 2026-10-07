@@ -24,6 +24,8 @@ type Metrics struct {
 	BalanceQueries atomic.Uint64
 	// VerifyRequests counts GET /entries/verify requests served.
 	VerifyRequests atomic.Uint64
+	// ReconcileRuns counts POST /reconcile requests served.
+	ReconcileRuns atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -47,6 +49,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /accounts/{id}/balance requests served.", m.BalanceQueries.Load())
 	writeCounter(&sb, "ledger_verify_requests_total",
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
+	writeCounter(&sb, "ledger_reconcile_runs_total",
+		"Total POST /reconcile requests served.", m.ReconcileRuns.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

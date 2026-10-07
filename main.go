@@ -171,10 +171,34 @@ func (s *server) handleVerifyEntries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "links": links, "head": head})
 }
 
+// handleReconcile implements POST /reconcile, the operator-facing end-of-day
+// reconciliation job. It runs a full read-only scan of the live ledger — the
+// accounting equation, per-account trial balances, idempotency-key health,
+// and audit-chain integrity — and returns the report as the response body.
+// A reconcile run that reports an unhealthy ledger is still a successful
+// request, so the status is always 200: the findings live inside the
+// report. The indented JSON body pipes straight into a dated archive:
+//
+//	curl -s -X POST localhost:8080/reconcile | tee reconcile-$(date +%F).json
+func (s *server) handleReconcile(w http.ResponseWriter, r *http.Request) {
+	s.metrics.ReconcileRuns.Add(1)
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	report := s.ledger.Reconcile(time.Now())
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := report.WriteJSON(w); err != nil {
+		log.Printf("ledger-api-go: POST /reconcile encode error: %v", err)
+	}
+}
+
 func newRouter(l *ledger.Ledger) http.Handler {
 	s := &server{ledger: l, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
+	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
