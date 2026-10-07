@@ -36,12 +36,41 @@ curl -s -X POST localhost:8080/entries \
   unknown JSON field, or trailing data after the JSON value) → `400` with an
   `{"error": ...}` body.
 - Body larger than `LEDGER_MAX_BODY_BYTES` (default 1 MiB) → `413`.
+- Either leg of the entry names a **frozen** account → `403`
+  `{"error":"ledger: account is frozen"}`. The rejection is counted in
+  `ledger_frozen_rejections_total`.
+
+### `POST /accounts/{id}/freeze` and `POST /accounts/{id}/unfreeze`
+
+Risk-control stop for an account (fintech wind-down / fraud hold). A frozen
+account rejects every new `POST /entries` that names it as debit or credit
+leg with `403`, while balance, snapshot, trial-balance, per-account
+entries, chain verification, and the end-of-day reconcile keep working —
+risk and reconciliation tooling can keep watching a stopped account.
+Freezing is idempotent, never bumps the ledger version (balances are
+unchanged by a freeze), and never touches the journal or the audit chain.
+
+Ordering note: the frozen check runs *after* the idempotency-key replay
+check. A key posted before the freeze still replays to its original entry
+after the freeze (the replay books nothing new); only fresh bookings
+through the frozen account are refused.
+
+```bash
+curl -s -X POST localhost:8080/accounts/cash/freeze
+# {"account":"cash","frozen":true}
+curl -s -X POST localhost:8080/accounts/cash/unfreeze
+# {"account":"cash","frozen":false}
+```
+
+The reconcile report lists frozen accounts (`frozen_accounts`), and each
+trial balance carries a `frozen` flag, so the day-end job shows which
+accounts were stopped.
 
 ### `GET /accounts/{id}/balance`
 
 ```bash
 curl -s localhost:8080/accounts/cash/balance
-# {"account":"cash","balance_cents":1000}
+# {"account":"cash","balance_cents":1000,"frozen":false}
 ```
 
 ### `GET /accounts/{id}/snapshot`
@@ -53,7 +82,7 @@ balance — a cheap change detector for reconciliation jobs.
 
 ```bash
 curl -s localhost:8080/accounts/cash/snapshot
-# {"account":"cash","balance_cents":1000,"version":3}
+# {"account":"cash","balance_cents":1000,"version":3,"frozen":false}
 ```
 
 ### `GET /accounts/{id}/entries`
@@ -80,7 +109,7 @@ net balance. `net_balance_cents` always equals `total_debits_cents` minus
 
 ```bash
 curl -s localhost:8080/accounts/cash/trial-balance
-# {"account":"cash","total_debits_cents":1500,"total_credits_cents":500,"net_balance_cents":1000,"version":3}
+# {"account":"cash","total_debits_cents":1500,"total_credits_cents":500,"net_balance_cents":1000,"version":3,"frozen":false}
 ```
 
 ### `GET /entries`
@@ -196,6 +225,8 @@ curl -s localhost:8080/metrics
   served. Snapshot reads are not counted.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
+- `ledger_frozen_rejections_total` — `POST /entries` requests rejected
+  with `403` because the debit or credit account was frozen.
 
 ## Running
 

@@ -26,6 +26,9 @@ type Metrics struct {
 	VerifyRequests atomic.Uint64
 	// ReconcileRuns counts POST /reconcile requests served.
 	ReconcileRuns atomic.Uint64
+	// FrozenRejections counts POST /entries requests rejected with 403
+	// because the debit or credit account was frozen.
+	FrozenRejections atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -51,6 +54,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
 	writeCounter(&sb, "ledger_reconcile_runs_total",
 		"Total POST /reconcile requests served.", m.ReconcileRuns.Load())
+	writeCounter(&sb, "ledger_frozen_rejections_total",
+		"Total POST /entries requests rejected because an account was frozen.",
+		m.FrozenRejections.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

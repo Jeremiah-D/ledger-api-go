@@ -54,7 +54,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // handleCreateEntry implements POST /entries.
 // The server generates ID and CreatedAt when the client omits them.
 // A first-time post returns 201; a duplicate idempotency key returns 200
-// with the originally posted entry; invalid entries return 400.
+// with the originally posted entry; invalid entries return 400; a post
+// through a frozen account returns 403.
 func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -98,6 +99,11 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 
 	posted, duplicate, err := s.ledger.Post(entry)
 	if err != nil {
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -120,6 +126,7 @@ func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"account":       id,
 		"balance_cents": s.ledger.Balance(ledger.AccountID(id)),
+		"frozen":        s.ledger.IsFrozen(ledger.AccountID(id)),
 	})
 }
 
@@ -138,6 +145,7 @@ func (s *server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		"account":       id,
 		"balance_cents": balance,
 		"version":       version,
+		"frozen":        s.ledger.IsFrozen(ledger.AccountID(id)),
 	})
 }
 
@@ -171,6 +179,43 @@ func (s *server) handleVerifyEntries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "links": links, "head": head})
 }
 
+// handleFreezeAccount implements POST /accounts/{id}/freeze: the
+// operator-facing risk-control stop. A frozen account rejects every new
+// POST /entries that names it as either leg with 403, while balance,
+// snapshot, trial-balance, entries, chain verification, and the
+// end-of-day reconcile keep working. Freezing is idempotent and does not
+// bump the ledger version (balances are unchanged by a freeze).
+func (s *server) handleFreezeAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	s.ledger.Freeze(ledger.AccountID(id))
+	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": true})
+}
+
+// handleUnfreezeAccount implements POST /accounts/{id}/unfreeze: lifts a
+// freeze applied with POST /accounts/{id}/freeze. Unfreezing an account
+// that was never frozen is a no-op.
+func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	s.ledger.Unfreeze(ledger.AccountID(id))
+	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
+}
+
 // handleReconcile implements POST /reconcile, the operator-facing end-of-day
 // reconciliation job. It runs a full read-only scan of the live ledger — the
 // accounting equation, per-account trial balances, idempotency-key health,
@@ -199,6 +244,8 @@ func newRouter(l *ledger.Ledger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
+	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
+	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)

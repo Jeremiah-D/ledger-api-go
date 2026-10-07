@@ -83,6 +83,7 @@ type Ledger struct {
 	byAccount      map[AccountID][]string  // entry IDs per account, in Post order
 	debitTotals    map[AccountID]int64     // total cents ever debited per account
 	creditTotals   map[AccountID]int64     // total cents ever credited per account
+	frozen         map[AccountID]bool      // risk-control stops; frozen accounts reject new posts (see freeze.go)
 	chain          []chainLink             // audit chain, one link per successful Post, in order
 	version        uint64                  // bumped by every successful Post
 	idempotencyTTL time.Duration           // 0 = never expire idempotency keys
@@ -113,6 +114,7 @@ func New(opts ...Option) *Ledger {
 		byAccount:     make(map[AccountID][]string),
 		debitTotals:   make(map[AccountID]int64),
 		creditTotals:  make(map[AccountID]int64),
+		frozen:        make(map[AccountID]bool),
 		pruneInterval: defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
@@ -133,6 +135,14 @@ func New(opts ...Option) *Ledger {
 // If e.IdempotencyKey is non-empty and the same key was posted before, Post
 // returns the originally posted entry with duplicate == true and does not
 // book anything again. A zero CreatedAt is filled with the current time.
+//
+// A frozen account (see freeze.go) rejects any post that would book a new
+// entry through it with ErrAccountFrozen. The frozen check runs after the
+// idempotency replay check: replaying a key that was posted before the
+// freeze returns the original entry instead of failing, because the replay
+// books nothing new. Rejected posts — validation failures and frozen
+// rejections alike — record nothing: no journal row, no chain link, no
+// version bump.
 //
 // The commit is atomic: while holding the ledger's single mutex, Post
 // applies every effect of the entry at once — the journal row, the
@@ -166,6 +176,10 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		if orig, ok := l.byKey[e.IdempotencyKey]; ok {
 			return orig, true, nil
 		}
+	}
+
+	if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
+		return JournalEntry{}, false, ErrAccountFrozen
 	}
 
 	if e.CreatedAt.IsZero() {
@@ -286,6 +300,10 @@ type TrialBalance struct {
 	TotalCredits int64     `json:"total_credits_cents"`
 	NetBalance   int64     `json:"net_balance_cents"`
 	Version      uint64    `json:"version"`
+	// Frozen reports whether the account is currently stopped by a
+	// risk-control freeze (see Freeze). A frozen account keeps its
+	// balances and history; only new postings through it are rejected.
+	Frozen bool `json:"frozen"`
 }
 
 // TrialBalance returns the double-entry breakdown of the given account at
@@ -301,6 +319,7 @@ func (l *Ledger) TrialBalance(a AccountID) TrialBalance {
 		TotalCredits: l.creditTotals[a],
 		NetBalance:   l.balances[a],
 		Version:      l.version,
+		Frozen:       l.frozen[a],
 	}
 }
 
