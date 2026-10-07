@@ -8,6 +8,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -22,8 +24,9 @@ import (
 )
 
 type server struct {
-	ledger  *ledger.Ledger
-	metrics *Metrics
+	ledger       *ledger.Ledger
+	metrics      *Metrics
+	maxBodyBytes int64
 }
 
 type createEntryRequest struct {
@@ -61,9 +64,25 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	// Every POST attempt is counted; replays are counted separately below.
 	s.metrics.PostsTotal.Add(1)
 
+	// Bound the body so a single POST cannot exhaust server memory, and
+	// decode strictly: unknown fields fail fast (surfacing client typos
+	// instead of silently dropping them), and trailing garbage after the
+	// JSON value is rejected.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
 	var req createEntryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
 		return
 	}
 
@@ -122,7 +141,7 @@ func (s *server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func newRouter(l *ledger.Ledger) http.Handler {
-	s := &server{ledger: l, metrics: &Metrics{}}
+	s := &server{ledger: l, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
@@ -130,6 +149,27 @@ func newRouter(l *ledger.Ledger) http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /metrics", s.metrics.handleMetrics)
 	return mux
+}
+
+// defaultMaxBodyBytes caps a single POST /entries body. Entry payloads are
+// tiny (a few hundred bytes), so 1 MiB is generous while still bounding the
+// memory one request can force the server to buffer.
+const defaultMaxBodyBytes = 1 << 20
+
+// maxRequestBodyBytes reads LEDGER_MAX_BODY_BYTES (a byte count, e.g.
+// "1048576"). Unset or invalid values fall back to the default with a log
+// line, mirroring shutdownTimeout.
+func maxRequestBodyBytes() int64 {
+	raw := os.Getenv("LEDGER_MAX_BODY_BYTES")
+	if raw == "" {
+		return defaultMaxBodyBytes
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_MAX_BODY_BYTES %q, using %d", raw, defaultMaxBodyBytes)
+		return defaultMaxBodyBytes
+	}
+	return n
 }
 
 // handleListEntries implements GET /entries: time-windowed, cursor-paginated

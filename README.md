@@ -27,7 +27,10 @@ curl -s -X POST localhost:8080/entries \
 
 - First-time post → `201` with the entry JSON (the server generates `id` and `created_at`).
 - Re-post with the same `idempotency_key` → `200` with the originally posted entry.
-- Invalid entry (empty account, debit == credit, amount ≤ 0, malformed JSON) → `400` with an `{"error": ...}` body.
+- Invalid entry (empty account, debit == credit, amount ≤ 0, malformed JSON,
+  unknown JSON field, or trailing data after the JSON value) → `400` with an
+  `{"error": ...}` body.
+- Body larger than `LEDGER_MAX_BODY_BYTES` (default 1 MiB) → `413`.
 
 ### `GET /accounts/{id}/balance`
 
@@ -100,6 +103,10 @@ go run .                 # listens on :8080; override with PORT, e.g. PORT=9090 
 Environment:
 
 - `PORT` — listen address (default `8080`).
+- `LEDGER_MAX_BODY_BYTES` — max accepted `POST /entries` body in bytes
+  (default `1048576` = 1 MiB). Larger bodies are rejected with `413`.
+  Entry payloads are tiny, so the default is generous while bounding the
+  memory a single request can force the server to buffer.
 - `LEDGER_IDEMPOTENCY_TTL` — how long idempotency keys are retained, e.g.
   `LEDGER_IDEMPOTENCY_TTL=72h`. Keys older than the TTL are evicted so the
   replay-detection index can't grow forever in a long-running process; the
