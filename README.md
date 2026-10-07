@@ -15,6 +15,7 @@ The design borrows its posting semantics from a publicly described concept: **"i
 - Every post commits atomically under one mutex: the journal row, the idempotency index, both net balances, and both per-account debit/credit totals land together — readers never see a half-posted entry.
 - The ledger tracks per-account total debits and total credits alongside net balances, so any account's trial balance is a single read. `VerifyAccountingEquation` checks the books: every account's net equals its debits minus its credits, and total debits equal total credits ledger-wide.
 - Posting is idempotent: submitting an entry with a previously used `IdempotencyKey` returns the original entry and books nothing again. All state is guarded by a mutex and safe for concurrent use.
+- Every post appends a tamper-evident audit-chain link: `SHA-256(prevHash || entry)` over a length-prefixed encoding of the entry's fields (standard library only). Rewriting a journaled entry, deleting a link, or splicing the chain breaks the hash continuity, and `VerifyChain` / `GET /entries/verify` detect it by recomputation.
 - A thin `net/http` JSON API exposes the ledger: no external dependencies.
 
 ## API
@@ -84,6 +85,23 @@ curl -s 'localhost:8080/entries?since=2026-10-01T00:00:00Z&limit=100'
   never duplicated or skipped.
 - Malformed timestamps, cursors, or limits → `400` with an `{"error": ...}` body.
 
+### `GET /entries/verify`
+
+Recomputes the ledger's tamper-evident audit chain and reports whether it
+is intact. The chain links every posted entry to the previous link's
+SHA-256 hash (`SHA-256(prevHash || entry)`); idempotent replays add no link.
+
+```bash
+curl -s localhost:8080/entries/verify
+# {"ok":true,"links":128,"head":"9f2c..."}   # empty ledger: links=0, head=64 zeros
+```
+
+- `200 {"ok":true,"links":N,"head":"<hex>"}` — the chain is intact; `head`
+  moves if and only if a new entry was posted.
+- `500 {"ok":false,"error":"..."}` — verification failed (rewritten entry,
+  missing journal row, spliced/reordered chain). This is an
+  operator-level integrity incident, not a client error.
+
 ### `GET /metrics`
 
 Prometheus-format counters, rendered by hand with the standard library
@@ -96,6 +114,7 @@ curl -s localhost:8080/metrics
 # ledger_posts_total 128
 # ledger_idempotency_hits_total 5
 # ledger_balance_queries_total 42
+# ledger_verify_requests_total 7
 ```
 
 - `ledger_posts_total` — every `POST /entries` request received.
@@ -103,6 +122,7 @@ curl -s localhost:8080/metrics
   idempotency key (returned the original entry, booked nothing).
 - `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
   served. Snapshot reads are not counted.
+- `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 
 ## Running
 

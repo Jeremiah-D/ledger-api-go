@@ -64,6 +64,11 @@ const defaultKeyPruneInterval = time.Minute
 // a TTL can be configured (WithIdempotencyTTL): keys older than the TTL are
 // eligible for eviction, which bounds memory in long-running processes. A
 // zero TTL disables expiry entirely.
+//
+// Every successful Post also appends one link to the tamper-evident audit
+// chain (see chain.go): a SHA-256 link of the entry onto the previous
+// link's hash. The chain makes silent rewrites of journaled entries
+// detectable via VerifyChain.
 type Ledger struct {
 	mu             sync.Mutex
 	balances       map[AccountID]int64
@@ -71,6 +76,7 @@ type Ledger struct {
 	byKey          map[string]JournalEntry // by idempotency key
 	debitTotals    map[AccountID]int64     // total cents ever debited per account
 	creditTotals   map[AccountID]int64     // total cents ever credited per account
+	chain          []chainLink            // audit chain, one link per successful Post, in order
 	version        uint64                  // bumped by every successful Post
 	idempotencyTTL time.Duration           // 0 = never expire idempotency keys
 	pruneInterval  time.Duration           // min gap between lazy key sweeps
@@ -122,9 +128,12 @@ func New(opts ...Option) *Ledger {
 //
 // The commit is atomic: while holding the ledger's single mutex, Post
 // applies every effect of the entry at once — the journal row, the
-// idempotency index, both net balances, and both debit/credit totals — then
-// bumps the version. Either all of them land or (on validation failure)
-// none do; readers never observe a half-posted entry.
+// idempotency index, both net balances, both debit/credit totals, and the
+// audit-chain link — then bumps the version. Either all of them land or (on
+// validation failure) none do; readers never observe a half-posted entry.
+//
+// Idempotent replays append no chain link: the chain records journaled
+// entries, and a replay journals nothing new.
 func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -166,6 +175,7 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	l.debitTotals[e.DebitAccount] += e.AmountCents
 	l.creditTotals[e.CreditAccount] += e.AmountCents
 	l.version++
+	l.appendChainLink(e)
 
 	return e, false, nil
 }

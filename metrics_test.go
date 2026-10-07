@@ -115,6 +115,7 @@ func TestMetricsStartAtZero(t *testing.T) {
 		"ledger_posts_total",
 		"ledger_idempotency_hits_total",
 		"ledger_balance_queries_total",
+		"ledger_verify_requests_total",
 	} {
 		v, ok := m[name]
 		if !ok {

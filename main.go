@@ -155,11 +155,27 @@ func (s *server) handleTrialBalance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.ledger.TrialBalance(ledger.AccountID(id)))
 }
 
+// handleVerifyEntries implements GET /entries/verify. It recomputes the
+// ledger's tamper-evident audit chain and reports whether it is intact:
+// 200 {"ok":true,"links":N,"head":"<hex>"} on success. A broken chain is an
+// operator-level integrity incident, not a client error, so verification
+// failure returns 500 {"ok":false,"error":"..."}.
+func (s *server) handleVerifyEntries(w http.ResponseWriter, r *http.Request) {
+	s.metrics.VerifyRequests.Add(1)
+	if err := s.ledger.VerifyChain(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	head, links := s.ledger.ChainHead()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "links": links, "head": head})
+}
+
 func newRouter(l *ledger.Ledger) http.Handler {
 	s := &server{ledger: l, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
+	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
