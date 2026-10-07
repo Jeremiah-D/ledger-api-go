@@ -66,6 +66,10 @@ type ReconciliationReport struct {
 	TrialBalances        []TrialBalance            `json:"trial_balances"`
 	Discrepancies        []TrialBalanceDiscrepancy `json:"discrepancies"`
 	FrozenAccounts       []AccountID               `json:"frozen_accounts"`
+	// OverdraftProtectedAccounts lists the accounts currently guarded
+	// against overdrafts (see EnableOverdraftProtection). Risk tooling
+	// reads this to know which accounts cannot go negative.
+	OverdraftProtectedAccounts []AccountID `json:"overdraft_protected_accounts"`
 	IdempotencyKeys      IdempotencyKeyHealth      `json:"idempotency_keys"`
 	AuditChain           AuditChainHealth          `json:"audit_chain"`
 }
@@ -86,11 +90,12 @@ func (l *Ledger) Reconcile(now time.Time) ReconciliationReport {
 // suffices because the scan mutates nothing.
 func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 	report := ReconciliationReport{
-		GeneratedAt:    now,
-		Version:        l.version,
-		TrialBalances:  make([]TrialBalance, 0, len(l.balances)),
-		Discrepancies:  make([]TrialBalanceDiscrepancy, 0),
-		FrozenAccounts: l.frozenAccountsLocked(),
+		GeneratedAt:                now,
+		Version:                    l.version,
+		TrialBalances:              make([]TrialBalance, 0, len(l.balances)),
+		Discrepancies:              make([]TrialBalanceDiscrepancy, 0),
+		FrozenAccounts:             l.frozenAccountsLocked(),
+		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit
@@ -122,12 +127,13 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		c := l.creditTotals[a]
 		net := l.balances[a]
 		report.TrialBalances = append(report.TrialBalances, TrialBalance{
-			Account:      a,
-			TotalDebits:  d,
-			TotalCredits: c,
-			NetBalance:   net,
-			Version:      l.version,
-			Frozen:       l.frozen[a],
+			Account:            a,
+			TotalDebits:        d,
+			TotalCredits:       c,
+			NetBalance:         net,
+			Version:            l.version,
+			Frozen:             l.frozen[a],
+			OverdraftProtected: l.noOverdraft[a],
 		})
 		if expected := d - c; net != expected {
 			report.Discrepancies = append(report.Discrepancies, TrialBalanceDiscrepancy{

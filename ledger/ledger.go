@@ -84,6 +84,10 @@ type Ledger struct {
 	debitTotals    map[AccountID]int64     // total cents ever debited per account
 	creditTotals   map[AccountID]int64     // total cents ever credited per account
 	frozen         map[AccountID]bool      // risk-control stops; frozen accounts reject new posts (see freeze.go)
+	// noOverdraft marks accounts guarded against overdrafts: a Post that
+	// would take a protected credit (payer) account below zero is rejected
+	// with ErrAccountOverdraft (see overdraft.go). Opt-in per account.
+	noOverdraft map[AccountID]bool
 	chain          []chainLink             // audit chain, one link per successful Post, in order
 	version        uint64                  // bumped by every successful Post
 	idempotencyTTL time.Duration           // 0 = never expire idempotency keys
@@ -104,6 +108,19 @@ func WithIdempotencyTTL(ttl time.Duration) Option {
 	}
 }
 
+// WithOverdraftProtection marks the given accounts as protected from
+// overdrafts from the start: any Post that would take a protected credit
+// (payer) account's balance below zero is rejected with
+// ErrAccountOverdraft. See EnableOverdraftProtection for the per-account
+// semantics; the same option can be combined with WithIdempotencyTTL.
+func WithOverdraftProtection(accounts ...AccountID) Option {
+	return func(l *Ledger) {
+		for _, a := range accounts {
+			l.noOverdraft[a] = true
+		}
+	}
+}
+
 // New returns an empty Ledger. Options configure behavior; by default
 // idempotency keys never expire.
 func New(opts ...Option) *Ledger {
@@ -115,6 +132,7 @@ func New(opts ...Option) *Ledger {
 		debitTotals:   make(map[AccountID]int64),
 		creditTotals:  make(map[AccountID]int64),
 		frozen:        make(map[AccountID]bool),
+		noOverdraft:   make(map[AccountID]bool),
 		pruneInterval: defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
@@ -140,9 +158,12 @@ func New(opts ...Option) *Ledger {
 // entry through it with ErrAccountFrozen. The frozen check runs after the
 // idempotency replay check: replaying a key that was posted before the
 // freeze returns the original entry instead of failing, because the replay
-// books nothing new. Rejected posts — validation failures and frozen
-// rejections alike — record nothing: no journal row, no chain link, no
-// version bump.
+// books nothing new. A credit (payer) account under overdraft protection
+// (see overdraft.go) rejects any post that would take its balance below
+// zero with ErrAccountOverdraft; the check runs after the frozen check and
+// after the idempotency replay check for the same reason. Rejected posts —
+// validation failures, frozen rejections, and overdraft rejections alike —
+// record nothing: no journal row, no chain link, no version bump.
 //
 // The commit is atomic: while holding the ledger's single mutex, Post
 // applies every effect of the entry at once — the journal row, the
@@ -180,6 +201,15 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 
 	if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountFrozen
+	}
+
+	// Overdraft protection is a risk control, not bookkeeping validation:
+	// it runs after the frozen check (a frozen account fails 403 before
+	// the overdraft question even arises) and after the idempotency replay
+	// check above (a replay books nothing new, so it must not fail on an
+	// account that was protected after the original posting).
+	if l.overdraftRejectedLocked(e) {
+		return JournalEntry{}, false, ErrAccountOverdraft
 	}
 
 	if e.CreatedAt.IsZero() {
@@ -304,6 +334,10 @@ type TrialBalance struct {
 	// risk-control freeze (see Freeze). A frozen account keeps its
 	// balances and history; only new postings through it are rejected.
 	Frozen bool `json:"frozen"`
+	// OverdraftProtected reports whether the account is guarded against
+	// overdrafts (see EnableOverdraftProtection): Postings that would
+	// take the balance below zero are rejected with ErrAccountOverdraft.
+	OverdraftProtected bool `json:"overdraft_protected"`
 }
 
 // TrialBalance returns the double-entry breakdown of the given account at
@@ -314,12 +348,13 @@ func (l *Ledger) TrialBalance(a AccountID) TrialBalance {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return TrialBalance{
-		Account:      a,
-		TotalDebits:  l.debitTotals[a],
-		TotalCredits: l.creditTotals[a],
-		NetBalance:   l.balances[a],
-		Version:      l.version,
-		Frozen:       l.frozen[a],
+		Account:            a,
+		TotalDebits:        l.debitTotals[a],
+		TotalCredits:       l.creditTotals[a],
+		NetBalance:         l.balances[a],
+		Version:            l.version,
+		Frozen:             l.frozen[a],
+		OverdraftProtected: l.noOverdraft[a],
 	}
 }
 

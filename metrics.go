@@ -29,6 +29,10 @@ type Metrics struct {
 	// FrozenRejections counts POST /entries requests rejected with 403
 	// because the debit or credit account was frozen.
 	FrozenRejections atomic.Uint64
+	// OverdraftRejections counts POST /entries requests rejected with 422
+	// because the posting would have overdrawn an overdraft-protected
+	// account.
+	OverdraftRejections atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -57,6 +61,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_frozen_rejections_total",
 		"Total POST /entries requests rejected because an account was frozen.",
 		m.FrozenRejections.Load())
+	writeCounter(&sb, "ledger_overdraft_rejections_total",
+		"Total POST /entries requests rejected because they would have overdrawn an overdraft-protected account.",
+		m.OverdraftRejections.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

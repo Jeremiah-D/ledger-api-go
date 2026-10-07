@@ -55,7 +55,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // The server generates ID and CreatedAt when the client omits them.
 // A first-time post returns 201; a duplicate idempotency key returns 200
 // with the originally posted entry; invalid entries return 400; a post
-// through a frozen account returns 403.
+// through a frozen account returns 403; a post that would overdraw an
+// overdraft-protected account returns 422.
 func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -102,6 +103,11 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -393,6 +399,24 @@ func main() {
 		} else if ttl > 0 {
 			opts = append(opts, ledger.WithIdempotencyTTL(ttl))
 			log.Printf("ledger-api-go: idempotency key TTL = %v", ttl)
+		}
+	}
+
+	// LEDGER_NO_OVERDRAFT_ACCOUNTS is a comma-separated list of account IDs
+	// guarded against overdrafts from the start (e.g. "cust-123,cust-456").
+	// Postings that would take one of these accounts below zero are
+	// rejected with 422. Whitespace around IDs is trimmed; empty entries
+	// are ignored.
+	if raw := os.Getenv("LEDGER_NO_OVERDRAFT_ACCOUNTS"); raw != "" {
+		var protected []ledger.AccountID
+		for _, id := range strings.Split(raw, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				protected = append(protected, ledger.AccountID(id))
+			}
+		}
+		if len(protected) > 0 {
+			opts = append(opts, ledger.WithOverdraftProtection(protected...))
+			log.Printf("ledger-api-go: overdraft protection enabled for %d account(s)", len(protected))
 		}
 	}
 

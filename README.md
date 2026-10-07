@@ -39,6 +39,10 @@ curl -s -X POST localhost:8080/entries \
 - Either leg of the entry names a **frozen** account → `403`
   `{"error":"ledger: account is frozen"}`. The rejection is counted in
   `ledger_frozen_rejections_total`.
+- The credit (payer) account is **overdraft-protected** and the posting would
+  take its balance below zero → `422`
+  `{"error":"ledger: posting would overdraw a protected account"}`. The
+  rejection is counted in `ledger_overdraft_rejections_total`.
 
 ### `POST /accounts/{id}/freeze` and `POST /accounts/{id}/unfreeze`
 
@@ -65,6 +69,34 @@ curl -s -X POST localhost:8080/accounts/cash/unfreeze
 The reconcile report lists frozen accounts (`frozen_accounts`), and each
 trial balance carries a `frozen` flag, so the day-end job shows which
 accounts were stopped.
+
+### Overdraft protection
+
+Per-account guard against negative balances (fintech risk control —
+customer cash accounts that must never go negative). Enable it with the
+`LEDGER_NO_OVERDRAFT_ACCOUNTS` environment variable (comma-separated
+account IDs) or the `ledger.WithOverdraftProtection` / 
+`EnableOverdraftProtection` API. A `POST /entries` that would take a
+protected credit (payer) account's balance below zero is rejected with
+`422`; draining the account to exactly zero is allowed.
+
+Protection is opt-in per account on purpose: internal accounts (suspense,
+revenue, settlement) routinely carry negative balances under this
+ledger's sign convention, so a blanket rule would break ordinary
+bookkeeping. Check order inside `Post`: field validation → idempotency
+replay → frozen (`403`) → overdraft (`422`). Like frozen rejections, an
+overdraft rejection books nothing — no journal row, no chain link, no
+version bump — and reads (balance, snapshot, trial balance, reconcile)
+keep working. The reconcile report lists protected accounts
+(`overdraft_protected_accounts`) and each trial balance carries an
+`overdraft_protected` flag.
+
+```bash
+LEDGER_NO_OVERDRAFT_ACCOUNTS="cust-123,cust-456" ./ledger-api-go
+curl -s -X POST localhost:8080/entries \
+  -d '{"debit_account":"cash","credit_account":"cust-123","amount_cents":1000}'
+# 422 {"error":"ledger: posting would overdraw a protected account"}
+```
 
 ### `GET /accounts/{id}/balance`
 
@@ -227,6 +259,9 @@ curl -s localhost:8080/metrics
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
 - `ledger_frozen_rejections_total` — `POST /entries` requests rejected
   with `403` because the debit or credit account was frozen.
+- `ledger_overdraft_rejections_total` — `POST /entries` requests rejected
+  with `422` because the posting would have overdrawn an
+  overdraft-protected account.
 
 ## Running
 
