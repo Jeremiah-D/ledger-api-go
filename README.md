@@ -110,12 +110,34 @@ Environment:
   New connections are refused immediately; requests already being served run to
   completion or until the timeout.
 
+## Benchmarks
+
+Single-goroutine `Ledger.Post` throughput and per-op latency, sampled on
+every post:
+
+| metric      | measured (2 runs, 2026-10-07) |
+|-------------|-------------------------------|
+| throughput  | 535k–583k entries/sec         |
+| p50 latency | < 1 µs/op                     |
+| p99 latency | 1–3 µs/op                     |
+
+Machine: linux/amd64, AMD EPYC 9D25, Go 1.27.1. Numbers are
+machine-specific; reproduce them with:
+
+```bash
+go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
+```
+
+(The raw runs were 535,093 entries/sec with p99 3 µs/op and
+582,839 entries/sec with p99 1 µs/op.)
+
 ## Layout
 
 ```
 .
 ├── ledger/
 │   ├── ledger.go              # Ledger, JournalEntry, Post, Balance, Snapshot, ListEntries
+│   ├── ledger_bench_test.go   # BenchmarkPost: throughput + p99 latency (numbers → README)
 │   ├── ledger_test.go         # validation, idempotency, concurrency tests
 │   ├── ledger_idempotency_ttl_test.go# TTL eviction, lazy prune, interval guard
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics
