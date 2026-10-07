@@ -12,10 +12,8 @@
 package ledger
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 )
@@ -65,18 +63,27 @@ const defaultKeyPruneInterval = time.Minute
 // eligible for eviction, which bounds memory in long-running processes. A
 // zero TTL disables expiry entirely.
 //
+// A per-account index maps each account to the IDs of the entries that
+// touched it (as debit or credit leg), so per-account listing scans only
+// that account's entries instead of the whole journal.
+//
 // Every successful Post also appends one link to the tamper-evident audit
 // chain (see chain.go): a SHA-256 link of the entry onto the previous
 // link's hash. The chain makes silent rewrites of journaled entries
 // detectable via VerifyChain.
+//
+// The mutex is an RWMutex: reads (Balance, Snapshot, ListEntries, ...) take
+// the read lock and run concurrently, while Post and ExpireIdempotencyKeys
+// take the write lock. Reads never block each other, only writers.
 type Ledger struct {
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	balances       map[AccountID]int64
 	entries        map[string]JournalEntry // by entry ID
 	byKey          map[string]JournalEntry // by idempotency key
+	byAccount      map[AccountID][]string  // entry IDs per account, in Post order
 	debitTotals    map[AccountID]int64     // total cents ever debited per account
 	creditTotals   map[AccountID]int64     // total cents ever credited per account
-	chain          []chainLink            // audit chain, one link per successful Post, in order
+	chain          []chainLink             // audit chain, one link per successful Post, in order
 	version        uint64                  // bumped by every successful Post
 	idempotencyTTL time.Duration           // 0 = never expire idempotency keys
 	pruneInterval  time.Duration           // min gap between lazy key sweeps
@@ -103,6 +110,7 @@ func New(opts ...Option) *Ledger {
 		balances:      make(map[AccountID]int64),
 		entries:       make(map[string]JournalEntry),
 		byKey:         make(map[string]JournalEntry),
+		byAccount:     make(map[AccountID][]string),
 		debitTotals:   make(map[AccountID]int64),
 		creditTotals:  make(map[AccountID]int64),
 		pruneInterval: defaultKeyPruneInterval,
@@ -170,6 +178,8 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	if e.IdempotencyKey != "" {
 		l.byKey[e.IdempotencyKey] = e
 	}
+	l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
+	l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
 	l.balances[e.DebitAccount] += e.AmountCents
 	l.balances[e.CreditAccount] -= e.AmountCents
 	l.debitTotals[e.DebitAccount] += e.AmountCents
@@ -183,16 +193,16 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 // Balance returns the current net balance (in cents) of the given account.
 // Unknown accounts have a zero balance.
 func (l *Ledger) Balance(a AccountID) int64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return l.balances[a]
 }
 
 // GetByIdempotencyKey returns the entry previously posted with the given
 // idempotency key, or false if the key has never been posted.
 func (l *Ledger) GetByIdempotencyKey(key string) (JournalEntry, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	e, ok := l.byKey[key]
 	return e, ok
 }
@@ -243,8 +253,8 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 
 // Entries returns a copy of all posted journal entries.
 func (l *Ledger) Entries() []JournalEntry {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	out := make([]JournalEntry, 0, len(l.entries))
 	for _, e := range l.entries {
 		out = append(out, e)
@@ -259,8 +269,8 @@ func (l *Ledger) Entries() []JournalEntry {
 // version are guaranteed to show the same balance — a cheap change detector
 // for reconciliation jobs.
 func (l *Ledger) Snapshot(a AccountID) (balance int64, version uint64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return l.balances[a], l.version
 }
 
@@ -283,8 +293,8 @@ type TrialBalance struct {
 // the same sequence Snapshot reports, so a trial balance and a snapshot
 // taken at one version describe the same books.
 func (l *Ledger) TrialBalance(a AccountID) TrialBalance {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return TrialBalance{
 		Account:      a,
 		TotalDebits:  l.debitTotals[a],
@@ -301,8 +311,8 @@ func (l *Ledger) TrialBalance(a AccountID) TrialBalance {
 // balance. Operators can run it after imports or restores; the test suite
 // runs it after every scenario, including the concurrent stress test.
 func (l *Ledger) VerifyAccountingEquation() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	seen := make(map[AccountID]bool)
 	for a := range l.balances {
 		seen[a] = true
@@ -343,16 +353,12 @@ func (l *Ledger) ListEntries(since, until time.Time, cursor string, limit int) (
 	if limit < 1 || limit > maxPageSize {
 		return nil, "", ErrInvalidLimit
 	}
-	var afterID string
-	if cursor != "" {
-		decoded, decErr := base64.RawURLEncoding.DecodeString(cursor)
-		if decErr != nil || len(decoded) == 0 {
-			return nil, "", ErrInvalidCursor
-		}
-		afterID = string(decoded)
+	afterID, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, "", err
 	}
 
-	l.mu.Lock()
+	l.mu.RLock()
 	filtered := make([]JournalEntry, 0, len(l.entries))
 	for _, e := range l.entries {
 		if e.CreatedAt.Before(since) {
@@ -363,37 +369,7 @@ func (l *Ledger) ListEntries(since, until time.Time, cursor string, limit int) (
 		}
 		filtered = append(filtered, e)
 	}
-	l.mu.Unlock()
+	l.mu.RUnlock()
 
-	sort.Slice(filtered, func(i, j int) bool {
-		if !filtered[i].CreatedAt.Equal(filtered[j].CreatedAt) {
-			return filtered[i].CreatedAt.Before(filtered[j].CreatedAt)
-		}
-		return filtered[i].ID < filtered[j].ID
-	})
-
-	start := 0
-	if afterID != "" {
-		found := false
-		for i, e := range filtered {
-			if e.ID == afterID {
-				start = i + 1
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, "", ErrInvalidCursor
-		}
-	}
-
-	end := start + limit
-	if end > len(filtered) {
-		end = len(filtered)
-	}
-	page = filtered[start:end]
-	if end < len(filtered) {
-		nextCursor = base64.RawURLEncoding.EncodeToString([]byte(page[len(page)-1].ID))
-	}
-	return page, nextCursor, nil
+	return paginateSortedEntries(filtered, afterID, limit)
 }

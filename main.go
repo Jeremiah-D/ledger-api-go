@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -177,6 +178,7 @@ func newRouter(l *ledger.Ledger) http.Handler {
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
+	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /metrics", s.metrics.handleMetrics)
@@ -204,6 +206,76 @@ func maxRequestBodyBytes() int64 {
 	return n
 }
 
+// parseEntryListQuery parses the ?since=&until=&limit= query shared by the
+// journal-export endpoints. since/until are RFC3339 timestamps filtering
+// CreatedAt in [since, until): omitted since means the beginning of time,
+// omitted until means no upper bound. limit defaults to 100. Malformed
+// values return an error the handlers render as 400.
+func parseEntryListQuery(q url.Values) (since, until time.Time, limit int, err error) {
+	since = time.Time{}
+	if v := firstQuery(q, "since"); v != "" {
+		t, perr := time.Parse(time.RFC3339, v)
+		if perr != nil {
+			return time.Time{}, time.Time{}, 0, errors.New("invalid since timestamp (want RFC3339)")
+		}
+		since = t
+	}
+	until = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	if v := firstQuery(q, "until"); v != "" {
+		t, perr := time.Parse(time.RFC3339, v)
+		if perr != nil {
+			return time.Time{}, time.Time{}, 0, errors.New("invalid until timestamp (want RFC3339)")
+		}
+		until = t
+	}
+	limit = 100
+	if v := firstQuery(q, "limit"); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil {
+			return time.Time{}, time.Time{}, 0, errors.New("invalid limit (want integer)")
+		}
+		limit = n
+	}
+	return since, until, limit, nil
+}
+
+func firstQuery(q url.Values, key string) string {
+	if vs, ok := q[key]; ok && len(vs) > 0 {
+		return vs[0]
+	}
+	return ""
+}
+
+// handleListAccountEntries implements GET /accounts/{id}/entries:
+// per-account, time-windowed, cursor-paginated journal export.
+//
+//	GET /accounts/{id}/entries?since=<rfc3339>&until=<rfc3339>&limit=100&cursor=<opaque>
+//
+// The pagination contract mirrors GET /entries (same sorting, same cursor
+// semantics, same 400s). Unknown accounts return an empty page, not 404 —
+// the journal is append-only, so absence means "nothing yet".
+func (s *server) handleListAccountEntries(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	since, until, limit, err := parseEntryListQuery(r.URL.Query())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	page, next, err := s.ledger.ListAccountEntries(ledger.AccountID(id), since, until, r.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries":     page,
+		"next_cursor": next,
+	})
+}
+
 // handleListEntries implements GET /entries: time-windowed, cursor-paginated
 // export of the journal.
 //
@@ -215,37 +287,13 @@ func maxRequestBodyBytes() int64 {
 // {"entries":[...], "next_cursor":"..."}; an empty next_cursor marks the last
 // page. Malformed timestamps, cursors, or limits return 400.
 func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-
-	since := time.Time{}
-	if v := q.Get("since"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since timestamp (want RFC3339)"})
-			return
-		}
-		since = t
-	}
-	until := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
-	if v := q.Get("until"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid until timestamp (want RFC3339)"})
-			return
-		}
-		until = t
-	}
-	limit := 100
-	if v := q.Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid limit (want integer)"})
-			return
-		}
-		limit = n
+	since, until, limit, err := parseEntryListQuery(r.URL.Query())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 
-	page, next, err := s.ledger.ListEntries(since, until, q.Get("cursor"), limit)
+	page, next, err := s.ledger.ListEntries(since, until, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

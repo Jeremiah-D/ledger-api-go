@@ -14,7 +14,9 @@ The design borrows its posting semantics from a publicly described concept: **"i
 - Entries are validated before booking: non-empty ID, distinct non-empty debit/credit accounts, and `amount_cents > 0`.
 - Every post commits atomically under one mutex: the journal row, the idempotency index, both net balances, and both per-account debit/credit totals land together — readers never see a half-posted entry.
 - The ledger tracks per-account total debits and total credits alongside net balances, so any account's trial balance is a single read. `VerifyAccountingEquation` checks the books: every account's net equals its debits minus its credits, and total debits equal total credits ledger-wide.
-- Posting is idempotent: submitting an entry with a previously used `IdempotencyKey` returns the original entry and books nothing again. All state is guarded by a mutex and safe for concurrent use.
+- Posting is idempotent: submitting an entry with a previously used `IdempotencyKey` returns the original entry and books nothing again.
+- All state is guarded by an `RWMutex`: reads (`Balance`, `Snapshot`, listings, chain verification) take the read lock and run concurrently, while `Post` and idempotency-key expiry take the write lock. Reads never block each other — only writers serialize.
+- A per-account index maps each account to the IDs of the entries that touched it (as debit or credit leg), so per-account listing scans only that account's entries instead of the whole journal.
 - Every post appends a tamper-evident audit-chain link: `SHA-256(prevHash || entry)` over a length-prefixed encoding of the entry's fields (standard library only). Rewriting a journaled entry, deleting a link, or splicing the chain breaks the hash continuity, and `VerifyChain` / `GET /entries/verify` detect it by recomputation.
 - A thin `net/http` JSON API exposes the ledger: no external dependencies.
 
@@ -53,6 +55,21 @@ balance — a cheap change detector for reconciliation jobs.
 curl -s localhost:8080/accounts/cash/snapshot
 # {"account":"cash","balance_cents":1000,"version":3}
 ```
+
+### `GET /accounts/{id}/entries`
+
+Per-account, time-windowed, cursor-paginated journal export — every entry
+where the account appears as the debit or the credit leg. Same pagination
+contract as `GET /entries`; the per-account index makes it O(k) in the
+account's own entries rather than O(N) over the whole journal.
+
+```bash
+curl -s 'localhost:8080/accounts/cash/entries?limit=100'
+# {"entries":[...],"next_cursor":"..."}   # empty next_cursor = last page
+```
+
+- Unknown accounts return `{"entries":[],"next_cursor":""}`, not 404 — the
+  journal is append-only, so absence means "nothing yet".
 
 ### `GET /accounts/{id}/trial-balance`
 

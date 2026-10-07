@@ -77,8 +77,8 @@ func (l *Ledger) appendChainLink(e JournalEntry) {
 // detector; GET /entries/verify recomputes the whole chain for a full
 // integrity check.
 func (l *Ledger) ChainHead() (head string, links uint64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	if n := len(l.chain); n > 0 {
 		return hex.EncodeToString(l.chain[n-1].hash[:]), uint64(n)
 	}
@@ -94,8 +94,8 @@ func (l *Ledger) ChainHead() (head string, links uint64) {
 // read-only; it holds the ledger's read lock so a concurrent Post cannot
 // race it, at the cost of blocking writers for the duration of the scan.
 func (l *Ledger) VerifyChain() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	var prev [32]byte
 	for i, link := range l.chain {
 		if want := uint64(i + 1); link.seq != want {
