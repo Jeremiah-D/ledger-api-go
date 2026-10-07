@@ -22,7 +22,8 @@ import (
 )
 
 type server struct {
-	ledger *ledger.Ledger
+	ledger  *ledger.Ledger
+	metrics *Metrics
 }
 
 type createEntryRequest struct {
@@ -57,6 +58,9 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
+	// Every POST attempt is counted; replays are counted separately below.
+	s.metrics.PostsTotal.Add(1)
+
 	var req createEntryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
@@ -78,6 +82,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if duplicate {
+		s.metrics.IdempotencyHits.Add(1)
 		writeJSON(w, http.StatusOK, posted)
 		return
 	}
@@ -86,6 +91,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 
 // handleBalance implements GET /accounts/{id}/balance.
 func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
+	s.metrics.BalanceQueries.Add(1)
 	id := r.PathValue("id")
 	if id == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
@@ -116,12 +122,13 @@ func (s *server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func newRouter(l *ledger.Ledger) http.Handler {
-	s := &server{ledger: l}
+	s := &server{ledger: l, metrics: &Metrics{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
+	mux.HandleFunc("GET /metrics", s.metrics.handleMetrics)
 	return mux
 }
 

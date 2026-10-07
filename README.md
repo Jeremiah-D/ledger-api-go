@@ -67,6 +67,26 @@ curl -s 'localhost:8080/entries?since=2026-10-01T00:00:00Z&limit=100'
   never duplicated or skipped.
 - Malformed timestamps, cursors, or limits → `400` with an `{"error": ...}` body.
 
+### `GET /metrics`
+
+Prometheus-format counters, rendered by hand with the standard library
+only (no client library dependency):
+
+```bash
+curl -s localhost:8080/metrics
+# # HELP ledger_posts_total Total POST /entries requests received.
+# # TYPE ledger_posts_total counter
+# ledger_posts_total 128
+# ledger_idempotency_hits_total 5
+# ledger_balance_queries_total 42
+```
+
+- `ledger_posts_total` — every `POST /entries` request received.
+- `ledger_idempotency_hits_total` — posts that replayed an existing
+  idempotency key (returned the original entry, booked nothing).
+- `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
+  served. Snapshot reads are not counted.
+
 ## Running
 
 Requires Go 1.27+.
@@ -101,6 +121,8 @@ Environment:
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics
 │   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts
 ├── main.go                    # net/http JSON API (thin assembly only)
+├── metrics.go                 # Prometheus-format /metrics counters (stdlib only)
+├── metrics_test.go            # /metrics exposition + counter semantics tests
 ├── main_test.go               # HTTP handler tests (httptest)
 ├── main_graceful_test.go      # SIGTERM drain: in-flight requests complete, listener closes
 └── .github/workflows/ci.yml
