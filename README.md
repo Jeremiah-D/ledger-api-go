@@ -214,7 +214,10 @@ released back to available automatically. `POST /holds/{id}/release`
 drops a hold without settling. `POST /holds/expire` is the
 operator-facing sweep that marks lapsed holds expired — expiry itself is
 lazy (an expired hold already counts as inactive for available-balance
-purposes before the sweep).
+purposes before the sweep). A background worker can run the same sweep on
+a timer — see `LEDGER_HOLD_SWEEP_INTERVAL` under [Environment](#running) —
+so operators don't need to poll the endpoint; every worker tick is counted
+by the same `ledger_hold_sweeps_total` counter.
 
 Holds are off-journal by design: they create no journal rows, no
 audit-chain links, and no ledger-version bumps (only the capture, which
@@ -526,7 +529,9 @@ curl -s localhost:8080/metrics
   existing idempotency key (returned the original receipt, booked
   nothing).
 - `ledger_releases_total` — `POST /holds/{id}/release` requests received.
-- `ledger_hold_sweeps_total` — `POST /holds/expire` requests received.
+- `ledger_hold_sweeps_total` — hold-expiry sweeps: `POST /holds/expire`
+  requests received plus background hold-sweeper ticks (see
+  `LEDGER_HOLD_SWEEP_INTERVAL` below).
 
 ## Running
 
@@ -554,6 +559,14 @@ Environment:
   requests to drain after SIGINT/SIGTERM (default `10s`, e.g. `SHUTDOWN_TIMEOUT=30s`).
   New connections are refused immediately; requests already being served run to
   completion or until the timeout.
+- `LEDGER_HOLD_SWEEP_INTERVAL` — enables the background hold-expiry
+  worker, e.g. `LEDGER_HOLD_SWEEP_INTERVAL=30s`. While enabled, the server
+  sweeps lapsed holds on the interval (the same `ExpireHolds` sweep
+  `POST /holds/expire` runs, off-journal, version untouched) and counts
+  every tick in `ledger_hold_sweeps_total` alongside operator requests.
+  The first tick fires after one full interval; SIGINT/SIGTERM stops the
+  worker with the server. Unset or invalid means disabled — expiry stays
+  lazy by predicate and available on demand via `POST /holds/expire`.
 - `LEDGER_TRANSFER_FEE` — default transfer fee policy as
   `"<rateBps>:<revenueAccount>"`, e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`
   for 2.5%. Applies to `POST /transfers` without an explicit fee unless the

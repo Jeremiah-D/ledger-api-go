@@ -68,7 +68,10 @@ type Metrics struct {
 	CaptureIdempotencyHits atomic.Uint64
 	// ReleasesTotal counts POST /holds/{id}/release requests received.
 	ReleasesTotal atomic.Uint64
-	// HoldSweeps counts POST /holds/expire requests received.
+	// HoldSweeps counts hold-expiry sweeps: POST /holds/expire requests
+	// received plus background hold-sweeper ticks (see
+	// LEDGER_HOLD_SWEEP_INTERVAL). Both paths run the same ExpireHolds
+	// sweep; the counter measures sweep executions, not expired holds.
 	HoldSweeps atomic.Uint64
 	// SweepsTotal counts POST /sweeps requests received (all attempts,
 	// including duplicates and rejected payloads).
@@ -129,7 +132,7 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_releases_total",
 		"Total POST /holds/{id}/release requests received.", m.ReleasesTotal.Load())
 	writeCounter(&sb, "ledger_hold_sweeps_total",
-		"Total POST /holds/expire requests received.", m.HoldSweeps.Load())
+		"Total hold-expiry sweeps: POST /holds/expire requests plus background hold-sweeper ticks.", m.HoldSweeps.Load())
 	writeCounter(&sb, "ledger_sweeps_total",
 		"Total POST /sweeps requests received.", m.SweepsTotal.Load())
 	writeCounter(&sb, "ledger_sweep_idempotency_hits_total",

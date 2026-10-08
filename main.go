@@ -721,7 +721,17 @@ func (s *server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 }
 
 func newRouter(l *ledger.Ledger) http.Handler {
-	s := &server{ledger: l, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
+	return newServer(l).handler()
+}
+
+// newServer builds the server the same way newRouter does but also hands
+// the caller the *server, so main can attach background workers (the hold
+// sweeper) to its metrics. Tests keep using newRouter.
+func newServer(l *ledger.Ledger) *server {
+	return &server{ledger: l, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
+}
+
+func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
@@ -929,12 +939,44 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	srv := newServer(ledger.New(opts...))
+
+	// Optional background hold-expiry sweeper: periodically marks lapsed
+	// holds expired so operators don't need to poll POST /holds/expire.
+	// It shares the server context, so SIGINT/SIGTERM stops it, and every
+	// tick is counted by the same ledger_hold_sweeps_total counter as the
+	// operator endpoint. Unset or invalid means disabled.
+	if interval, ok := holdSweepInterval(); ok {
+		sweeper := ledger.StartHoldSweeper(ctx, srv.ledger, interval, func(int) {
+			srv.metrics.HoldSweeps.Add(1)
+		})
+		log.Printf("ledger-api-go: hold sweep worker started (interval %v)", interval)
+		defer sweeper.Stop()
+	}
+
 	timeout := shutdownTimeout()
 	log.Printf("ledger-api-go listening on %s (shutdown timeout %v)", ln.Addr(), timeout)
-	if err := runServer(ctx, ln, newRouter(ledger.New(opts...)), timeout); err != nil {
+	if err := runServer(ctx, ln, srv.handler(), timeout); err != nil {
 		log.Fatalf("ledger-api-go: %v", err)
 	}
 	log.Print("ledger-api-go shut down cleanly")
+}
+
+// holdSweepInterval reads LEDGER_HOLD_SWEEP_INTERVAL (a Go duration string,
+// e.g. "30s") for the background hold-expiry worker. Unset or invalid
+// values mean the worker is disabled; a non-positive duration is invalid
+// and falls back to disabled with a log line.
+func holdSweepInterval() (time.Duration, bool) {
+	raw := os.Getenv("LEDGER_HOLD_SWEEP_INTERVAL")
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_HOLD_SWEEP_INTERVAL %q, hold sweep worker disabled", raw)
+		return 0, false
+	}
+	return d, true
 }
 
 // shutdownTimeout reads SHUTDOWN_TIMEOUT (a Go duration string, e.g. "15s").
