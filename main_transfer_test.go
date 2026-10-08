@@ -263,3 +263,47 @@ func TestTransferFeePolicyFromEnv(t *testing.T) {
 		t.Errorf("skip_fee receipt = %v, want no fee leg", body)
 	}
 }
+
+func TestTransferFeeScheduleFromEnvSyntax(t *testing.T) {
+	// The tiered LEDGER_TRANSFER_FEE syntax wires up exactly like the Go
+	// option: ParseFeeSchedule output fed to WithTransferFeeSchedule.
+	// A $100 transfer falls in tier 1 (2.5%); a $5 dust transfer lands in
+	// the fee-free tier 0 and discloses it.
+	tiers, account, err := ledger.ParseFeeSchedule("0:0,10000:250,1000000:100@platform-revenue")
+	if err != nil {
+		t.Fatalf("ParseFeeSchedule: %v", err)
+	}
+	l := ledger.New(ledger.WithTransferFeeSchedule(tiers, account))
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+
+	code, _ := postJSON(t, srv.URL+"/entries",
+		`{"debit_account":"alice","credit_account":"funding","amount_cents":10000000}`)
+	if code != http.StatusCreated {
+		t.Fatalf("funding post: status=%d, want 201", code)
+	}
+
+	code, body := postJSON(t, srv.URL+"/transfers",
+		`{"transfer_id":"tx-ts1","from_account":"alice","to_account":"bob","amount_cents":10000}`)
+	if code != http.StatusCreated {
+		t.Fatalf("transfer: status=%d, want 201 (body=%v)", code, body)
+	}
+	if body["fee_cents"] != float64(250) {
+		t.Errorf("fee_cents = %v, want 250 (tier 1, 2.5%% of 10000)", body["fee_cents"])
+	}
+	if body["fee_tier_index"] != float64(1) || body["fee_rate_bps"] != float64(250) {
+		t.Errorf("tier disclosure = (%v, %v bps), want (1, 250)", body["fee_tier_index"], body["fee_rate_bps"])
+	}
+
+	code, body = postJSON(t, srv.URL+"/transfers",
+		`{"transfer_id":"tx-ts2","from_account":"alice","to_account":"bob","amount_cents":500}`)
+	if code != http.StatusCreated {
+		t.Fatalf("dust transfer: status=%d, want 201 (body=%v)", code, body)
+	}
+	if body["fee_cents"] != float64(0) || len(body["entries"].([]any)) != 1 {
+		t.Errorf("dust receipt = %v, want no fee leg", body)
+	}
+	if body["fee_tier_index"] != float64(0) || body["fee_rate_bps"] != float64(0) {
+		t.Errorf("dust tier disclosure = (%v, %v bps), want (0, 0)", body["fee_tier_index"], body["fee_rate_bps"])
+	}
+}

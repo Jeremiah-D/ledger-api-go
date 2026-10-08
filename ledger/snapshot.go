@@ -121,14 +121,29 @@ type snapshotIdempotencyLine struct {
 // needs: frozen and overdraft-protected accounts (replay checks order
 // against them), the sub-account hierarchy, the transfer fee policy, and
 // the idempotency TTL (key-expiry behavior must survive a restore).
+// FeeTiers carries the tiered schedule; FeeRateBps is kept for snapshots
+// written before the tiered schedule existed (a flat single-tier policy)
+// and is only read when FeeTiers is absent.
 type snapshotConfigLine struct {
-	Record             string                 `json:"record"`
-	Frozen             []AccountID            `json:"frozen"`
-	OverdraftProtected []AccountID            `json:"overdraft_protected"`
+	Record             string                  `json:"record"`
+	Frozen             []AccountID             `json:"frozen"`
+	OverdraftProtected []AccountID             `json:"overdraft_protected"`
 	Parents            map[AccountID]AccountID `json:"parents"`
-	FeeRateBps         int64                  `json:"fee_rate_bps"`
-	FeeRevenueAccount  AccountID              `json:"fee_revenue_account"`
-	IdempotencyTTL     string                 `json:"idempotency_ttl"`
+	FeeRateBps         int64                   `json:"fee_rate_bps"`
+	FeeTiers           []FeeTier               `json:"fee_tiers,omitempty"`
+	FeeRevenueAccount  AccountID               `json:"fee_revenue_account"`
+	IdempotencyTTL     string                  `json:"idempotency_ttl"`
+}
+
+// flatFeeRateBps reports the fee rate for snapshots read by legacy
+// consumers that only understand fee_rate_bps: it is the rate when the
+// policy is a single flat tier starting at 0, and 0 otherwise (a tiered
+// schedule has no single rate; legacy readers see the fee_tiers field).
+func flatFeeRateBps(tiers []FeeTier) int64 {
+	if len(tiers) == 1 && tiers[0].MinAmountCents == 0 {
+		return tiers[0].RateBps
+	}
+	return 0
 }
 
 // ExportSnapshot writes a JSONL disaster-recovery snapshot of the ledger to
@@ -278,7 +293,8 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 		Frozen:             frozen,
 		OverdraftProtected: overdraft,
 		Parents:            parents,
-		FeeRateBps:         l.feeRateBps,
+		FeeRateBps:         flatFeeRateBps(l.feeTiers),
+		FeeTiers:           l.feeTiers,
 		FeeRevenueAccount:  l.feeRevenueAccount,
 		IdempotencyTTL:     l.idempotencyTTL.String(),
 	}
@@ -613,7 +629,15 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	for c, p := range cfg.Parents {
 		l.parents[c] = p
 	}
-	l.feeRateBps = cfg.FeeRateBps
+	// The transfer fee policy: prefer the tiered schedule when present;
+	// otherwise rebuild the flat single-tier policy from the legacy
+	// fee_rate_bps field (snapshots predating tiered fees). An empty
+	// revenue account means the policy was disabled.
+	if len(cfg.FeeTiers) > 0 {
+		l.feeTiers = cfg.FeeTiers
+	} else if cfg.FeeRevenueAccount != "" {
+		l.feeTiers = []FeeTier{{MinAmountCents: 0, RateBps: cfg.FeeRateBps}}
+	}
 	l.feeRevenueAccount = cfg.FeeRevenueAccount
 	if cfg.IdempotencyTTL != "" {
 		ttl, err := time.ParseDuration(cfg.IdempotencyTTL)
@@ -729,7 +753,7 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	if !reflect.DeepEqual(a.parents, b.parents) {
 		return false
 	}
-	if a.feeRateBps != b.feeRateBps || a.feeRevenueAccount != b.feeRevenueAccount {
+	if !reflect.DeepEqual(a.feeTiers, b.feeTiers) || a.feeRevenueAccount != b.feeRevenueAccount {
 		return false
 	}
 	if a.idempotencyTTL != b.idempotencyTTL {

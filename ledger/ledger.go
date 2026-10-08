@@ -111,11 +111,14 @@ type Ledger struct {
 	// SetParent keeps the map cycle-free, so Rollup's subtree walk always
 	// terminates.
 	parents map[AccountID]AccountID
-	// feeRateBps / feeRevenueAccount configure the default transfer fee
-	// policy (see WithTransferFeePolicy in transfer.go): unless a transfer
-	// carries an explicit fee or sets SkipFee, PostTransfer books a fee leg
-	// of floor(amount * feeRateBps / 10000) cents to feeRevenueAccount.
-	feeRateBps        int64
+	// feeTiers / feeRevenueAccount configure the default transfer fee
+	// policy (see WithTransferFeeSchedule and WithTransferFeePolicy in
+	// transfer.go): unless a transfer carries an explicit fee or sets
+	// SkipFee, PostTransfer books a fee leg of floor(amount * tierRateBps
+	// / 10000) cents to feeRevenueAccount, where the tier is the last one
+	// whose minimum does not exceed the transfer amount. Empty tiers (or
+	// an empty revenue account) disable the policy.
+	feeTiers          []FeeTier
 	feeRevenueAccount AccountID
 	// transferKeys maps a transfer's idempotency key to the IDs of the
 	// journal entries it posted, in commit order (principal, then the fee

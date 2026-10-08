@@ -957,20 +957,25 @@ func main() {
 		}
 	}
 
-	// LEDGER_TRANSFER_FEE configures the default transfer fee policy as
-	// "<rateBps>:<revenueAccount>" (e.g. "250:fee-revenue" for 2.5%).
-	// Unless a transfer carries an explicit fee or sets skip_fee,
-	// POST /transfers books floor(amount * rateBps / 10000) cents to the
-	// revenue account on top of the transfer amount. Unset or invalid
-	// values mean no default fee.
+	// LEDGER_TRANSFER_FEE configures the default transfer fee policy.
+	// Flat form (legacy): "<rateBps>:<revenueAccount>" (e.g.
+	// "250:fee-revenue" for a flat 2.5%). Tiered form:
+	// "<min>:<bps>,<min>:<bps>,...@<revenueAccount>" (e.g.
+	// "0:0,10000:250,1000000:100@fee-revenue" for fee-free dust, 2.5%
+	// from $100, 1% from $10k). Unless a transfer carries an explicit
+	// fee or sets skip_fee, POST /transfers books floor(amount *
+	// tierRateBps / 10000) cents to the revenue account on top of the
+	// transfer amount; the receipt discloses the applied tier
+	// (fee_tier_index) and rate (fee_rate_bps). Unset means no default
+	// fee. An invalid value fails the startup fast (log.Fatal): a
+	// misconfigured fee schedule must never silently misprice transfers.
 	if raw := os.Getenv("LEDGER_TRANSFER_FEE"); raw != "" {
-		rate, account, ok := strings.Cut(raw, ":")
-		if bps, err := strconv.ParseInt(rate, 10, 64); !ok || err != nil || account == "" {
-			log.Printf("ledger-api-go: ignoring invalid LEDGER_TRANSFER_FEE %q (want \"<rateBps>:<revenueAccount>\")", raw)
-		} else {
-			opts = append(opts, ledger.WithTransferFeePolicy(bps, ledger.AccountID(account)))
-			log.Printf("ledger-api-go: transfer fee policy = %d bps to %q", bps, account)
+		tiers, account, err := ledger.ParseFeeSchedule(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
 		}
+		opts = append(opts, ledger.WithTransferFeeSchedule(tiers, account))
+		log.Printf("ledger-api-go: transfer fee schedule = %v to %q", tiers, account)
 	}
 
 	ln, err := net.Listen("tcp", addr)

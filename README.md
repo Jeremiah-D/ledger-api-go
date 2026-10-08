@@ -95,13 +95,33 @@ A positive `fee_cents` requires `fee_account` (and vice versa); a
 negative fee is rejected with `400`.
 
 Without an explicit fee, the server-wide fee policy applies unless
-`skip_fee` is set: `LEDGER_TRANSFER_FEE="<rateBps>:<revenueAccount>"`
-(e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`) books
-`floor(amount_cents * rateBps / 10000)` to the revenue account.
-The fee is rounded down with overflow-safe integer arithmetic; a
-computed fee of zero (dust amounts under a low rate) posts no leg.
-An explicit fee always wins over the policy. Total fee cents booked are
-exposed as `ledger_transfer_fee_cents_total`.
+`skip_fee` is set. The policy is an **amount-tiered schedule**: a transfer
+of `A` cents falls into the last tier whose minimum does not exceed `A`
+and is charged `floor(A * tierRateBps / 10000)` cents to the revenue
+account. The receipt discloses the applied tier as `fee_tier_index`
+(0-based; `-1` when no policy tier applied — explicit fee, `skip_fee`,
+or no policy) and `fee_rate_bps`.
+
+Configure it with `LEDGER_TRANSFER_FEE` in one of two forms:
+
+```bash
+# Flat (legacy): "<rateBps>:<revenueAccount>"
+LEDGER_TRANSFER_FEE="250:fee-revenue"            # flat 2.5%
+
+# Tiered: "<minCents>:<rateBps>,...@<revenueAccount>"
+LEDGER_TRANSFER_FEE="0:0,10000:250,1000000:100@fee-revenue"
+#   fee-free dust below $100, 2.5% from $100, 1% from $10k
+#   (the cheap top band caps the fee curve on large transfers)
+```
+
+Each tier rounds down with overflow-safe integer arithmetic (no
+intermediate product can overflow `int64` for any amount at rates up to
+10000 bps); a computed fee of zero (a free dust tier, or a dust amount
+under a low rate) posts no leg, while the receipt still discloses the
+tier that produced it. An explicit fee always wins over the policy. A
+malformed value fails the startup fast (`log.Fatal`) instead of
+silently mispricing transfers. Total fee cents booked are exposed as
+`ledger_transfer_fee_cents_total`.
 
 ### `POST /sweeps`
 
@@ -634,10 +654,13 @@ Environment:
   The first tick fires after one full interval; SIGINT/SIGTERM stops the
   worker with the server. Unset or invalid means disabled — expiry stays
   lazy by predicate and available on demand via `POST /holds/expire`.
-- `LEDGER_TRANSFER_FEE` — default transfer fee policy as
-  `"<rateBps>:<revenueAccount>"`, e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`
-  for 2.5%. Applies to `POST /transfers` without an explicit fee unless the
-  request sets `skip_fee`. Unset or invalid means no default fee.
+- `LEDGER_TRANSFER_FEE` — default transfer fee policy. Flat form
+  `"<rateBps>:<revenueAccount>"` (e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`
+  for 2.5%), or tiered form `"<minCents>:<rateBps>,...@<revenueAccount>"`
+  (e.g. `"0:0,10000:250,1000000:100@fee-revenue"`). Applies to
+  `POST /transfers` without an explicit fee unless the request sets
+  `skip_fee`. Unset means no default fee; an invalid value fails startup
+  fast.
 
 ## Benchmarks
 

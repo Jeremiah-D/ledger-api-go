@@ -2,7 +2,10 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"math"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -82,34 +85,126 @@ type Transfer struct {
 // Entries holds the journal entries the transfer posted, in commit order:
 // the principal entry, followed by the fee entry when the transfer carried
 // a fee leg. FeeCents reports the fee actually booked (0 when there is no
-// fee leg). Duplicate replays return the originally posted entries with
-// Duplicate == true and book nothing new.
+// fee leg). FeeTierIndex and FeeRateBps disclose the fee schedule tier
+// that applied: the 0-based index of the tier and its basis-point rate,
+// exactly as the fee was computed. They are -1 and 0 when no policy tier
+// applied — no fee leg was booked, the fee came from an explicit FeeCents,
+// or SkipFee/the policy was disabled. Duplicate replays return the
+// originally posted entries with Duplicate == true and book nothing new,
+// carrying the same tier disclosure as the original receipt.
 type TransferReceipt struct {
-	TransferID string         `json:"transfer_id"`
-	Entries    []JournalEntry `json:"entries"`
-	FeeCents   int64          `json:"fee_cents"`
-	Duplicate  bool           `json:"duplicate"`
+	TransferID   string         `json:"transfer_id"`
+	Entries      []JournalEntry `json:"entries"`
+	FeeCents     int64          `json:"fee_cents"`
+	FeeTierIndex int            `json:"fee_tier_index"`
+	FeeRateBps   int64          `json:"fee_rate_bps"`
+	Duplicate    bool           `json:"duplicate"`
+}
+
+// FeeTier is one band of the tiered transfer fee schedule: transfers of
+// at least MinAmountCents (and below the next tier's minimum) are charged
+// floor(amount * RateBps / 10000) cents. MinAmountCents is in cents and
+// RateBps is basis points (250 = 2.5%). A RateBps of 0 makes the band
+// fee-free — the standard way to model a dust allowance.
+type FeeTier struct {
+	MinAmountCents int64 `json:"min_amount_cents"`
+	RateBps        int64 `json:"rate_bps"`
 }
 
 // WithTransferFeePolicy sets the ledger-wide default fee policy for
-// transfers: unless a transfer carries an explicit fee or sets SkipFee,
-// PostTransfer books an additional fee leg of
-// floor(amount * rateBps / 10000) cents to revenueAccount. rateBps is basis
-// points (250 = 2.5%); a zero rate or an empty revenue account disables
-// the policy. Negative rates are normalized to 0, and rates above 10000
-// bps (100%) are clamped to 10000 — a fee above the transferred amount is
-// a configuration bug, and the clamp keeps fee arithmetic overflow-safe.
+// transfers as a single flat tier: unless a transfer carries an explicit
+// fee or sets SkipFee, PostTransfer books an additional fee leg of
+// floor(amount * rateBps / 10000) cents to revenueAccount. It is kept as
+// the one-tier convenience over WithTransferFeeSchedule: a flat rate is a
+// schedule with a single tier starting at 0. rateBps is basis points
+// (250 = 2.5%); a zero rate or an empty revenue account disables the
+// policy. Negative rates are normalized to 0, and rates above 10000 bps
+// (100%) are clamped to 10000 — a fee above the transferred amount is a
+// configuration bug, and the clamp keeps fee arithmetic overflow-safe.
 func WithTransferFeePolicy(rateBps int64, revenueAccount AccountID) Option {
-	return func(l *Ledger) {
-		if rateBps < 0 {
-			rateBps = 0
-		}
-		if rateBps > 10000 {
-			rateBps = 10000
-		}
-		l.feeRateBps = rateBps
-		l.feeRevenueAccount = revenueAccount
+	if rateBps < 0 {
+		rateBps = 0
 	}
+	if rateBps > 10000 {
+		rateBps = 10000
+	}
+	return WithTransferFeeSchedule([]FeeTier{{MinAmountCents: 0, RateBps: rateBps}}, revenueAccount)
+}
+
+// WithTransferFeeSchedule sets the ledger-wide default fee policy as an
+// amount-tiered table: a transfer of amount A falls into the last tier
+// whose MinAmountCents <= A and is charged
+// floor(A * tier.RateBps / 10000) cents to revenueAccount, unless the
+// transfer carries an explicit fee or sets SkipFee. The classic shape is
+// fee-free dust, a standard middle band, and a cheaper top band that acts
+// as an effective cap on large transfers, e.g.
+//
+//	[]ledger.FeeTier{
+//		{MinAmountCents: 0, RateBps: 0},        // dust: free
+//		{MinAmountCents: 10000, RateBps: 250},  // $100+: 2.5%
+//		{MinAmountCents: 1000000, RateBps: 100}, // $10k+: 1% (effective cap)
+//	}
+//
+// An empty tier list or an empty revenue account disables the policy.
+// Tiers must be sorted by strictly increasing MinAmountCents and the first
+// tier must start at 0, so every positive amount matches exactly one
+// tier. Per-tier rates are normalized like the flat policy: negatives
+// become 0, anything above 10000 bps clamps to 10000.
+//
+// Misconfiguration is fail-fast: an invalid tier table panics at
+// construction time, so a bad schedule can never silently under- or
+// over-charge. (Operator-supplied config should go through
+// ParseFeeSchedule, which reports the same problems as an error instead.)
+func WithTransferFeeSchedule(tiers []FeeTier, revenueAccount AccountID) Option {
+	return func(l *Ledger) {
+		l.feeTiers, l.feeRevenueAccount = normalizeFeeSchedule(tiers, revenueAccount)
+	}
+}
+
+// normalizeFeeSchedule validates and canonicalizes a fee schedule: it
+// returns a defensive copy of the tiers with rates clamped to
+// [0, 10000], or (nil, "") when the policy is disabled. Structural
+// problems panic — fail-fast at construction, never silent mispricing.
+func normalizeFeeSchedule(tiers []FeeTier, revenueAccount AccountID) ([]FeeTier, AccountID) {
+	if len(tiers) == 0 || revenueAccount == "" {
+		return nil, ""
+	}
+	out := make([]FeeTier, len(tiers))
+	for i, t := range tiers {
+		if t.MinAmountCents < 0 {
+			panic("ledger: fee schedule tier minimum must not be negative")
+		}
+		if i > 0 && t.MinAmountCents <= out[i-1].MinAmountCents {
+			panic("ledger: fee schedule tier minimums must be strictly increasing")
+		}
+		rate := t.RateBps
+		if rate < 0 {
+			rate = 0
+		}
+		if rate > 10000 {
+			rate = 10000
+		}
+		out[i] = FeeTier{MinAmountCents: t.MinAmountCents, RateBps: rate}
+	}
+	if out[0].MinAmountCents != 0 {
+		panic("ledger: fee schedule first tier must start at 0")
+	}
+	return out, revenueAccount
+}
+
+// feeTierFor returns the 0-based index and rate of the tier a transfer of
+// the given amount falls into: the last tier whose MinAmountCents is at
+// most amount. Tiers are validated at construction (strictly increasing,
+// first starting at 0), so every positive amount matches exactly one.
+func (l *Ledger) feeTierFor(amount int64) (index int, rateBps int64) {
+	idx := 0
+	for i, t := range l.feeTiers {
+		if amount < t.MinAmountCents {
+			break
+		}
+		idx = i
+	}
+	return idx, l.feeTiers[idx].RateBps
 }
 
 // policyFeeCents computes floor(amount * rateBps / 10000) without
@@ -130,32 +225,118 @@ func addCents(a, b int64) (int64, bool) {
 }
 
 // resolveFeeLocked determines the fee leg for a transfer: it returns the
-// fee in cents and the account that receives it ("" when there is no fee
-// leg). Explicit fees win over the policy; the policy applies only when no
-// explicit fee is given and SkipFee is false. Callers must hold l.mu.
-func (l *Ledger) resolveFeeLocked(t Transfer) (feeCents int64, feeAccount AccountID, err error) {
+// fee in cents, the account that receives it ("" when there is no fee
+// leg), and the schedule tier that applied (index -1 and rate 0 when the
+// fee came from an explicit FeeCents, SkipFee suppressed the policy, or
+// the policy is disabled). Explicit fees win over the policy; the policy
+// applies only when no explicit fee is given and SkipFee is false.
+// Callers must hold l.mu.
+func (l *Ledger) resolveFeeLocked(t Transfer) (feeCents int64, feeAccount AccountID, tierIndex int, rateBps int64, err error) {
 	if t.FeeCents < 0 {
-		return 0, "", ErrInvalidFee
+		return 0, "", -1, 0, ErrInvalidFee
 	}
 	if t.FeeCents > 0 {
 		if t.FeeAccount == "" {
-			return 0, "", ErrInvalidFee
+			return 0, "", -1, 0, ErrInvalidFee
 		}
-		return t.FeeCents, t.FeeAccount, nil
+		return t.FeeCents, t.FeeAccount, -1, 0, nil
 	}
 	if t.FeeAccount != "" {
 		// An explicit fee account without a positive fee is a caller bug:
 		// silently ignoring it would misroute policy-computed fees.
-		return 0, "", ErrInvalidFee
+		return 0, "", -1, 0, ErrInvalidFee
 	}
-	if t.SkipFee || l.feeRateBps <= 0 || l.feeRevenueAccount == "" {
-		return 0, "", nil
+	if t.SkipFee || len(l.feeTiers) == 0 || l.feeRevenueAccount == "" {
+		return 0, "", -1, 0, nil
 	}
-	if fee := policyFeeCents(t.AmountCents, l.feeRateBps); fee > 0 {
-		return fee, l.feeRevenueAccount, nil
+	tierIndex, rateBps = l.feeTierFor(t.AmountCents)
+	if fee := policyFeeCents(t.AmountCents, rateBps); fee > 0 {
+		return fee, l.feeRevenueAccount, tierIndex, rateBps, nil
 	}
-	// A computed fee of zero (tiny amounts under a low rate) posts no leg.
-	return 0, "", nil
+	// A computed fee of zero (a free dust tier, or a tiny amount under a
+	// low rate) posts no leg, but the tier that produced it is still
+	// disclosed on the receipt.
+	return 0, "", tierIndex, rateBps, nil
+}
+
+// ParseFeeSchedule parses the LEDGER_TRANSFER_FEE environment variable
+// into a fee schedule and revenue account. Two syntaxes are accepted:
+//
+//	Flat (legacy):   "<rateBps>:<revenueAccount>"
+//	                 e.g. "250:fee-revenue" for a flat 2.5%
+//	Tiered:          "<min>:<bps>,<min>:<bps>,...@<revenueAccount>"
+//	                 e.g. "0:0,10000:250,1000000:100@fee-revenue"
+//	                 for fee-free dust, 2.5% from $100, 1% from $10k.
+//
+// Amounts are integer cents, rates are basis points. The tiered form is
+// selected by the presence of "@" (everything after the first "@" is the
+// revenue account); anything else is parsed as the flat form. Unlike the
+// Go options, parsing is strict — a negative rate, a rate above 10000
+// bps, a non-integer, an unsorted or duplicate tier minimum, a first tier
+// not starting at 0, or a missing revenue account is an error, so a
+// misconfigured deployment fails fast at startup instead of silently
+// mispricing transfers.
+func ParseFeeSchedule(raw string) ([]FeeTier, AccountID, error) {
+	fail := func(format string, args ...any) ([]FeeTier, AccountID, error) {
+		return nil, "", fmt.Errorf("ledger: invalid transfer fee schedule %q: "+format, append([]any{raw}, args...)...)
+	}
+	if strings.Contains(raw, "@") {
+		// The revenue account is everything after the first "@", so an
+		// account name containing "@" still parses; the tier list itself
+		// never contains "@" (integer minimums and rates).
+		spec, account, _ := strings.Cut(raw, "@")
+		return parseTieredFeeSchedule(spec, account, fail)
+	}
+	rate, account, ok := strings.Cut(raw, ":")
+	if !ok || account == "" {
+		return fail("want \"<rateBps>:<revenueAccount>\" or \"<min>:<bps>,...@<revenueAccount>\"")
+	}
+	// The flat form takes a single account token: a "," or ":" in the
+	// account means the caller meant the tiered form but forgot the "@",
+	// so fail fast instead of misreading the schedule.
+	if strings.ContainsAny(account, ",:") {
+		return fail("revenue account %q must not contain \",\" or \":\" (want \"<rateBps>:<revenueAccount>\" or \"<min>:<bps>,...@<revenueAccount>\")", account)
+	}
+	bps, err := strconv.ParseInt(rate, 10, 64)
+	if err != nil || bps < 0 || bps > 10000 {
+		return fail("rate %q must be an integer 0..10000 (basis points)", rate)
+	}
+	return []FeeTier{{MinAmountCents: 0, RateBps: bps}}, AccountID(account), nil
+}
+
+// parseTieredFeeSchedule parses the tiered form selected by ParseFeeSchedule.
+func parseTieredFeeSchedule(spec, account string, fail func(string, ...any) ([]FeeTier, AccountID, error)) ([]FeeTier, AccountID, error) {
+	if account == "" {
+		return fail("revenue account after \"@\" must not be empty")
+	}
+	if spec == "" {
+		return fail("tier list before \"@\" must not be empty")
+	}
+	var tiers []FeeTier
+	for _, seg := range strings.Split(spec, ",") {
+		minRaw, bpsRaw, ok := strings.Cut(seg, ":")
+		if !ok {
+			return fail("tier %q must be \"<minAmountCents>:<rateBps>\"", seg)
+		}
+		min, err := strconv.ParseInt(strings.TrimSpace(minRaw), 10, 64)
+		if err != nil || min < 0 {
+			return fail("tier minimum %q must be a non-negative integer (cents)", minRaw)
+		}
+		bps, err := strconv.ParseInt(strings.TrimSpace(bpsRaw), 10, 64)
+		if err != nil || bps < 0 || bps > 10000 {
+			return fail("tier rate %q must be an integer 0..10000 (basis points)", bpsRaw)
+		}
+		tiers = append(tiers, FeeTier{MinAmountCents: min, RateBps: bps})
+	}
+	for i := 1; i < len(tiers); i++ {
+		if tiers[i].MinAmountCents <= tiers[i-1].MinAmountCents {
+			return fail("tier minimums must be strictly increasing")
+		}
+	}
+	if tiers[0].MinAmountCents != 0 {
+		return fail("first tier minimum must be 0")
+	}
+	return tiers, AccountID(account), nil
 }
 
 // PostTransfer records an atomic transfer from one account to another,
@@ -205,7 +386,7 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	}
 	t.Currency = currency
 
-	feeCents, feeAccount, err := l.resolveFeeLocked(t)
+	feeCents, feeAccount, tierIndex, rateBps, err := l.resolveFeeLocked(t)
 	if err != nil {
 		return TransferReceipt{}, err
 	}
@@ -226,7 +407,22 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 			for _, id := range ids {
 				entries = append(entries, l.entries[id])
 			}
-			return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCentsOf(entries), Duplicate: true}, nil
+			feeCents := feeCentsOf(entries)
+			// Re-disclose the tier the original transfer was charged
+			// under: the fee policy is construction-time immutable, so
+			// the tier re-derives exactly from the principal amount when
+			// the fee leg went to the policy's revenue account. (An
+			// explicit fee routed to the same account for an identical
+			// amount is indistinguishable — and the disclosed rate still
+			// matches the fee math.)
+			tierIndex, rateBps := -1, int64(0)
+			if len(entries) > 1 && len(l.feeTiers) > 0 && l.feeRevenueAccount != "" &&
+				entries[1].DebitAccount == l.feeRevenueAccount {
+				if idx, rate := l.feeTierFor(entries[0].AmountCents); policyFeeCents(entries[0].AmountCents, rate) == feeCents {
+					tierIndex, rateBps = idx, rate
+				}
+			}
+			return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCents, FeeTierIndex: tierIndex, FeeRateBps: rateBps, Duplicate: true}, nil
 		}
 		if orig, ok := l.byKey[t.IdempotencyKey]; ok {
 			return TransferReceipt{
@@ -325,10 +521,12 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	}
 
 	return TransferReceipt{
-		TransferID: t.ID,
-		Entries:    entries,
-		FeeCents:   feeCents,
-		Duplicate:  false,
+		TransferID:   t.ID,
+		Entries:      entries,
+		FeeCents:     feeCents,
+		FeeTierIndex: tierIndex,
+		FeeRateBps:   rateBps,
+		Duplicate:    false,
 	}, nil
 }
 
