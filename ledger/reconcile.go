@@ -50,6 +50,18 @@ type AuditChainHealth struct {
 	ConsistencyError string `json:"consistency_error,omitempty"`
 }
 
+// CurrencyHoldTotals is the per-currency rollup of active authorization
+// holds (see hold.go) at report time: how many cents are currently
+// reserved from available balances, and in how many holds. Currencies are
+// never summed together — each currency's reserved funds are reported on
+// their own row, sorted by currency code. Expired holds count as inactive
+// (expiry is lazy); the rows only cover holds that still reserve funds.
+type CurrencyHoldTotals struct {
+	Currency    string `json:"currency"`
+	HeldCents   int64  `json:"held_cents"`
+	ActiveHolds int    `json:"active_holds"`
+}
+
 // ReconciliationReport is the end-of-day reconciliation: one consistent,
 // read-only snapshot of the whole ledger's health. It answers, in one
 // pass, the questions a settlement operator asks at day end: do the books
@@ -77,9 +89,14 @@ type ReconciliationReport struct {
 	// OverdraftProtectedAccounts lists the accounts currently guarded
 	// against overdrafts (see EnableOverdraftProtection). Risk tooling
 	// reads this to know which accounts cannot go negative.
-	OverdraftProtectedAccounts []AccountID          `json:"overdraft_protected_accounts"`
-	IdempotencyKeys            IdempotencyKeyHealth `json:"idempotency_keys"`
-	AuditChain                 AuditChainHealth     `json:"audit_chain"`
+	OverdraftProtectedAccounts []AccountID `json:"overdraft_protected_accounts"`
+	// HeldTotals is the per-currency rollup of active authorization
+	// holds (see hold.go) at report time, sorted by currency code: the
+	// cents currently reserved from available balances. Expired holds
+	// count as inactive even before the ExpireHolds sweep.
+	HeldTotals      []CurrencyHoldTotals `json:"held_totals"`
+	IdempotencyKeys IdempotencyKeyHealth `json:"idempotency_keys"`
+	AuditChain      AuditChainHealth     `json:"audit_chain"`
 }
 
 // Reconcile runs a full read-only scan of the ledger and returns the
@@ -104,6 +121,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		Discrepancies:              make([]TrialBalanceDiscrepancy, 0),
 		FrozenAccounts:             l.frozenAccountsLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
+		HeldTotals:                 l.heldTotalsLocked(now),
 	}
 
 	// Every account that has ever been touched. Net balances, debit
@@ -198,6 +216,36 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 	report.AuditChain = l.auditChainHealthLocked()
 
 	return report
+}
+
+// heldTotalsLocked rolls active authorization holds up per currency at
+// now, sorted by currency code. Expiry is lazy: holds whose ExpiresAt has
+// passed count as inactive even before the ExpireHolds sweep. Callers must
+// hold l.mu; the read lock suffices because the scan mutates nothing.
+func (l *Ledger) heldTotalsLocked(now time.Time) []CurrencyHoldTotals {
+	byCurrency := make(map[string]*CurrencyHoldTotals)
+	for _, h := range l.holds {
+		if !activeHoldLocked(h, now) {
+			continue
+		}
+		row, ok := byCurrency[h.Currency]
+		if !ok {
+			row = &CurrencyHoldTotals{Currency: h.Currency}
+			byCurrency[h.Currency] = row
+		}
+		row.HeldCents += h.AmountCents
+		row.ActiveHolds++
+	}
+	currencies := make([]string, 0, len(byCurrency))
+	for c := range byCurrency {
+		currencies = append(currencies, c)
+	}
+	sort.Strings(currencies)
+	out := make([]CurrencyHoldTotals, 0, len(currencies))
+	for _, c := range currencies {
+		out = append(out, *byCurrency[c])
+	}
+	return out
 }
 
 // auditChainHealthLocked recomputes the audit chain and checks the head

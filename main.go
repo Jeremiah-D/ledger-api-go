@@ -239,7 +239,232 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, receipt)
 }
 
+// decodeJSONBody decodes a JSON request body with the same transport
+// contract as POST /entries: bounded body, strict decoding (unknown
+// fields fail fast), no trailing garbage. It returns false after writing
+// the error response when decoding fails. Callers must check the HTTP
+// method before calling it; it always closes the body.
+func (s *server) decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return false
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return false
+	}
+	return true
+}
+
+type createHoldRequest struct {
+	HoldID         string           `json:"hold_id"`
+	Account        ledger.AccountID `json:"account"`
+	AmountCents    int64            `json:"amount_cents"`
+	Currency       string           `json:"currency"`
+	ExpiresAt      time.Time        `json:"expires_at"`
+	IdempotencyKey string           `json:"idempotency_key"`
+}
+
+// handleCreateHold implements POST /holds, the authorization half of the
+// auth/capture flow: it reserves amount_cents of the account's available
+// funds until expires_at (RFC3339) without moving any money through the
+// journal. While the hold is active, GET /accounts/{id}/balance reports
+// available_cents = balance_cents - held. The server generates hold_id
+// when the client omits it.
+//
+// A first-time hold returns 201; a duplicate idempotency key returns 200
+// with the original hold; malformed requests return 400; a hold on a
+// frozen account returns 403; a hold the account's available funds cannot
+// cover returns 422. The currency field is optional and defaults to USD;
+// when given it must be a 3-letter uppercase ISO 4217 code. expires_at is
+// required — authorizations are always time-bound.
+func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.HoldsTotal.Add(1)
+	var req createHoldRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	id := req.HoldID
+	if id == "" {
+		id = newID()
+	}
+	held, duplicate, err := s.ledger.Hold(ledger.Hold{
+		ID:             id,
+		Account:        req.Account,
+		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
+		ExpiresAt:      req.ExpiresAt,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	})
+	if err != nil {
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInsufficientAvailableFunds) {
+			s.metrics.HoldRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		s.metrics.HoldIdempotencyHits.Add(1)
+		writeJSON(w, http.StatusOK, held)
+		return
+	}
+	writeJSON(w, http.StatusCreated, held)
+}
+
+type captureHoldRequest struct {
+	CaptureID      string           `json:"capture_id"`
+	ToAccount      ledger.AccountID `json:"to_account"`
+	AmountCents    int64            `json:"amount_cents"`
+	IdempotencyKey string           `json:"idempotency_key"`
+}
+
+// handleCaptureHold implements POST /holds/{id}/capture, the settlement
+// half of the auth/capture flow: it posts amount_cents (which must not
+// exceed the held amount) as a double-entry journal entry from the held
+// account to to_account, in the hold's currency, and consumes the hold —
+// the un-captured remainder is released back to available funds
+// automatically (see released_cents in the receipt). The server generates
+// capture_id when the client omits it.
+//
+// A first-time capture returns 201 with the receipt; a duplicate
+// idempotency key returns 200 with the original receipt; an unknown hold
+// returns 404; a capture on a frozen account returns 403; a capture that
+// exceeds the hold, targets a captured/released hold, targets an expired
+// hold, or would overdraw an overdraft-protected held account returns 422.
+func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hold id required"})
+		return
+	}
+	s.metrics.CapturesTotal.Add(1)
+	var req captureHoldRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	captureID := req.CaptureID
+	if captureID == "" {
+		captureID = newID()
+	}
+	receipt, err := s.ledger.Capture(ledger.Capture{
+		ID:             captureID,
+		HoldID:         id,
+		To:             req.ToAccount,
+		AmountCents:    req.AmountCents,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	})
+	if err != nil {
+		if errors.Is(err, ledger.ErrHoldNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCaptureExceedsHold) ||
+			errors.Is(err, ledger.ErrHoldNotActive) ||
+			errors.Is(err, ledger.ErrHoldExpired) {
+			s.metrics.HoldRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if receipt.Duplicate {
+		s.metrics.CaptureIdempotencyHits.Add(1)
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
+// handleReleaseHold implements POST /holds/{id}/release: drops the hold
+// without settling anything, returning its reserved funds to available.
+// Release is idempotent — releasing an already-released or expired hold
+// is a no-op returning the hold — and works on frozen accounts (it frees
+// funds rather than moving money). An unknown hold returns 404. The
+// request takes no body.
+func (s *server) handleReleaseHold(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hold id required"})
+		return
+	}
+	s.metrics.ReleasesTotal.Add(1)
+	h, err := s.ledger.Release(id)
+	if err != nil {
+		if errors.Is(err, ledger.ErrHoldNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, h)
+}
+
+// handleExpireHolds implements POST /holds/expire: the operator-facing
+// sweep that marks every hold whose ExpiresAt has passed as expired and
+// reports how many were marked. Expiry is lazy — expired holds already
+// count as inactive for available-balance purposes before the sweep — so
+// this endpoint is observability and bookkeeping, not a correctness
+// gate. It returns 200 {"expired": N}.
+func (s *server) handleExpireHolds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.HoldSweeps.Add(1)
+	writeJSON(w, http.StatusOK, map[string]any{"expired": s.ledger.ExpireHolds()})
+}
+
 // handleBalance implements GET /accounts/{id}/balance.
+//
+// available_cents is the account's spendable funds: net balance minus
+// active authorization holds (see POST /holds). A hold reserves funds
+// without moving them, so balance_cents keeps reporting the journaled
+// net while available_cents reports what can still be authorized.
 func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	s.metrics.BalanceQueries.Add(1)
 	id := r.PathValue("id")
@@ -248,9 +473,10 @@ func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"account":       id,
-		"balance_cents": s.ledger.Balance(ledger.AccountID(id)),
-		"frozen":        s.ledger.IsFrozen(ledger.AccountID(id)),
+		"account":         id,
+		"balance_cents":   s.ledger.Balance(ledger.AccountID(id)),
+		"available_cents": s.ledger.Available(ledger.AccountID(id)),
+		"frozen":          s.ledger.IsFrozen(ledger.AccountID(id)),
 	})
 }
 
@@ -436,6 +662,10 @@ func newRouter(l *ledger.Ledger) http.Handler {
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
+	mux.HandleFunc("POST /holds", s.handleCreateHold)
+	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)
+	mux.HandleFunc("POST /holds/{id}/capture", s.handleCaptureHold)
+	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)

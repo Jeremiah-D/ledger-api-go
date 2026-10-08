@@ -121,7 +121,19 @@ type Ledger struct {
 	// journal entries it posted, in commit order (principal, then the fee
 	// leg when one was booked), so a replayed transfer returns its full
 	// receipt. Keys expire with the TTL like the entry-level index.
-	transferKeys   map[string][]string
+	transferKeys map[string][]string
+	// holds maps hold IDs to authorization holds (see hold.go). Holds are
+	// off-journal reservations: they never appear in entries, the audit
+	// chain, or the version counter. holdsByAccount indexes them per
+	// account so Available only scans that account's holds.
+	holds          map[string]Hold
+	holdsByAccount map[AccountID][]string
+	// holdKeys maps a hold's idempotency key to its hold ID, and
+	// captureKeys maps a capture's idempotency key to its receipt. The
+	// two namespaces are independent of each other and of the
+	// entry/transfer key namespaces; all of them expire with the TTL.
+	holdKeys       map[string]string
+	captureKeys    map[string]CaptureReceipt
 	chain          []chainLink   // audit chain, one link per successful Post, in order
 	version        uint64        // bumped by every successful Post
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
@@ -159,17 +171,21 @@ func WithOverdraftProtection(accounts ...AccountID) Option {
 // idempotency keys never expire.
 func New(opts ...Option) *Ledger {
 	l := &Ledger{
-		balances:      make(map[accountCurrency]int64),
-		entries:       make(map[string]JournalEntry),
-		byKey:         make(map[string]JournalEntry),
-		byAccount:     make(map[AccountID][]string),
-		debitTotals:   make(map[accountCurrency]int64),
-		creditTotals:  make(map[accountCurrency]int64),
-		frozen:        make(map[AccountID]bool),
-		noOverdraft:   make(map[AccountID]bool),
-		parents:       make(map[AccountID]AccountID),
-		transferKeys:  make(map[string][]string),
-		pruneInterval: defaultKeyPruneInterval,
+		balances:       make(map[accountCurrency]int64),
+		entries:        make(map[string]JournalEntry),
+		byKey:          make(map[string]JournalEntry),
+		byAccount:      make(map[AccountID][]string),
+		debitTotals:    make(map[accountCurrency]int64),
+		creditTotals:   make(map[accountCurrency]int64),
+		frozen:         make(map[AccountID]bool),
+		noOverdraft:    make(map[AccountID]bool),
+		parents:        make(map[AccountID]AccountID),
+		transferKeys:   make(map[string][]string),
+		holds:          make(map[string]Hold),
+		holdsByAccount: make(map[AccountID][]string),
+		holdKeys:       make(map[string]string),
+		captureKeys:    make(map[string]CaptureReceipt),
+		pruneInterval:  defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
 		opt(l)
@@ -349,6 +365,9 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 			removed++
 		}
 	}
+	// Hold and capture keys expire on the same schedule, in their own
+	// namespaces (see pruneHoldKeysLocked in hold.go).
+	removed += l.pruneHoldKeysLocked(now)
 	return removed
 }
 

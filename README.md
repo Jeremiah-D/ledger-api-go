@@ -157,6 +157,62 @@ curl -s -X POST localhost:8080/entries \
 # 422 {"error":"ledger: posting would overdraw a protected account"}
 ```
 
+### Authorization holds (auth/capture)
+
+Fintech pre-authorization flow: `POST /holds` reserves funds on an
+account until a time-bound expiry *without* moving any money through the
+journal — the card-network auth/capture pattern. While a hold is active,
+the account's **available** balance is reduced by the held amount
+(`available = balance − held`); the net balance, debit/credit totals,
+and the audit chain are untouched. `POST /holds/{id}/capture` then
+settles up to the held amount as an ordinary double-entry posting from
+the held account to a payee (in the hold's currency — captures never
+cross currencies), consuming the hold; the un-captured remainder is
+released back to available automatically. `POST /holds/{id}/release`
+drops a hold without settling. `POST /holds/expire` is the
+operator-facing sweep that marks lapsed holds expired — expiry itself is
+lazy (an expired hold already counts as inactive for available-balance
+purposes before the sweep).
+
+Holds are off-journal by design: they create no journal rows, no
+audit-chain links, and no ledger-version bumps (only the capture, which
+journals a real posting, bumps the version). A hold is rejected with
+`422` when the account's available funds cannot cover it — for
+overdraft-protected accounts this check is also the overdraft guard,
+since their balance floor is zero. Frozen accounts cannot place holds
+or be capture legs (`403`); release still works on a frozen account
+because it frees funds rather than moving them. Captures run the same
+frozen/overdraft checks as ordinary postings: the reservation is
+advisory, not an escrow, so a capture that would overdraw a protected
+account whose balance moved after the hold is rejected with `422`.
+
+Lifecycle: `active → captured | released | expired`. Captures are
+single-shot (one capture consumes the hold); release is idempotent. Hold
+and capture idempotency keys live in their own per-operation namespaces,
+independent of `POST /entries` and `POST /transfers` keys, and honor the
+same `LEDGER_IDEMPOTENCY_TTL`.
+
+```bash
+curl -s -X POST localhost:8080/holds \
+  -d '{"account":"card-42","amount_cents":5000,"expires_at":"2026-10-08T12:00:00Z"}'
+# 201 {"id":"...","account":"card-42","amount_cents":5000,"currency":"USD",
+#      "expires_at":"...","status":"active",...}
+curl -s localhost:8080/accounts/card-42/balance
+# {"account":"card-42","balance_cents":10000,"available_cents":5000,"frozen":false}
+curl -s -X POST localhost:8080/holds/<id>/capture \
+  -d '{"to_account":"merchant-7","amount_cents":3200}'
+# 201 {"capture_id":"...","hold_id":"...","captured_cents":3200,"released_cents":1800,...}
+curl -s -X POST localhost:8080/holds/<id>/release
+# 200 {"id":"...","status":"released",...}
+curl -s -X POST localhost:8080/holds/expire
+# 200 {"expired":3}
+```
+
+Status codes: `201` first booking / `200` idempotent replay or release;
+`400` malformed request; `403` frozen account; `404` unknown hold;
+`422` insufficient available funds, capture exceeding the hold, or
+capture on a non-active/expired hold.
+
 ### Multi-currency
 
 Every entry carries a `currency`: a three-letter uppercase ISO 4217 code
@@ -201,8 +257,12 @@ protected payer's EUR balance cannot cover a USD outflow.
 
 ```bash
 curl -s localhost:8080/accounts/cash/balance
-# {"account":"cash","balance_cents":1000,"frozen":false}
+# {"account":"cash","balance_cents":1000,"available_cents":1000,"frozen":false}
 ```
+
+`balance_cents` is the journaled net; `available_cents` is the spendable
+amount — net minus active authorization holds (see Authorization holds
+above). With no holds outstanding the two are equal.
 
 ### `GET /accounts/{id}/snapshot`
 
@@ -339,6 +399,8 @@ Report fields:
 | `trial_balances`       | per-account trial balances for every account ever touched, sorted by account |
 | `discrepancies`        | accounts where net != debits − credits, each with `total_debits_cents`, `total_credits_cents`, `net_balance_cents`, `expected_net_cents`, `difference_cents` (`[]` on a healthy ledger) |
 | `total_debits_cents` / `total_credits_cents` | ledger-wide sums for at-a-glance balancing |
+| `overdraft_protected_accounts` | accounts currently guarded against overdrafts |
+| `held_totals`          | per-currency rollup of active authorization holds (`currency`, `held_cents`, `active_holds`), sorted by currency — the cents currently reserved from available balances; expired holds count as inactive |
 | `idempotency_keys`     | `ttl_configured`, `ttl`, `total_keys`, and `expired_eligible` (keys older than the TTL, i.e. the next sweep's eviction set) |
 | `audit_chain`          | `verify_ok` / `verify_error`, `head`, `links`, plus `head_consistent` — the chain-length == ledger-version check with `consistency_error` when the counters desync |
 
@@ -401,11 +463,24 @@ curl -s localhost:8080/metrics
   served. Snapshot reads are not counted.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
-- `ledger_frozen_rejections_total` — `POST /entries` and `POST /transfers`
-  requests rejected with `403` because an account was frozen.
-- `ledger_overdraft_rejections_total` — `POST /entries` and `POST
-  /transfers` requests rejected with `422` because the posting would have
-  overdrawn an overdraft-protected account.
+- `ledger_frozen_rejections_total` — `POST /entries`, `POST /transfers`,
+  and hold requests rejected with `403` because an account was frozen.
+- `ledger_overdraft_rejections_total` — `POST /entries`, `POST
+  /transfers`, and capture requests rejected with `422` because the
+  posting would have overdrawn an overdraft-protected account.
+- `ledger_holds_total` — every `POST /holds` request received.
+- `ledger_hold_idempotency_hits_total` — holds that replayed an existing
+  idempotency key (returned the original hold, reserved nothing).
+- `ledger_hold_rejections_total` — hold-domain requests rejected with
+  `422`: insufficient available funds, a capture exceeding the held
+  amount, or a capture on a non-active or expired hold.
+- `ledger_captures_total` — every `POST /holds/{id}/capture` request
+  received.
+- `ledger_capture_idempotency_hits_total` — captures that replayed an
+  existing idempotency key (returned the original receipt, booked
+  nothing).
+- `ledger_releases_total` — `POST /holds/{id}/release` requests received.
+- `ledger_hold_sweeps_total` — `POST /holds/expire` requests received.
 
 ## Running
 

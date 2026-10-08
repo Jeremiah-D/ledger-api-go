@@ -36,17 +36,39 @@ type Metrics struct {
 	// POST /transfers fee legs (principal + fee entries land together, so
 	// the fee is counted once the transfer commits).
 	TransferFeeCentsTotal atomic.Uint64
-	// FrozenRejections counts POST /entries and POST /transfers requests
-	// rejected with 403 because the debit or credit account was frozen.
+	// FrozenRejections counts POST /entries, POST /transfers, and hold
+	// requests rejected with 403 because an account involved was frozen.
 	FrozenRejections atomic.Uint64
-	// OverdraftRejections counts POST /entries and POST /transfers requests
-	// rejected with 422 because they would have overdrawn an
-	// overdraft-protected account.
+	// OverdraftRejections counts POST /entries, POST /transfers, and
+	// capture requests rejected with 422 because they would have
+	// overdrawn an overdraft-protected account.
 	OverdraftRejections atomic.Uint64
 	// CurrencyRejections counts POST /entries and POST /transfers requests
 	// rejected for currency reasons: a malformed currency code (400) or a
 	// cross-currency transfer (422).
 	CurrencyRejections atomic.Uint64
+	// HoldsTotal counts POST /holds requests received (all attempts,
+	// including duplicates and rejected payloads).
+	HoldsTotal atomic.Uint64
+	// HoldIdempotencyHits counts POST /holds requests that replayed an
+	// already-placed hold idempotency key and returned the original hold.
+	HoldIdempotencyHits atomic.Uint64
+	// HoldRejections counts hold-domain requests rejected with 422 for
+	// semantic reasons: insufficient available funds on POST /holds, and
+	// capture requests that exceed the held amount or target a hold that
+	// is not active (already captured/released) or expired.
+	HoldRejections atomic.Uint64
+	// CapturesTotal counts POST /holds/{id}/capture requests received
+	// (all attempts, including duplicates and rejected payloads).
+	CapturesTotal atomic.Uint64
+	// CaptureIdempotencyHits counts POST /holds/{id}/capture requests
+	// that replayed an already-settled capture idempotency key and
+	// returned the original receipt.
+	CaptureIdempotencyHits atomic.Uint64
+	// ReleasesTotal counts POST /holds/{id}/release requests received.
+	ReleasesTotal atomic.Uint64
+	// HoldSweeps counts POST /holds/expire requests received.
+	HoldSweeps atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -81,10 +103,27 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total fee cents booked by POST /transfers fee legs.",
 		m.TransferFeeCentsTotal.Load())
 	writeCounter(&sb, "ledger_frozen_rejections_total",
-		"Total POST /entries and POST /transfers requests rejected because an account was frozen.",
+		"Total POST /entries, POST /transfers, and hold requests rejected because an account was frozen.",
 		m.FrozenRejections.Load())
+	writeCounter(&sb, "ledger_holds_total",
+		"Total POST /holds requests received.", m.HoldsTotal.Load())
+	writeCounter(&sb, "ledger_hold_idempotency_hits_total",
+		"Total POST /holds requests that replayed an existing hold idempotency key.",
+		m.HoldIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_hold_rejections_total",
+		"Total hold-domain requests rejected with 422: insufficient available funds, capture exceeding the held amount, or capture on a non-active or expired hold.",
+		m.HoldRejections.Load())
+	writeCounter(&sb, "ledger_captures_total",
+		"Total POST /holds/{id}/capture requests received.", m.CapturesTotal.Load())
+	writeCounter(&sb, "ledger_capture_idempotency_hits_total",
+		"Total POST /holds/{id}/capture requests that replayed an existing capture idempotency key.",
+		m.CaptureIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_releases_total",
+		"Total POST /holds/{id}/release requests received.", m.ReleasesTotal.Load())
+	writeCounter(&sb, "ledger_hold_sweeps_total",
+		"Total POST /holds/expire requests received.", m.HoldSweeps.Load())
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
-		"Total POST /entries and POST /transfers requests rejected because they would have overdrawn an overdraft-protected account.",
+		"Total POST /entries, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())
 	writeCounter(&sb, "ledger_currency_rejections_total",
 		"Total POST /entries and POST /transfers requests rejected for currency reasons: malformed currency code or cross-currency transfer.",
