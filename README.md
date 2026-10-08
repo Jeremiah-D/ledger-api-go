@@ -321,6 +321,26 @@ curl -s localhost:8080/accounts/cash/snapshot
 # {"account":"cash","balance_cents":1000,"version":3,"frozen":false}
 ```
 
+### `GET /accounts/{id}/balance-at?version=N[&currency=XXX]`
+
+Time-travel balance query: the account's net balance as of ledger version
+N — the balance after exactly N successful posts. The version `/snapshot`
+reports can be fed back here to reproduce the balance that was current
+then, the primitive for audit replay and point-in-time reconciliation
+("what did this account hold when the incident happened"). Version 0 is
+the genesis (zero for every account); a version beyond the current one is
+`422` (`ErrVersionInFuture` — the future has no balance yet). `currency`
+is optional and defaults to USD; unknown accounts report zero, like
+`/balance` and `/snapshot`. The scan folds the audit-chain prefix under a
+single read lock, so the result is a consistent point-in-time view;
+O(version) per query, and the append-only journal means a cached answer
+never goes stale.
+
+```bash
+curl -s "localhost:8080/accounts/cash/balance-at?version=2"
+# {"account":"cash","currency":"USD","version":2,"balance_cents":200}
+```
+
 ### `GET /accounts/{id}/entries`
 
 Per-account, time-windowed, cursor-paginated journal export — every entry
@@ -509,6 +529,8 @@ curl -s localhost:8080/metrics
   idempotency key (returned the original receipt, booked nothing).
 - `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
   served. Snapshot reads are not counted.
+- `ledger_balance_at_queries_total` — `GET /accounts/{id}/balance-at`
+  requests served.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
 - `ledger_frozen_rejections_total` — `POST /entries`, `POST /transfers`,
@@ -607,11 +629,14 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── ledger_hierarchy_test.go# parent assignment, cycle rejection, rollup aggregation, concurrency
 │   ├── ledger_idempotency_ttl_test.go# TTL eviction, lazy prune, interval guard
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics
+│   ├── timetravel.go          # BalanceAt: point-in-time balance at a ledger version (audit-chain prefix scan)
+│   ├── ledger_timetravel_test.go# time-travel correctness, currency isolation, future-version rejection, concurrent readers
 │   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts
 ├── main.go                    # net/http JSON API (thin assembly only)
 ├── metrics.go                 # Prometheus-format /metrics counters (stdlib only)
 ├── metrics_test.go            # /metrics exposition + counter semantics tests
 ├── main_test.go               # HTTP handler tests (httptest)
+├── main_timetravel_test.go    # GET /accounts/{id}/balance-at handler tests (httptest)
 ├── main_reconcile_test.go     # POST /reconcile handler tests (httptest)
 ├── main_graceful_test.go      # SIGTERM drain: in-flight requests complete, listener closes
 └── .github/workflows/ci.yml

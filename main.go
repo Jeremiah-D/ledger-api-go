@@ -563,6 +563,49 @@ func (s *server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleBalanceAt implements GET /accounts/{id}/balance-at?version=N[&currency=XXX].
+// Returns the account's net balance as of ledger version N — the balance
+// after exactly N successful posts — for audit replay and point-in-time
+// reconciliation. The version /snapshot reports can be fed back here to
+// reproduce the balance that was current then.
+//
+// version is required and must be a non-negative integer; a version beyond
+// the current ledger version is 422 (the future has no balance yet).
+// currency is optional and defaults to USD. Like /balance and /snapshot,
+// an unknown account reports zero.
+func (s *server) handleBalanceAt(w http.ResponseWriter, r *http.Request) {
+	s.metrics.BalanceAtQueries.Add(1)
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	version, err := strconv.ParseUint(r.URL.Query().Get("version"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "version query parameter is required as a non-negative integer"})
+		return
+	}
+	currency := r.URL.Query().Get("currency")
+	if currency == "" {
+		currency = ledger.DefaultCurrency
+	}
+	balance, err := s.ledger.BalanceAt(ledger.AccountID(id), currency, version)
+	if err != nil {
+		if errors.Is(err, ledger.ErrVersionInFuture) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":       id,
+		"currency":      currency,
+		"version":       version,
+		"balance_cents": balance,
+	})
+}
+
 // handleTrialBalance implements GET /accounts/{id}/trial-balance.
 // Returns the account's double-entry breakdown — total debits, total
 // credits, and net balance — at the current ledger version. Net balance
@@ -749,6 +792,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
+	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
 	mux.HandleFunc("GET /metrics", s.metrics.handleMetrics)
