@@ -498,6 +498,51 @@ Daily cron example (midnight, keep 90 days of reports):
 Reports from a healthy ledger are byte-identical when scanned at the same
 `generated_at`, so plain `diff` works for day-over-day comparisons.
 
+### Disaster-recovery snapshots (`ledger/snapshot.go`)
+
+The ledger can be exported to a JSONL disaster-recovery snapshot and
+rebuilt from it. The export is a library-level API (no HTTP endpoint —
+backups are an operator concern, taken from the process embedding the
+ledger):
+
+```go
+var buf bytes.Buffer
+if err := l.ExportSnapshot(&buf); err != nil { /* ... */ }
+// buf now holds one JSON object per line:
+//   {"record":"meta",...}                 exactly one, always first
+//   {"record":"entry",...}                journal entries, in Post (chain) order
+//   {"record":"link",...}                 audit-chain links, seq 1..N
+//   {"record":"hold",...}                 authorization holds
+//   {"record":"idempotency","namespace":"entry|transfer|hold|capture|sweep",...}
+//   {"record":"config",...}               frozen/overdraft/hierarchy/fee-policy/TTL
+```
+
+The export holds the read lock for its whole duration (one consistent
+point in time) and is byte-deterministic for identical state, so
+`sha256sum` fingerprints work for backup verification.
+
+`ImportSnapshot` rebuilds a fully working ledger from a snapshot:
+balances, totals, and indexes are refolded from the journal in chain
+order, holds and all five idempotency-key namespaces are restored with
+referential checks, and operational config (frozen accounts, overdraft
+guards, sub-account hierarchy, transfer fee policy, idempotency TTL) comes
+back intact. The import finishes with a full audit-chain verification —
+a rewritten amount, spliced link, reordered journal, or dangling registry
+reference rejects the whole import (`ErrSnapshotInvalid`); no
+half-restored ledger is ever returned.
+
+The operator's pre-promotion check is to rerun reconciliation against the
+restored copy:
+
+```go
+restored, err := ImportSnapshot(bytes.NewReader(snapshotBytes))
+if err != nil {
+    log.Fatalf("backup failed verification: %v", err) // do NOT promote
+}
+report := restored.Reconcile(time.Now())
+// report.AccountingEquationOK && report.AuditChain.VerifyOK => safe to promote
+```
+
 ### `GET /metrics`
 
 Prometheus-format counters, rendered by hand with the standard library
@@ -629,6 +674,8 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── ledger_hierarchy_test.go# parent assignment, cycle rejection, rollup aggregation, concurrency
 │   ├── ledger_idempotency_ttl_test.go# TTL eviction, lazy prune, interval guard
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics
+│   ├── snapshot.go            # disaster-recovery snapshots: JSONL export / verified import (entries + chain + holds + idempotency registries + config)
+│   ├── ledger_dr_test.go      # snapshot round-trip, tamper/splice rejection, reconcile-rerun parity
 │   ├── timetravel.go          # BalanceAt: point-in-time balance at a ledger version (audit-chain prefix scan)
 │   ├── ledger_timetravel_test.go# time-travel correctness, currency isolation, future-version rejection, concurrent readers
 │   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts
