@@ -44,6 +44,37 @@ curl -s -X POST localhost:8080/entries \
   `{"error":"ledger: posting would overdraw a protected account"}`. The
   rejection is counted in `ledger_overdraft_rejections_total`.
 
+### `POST /transfers`
+
+The payment-domain view of a posting: instead of debit/credit legs, the
+caller names the payer (`from_account`) and the payee (`to_account`) and
+the ledger books the double-entry pair **atomically** — either both
+balance effects land or nothing does. A transfer that fails on either leg
+(frozen account, overdraft, validation) records nothing: no journal row,
+no chain link, no version bump.
+
+```bash
+curl -s -X POST localhost:8080/transfers \
+  -H 'Content-Type: application/json' \
+  -d '{"transfer_id":"tx-2026-001","from_account":"alice","to_account":"bob","amount_cents":2500,"idempotency_key":"pay-001"}'
+# 201 {"transfer_id":"tx-2026-001","entries":[{...}],"duplicate":false}
+```
+
+- First-time transfer → `201` with the receipt; the journal entry carries
+  the transfer's ID (`entries[0].id == transfer_id`), so transfers are
+  directly visible in journal exports and the audit chain.
+- Re-post with the same `idempotency_key` → `200` with the originally
+  posted receipt (the idempotency namespace is shared with `POST
+  /entries`).
+- `transfer_id` is optional — the server generates one when omitted.
+- Invalid transfer (empty ID/accounts, from == to, amount ≤ 0, transfer ID
+  colliding with an existing entry ID, malformed JSON, unknown field) →
+  `400`.
+- Either leg names a **frozen** account → `403`; the payer is
+  **overdraft-protected** and the transfer would take it below zero →
+  `422`. Both are counted in the shared `ledger_frozen_rejections_total` /
+  `ledger_overdraft_rejections_total` counters.
+
 ### `POST /accounts/{id}/freeze` and `POST /accounts/{id}/unfreeze`
 
 Risk-control stop for an account (fintech wind-down / fraud hold). A frozen
@@ -247,21 +278,26 @@ curl -s localhost:8080/metrics
 # ledger_posts_total 128
 # ledger_idempotency_hits_total 5
 # ledger_balance_queries_total 42
-# ledger_verify_requests_total 7
+# ledger_transfers_total 12
+# ledger_transfer_idempotency_hits_total 3
 ```
 
 - `ledger_posts_total` — every `POST /entries` request received.
+- `ledger_transfers_total` — every `POST /transfers` request received.
 - `ledger_idempotency_hits_total` — posts that replayed an existing
   idempotency key (returned the original entry, booked nothing).
+- `ledger_transfer_idempotency_hits_total` — transfers that replayed an
+  existing idempotency key (returned the original receipt, booked
+  nothing).
 - `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
   served. Snapshot reads are not counted.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
-- `ledger_frozen_rejections_total` — `POST /entries` requests rejected
-  with `403` because the debit or credit account was frozen.
-- `ledger_overdraft_rejections_total` — `POST /entries` requests rejected
-  with `422` because the posting would have overdrawn an
-  overdraft-protected account.
+- `ledger_frozen_rejections_total` — `POST /entries` and `POST /transfers`
+  requests rejected with `403` because an account was frozen.
+- `ledger_overdraft_rejections_total` — `POST /entries` and `POST
+  /transfers` requests rejected with `422` because the posting would have
+  overdrawn an overdraft-protected account.
 
 ## Running
 

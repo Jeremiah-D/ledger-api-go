@@ -217,19 +217,7 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	}
 
 	l.maybePruneIdempotencyKeys(time.Now())
-
-	l.entries[e.ID] = e
-	if e.IdempotencyKey != "" {
-		l.byKey[e.IdempotencyKey] = e
-	}
-	l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
-	l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
-	l.balances[e.DebitAccount] += e.AmountCents
-	l.balances[e.CreditAccount] -= e.AmountCents
-	l.debitTotals[e.DebitAccount] += e.AmountCents
-	l.creditTotals[e.CreditAccount] += e.AmountCents
-	l.version++
-	l.appendChainLink(e)
+	l.commitEntryLocked(e)
 
 	return e, false, nil
 }

@@ -121,6 +121,90 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, posted)
 }
 
+type createTransferRequest struct {
+	TransferID     string           `json:"transfer_id"`
+	FromAccount    ledger.AccountID `json:"from_account"`
+	ToAccount      ledger.AccountID `json:"to_account"`
+	AmountCents    int64            `json:"amount_cents"`
+	IdempotencyKey string           `json:"idempotency_key"`
+}
+
+// handleCreateTransfer implements POST /transfers, the payment-domain view
+// of a posting: the caller names the payer (from_account) and the payee
+// (to_account) and the ledger books the double-entry pair atomically —
+// either both balance effects land or nothing does.
+//
+// The server generates transfer_id when the client omits it. A first-time
+// transfer returns 201 with the receipt; a duplicate idempotency key
+// returns 200 with the originally posted receipt; invalid transfers return
+// 400; a transfer through a frozen account returns 403; a transfer that
+// would overdraw an overdraft-protected payer returns 422.
+func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	// Every POST attempt is counted; replays are counted separately below.
+	s.metrics.TransfersTotal.Add(1)
+
+	// Same transport contract as POST /entries: bounded body, strict
+	// decoding, no trailing garbage.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req createTransferRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	id := req.TransferID
+	if id == "" {
+		id = newID()
+	}
+	transfer := ledger.Transfer{
+		ID:             id,
+		From:           req.FromAccount,
+		To:             req.ToAccount,
+		AmountCents:    req.AmountCents,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	}
+
+	receipt, err := s.ledger.PostTransfer(transfer)
+	if err != nil {
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if receipt.Duplicate {
+		s.metrics.TransferIdempotencyHits.Add(1)
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
 // handleBalance implements GET /accounts/{id}/balance.
 func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	s.metrics.BalanceQueries.Add(1)
@@ -249,6 +333,7 @@ func newRouter(l *ledger.Ledger) http.Handler {
 	s := &server{ledger: l, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
+	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)

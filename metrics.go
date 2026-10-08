@@ -26,12 +26,18 @@ type Metrics struct {
 	VerifyRequests atomic.Uint64
 	// ReconcileRuns counts POST /reconcile requests served.
 	ReconcileRuns atomic.Uint64
-	// FrozenRejections counts POST /entries requests rejected with 403
-	// because the debit or credit account was frozen.
+	// TransfersTotal counts POST /transfers requests received (all attempts,
+	// including duplicates and rejected payloads).
+	TransfersTotal atomic.Uint64
+	// TransferIdempotencyHits counts POST /transfers requests that replayed
+	// an already-posted idempotency key and returned the original receipt.
+	TransferIdempotencyHits atomic.Uint64
+	// FrozenRejections counts POST /entries and POST /transfers requests
+	// rejected with 403 because the debit or credit account was frozen.
 	FrozenRejections atomic.Uint64
-	// OverdraftRejections counts POST /entries requests rejected with 422
-	// because the posting would have overdrawn an overdraft-protected
-	// account.
+	// OverdraftRejections counts POST /entries and POST /transfers requests
+	// rejected with 422 because they would have overdrawn an
+	// overdraft-protected account.
 	OverdraftRejections atomic.Uint64
 }
 
@@ -58,11 +64,16 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
 	writeCounter(&sb, "ledger_reconcile_runs_total",
 		"Total POST /reconcile requests served.", m.ReconcileRuns.Load())
+	writeCounter(&sb, "ledger_transfers_total",
+		"Total POST /transfers requests received.", m.TransfersTotal.Load())
+	writeCounter(&sb, "ledger_transfer_idempotency_hits_total",
+		"Total POST /transfers requests that replayed an existing idempotency key.",
+		m.TransferIdempotencyHits.Load())
 	writeCounter(&sb, "ledger_frozen_rejections_total",
-		"Total POST /entries requests rejected because an account was frozen.",
+		"Total POST /entries and POST /transfers requests rejected because an account was frozen.",
 		m.FrozenRejections.Load())
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
-		"Total POST /entries requests rejected because they would have overdrawn an overdraft-protected account.",
+		"Total POST /entries and POST /transfers requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
