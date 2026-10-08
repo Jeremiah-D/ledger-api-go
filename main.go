@@ -288,6 +288,73 @@ func (s *server) handleTrialBalance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.ledger.TrialBalance(ledger.AccountID(id)))
 }
 
+// setParentRequest is the body of POST /accounts/{id}/parent. An empty
+// parent clears the assignment.
+type setParentRequest struct {
+	Parent ledger.AccountID `json:"parent"`
+}
+
+// handleSetParent implements POST /accounts/{id}/parent: links an account
+// into the sub-account hierarchy (see ledger.SetParent), the structure
+// GET /accounts/{id}/rollup aggregates over. The body names the parent;
+// sending {"parent":""} clears the link. Like Freeze, linking is
+// structural and does not bump the ledger version. A self-assignment is
+// 400; an assignment that would close a cycle is 422.
+func (s *server) handleSetParent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req setParentRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	if err := s.ledger.SetParent(ledger.AccountID(id), req.Parent); err != nil {
+		if errors.Is(err, ledger.ErrParentCycle) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	parent, _ := s.ledger.Parent(ledger.AccountID(id))
+	writeJSON(w, http.StatusOK, map[string]any{"account": id, "parent": string(parent)})
+}
+
+// handleRollup implements GET /accounts/{id}/rollup: the balance rollup of
+// the sub-account subtree rooted at the account — the account's own
+// balances plus every descendant's, per currency (see ledger.Rollup).
+// Like /balance, an unknown account rolls up to just itself with zero
+// balances.
+func (s *server) handleRollup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.ledger.Rollup(ledger.AccountID(id)))
+}
+
 // handleVerifyEntries implements GET /entries/verify. It recomputes the
 // ledger's tamper-evident audit chain and reports whether it is intact:
 // 200 {"ok":true,"links":N,"head":"<hex>"} on success. A broken chain is an
@@ -371,12 +438,14 @@ func newRouter(l *ledger.Ledger) http.Handler {
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
+	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
+	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
 	mux.HandleFunc("GET /metrics", s.metrics.handleMetrics)
 	return mux
 }

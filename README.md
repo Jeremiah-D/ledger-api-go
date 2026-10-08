@@ -248,6 +248,38 @@ curl -s localhost:8080/accounts/cash/trial-balance
 #  "version":3,"frozen":false}
 ```
 
+### `POST /accounts/{id}/parent` and `GET /accounts/{id}/rollup`
+
+The **sub-account hierarchy**: link accounts into a parent/child tree —
+the classic shape is a merchant account with sub-merchant children, each
+of which may have its own children — and roll up balances over the whole
+subtree. Linking is structural, not bookkeeping: like freeze/unfreeze, it
+does not bump the ledger version.
+
+```bash
+curl -s -X POST localhost:8080/accounts/sub-1/parent \
+  -H 'Content-Type: application/json' -d '{"parent":"merchant"}'
+# 200 {"account":"sub-1","parent":"merchant"}
+
+curl -s localhost:8080/accounts/merchant/rollup
+# {"account":"merchant","descendant_count":2,
+#  "accounts":["merchant","sub-1","sub-2"],
+#  "by_currency":[{"currency":"EUR","balance_cents":300},
+#                 {"currency":"USD","balance_cents":1200}],
+#  "version":5,"frozen":false}
+```
+
+- `POST /accounts/{id}/parent` with `{"parent":"..."}` assigns the
+  parent; `{"parent":""}` clears the link. Accounts need no prior
+  registration — a sub-merchant can be linked before its first posting.
+- An account assigned as its own parent → `400`; an assignment that would
+  close a cycle (the child is already an ancestor of the proposed parent)
+  → `422`. The hierarchy stays a forest, so rollups always terminate.
+- `GET /accounts/{id}/rollup` returns the account's own balances plus every
+  descendant's, aggregated **per currency** (currencies are never summed
+  together, mirroring the accounting equation). Unknown accounts roll up
+  to just themselves with zero balances.
+
 ### `GET /entries`
 
 Time-windowed, cursor-paginated export of the journal, sorted by
@@ -437,6 +469,8 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── ledger_reconcile_test.go # reconciliation report tests (healthy, tampered, TTL, determinism)
 │   ├── ledger_bench_test.go   # BenchmarkPost: throughput + p99 latency (numbers → README)
 │   ├── ledger_test.go         # validation, idempotency, concurrency tests
+│   ├── hierarchy.go           # sub-account parent links (cycle-guarded) + per-currency balance rollup
+│   ├── ledger_hierarchy_test.go# parent assignment, cycle rejection, rollup aggregation, concurrency
 │   ├── ledger_idempotency_ttl_test.go# TTL eviction, lazy prune, interval guard
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics
 │   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts

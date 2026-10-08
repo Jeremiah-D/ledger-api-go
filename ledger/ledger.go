@@ -105,6 +105,12 @@ type Ledger struct {
 	// would take a protected credit (payer) account below zero is rejected
 	// with ErrAccountOverdraft (see overdraft.go). Opt-in per account.
 	noOverdraft map[AccountID]bool
+	// parents maps a child account to its parent account in the
+	// sub-account hierarchy (see hierarchy.go). Only accounts with an
+	// assigned parent appear here; clearing the parent deletes the row.
+	// SetParent keeps the map cycle-free, so Rollup's subtree walk always
+	// terminates.
+	parents map[AccountID]AccountID
 	// feeRateBps / feeRevenueAccount configure the default transfer fee
 	// policy (see WithTransferFeePolicy in transfer.go): unless a transfer
 	// carries an explicit fee or sets SkipFee, PostTransfer books a fee leg
@@ -161,6 +167,7 @@ func New(opts ...Option) *Ledger {
 		creditTotals:  make(map[accountCurrency]int64),
 		frozen:        make(map[AccountID]bool),
 		noOverdraft:   make(map[AccountID]bool),
+		parents:       make(map[AccountID]AccountID),
 		transferKeys:  make(map[string][]string),
 		pruneInterval: defaultKeyPruneInterval,
 	}
