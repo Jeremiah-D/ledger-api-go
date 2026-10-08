@@ -239,6 +239,70 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, receipt)
 }
 
+type createSweepRequest struct {
+	SweepID        string             `json:"sweep_id"`
+	FromAccounts   []ledger.AccountID `json:"from_accounts"`
+	ToAccount      ledger.AccountID   `json:"to_account"`
+	IdempotencyKey string             `json:"idempotency_key"`
+}
+
+// handleCreateSweep implements POST /sweeps, the treasury view of the
+// payment domain: the caller names the source accounts (typically a
+// merchant's sub-merchants, see GET /accounts/{id}/rollup) and the target
+// account, and the ledger atomically moves every source's positive
+// per-currency balance to the target — one journal entry per
+// (source, currency), all under the sweep ID. Sweeps reuse transfer
+// semantics but never charge a fee: they are internal treasury movements,
+// so the LEDGER_TRANSFER_FEE policy does not apply.
+//
+// The server generates sweep_id when the client omits it. A first-time
+// sweep returns 201 with the receipt; a duplicate idempotency key returns
+// 200 with the originally posted receipt; invalid sweeps return 400; a
+// sweep touching a frozen account returns 403. A sweep whose sources all
+// have non-positive balances succeeds with an empty receipt (sources are
+// skipped, never swept into debt).
+func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	// Every POST attempt is counted; replays are counted separately below.
+	s.metrics.SweepsTotal.Add(1)
+
+	var req createSweepRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	id := req.SweepID
+	if id == "" {
+		id = newID()
+	}
+	receipt, err := s.ledger.PostSweep(ledger.Sweep{
+		ID:             id,
+		From:           req.FromAccounts,
+		To:             req.ToAccount,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	})
+	if err != nil {
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if receipt.Duplicate {
+		s.metrics.SweepIdempotencyHits.Add(1)
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
 // decodeJSONBody decodes a JSON request body with the same transport
 // contract as POST /entries: bounded body, strict decoding (unknown
 // fields fail fast), no trailing garbage. It returns false after writing
@@ -661,6 +725,7 @@ func newRouter(l *ledger.Ledger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
+	mux.HandleFunc("POST /sweeps", s.handleCreateSweep)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
 	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)

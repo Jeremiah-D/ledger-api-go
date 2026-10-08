@@ -134,6 +134,10 @@ type Ledger struct {
 	// entry/transfer key namespaces; all of them expire with the TTL.
 	holdKeys       map[string]string
 	captureKeys    map[string]CaptureReceipt
+	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so
+	// replays rebuild the full receipt (see sweep.go). Its own namespace,
+	// like holdKeys/captureKeys, expiring with the TTL.
+	sweepKeys      map[string]sweepRecord
 	chain          []chainLink   // audit chain, one link per successful Post, in order
 	version        uint64        // bumped by every successful Post
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
@@ -185,6 +189,7 @@ func New(opts ...Option) *Ledger {
 		holdsByAccount: make(map[AccountID][]string),
 		holdKeys:       make(map[string]string),
 		captureKeys:    make(map[string]CaptureReceipt),
+		sweepKeys:      make(map[string]sweepRecord),
 		pruneInterval:  defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
@@ -366,8 +371,10 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 		}
 	}
 	// Hold and capture keys expire on the same schedule, in their own
-	// namespaces (see pruneHoldKeysLocked in hold.go).
+	// namespaces (see pruneHoldKeysLocked in hold.go). Sweep keys expire
+	// on the same schedule too (see pruneSweepKeysLocked in sweep.go).
 	removed += l.pruneHoldKeysLocked(now)
+	removed += l.pruneSweepKeysLocked(now)
 	return removed
 }
 

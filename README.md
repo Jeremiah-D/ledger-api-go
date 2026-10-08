@@ -103,6 +103,48 @@ computed fee of zero (dust amounts under a low rate) posts no leg.
 An explicit fee always wins over the policy. Total fee cents booked are
 exposed as `ledger_transfer_fee_cents_total`.
 
+### `POST /sweeps`
+
+Treasury sweep: atomically moves the positive per-currency balances of the
+source accounts into the target account — one journal entry per
+`(source, currency)`, all under the sweep ID. The classic shape is a
+merchant sweeping its sub-merchants' settlement balances (see
+`GET /accounts/{id}/rollup` for the subtree) into the master account at
+the end of the day.
+
+```bash
+curl -X POST localhost:8080/sweeps -d '{
+  "sweep_id": "sweep-2026-10-08",
+  "from_accounts": ["sub-merchant-1", "sub-merchant-2"],
+  "to_account": "treasury",
+  "idempotency_key": "sweep-day-2026-10-08"
+}'
+# 201 {"sweep_id":"sweep-2026-10-08",
+#      "legs":[{"from_account":"sub-merchant-1","currency":"USD","amount_cents":10000,
+#               "entry_id":"sweep-2026-10-08/sub-merchant-1/USD"}, ...],
+#      "entries":[{...}],"duplicate":false}
+```
+
+Each leg reuses transfer semantics (debit target, credit source) but a
+sweep **never charges a fee** — sweeps are internal treasury movements,
+so the `LEDGER_TRANSFER_FEE` policy does not apply. Sweep legs are marked
+by their entry-ID prefix `<sweep ID>/<source>/<currency>`, so they are
+directly visible in journal exports and the audit chain.
+
+Only positive balances move: zero balances are skipped, and negative
+balances are skipped too (a negative balance means the account owes money;
+sweeping it would move debt into the treasury account). A sweep whose
+sources all have non-positive balances succeeds with an empty receipt.
+Overdraft protection needs no check — each leg moves its source's full
+positive balance, so every source lands at exactly zero. Holds are
+advisory reservations, not journaled money: a sweep moves the full journal
+balance, so settle or release holds before sweeping.
+
+Validation mirrors `POST /transfers`: a first-time sweep returns `201`
+with the receipt; a duplicate idempotency key returns `200` with the
+original receipt (its own key namespace, expiring with the TTL); invalid
+sweeps return `400`; a sweep touching a frozen account returns `403`.
+
 ### `POST /accounts/{id}/freeze` and `POST /accounts/{id}/unfreeze`
 
 Risk-control stop for an account (fintech wind-down / fraud hold). A frozen
@@ -459,12 +501,16 @@ curl -s localhost:8080/metrics
   nothing).
 - `ledger_transfer_fee_cents_total` — total fee cents booked by transfer
   fee legs.
+- `ledger_sweeps_total` — every `POST /sweeps` request received.
+- `ledger_sweep_idempotency_hits_total` — sweeps that replayed an existing
+  idempotency key (returned the original receipt, booked nothing).
 - `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
   served. Snapshot reads are not counted.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
 - `ledger_frozen_rejections_total` — `POST /entries`, `POST /transfers`,
-  and hold requests rejected with `403` because an account was frozen.
+  `POST /sweeps`, and hold requests rejected with `403` because an account
+  was frozen.
 - `ledger_overdraft_rejections_total` — `POST /entries`, `POST
   /transfers`, and capture requests rejected with `422` because the
   posting would have overdrawn an overdraft-protected account.

@@ -36,8 +36,9 @@ type Metrics struct {
 	// POST /transfers fee legs (principal + fee entries land together, so
 	// the fee is counted once the transfer commits).
 	TransferFeeCentsTotal atomic.Uint64
-	// FrozenRejections counts POST /entries, POST /transfers, and hold
-	// requests rejected with 403 because an account involved was frozen.
+	// FrozenRejections counts POST /entries, POST /transfers, POST /sweeps,
+	// and hold requests rejected with 403 because an account involved was
+	// frozen.
 	FrozenRejections atomic.Uint64
 	// OverdraftRejections counts POST /entries, POST /transfers, and
 	// capture requests rejected with 422 because they would have
@@ -69,6 +70,13 @@ type Metrics struct {
 	ReleasesTotal atomic.Uint64
 	// HoldSweeps counts POST /holds/expire requests received.
 	HoldSweeps atomic.Uint64
+	// SweepsTotal counts POST /sweeps requests received (all attempts,
+	// including duplicates and rejected payloads).
+	SweepsTotal atomic.Uint64
+	// SweepIdempotencyHits counts POST /sweeps requests that replayed an
+	// already-posted sweep idempotency key and returned the original
+	// receipt.
+	SweepIdempotencyHits atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -122,6 +130,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /holds/{id}/release requests received.", m.ReleasesTotal.Load())
 	writeCounter(&sb, "ledger_hold_sweeps_total",
 		"Total POST /holds/expire requests received.", m.HoldSweeps.Load())
+	writeCounter(&sb, "ledger_sweeps_total",
+		"Total POST /sweeps requests received.", m.SweepsTotal.Load())
+	writeCounter(&sb, "ledger_sweep_idempotency_hits_total",
+		"Total POST /sweeps requests that replayed an existing sweep idempotency key.",
+		m.SweepIdempotencyHits.Load())
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
 		"Total POST /entries, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())
