@@ -34,6 +34,7 @@ type createEntryRequest struct {
 	DebitAccount   ledger.AccountID `json:"debit_account"`
 	CreditAccount  ledger.AccountID `json:"credit_account"`
 	AmountCents    int64            `json:"amount_cents"`
+	Currency       string           `json:"currency"`
 	IdempotencyKey string           `json:"idempotency_key"`
 }
 
@@ -54,9 +55,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // handleCreateEntry implements POST /entries.
 // The server generates ID and CreatedAt when the client omits them.
 // A first-time post returns 201; a duplicate idempotency key returns 200
-// with the originally posted entry; invalid entries return 400; a post
-// through a frozen account returns 403; a post that would overdraw an
-// overdraft-protected account returns 422.
+// with the originally posted entry; invalid entries (including a malformed
+// currency code) return 400; a post through a frozen account returns 403;
+// a post that would overdraw an overdraft-protected account returns 422.
+// The currency field is optional and defaults to USD; when given it must
+// be a 3-letter uppercase ISO 4217 code.
 func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -94,6 +97,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		DebitAccount:   req.DebitAccount,
 		CreditAccount:  req.CreditAccount,
 		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
 		IdempotencyKey: req.IdempotencyKey,
 		CreatedAt:      time.Now(),
 	}
@@ -109,6 +113,9 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 			s.metrics.OverdraftRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -126,6 +133,7 @@ type createTransferRequest struct {
 	FromAccount    ledger.AccountID `json:"from_account"`
 	ToAccount      ledger.AccountID `json:"to_account"`
 	AmountCents    int64            `json:"amount_cents"`
+	Currency       string           `json:"currency"`
 	FeeCents       int64            `json:"fee_cents"`
 	FeeAccount     ledger.AccountID `json:"fee_account"`
 	SkipFee        bool             `json:"skip_fee"`
@@ -145,7 +153,11 @@ type createTransferRequest struct {
 // transfer returns 201 with the receipt; a duplicate idempotency key
 // returns 200 with the originally posted receipt; invalid transfers return
 // 400; a transfer through a frozen account returns 403; a transfer that
-// would overdraw an overdraft-protected payer returns 422.
+// would overdraw an overdraft-protected payer returns 422, as does a
+// transfer whose legs would span currencies (this ledger performs no FX
+// conversion — every transfer is single-currency). The currency field is
+// optional and defaults to USD; when given it must be a 3-letter uppercase
+// ISO 4217 code, and the fee leg is booked in the same currency.
 func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -185,6 +197,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		From:           req.FromAccount,
 		To:             req.ToAccount,
 		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
 		FeeCents:       req.FeeCents,
 		FeeAccount:     req.FeeAccount,
 		SkipFee:        req.SkipFee,
@@ -203,6 +216,14 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 			s.metrics.OverdraftRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
+		}
+		if errors.Is(err, ledger.ErrCrossCurrencyTransfer) {
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

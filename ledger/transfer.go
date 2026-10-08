@@ -8,10 +8,10 @@ import (
 
 // Validation errors returned by PostTransfer.
 var (
-	ErrEmptyTransferID       = errors.New("ledger: transfer ID must not be empty")
-	ErrEmptyFromAccount      = errors.New("ledger: transfer from-account must not be empty")
-	ErrEmptyToAccount        = errors.New("ledger: transfer to-account must not be empty")
-	ErrTransferSameAccount   = errors.New("ledger: transfer from- and to-accounts must differ")
+	ErrEmptyTransferID           = errors.New("ledger: transfer ID must not be empty")
+	ErrEmptyFromAccount          = errors.New("ledger: transfer from-account must not be empty")
+	ErrEmptyToAccount            = errors.New("ledger: transfer to-account must not be empty")
+	ErrTransferSameAccount       = errors.New("ledger: transfer from- and to-accounts must differ")
 	ErrTransferNonPositiveAmount = errors.New("ledger: transfer amount must be greater than zero")
 	// ErrTransferIDConflict is returned when the transfer ID is already
 	// used as a journal entry ID (transfers book their principal entry
@@ -53,6 +53,13 @@ type Transfer struct {
 	From        AccountID `json:"from_account"`
 	To          AccountID `json:"to_account"`
 	AmountCents int64     `json:"amount_cents"`
+	// Currency is the ISO 4217 alpha-3 code the transfer is denominated
+	// in (e.g. "USD", "EUR"). Empty means the default currency (see
+	// DefaultCurrency). Every leg of the transfer — principal and fee —
+	// is booked in this one currency: the ledger performs no FX
+	// conversion, so a transfer spanning currencies is rejected with
+	// ErrCrossCurrencyTransfer.
+	Currency string `json:"currency,omitempty"`
 	// FeeCents is an explicit per-transfer fee, in cents, charged to the
 	// payer (From) on top of AmountCents and booked to FeeAccount. It must
 	// be non-negative; a positive fee requires FeeAccount. An explicit fee
@@ -65,8 +72,8 @@ type Transfer struct {
 	FeeAccount AccountID `json:"fee_account,omitempty"`
 	// SkipFee suppresses the ledger's default fee policy for this
 	// transfer. An explicit FeeCents still applies.
-	SkipFee        bool   `json:"skip_fee,omitempty"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	SkipFee        bool      `json:"skip_fee,omitempty"`
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
@@ -187,6 +194,16 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	if t.AmountCents <= 0 {
 		return TransferReceipt{}, ErrTransferNonPositiveAmount
 	}
+	// Currency is field validation, like the accounts and the amount: an
+	// empty code normalizes to the default currency, anything else must
+	// be a 3-letter uppercase ISO 4217 code. Normalization happens
+	// before the idempotency replay check, mirroring Post, so replays
+	// compare canonical codes.
+	currency, err := normalizeCurrency(t.Currency)
+	if err != nil {
+		return TransferReceipt{}, err
+	}
+	t.Currency = currency
 
 	feeCents, feeAccount, err := l.resolveFeeLocked(t)
 	if err != nil {
@@ -240,9 +257,12 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 
 	// Overdraft protection guards the payer's total outflow (amount + fee),
 	// not just the principal: a transfer whose fee alone would overdraw a
-	// protected payer is rejected. The comparison never subtracts, so it
-	// cannot overflow (see overdraft.go); totalOutflow is known to fit.
-	if l.noOverdraft[t.From] && l.balances[t.From] < totalOutflow {
+	// protected payer is rejected. The check runs against the payer's
+	// balance in the transfer's currency — a EUR balance cannot cover a
+	// USD outflow. The comparison never subtracts, so it cannot overflow
+	// (see overdraft.go); totalOutflow is known to fit.
+	if l.noOverdraft[t.From] &&
+		l.balances[accountCurrency{account: t.From, currency: t.Currency}] < totalOutflow {
 		return TransferReceipt{}, ErrAccountOverdraft
 	}
 
@@ -252,6 +272,7 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		DebitAccount:   t.To,
 		CreditAccount:  t.From,
 		AmountCents:    t.AmountCents,
+		Currency:       t.Currency,
 		IdempotencyKey: t.IdempotencyKey,
 		CreatedAt:      t.CreatedAt,
 	}
@@ -270,9 +291,21 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 			DebitAccount:   feeAccount,
 			CreditAccount:  t.From,
 			AmountCents:    feeCents,
+			Currency:       t.Currency,
 			IdempotencyKey: feeKey,
 			CreatedAt:      principal.CreatedAt,
 		})
+	}
+
+	// No-FX invariant: every leg of a transfer is booked in the
+	// transfer's single currency. Both legs above derive from t.Currency
+	// so this holds by construction; the check is the explicit seam that
+	// keeps cross-currency (FX) transfers rejected — this ledger performs
+	// no currency conversion — if per-leg currencies are ever introduced.
+	for _, e := range entries {
+		if e.Currency != t.Currency {
+			return TransferReceipt{}, ErrCrossCurrencyTransfer
+		}
 	}
 
 	// Atomic commit: every leg's journal row, idempotency index entries,
@@ -322,10 +355,12 @@ func (l *Ledger) commitEntryLocked(e JournalEntry) {
 	}
 	l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
 	l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
-	l.balances[e.DebitAccount] += e.AmountCents
-	l.balances[e.CreditAccount] -= e.AmountCents
-	l.debitTotals[e.DebitAccount] += e.AmountCents
-	l.creditTotals[e.CreditAccount] += e.AmountCents
+	debitKey := accountCurrency{account: e.DebitAccount, currency: e.Currency}
+	creditKey := accountCurrency{account: e.CreditAccount, currency: e.Currency}
+	l.balances[debitKey] += e.AmountCents
+	l.balances[creditKey] -= e.AmountCents
+	l.debitTotals[debitKey] += e.AmountCents
+	l.creditTotals[creditKey] += e.AmountCents
 	l.version++
 	l.appendChainLink(e)
 }

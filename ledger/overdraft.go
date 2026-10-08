@@ -41,12 +41,15 @@ func (l *Ledger) OverdraftProtected(a AccountID) bool {
 }
 
 // overdraftRejectedLocked reports whether posting e as the credit (payer)
-// leg would overdraw a protected account. Callers must hold l.mu. The
-// comparison never subtracts, so it cannot overflow even when the account
-// balance is already negative and the amount is huge: b < a is equivalent
-// to b - a < 0 for every int64 pair.
+// leg would overdraw a protected account. The check runs against the
+// account's balance in the entry's currency — a EUR balance cannot cover
+// a USD posting. Callers must hold l.mu. The comparison never subtracts,
+// so it cannot overflow even when the account balance is already negative
+// and the amount is huge: b < a is equivalent to b - a < 0 for every int64
+// pair.
 func (l *Ledger) overdraftRejectedLocked(e JournalEntry) bool {
-	return l.noOverdraft[e.CreditAccount] && l.balances[e.CreditAccount] < e.AmountCents
+	return l.noOverdraft[e.CreditAccount] &&
+		l.balances[accountCurrency{account: e.CreditAccount, currency: e.Currency}] < e.AmountCents
 }
 
 // overdraftProtectedAccountsLocked lists every currently protected

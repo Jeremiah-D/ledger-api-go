@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -113,7 +114,7 @@ func TestTrialBalanceRejectedEntriesChangeNothing(t *testing.T) {
 			t.Fatalf("case %d: expected rejection", i)
 		}
 	}
-	if tb := l.TrialBalance("cash"); tb != (TrialBalance{Account: "cash"}) {
+	if tb := l.TrialBalance("cash"); !reflect.DeepEqual(tb, TrialBalance{Account: "cash", Currency: "USD"}) {
 		t.Fatalf("TrialBalance(cash) after rejections = %+v, want zero value", tb)
 	}
 	if err := l.VerifyAccountingEquation(); err != nil {

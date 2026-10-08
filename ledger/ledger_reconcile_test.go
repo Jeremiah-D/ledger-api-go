@@ -160,7 +160,7 @@ func TestReconcileDetectsBalanceCorruption(t *testing.T) {
 
 	// Cash's true net after the seed: debits 1500, credits 150 → 1350.
 	// A corruptor skims 50 cents off the net balance row only.
-	l.balances["cash"] -= 50
+	l.balances[accountCurrency{account: "cash", currency: DefaultCurrency}] -= 50
 
 	report := l.Reconcile(now)
 

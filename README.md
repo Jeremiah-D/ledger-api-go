@@ -157,6 +157,46 @@ curl -s -X POST localhost:8080/entries \
 # 422 {"error":"ledger: posting would overdraw a protected account"}
 ```
 
+### Multi-currency
+
+Every entry carries a `currency`: a three-letter uppercase ISO 4217 code
+(`USD`, `EUR`, `CNY`, …). The field is optional on input — omitting it
+books the entry in the default currency, `USD` — and anything else must
+be exactly three ASCII uppercase letters, otherwise the post is rejected
+with `400`. The ledger normalizes the code before committing, so the
+journal, the idempotency index, and the tamper-evident audit-chain hash
+all store the canonical code.
+
+```bash
+curl -s -X POST localhost:8080/entries \
+  -d '{"debit_account":"cash","credit_account":"equity","amount_cents":2000,"currency":"EUR"}'
+# 201 {"id":"...","debit_account":"cash","credit_account":"equity","amount_cents":2000,"currency":"EUR",...}
+```
+
+Balances, debit totals, and credit totals are tracked per **(account,
+currency)** pair, so one account can hold USD, EUR, and CNY side by side
+without the currencies ever mixing. The accounting equation is verified
+**per currency, never across them** — adding USD cents to EUR cents would
+be meaningless, so each currency's books must balance on their own.
+`GET /accounts/{id}/trial-balance` reports the default-currency view on
+top and a `by_currency` breakdown of every currency the account holds;
+`POST /reconcile` adds a `currency_totals` rollup with per-currency
+debit/credit sums.
+
+`POST /transfers` accepts the same `currency` field and books **every
+leg — principal and fee — in that one currency**. This ledger performs
+no FX conversion, so a transfer spanning currencies is rejected with
+`422` (`ledger: cross-currency transfers are not supported`); both
+currency rejections (malformed code `400`, cross-currency `422`) are
+counted in `ledger_currency_rejections_total`.
+
+Two read-path notes: `GET /accounts/{id}/balance` and
+`GET /accounts/{id}/snapshot` keep their historical meaning — the
+**default-currency** balance — so existing consumers are unaffected; use
+the trial balance's `by_currency` rows (or `BalanceIn` in the Go API) for
+a specific currency. Overdraft protection is likewise per-currency: a
+protected payer's EUR balance cannot cover a USD outflow.
+
 ### `GET /accounts/{id}/balance`
 
 ```bash
@@ -196,11 +236,16 @@ curl -s 'localhost:8080/accounts/cash/entries?limit=100'
 The account's double-entry breakdown at the current ledger version:
 every cent ever debited to it, every cent ever credited from it, and the
 net balance. `net_balance_cents` always equals `total_debits_cents` minus
-`total_credits_cents`; unknown accounts report zeros.
+`total_credits_cents`; unknown accounts report zeros. The top-level totals
+are the default-currency (USD) view; `by_currency` breaks the account
+down per currency it holds.
 
 ```bash
 curl -s localhost:8080/accounts/cash/trial-balance
-# {"account":"cash","total_debits_cents":1500,"total_credits_cents":500,"net_balance_cents":1000,"version":3,"frozen":false}
+# {"account":"cash","currency":"USD","total_debits_cents":1500,"total_credits_cents":500,"net_balance_cents":1000,
+#  "by_currency":[{"currency":"EUR","total_debits_cents":2000,"total_credits_cents":0,"net_balance_cents":2000},
+#                 {"currency":"USD","total_debits_cents":1500,"total_credits_cents":500,"net_balance_cents":1000}],
+#  "version":3,"frozen":false}
 ```
 
 ### `GET /entries`

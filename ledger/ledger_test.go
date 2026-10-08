@@ -30,7 +30,14 @@ func TestPostValidEntryUpdatesBalances(t *testing.T) {
 		t.Fatalf("Post reported duplicate for a first-time entry")
 	}
 	if posted != e {
-		t.Fatalf("Post returned modified entry: got %+v, want %+v", posted, e)
+		// Post normalizes an empty currency to the default before
+		// committing, so the returned entry is the canonical journaled
+		// form, not a byte copy of the input.
+		want := e
+		want.Currency = DefaultCurrency
+		if posted != want {
+			t.Fatalf("Post returned modified entry: got %+v, want %+v", posted, want)
+		}
 	}
 	if got := l.Balance("cash"); got != 1000 {
 		t.Errorf("Balance(cash) = %d, want 1000", got)

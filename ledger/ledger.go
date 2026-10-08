@@ -14,6 +14,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -22,11 +23,21 @@ import (
 type AccountID string
 
 // JournalEntry is a single double-entry journal posting.
+//
+// Currency is the ISO 4217 alpha-3 code the posting is denominated in
+// (e.g. "USD", "EUR", "CNY"). An empty currency on input means the
+// default currency (see DefaultCurrency); Post normalizes it before
+// committing, so journaled entries always carry an explicit code and the
+// audit-chain hash covers it like every other journaled field. One entry
+// is always single-currency: debit and credit legs can never span
+// currencies, and balances are tracked per (account, currency), so the
+// accounting equation is verified per currency, never across them.
 type JournalEntry struct {
 	ID             string    `json:"id"`
 	DebitAccount   AccountID `json:"debit_account"`
 	CreditAccount  AccountID `json:"credit_account"`
 	AmountCents    int64     `json:"amount_cents"`
+	Currency       string    `json:"currency,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -76,14 +87,20 @@ const defaultKeyPruneInterval = time.Minute
 // the read lock and run concurrently, while Post and ExpireIdempotencyKeys
 // take the write lock. Reads never block each other, only writers.
 type Ledger struct {
-	mu             sync.RWMutex
-	balances       map[AccountID]int64
-	entries        map[string]JournalEntry // by entry ID
-	byKey          map[string]JournalEntry // by idempotency key
-	byAccount      map[AccountID][]string  // entry IDs per account, in Post order
-	debitTotals    map[AccountID]int64     // total cents ever debited per account
-	creditTotals   map[AccountID]int64     // total cents ever credited per account
-	frozen         map[AccountID]bool      // risk-control stops; frozen accounts reject new posts (see freeze.go)
+	mu sync.RWMutex
+	// balances, debitTotals, and creditTotals are keyed by
+	// (account, currency): one account can hold several currencies side
+	// by side, and the books for each currency stay isolated (see
+	// currency.go). The per-account index below stays account-keyed —
+	// it maps an account to every entry ID that touched it, in any
+	// currency.
+	balances     map[accountCurrency]int64
+	entries      map[string]JournalEntry   // by entry ID
+	byKey        map[string]JournalEntry   // by idempotency key
+	byAccount    map[AccountID][]string    // entry IDs per account, in Post order
+	debitTotals  map[accountCurrency]int64 // total cents ever debited per (account, currency)
+	creditTotals map[accountCurrency]int64 // total cents ever credited per (account, currency)
+	frozen       map[AccountID]bool        // risk-control stops; frozen accounts reject new posts (see freeze.go)
 	// noOverdraft marks accounts guarded against overdrafts: a Post that
 	// would take a protected credit (payer) account below zero is rejected
 	// with ErrAccountOverdraft (see overdraft.go). Opt-in per account.
@@ -98,11 +115,11 @@ type Ledger struct {
 	// journal entries it posted, in commit order (principal, then the fee
 	// leg when one was booked), so a replayed transfer returns its full
 	// receipt. Keys expire with the TTL like the entry-level index.
-	transferKeys       map[string][]string
-	chain          []chainLink             // audit chain, one link per successful Post, in order
-	version        uint64                  // bumped by every successful Post
-	idempotencyTTL time.Duration           // 0 = never expire idempotency keys
-	pruneInterval  time.Duration           // min gap between lazy key sweeps
+	transferKeys   map[string][]string
+	chain          []chainLink   // audit chain, one link per successful Post, in order
+	version        uint64        // bumped by every successful Post
+	idempotencyTTL time.Duration // 0 = never expire idempotency keys
+	pruneInterval  time.Duration // min gap between lazy key sweeps
 	lastKeyPrune   time.Time
 }
 
@@ -136,12 +153,12 @@ func WithOverdraftProtection(accounts ...AccountID) Option {
 // idempotency keys never expire.
 func New(opts ...Option) *Ledger {
 	l := &Ledger{
-		balances:      make(map[AccountID]int64),
+		balances:      make(map[accountCurrency]int64),
 		entries:       make(map[string]JournalEntry),
 		byKey:         make(map[string]JournalEntry),
 		byAccount:     make(map[AccountID][]string),
-		debitTotals:   make(map[AccountID]int64),
-		creditTotals:  make(map[AccountID]int64),
+		debitTotals:   make(map[accountCurrency]int64),
+		creditTotals:  make(map[accountCurrency]int64),
 		frozen:        make(map[AccountID]bool),
 		noOverdraft:   make(map[AccountID]bool),
 		transferKeys:  make(map[string][]string),
@@ -157,10 +174,12 @@ func New(opts ...Option) *Ledger {
 //
 // Double-entry validation runs before anything is recorded: the entry must
 // carry both legs of the posting — a non-empty debit account and a
-// non-empty credit account, distinct from each other — and a positive
-// amount, so the debit leg always equals the credit leg (the books balance
-// by construction). A validation failure returns an error and records
-// nothing.
+// non-empty credit account, distinct from each other — a positive amount,
+// and a valid currency (empty normalizes to the default currency; anything
+// else must be a 3-letter uppercase ISO 4217 code), so the debit leg always
+// equals the credit leg in one currency (the books balance by
+// construction, per currency). A validation failure returns an error and
+// records nothing.
 //
 // If e.IdempotencyKey is non-empty and the same key was posted before, Post
 // returns the originally posted entry with duplicate == true and does not
@@ -204,6 +223,16 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	if e.AmountCents <= 0 {
 		return JournalEntry{}, false, ErrNonPositiveAmount
 	}
+	// Currency is field validation, like the legs and the amount: an
+	// empty code normalizes to the default currency, anything else must
+	// be a 3-letter uppercase ISO 4217 code. Normalization happens here,
+	// before the idempotency replay check, so the journal, the replay
+	// index, and the audit chain all store the canonical code.
+	currency, err := normalizeCurrency(e.Currency)
+	if err != nil {
+		return JournalEntry{}, false, err
+	}
+	e.Currency = currency
 
 	if e.IdempotencyKey != "" {
 		if orig, ok := l.byKey[e.IdempotencyKey]; ok {
@@ -234,12 +263,29 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	return e, false, nil
 }
 
-// Balance returns the current net balance (in cents) of the given account.
-// Unknown accounts have a zero balance.
+// Balance returns the current net balance (in cents) of the given account
+// in the default currency (see DefaultCurrency). Unknown accounts have a
+// zero balance. In a multi-currency ledger a single number cannot describe
+// an account — use BalanceIn or TrialBalance for a specific currency, or
+// TrialBalance's ByCurrency breakdown for the full picture. Balance keeps
+// its historical meaning (the default-currency balance) so existing
+// readers keep working unchanged.
 func (l *Ledger) Balance(a AccountID) int64 {
+	return l.BalanceIn(a, DefaultCurrency)
+}
+
+// BalanceIn returns the current net balance (in cents) of the given
+// account in the given currency. Unknown accounts, and accounts with no
+// postings in that currency, have a zero balance. An empty currency means
+// the default currency; other codes are looked up as-is (codes that never
+// appeared simply report zero).
+func (l *Ledger) BalanceIn(a AccountID, currency string) int64 {
+	if currency == "" {
+		currency = DefaultCurrency
+	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return l.balances[a]
+	return l.balances[accountCurrency{account: a, currency: currency}]
 }
 
 // GetByIdempotencyKey returns the entry previously posted with the given
@@ -311,29 +357,42 @@ func (l *Ledger) Entries() []JournalEntry {
 }
 
 // Snapshot returns the current net balance (in cents) of the given account
-// together with the ledger version at read time. Unknown accounts have a
-// zero balance. The version is bumped by every successful Post (idempotent
-// replays and rejected entries do not count), so two snapshots with the same
-// version are guaranteed to show the same balance — a cheap change detector
-// for reconciliation jobs.
+// in the default currency (see DefaultCurrency), together with the ledger
+// version at read time. Unknown accounts have a zero balance. The version
+// is bumped by every successful Post (idempotent replays and rejected
+// entries do not count), so two snapshots with the same version are
+// guaranteed to show the same balance — a cheap change detector for
+// reconciliation jobs. For a specific currency, use BalanceIn; the
+// version it pairs with is the same ledger-wide sequence.
 func (l *Ledger) Snapshot(a AccountID) (balance int64, version uint64) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return l.balances[a], l.version
+	return l.balances[accountCurrency{account: a, currency: DefaultCurrency}], l.version
 }
 
 // TrialBalance is the double-entry breakdown of a single account: every cent
 // ever debited to it, every cent ever credited from it, and the resulting
 // net balance. NetBalance always equals TotalDebits - TotalCredits; across
 // the whole ledger, the sum of all debit totals equals the sum of all
-// credit totals — that equality is the accounting equation, and
-// VerifyAccountingEquation checks it.
+// credit totals within each currency — that per-currency equality is the
+// accounting equation, and VerifyAccountingEquation checks it.
+//
+// The top-level totals describe the account in Currency (the default
+// currency unless stated otherwise); ByCurrency breaks the same account
+// down per currency, sorted by currency code, so multi-currency accounts
+// report every currency they hold. A single-currency account's ByCurrency
+// holds exactly one row, mirroring the top-level totals.
 type TrialBalance struct {
 	Account      AccountID `json:"account"`
+	Currency     string    `json:"currency"`
 	TotalDebits  int64     `json:"total_debits_cents"`
 	TotalCredits int64     `json:"total_credits_cents"`
 	NetBalance   int64     `json:"net_balance_cents"`
-	Version      uint64    `json:"version"`
+	// ByCurrency is the per-currency breakdown of this account, sorted by
+	// currency code. It always covers every currency the account has
+	// postings in, including Currency itself.
+	ByCurrency []CurrencyTrialBalance `json:"by_currency"`
+	Version    uint64                 `json:"version"`
 	// Frozen reports whether the account is currently stopped by a
 	// risk-control freeze (see Freeze). A frozen account keeps its
 	// balances and history; only new postings through it are rejected.
@@ -351,47 +410,100 @@ type TrialBalance struct {
 func (l *Ledger) TrialBalance(a AccountID) TrialBalance {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return TrialBalance{
+	return l.trialBalanceLocked(a)
+}
+
+// trialBalanceLocked builds the trial balance. Callers must hold l.mu; the
+// read lock suffices because nothing is mutated. The reconciliation scan
+// calls this directly so the per-account rows are built under the same
+// read lock as the rest of the report.
+func (l *Ledger) trialBalanceLocked(a AccountID) TrialBalance {
+	tb := TrialBalance{
 		Account:            a,
-		TotalDebits:        l.debitTotals[a],
-		TotalCredits:       l.creditTotals[a],
-		NetBalance:         l.balances[a],
+		Currency:           DefaultCurrency,
 		Version:            l.version,
 		Frozen:             l.frozen[a],
 		OverdraftProtected: l.noOverdraft[a],
 	}
+	seen := make(map[string]bool)
+	for k := range l.balances {
+		if k.account == a {
+			seen[k.currency] = true
+		}
+	}
+	for k := range l.debitTotals {
+		if k.account == a {
+			seen[k.currency] = true
+		}
+	}
+	for k := range l.creditTotals {
+		if k.account == a {
+			seen[k.currency] = true
+		}
+	}
+	currencies := make([]string, 0, len(seen))
+	for c := range seen {
+		currencies = append(currencies, c)
+	}
+	sort.Strings(currencies)
+	for _, c := range currencies {
+		d := l.debitTotals[accountCurrency{account: a, currency: c}]
+		cr := l.creditTotals[accountCurrency{account: a, currency: c}]
+		row := CurrencyTrialBalance{
+			Currency:     c,
+			TotalDebits:  d,
+			TotalCredits: cr,
+			NetBalance:   l.balances[accountCurrency{account: a, currency: c}],
+		}
+		tb.ByCurrency = append(tb.ByCurrency, row)
+		if c == DefaultCurrency {
+			tb.TotalDebits = d
+			tb.TotalCredits = cr
+			tb.NetBalance = row.NetBalance
+		}
+	}
+	return tb
 }
 
 // VerifyAccountingEquation checks the two invariants double-entry
-// bookkeeping guarantees: for every account, net balance == total debits −
-// total credits; and globally, total debits == total credits (equivalently,
-// the sum of all net balances is zero). It returns nil when the books
-// balance. Operators can run it after imports or restores; the test suite
-// runs it after every scenario, including the concurrent stress test.
+// bookkeeping guarantees, isolated per currency: for every
+// (account, currency), net balance == total debits − total credits; and
+// within each currency, total debits == total credits (equivalently, the
+// sum of all net balances in that currency is zero). Currencies never mix
+// in the check — adding USD cents to EUR cents would be meaningless, so
+// each currency's books must balance on their own. It returns nil when the
+// books balance. Operators can run it after imports or restores; the test
+// suite runs it after every scenario, including the concurrent stress test.
 func (l *Ledger) VerifyAccountingEquation() error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	seen := make(map[AccountID]bool)
-	for a := range l.balances {
-		seen[a] = true
+	seen := make(map[accountCurrency]bool)
+	for k := range l.balances {
+		seen[k] = true
 	}
-	for a := range l.debitTotals {
-		seen[a] = true
+	for k := range l.debitTotals {
+		seen[k] = true
 	}
-	for a := range l.creditTotals {
-		seen[a] = true
+	for k := range l.creditTotals {
+		seen[k] = true
 	}
-	var debits, credits int64
-	for a := range seen {
-		if want := l.debitTotals[a] - l.creditTotals[a]; l.balances[a] != want {
-			return fmt.Errorf("ledger: account %q out of balance: net %d != debits %d - credits %d",
-				a, l.balances[a], l.debitTotals[a], l.creditTotals[a])
+	debits := make(map[string]int64)
+	credits := make(map[string]int64)
+	for k := range seen {
+		d := l.debitTotals[k]
+		c := l.creditTotals[k]
+		if want := d - c; l.balances[k] != want {
+			return fmt.Errorf("ledger: account %q (%s) out of balance: net %d != debits %d - credits %d",
+				k.account, k.currency, l.balances[k], d, c)
 		}
-		debits += l.debitTotals[a]
-		credits += l.creditTotals[a]
+		debits[k.currency] += d
+		credits[k.currency] += c
 	}
-	if debits != credits {
-		return fmt.Errorf("ledger: books do not balance: total debits %d != total credits %d", debits, credits)
+	for currency, d := range debits {
+		if c := credits[currency]; d != c {
+			return fmt.Errorf("ledger: books do not balance in %s: total debits %d != total credits %d",
+				currency, d, c)
+		}
 	}
 	return nil
 }

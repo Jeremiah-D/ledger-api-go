@@ -9,13 +9,14 @@ import (
 	"time"
 )
 
-// TrialBalanceDiscrepancy describes one account whose net balance does not
-// equal its debit totals minus credit totals (the per-account accounting
-// equation). On a healthy ledger the report's discrepancy list is empty;
-// the shape exists so reconciliation tooling can distinguish "ran clean"
-// from "did not run".
+// TrialBalanceDiscrepancy describes one (account, currency) whose net
+// balance does not equal its debit totals minus credit totals (the
+// per-account, per-currency accounting equation). On a healthy ledger the
+// report's discrepancy list is empty; the shape exists so reconciliation
+// tooling can distinguish "ran clean" from "did not run".
 type TrialBalanceDiscrepancy struct {
 	Account           AccountID `json:"account"`
+	Currency          string    `json:"currency"`
 	TotalDebitsCents  int64     `json:"total_debits_cents"`
 	TotalCreditsCents int64     `json:"total_credits_cents"`
 	NetBalanceCents   int64     `json:"net_balance_cents"`
@@ -57,10 +58,17 @@ type AuditChainHealth struct {
 // their TTL, and is the audit chain intact and in step with the ledger
 // version.
 type ReconciliationReport struct {
-	GeneratedAt          time.Time                 `json:"generated_at"`
-	Version              uint64                    `json:"version"`
-	TotalDebitsCents     int64                     `json:"total_debits_cents"`
-	TotalCreditsCents    int64                     `json:"total_credits_cents"`
+	GeneratedAt       time.Time `json:"generated_at"`
+	Version           uint64    `json:"version"`
+	TotalDebitsCents  int64     `json:"total_debits_cents"`
+	TotalCreditsCents int64     `json:"total_credits_cents"`
+	// CurrencyTotals is the per-currency rollup of the ledger's debit and
+	// credit totals, sorted by currency code. The accounting equation
+	// (total debits == total credits) holds independently inside each
+	// row — currencies are never summed together. TotalDebitsCents and
+	// TotalCreditsCents above are the DefaultCurrency row, kept for
+	// backward compatibility.
+	CurrencyTotals       []CurrencyTotals          `json:"currency_totals"`
 	AccountingEquationOK bool                      `json:"accounting_equation_ok"`
 	AccountingError      string                    `json:"accounting_error,omitempty"`
 	TrialBalances        []TrialBalance            `json:"trial_balances"`
@@ -69,9 +77,9 @@ type ReconciliationReport struct {
 	// OverdraftProtectedAccounts lists the accounts currently guarded
 	// against overdrafts (see EnableOverdraftProtection). Risk tooling
 	// reads this to know which accounts cannot go negative.
-	OverdraftProtectedAccounts []AccountID `json:"overdraft_protected_accounts"`
-	IdempotencyKeys      IdempotencyKeyHealth      `json:"idempotency_keys"`
-	AuditChain           AuditChainHealth          `json:"audit_chain"`
+	OverdraftProtectedAccounts []AccountID          `json:"overdraft_protected_accounts"`
+	IdempotencyKeys            IdempotencyKeyHealth `json:"idempotency_keys"`
+	AuditChain                 AuditChainHealth     `json:"audit_chain"`
 }
 
 // Reconcile runs a full read-only scan of the ledger and returns the
@@ -99,19 +107,20 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 	}
 
 	// Every account that has ever been touched. Net balances, debit
-	// totals, and credit totals each cover a different account set in
-	// principle (a storage-layer corruption could strand a totals row
-	// without a balance row, or vice versa), so union all three. Sorting
-	// the accounts makes the report deterministic across runs.
+	// totals, and credit totals each cover a different (account, currency)
+	// set in principle (a storage-layer corruption could strand a totals
+	// row without a balance row, or vice versa), so union all three on
+	// the account dimension. Sorting the accounts makes the report
+	// deterministic across runs.
 	seen := make(map[AccountID]bool)
-	for a := range l.balances {
-		seen[a] = true
+	for k := range l.balances {
+		seen[k.account] = true
 	}
-	for a := range l.debitTotals {
-		seen[a] = true
+	for k := range l.debitTotals {
+		seen[k.account] = true
 	}
-	for a := range l.creditTotals {
-		seen[a] = true
+	for k := range l.creditTotals {
+		seen[k.account] = true
 	}
 	accounts := make([]AccountID, 0, len(seen))
 	for a := range seen {
@@ -120,44 +129,54 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i] < accounts[j] })
 
 	// One pass: per-account trial balances, per-account equation checks,
-	// and the global debit/credit sums.
-	var debits, credits int64
+	// and the per-currency debit/credit sums. Currencies are never added
+	// together: each currency's books must balance on their own.
+	debits := make(map[string]int64)
+	credits := make(map[string]int64)
 	for _, a := range accounts {
-		d := l.debitTotals[a]
-		c := l.creditTotals[a]
-		net := l.balances[a]
-		report.TrialBalances = append(report.TrialBalances, TrialBalance{
-			Account:            a,
-			TotalDebits:        d,
-			TotalCredits:       c,
-			NetBalance:         net,
-			Version:            l.version,
-			Frozen:             l.frozen[a],
-			OverdraftProtected: l.noOverdraft[a],
-		})
-		if expected := d - c; net != expected {
-			report.Discrepancies = append(report.Discrepancies, TrialBalanceDiscrepancy{
-				Account:           a,
-				TotalDebitsCents:  d,
-				TotalCreditsCents: c,
-				NetBalanceCents:   net,
-				ExpectedNetCents:  expected,
-				DifferenceCents:   net - expected,
-			})
-			if report.AccountingError == "" {
-				report.AccountingError = fmt.Sprintf(
-					"ledger: account %q out of balance: net %d != debits %d - credits %d",
-					a, net, d, c)
+		tb := l.trialBalanceLocked(a)
+		report.TrialBalances = append(report.TrialBalances, tb)
+		for _, row := range tb.ByCurrency {
+			debits[row.Currency] += row.TotalDebits
+			credits[row.Currency] += row.TotalCredits
+			if expected := row.TotalDebits - row.TotalCredits; row.NetBalance != expected {
+				report.Discrepancies = append(report.Discrepancies, TrialBalanceDiscrepancy{
+					Account:           a,
+					Currency:          row.Currency,
+					TotalDebitsCents:  row.TotalDebits,
+					TotalCreditsCents: row.TotalCredits,
+					NetBalanceCents:   row.NetBalance,
+					ExpectedNetCents:  expected,
+					DifferenceCents:   row.NetBalance - expected,
+				})
+				if report.AccountingError == "" {
+					report.AccountingError = fmt.Sprintf(
+						"ledger: account %q (%s) out of balance: net %d != debits %d - credits %d",
+						a, row.Currency, row.NetBalance, row.TotalDebits, row.TotalCredits)
+				}
 			}
 		}
-		debits += d
-		credits += c
 	}
-	report.TotalDebitsCents = debits
-	report.TotalCreditsCents = credits
-	if report.AccountingError == "" && debits != credits {
-		report.AccountingError = fmt.Sprintf(
-			"ledger: books do not balance: total debits %d != total credits %d", debits, credits)
+	currencies := make([]string, 0, len(debits))
+	for c := range debits {
+		currencies = append(currencies, c)
+	}
+	sort.Strings(currencies)
+	for _, c := range currencies {
+		d, cr := debits[c], credits[c]
+		report.CurrencyTotals = append(report.CurrencyTotals, CurrencyTotals{
+			Currency:     c,
+			TotalDebits:  d,
+			TotalCredits: cr,
+		})
+		if c == DefaultCurrency {
+			report.TotalDebitsCents = d
+			report.TotalCreditsCents = cr
+		}
+		if report.AccountingError == "" && d != cr {
+			report.AccountingError = fmt.Sprintf(
+				"ledger: books do not balance in %s: total debits %d != total credits %d", c, d, cr)
+		}
 	}
 	report.AccountingEquationOK = report.AccountingError == ""
 

@@ -43,6 +43,10 @@ type Metrics struct {
 	// rejected with 422 because they would have overdrawn an
 	// overdraft-protected account.
 	OverdraftRejections atomic.Uint64
+	// CurrencyRejections counts POST /entries and POST /transfers requests
+	// rejected for currency reasons: a malformed currency code (400) or a
+	// cross-currency transfer (422).
+	CurrencyRejections atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -82,6 +86,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
 		"Total POST /entries and POST /transfers requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())
+	writeCounter(&sb, "ledger_currency_rejections_total",
+		"Total POST /entries and POST /transfers requests rejected for currency reasons: malformed currency code or cross-currency transfer.",
+		m.CurrencyRejections.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

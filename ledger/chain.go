@@ -48,6 +48,7 @@ func hashChainLink(prevHash [32]byte, e JournalEntry) [32]byte {
 	writeString(string(e.DebitAccount))
 	writeString(string(e.CreditAccount))
 	writeInt(e.AmountCents)
+	writeString(e.Currency)
 	writeString(e.IdempotencyKey)
 	writeInt(e.CreatedAt.UnixNano())
 	var out [32]byte
