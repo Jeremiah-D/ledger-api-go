@@ -32,6 +32,10 @@ type Metrics struct {
 	// TransferIdempotencyHits counts POST /transfers requests that replayed
 	// an already-posted idempotency key and returned the original receipt.
 	TransferIdempotencyHits atomic.Uint64
+	// TransferFeeCentsTotal counts the total fee cents booked by
+	// POST /transfers fee legs (principal + fee entries land together, so
+	// the fee is counted once the transfer commits).
+	TransferFeeCentsTotal atomic.Uint64
 	// FrozenRejections counts POST /entries and POST /transfers requests
 	// rejected with 403 because the debit or credit account was frozen.
 	FrozenRejections atomic.Uint64
@@ -69,6 +73,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_transfer_idempotency_hits_total",
 		"Total POST /transfers requests that replayed an existing idempotency key.",
 		m.TransferIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_transfer_fee_cents_total",
+		"Total fee cents booked by POST /transfers fee legs.",
+		m.TransferFeeCentsTotal.Load())
 	writeCounter(&sb, "ledger_frozen_rejections_total",
 		"Total POST /entries and POST /transfers requests rejected because an account was frozen.",
 		m.FrozenRejections.Load())

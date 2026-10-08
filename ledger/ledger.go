@@ -88,6 +88,17 @@ type Ledger struct {
 	// would take a protected credit (payer) account below zero is rejected
 	// with ErrAccountOverdraft (see overdraft.go). Opt-in per account.
 	noOverdraft map[AccountID]bool
+	// feeRateBps / feeRevenueAccount configure the default transfer fee
+	// policy (see WithTransferFeePolicy in transfer.go): unless a transfer
+	// carries an explicit fee or sets SkipFee, PostTransfer books a fee leg
+	// of floor(amount * feeRateBps / 10000) cents to feeRevenueAccount.
+	feeRateBps        int64
+	feeRevenueAccount AccountID
+	// transferKeys maps a transfer's idempotency key to the IDs of the
+	// journal entries it posted, in commit order (principal, then the fee
+	// leg when one was booked), so a replayed transfer returns its full
+	// receipt. Keys expire with the TTL like the entry-level index.
+	transferKeys       map[string][]string
 	chain          []chainLink             // audit chain, one link per successful Post, in order
 	version        uint64                  // bumped by every successful Post
 	idempotencyTTL time.Duration           // 0 = never expire idempotency keys
@@ -133,6 +144,7 @@ func New(opts ...Option) *Ledger {
 		creditTotals:  make(map[AccountID]int64),
 		frozen:        make(map[AccountID]bool),
 		noOverdraft:   make(map[AccountID]bool),
+		transferKeys:  make(map[string][]string),
 		pruneInterval: defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
@@ -277,6 +289,10 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	for key, e := range l.byKey {
 		if e.CreatedAt.Before(cutoff) {
 			delete(l.byKey, key)
+			// A transfer's receipt index expires with its principal key:
+			// after the TTL, reposting the transfer key books brand-new
+			// entries, exactly like the entry-level contract.
+			delete(l.transferKeys, key)
 			removed++
 		}
 	}

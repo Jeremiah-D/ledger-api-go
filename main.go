@@ -126,13 +126,20 @@ type createTransferRequest struct {
 	FromAccount    ledger.AccountID `json:"from_account"`
 	ToAccount      ledger.AccountID `json:"to_account"`
 	AmountCents    int64            `json:"amount_cents"`
+	FeeCents       int64            `json:"fee_cents"`
+	FeeAccount     ledger.AccountID `json:"fee_account"`
+	SkipFee        bool             `json:"skip_fee"`
 	IdempotencyKey string           `json:"idempotency_key"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
 // of a posting: the caller names the payer (from_account) and the payee
 // (to_account) and the ledger books the double-entry pair atomically —
-// either both balance effects land or nothing does.
+// either every leg lands or nothing does. An optional fee leg
+// (fee_cents + fee_account, or the server-wide LEDGER_TRANSFER_FEE policy
+// unless skip_fee is set) charges the payer on top of the amount and books
+// it to the fee account as a second entry; the receipt's fee_cents reports
+// what was booked.
 //
 // The server generates transfer_id when the client omits it. A first-time
 // transfer returns 201 with the receipt; a duplicate idempotency key
@@ -178,6 +185,9 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		From:           req.FromAccount,
 		To:             req.ToAccount,
 		AmountCents:    req.AmountCents,
+		FeeCents:       req.FeeCents,
+		FeeAccount:     req.FeeAccount,
+		SkipFee:        req.SkipFee,
 		IdempotencyKey: req.IdempotencyKey,
 		CreatedAt:      time.Now(),
 	}
@@ -201,6 +211,9 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		s.metrics.TransferIdempotencyHits.Add(1)
 		writeJSON(w, http.StatusOK, receipt)
 		return
+	}
+	if receipt.FeeCents > 0 {
+		s.metrics.TransferFeeCentsTotal.Add(uint64(receipt.FeeCents))
 	}
 	writeJSON(w, http.StatusCreated, receipt)
 }
@@ -502,6 +515,22 @@ func main() {
 		if len(protected) > 0 {
 			opts = append(opts, ledger.WithOverdraftProtection(protected...))
 			log.Printf("ledger-api-go: overdraft protection enabled for %d account(s)", len(protected))
+		}
+	}
+
+	// LEDGER_TRANSFER_FEE configures the default transfer fee policy as
+	// "<rateBps>:<revenueAccount>" (e.g. "250:fee-revenue" for 2.5%).
+	// Unless a transfer carries an explicit fee or sets skip_fee,
+	// POST /transfers books floor(amount * rateBps / 10000) cents to the
+	// revenue account on top of the transfer amount. Unset or invalid
+	// values mean no default fee.
+	if raw := os.Getenv("LEDGER_TRANSFER_FEE"); raw != "" {
+		rate, account, ok := strings.Cut(raw, ":")
+		if bps, err := strconv.ParseInt(rate, 10, 64); !ok || err != nil || account == "" {
+			log.Printf("ledger-api-go: ignoring invalid LEDGER_TRANSFER_FEE %q (want \"<rateBps>:<revenueAccount>\")", raw)
+		} else {
+			opts = append(opts, ledger.WithTransferFeePolicy(bps, ledger.AccountID(account)))
+			log.Printf("ledger-api-go: transfer fee policy = %d bps to %q", bps, account)
 		}
 	}
 

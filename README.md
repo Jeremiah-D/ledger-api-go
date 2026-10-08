@@ -75,6 +75,34 @@ curl -s -X POST localhost:8080/transfers \
   `422`. Both are counted in the shared `ledger_frozen_rejections_total` /
   `ledger_overdraft_rejections_total` counters.
 
+#### Transfer fees
+
+A transfer can carry a **fee leg**: the payer is charged `fee_cents` on
+top of the transfer amount, booked to `fee_account` as a second journal
+entry (`debit fee_account`, `credit from_account`, id
+`<transfer_id>/fee`). The payee always receives the full transfer
+amount; the payer's total outflow is amount + fee. Both entries commit
+atomically — if the fee leg fails (frozen fee account, overdraft on the
+payer's total outflow), the principal entry is not recorded either.
+
+```bash
+curl -s -X POST localhost:8080/transfers \
+  -d '{"transfer_id":"tx-2026-002","from_account":"alice","to_account":"bob","amount_cents":1000,"fee_cents":25,"fee_account":"fees"}'
+# 201 {"transfer_id":"tx-2026-002","entries":[{...},{...}],"fee_cents":25,"duplicate":false}
+```
+
+A positive `fee_cents` requires `fee_account` (and vice versa); a
+negative fee is rejected with `400`.
+
+Without an explicit fee, the server-wide fee policy applies unless
+`skip_fee` is set: `LEDGER_TRANSFER_FEE="<rateBps>:<revenueAccount>"`
+(e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`) books
+`floor(amount_cents * rateBps / 10000)` to the revenue account.
+The fee is rounded down with overflow-safe integer arithmetic; a
+computed fee of zero (dust amounts under a low rate) posts no leg.
+An explicit fee always wins over the policy. Total fee cents booked are
+exposed as `ledger_transfer_fee_cents_total`.
+
 ### `POST /accounts/{id}/freeze` and `POST /accounts/{id}/unfreeze`
 
 Risk-control stop for an account (fintech wind-down / fraud hold). A frozen
@@ -280,6 +308,7 @@ curl -s localhost:8080/metrics
 # ledger_balance_queries_total 42
 # ledger_transfers_total 12
 # ledger_transfer_idempotency_hits_total 3
+# ledger_transfer_fee_cents_total 310
 ```
 
 - `ledger_posts_total` — every `POST /entries` request received.
@@ -289,6 +318,8 @@ curl -s localhost:8080/metrics
 - `ledger_transfer_idempotency_hits_total` — transfers that replayed an
   existing idempotency key (returned the original receipt, booked
   nothing).
+- `ledger_transfer_fee_cents_total` — total fee cents booked by transfer
+  fee legs.
 - `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
   served. Snapshot reads are not counted.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
@@ -325,6 +356,10 @@ Environment:
   requests to drain after SIGINT/SIGTERM (default `10s`, e.g. `SHUTDOWN_TIMEOUT=30s`).
   New connections are refused immediately; requests already being served run to
   completion or until the timeout.
+- `LEDGER_TRANSFER_FEE` — default transfer fee policy as
+  `"<rateBps>:<revenueAccount>"`, e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`
+  for 2.5%. Applies to `POST /transfers` without an explicit fee unless the
+  request sets `skip_fee`. Unset or invalid means no default fee.
 
 ## Benchmarks
 
