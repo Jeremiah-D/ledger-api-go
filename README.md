@@ -689,6 +689,55 @@ state with no new journal rows.
 A full `ImportSnapshot` explicitly refuses a meta carrying `base_version`,
 so the two snapshot kinds can never be confused.
 
+### Structured audit log (`ledger/audit.go`)
+
+Every mutating operation (`POST`, `POST /transfers`, `POST /sweeps`,
+`POST /merges`, holds, freeze/unfreeze) and every `POST /reconcile` run
+appends one JSONL event to a configured directory — the compliance trail
+of who did what, when, and what changed. Disabled by default; set
+`LEDGER_AUDIT_DIR` to enable.
+
+```json
+{"ts":"2026-10-09T04:36:23.592704067Z","op":"merge","actor":"PostMerge",
+ "trace_id":"merge-2026-10-09","version_before":1,"version_after":2,
+ "entry_ids":["merge-2026-10-09/USD"],"accounts":["old-corp","new-corp"],
+ "details":{"legs":1}}
+```
+
+- `op` — the operation (`post`, `transfer`, `sweep`, `merge`, `hold`,
+  `hold_capture`, `hold_release`, `hold_expire`, `freeze`, `unfreeze`,
+  `reconcile`).
+- `actor` — the in-process ledger entrypoint that performed it
+  (`Post`, `PostTransfer`, …). HTTP handlers call through these
+  entrypoints; correlate with the HTTP access log by timestamp for
+  client attribution.
+- `trace_id` — correlates related records: the entry ID for a post, the
+  transfer/sweep/merge ID for a compound operation (all of its legs share
+  it), the hold ID for hold operations, the account for a freeze, the
+  reconciled version for a reconcile run.
+- `version_before` / `version_after` — the ledger version bracket around
+  the operation. Read-only operations (freeze, reconcile) report a flat
+  bracket — the event still proves the log line was written against a
+  known ledger state.
+- `entry_ids` — the journal entries the operation committed, in commit
+  order; empty for operations that book nothing.
+
+Writes are asynchronous and never block the ledger: operations enqueue
+into a bounded channel (default 4096, `WithAuditLogQueueSize`), a
+background goroutine appends JSONL — one `Write` syscall per line, so
+lines are never torn. When the queue is full the event is dropped and
+counted (`ledger_audit_dropped_total` — alert on it); a dead disk can
+never stall posting. Reads never touch the log, so the read path is
+unaffected.
+
+Files rotate daily (UTC, `audit-2006-01-02.jsonl`) and on the size cap
+(default 100 MiB, `LEDGER_AUDIT_MAX_BYTES`); rotated files are gzipped in
+the background (`audit-2006-01-02.jsonl.gz`). Filenames are never reused,
+so a `.jsonl` and its `.gz` twin always carry identical events.
+`ledger.ReadAuditLog(dir, "2006-01-02")` reads a day's files (plain and
+gzipped, in order) and skips malformed lines — a damaged audit file never
+fails the read; corrupt lines are counted and reported.
+
 ### `GET /metrics`
 
 Prometheus-format counters, rendered by hand with the standard library
@@ -720,6 +769,11 @@ curl -s localhost:8080/metrics
 - `ledger_sweeps_total` — every `POST /sweeps` request received.
 - `ledger_sweep_idempotency_hits_total` — sweeps that replayed an existing
   idempotency key (returned the original receipt, booked nothing).
+- `ledger_audit_events_total` — audit-log events written to disk (synced
+  from the ledger's audit log on every scrape).
+- `ledger_audit_dropped_total` — audit-log events dropped because the
+  async queue was full or the log was closed. A growing value means the
+  disk cannot keep up — alert on it.
 - `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
   served. Snapshot reads are not counted.
 - `ledger_balance_at_queries_total` — `GET /accounts/{id}/balance-at`
@@ -808,6 +862,15 @@ Environment:
   `floor(X * num / den)` target cents. Rates are directional and take
   effect at ledger version 0. Unset means no rates: any cross-currency
   transfer is rejected with `422`; an invalid value fails startup fast.
+- `LEDGER_AUDIT_DIR` — enables the structured audit log (see above):
+  every mutating operation and every reconcile run is appended as JSONL
+  to this directory, with daily rotation and a per-file size cap. Unset
+  means disabled. The directory is created if needed; an unwritable
+  directory fails startup fast. The log is flushed on graceful shutdown.
+- `LEDGER_AUDIT_MAX_BYTES` — caps a single audit file in bytes (default
+  `104857600` = 100 MiB). Past the cap the writer rotates to a new file;
+  rotated files are gzipped in the background. Unset or invalid means the
+  default.
 
 ## Benchmarks
 
@@ -846,6 +909,8 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics
 │   ├── snapshot.go            # disaster-recovery snapshots: JSONL export / verified import (entries + chain + holds + idempotency registries + config)
 │   ├── ledger_dr_test.go      # snapshot round-trip, tamper/splice rejection, reconcile-rerun parity
+│   ├── audit.go               # structured compliance audit log: async JSONL writer, daily + size rotation, gzip, corrupt-line-skipping reader
+│   ├── ledger_audit_test.go   # audit event shapes, rotation/gzip, corrupt-line skipping, read-path silence, concurrency
 │   ├── timetravel.go          # BalanceAt: point-in-time balance at a ledger version (audit-chain prefix scan)
 │   ├── ledger_timetravel_test.go# time-travel correctness, currency isolation, future-version rejection, concurrent readers
 │   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts

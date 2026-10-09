@@ -90,6 +90,15 @@ type Metrics struct {
 	// already-posted sweep idempotency key and returned the original
 	// receipt.
 	SweepIdempotencyHits atomic.Uint64
+	// AuditEventsTotal counts audit-log events written to disk. It is
+	// synced from the ledger's audit log on every GET /metrics scrape,
+	// so it stays meaningful even though the events are produced inside
+	// the ledger package.
+	AuditEventsTotal atomic.Uint64
+	// AuditDroppedTotal counts audit-log events dropped because the async
+	// queue was full or the log was closed. A growing value means the
+	// disk cannot keep up — alert on it.
+	AuditDroppedTotal atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -150,6 +159,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_sweep_idempotency_hits_total",
 		"Total POST /sweeps requests that replayed an existing sweep idempotency key.",
 		m.SweepIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_audit_events_total",
+		"Total audit-log events written to disk.", m.AuditEventsTotal.Load())
+	writeCounter(&sb, "ledger_audit_dropped_total",
+		"Total audit-log events dropped because the async queue was full or the log was closed.",
+		m.AuditDroppedTotal.Load())
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
 		"Total POST /entries, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())

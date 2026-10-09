@@ -155,7 +155,11 @@ type Ledger struct {
 	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so
 	// replays rebuild the full receipt (see sweep.go). Its own namespace,
 	// like holdKeys/captureKeys, expiring with the TTL.
-	sweepKeys      map[string]sweepRecord
+	sweepKeys map[string]sweepRecord
+	// audit is the structured compliance audit log (see audit.go). Nil
+	// means disabled: operations skip event construction entirely and
+	// reads never touch it, so the read path is unaffected.
+	audit *AuditLog
 	chain          []chainLink   // audit chain, one link per successful Post, in order
 	version        uint64        // bumped by every successful Post
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
@@ -175,6 +179,41 @@ func WithIdempotencyTTL(ttl time.Duration) Option {
 	return func(l *Ledger) {
 		l.idempotencyTTL = ttl
 	}
+}
+
+// WithAuditLog attaches a structured audit log (see audit.go): every
+// mutating operation and every Reconcile run emits one JSONL event after
+// it commits. A nil log disables auditing entirely.
+func WithAuditLog(al *AuditLog) Option {
+	return func(l *Ledger) {
+		l.audit = al
+	}
+}
+
+// emitAudit enqueues one audit event when the audit log is enabled; it is
+// a no-op when disabled. Callers must hold l.mu (either lock suffices) —
+// the enqueue never blocks, so emitting under the write lock cannot stall
+// the operation. The timestamp is taken here so the recorded time matches
+// the commit, not the (asynchronous) flush.
+func (l *Ledger) emitAudit(ev AuditEvent) {
+	if l.audit == nil {
+		return
+	}
+	if ev.Timestamp.IsZero() {
+		ev.Timestamp = time.Now().UTC()
+	}
+	l.audit.Log(ev)
+}
+
+// AuditStats reports the audit log's written/dropped event counters.
+// Enabled is false when no audit log is attached (WithAuditLog was never
+// used): in that case the counters are zero and meaningless.
+func (l *Ledger) AuditStats() (written, dropped uint64, enabled bool) {
+	if l.audit == nil {
+		return 0, 0, false
+	}
+	w, d := l.audit.Stats()
+	return w, d, true
 }
 
 // WithOverdraftProtection marks the given accounts as protected from
@@ -327,8 +366,22 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 
 	l.maybePruneIdempotencyKeys(time.Now())
 	l.maybePruneDailyOutflowLocked(time.Now())
+	versionBefore := l.version
 	l.commitEntryLocked(e)
 	l.addDailyOutflowLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt)
+	l.emitAudit(AuditEvent{
+		Op:            "post",
+		Actor:         "Post",
+		TraceID:       e.ID,
+		VersionBefore: versionBefore,
+		VersionAfter:  l.version,
+		EntryIDs:      []string{e.ID},
+		Accounts:      []AccountID{e.DebitAccount, e.CreditAccount},
+		Details: map[string]any{
+			"amount_cents": e.AmountCents,
+			"currency":     e.Currency,
+		},
+	})
 
 	return e, false, nil
 }

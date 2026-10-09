@@ -827,7 +827,16 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
-	mux.HandleFunc("GET /metrics", s.metrics.handleMetrics)
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		// The audit log lives in the ledger package; sync its counters
+		// into the HTTP metrics on every scrape so the exposition stays
+		// meaningful without the ledger knowing about HTTP.
+		if written, dropped, ok := s.ledger.AuditStats(); ok {
+			s.metrics.AuditEventsTotal.Store(written)
+			s.metrics.AuditDroppedTotal.Store(dropped)
+		}
+		s.metrics.handleMetrics(w, r)
+	})
 	return mux
 }
 
@@ -1059,6 +1068,22 @@ func main() {
 		log.Fatalf("ledger-api-go: listen %s: %v", addr, err)
 	}
 
+	// LEDGER_AUDIT_DIR enables the structured compliance audit log (see
+	// ledger/audit.go): every mutating operation and every reconcile run
+	// is appended as JSONL to the directory, with daily rotation and a
+	// per-file size cap. Unset means disabled. LEDGER_AUDIT_MAX_BYTES
+	// caps a single audit file (default 100 MiB). The log is closed
+	// (flushed) on shutdown after the background workers stop.
+	if dir := os.Getenv("LEDGER_AUDIT_DIR"); dir != "" {
+		al, err := ledger.NewAuditLog(dir, ledger.WithAuditLogMaxBytes(auditMaxBytes()))
+		if err != nil {
+			log.Fatalf("ledger-api-go: audit log: %v", err)
+		}
+		defer al.Close()
+		opts = append(opts, ledger.WithAuditLog(al))
+		log.Printf("ledger-api-go: audit log enabled (dir %s)", dir)
+	}
+
 	// SIGINT/SIGTERM cancel the context; runServer then drains in-flight
 	// requests instead of dropping them.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1085,6 +1110,23 @@ func main() {
 		log.Fatalf("ledger-api-go: %v", err)
 	}
 	log.Print("ledger-api-go shut down cleanly")
+}
+
+// auditMaxBytes reads LEDGER_AUDIT_MAX_BYTES (a byte count, e.g.
+// "104857600") for the audit-log file size cap. Unset means the default;
+// invalid or non-positive values fall back to the default with a log
+// line.
+func auditMaxBytes() int64 {
+	raw := os.Getenv("LEDGER_AUDIT_MAX_BYTES")
+	if raw == "" {
+		return ledger.DefaultAuditMaxBytes
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_AUDIT_MAX_BYTES %q, using %d", raw, ledger.DefaultAuditMaxBytes)
+		return ledger.DefaultAuditMaxBytes
+	}
+	return n
 }
 
 // holdSweepInterval reads LEDGER_HOLD_SWEEP_INTERVAL (a Go duration string,

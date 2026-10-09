@@ -37,6 +37,14 @@ func (l *Ledger) Freeze(a AccountID) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.frozen[a] = true
+	l.emitAudit(AuditEvent{
+		Op:            "freeze",
+		Actor:         "Freeze",
+		TraceID:       string(a),
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Accounts:      []AccountID{a},
+	})
 }
 
 // Unfreeze lifts a freeze previously applied with Freeze. Unfreezing an
@@ -46,6 +54,14 @@ func (l *Ledger) Unfreeze(a AccountID) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.frozen, a)
+	l.emitAudit(AuditEvent{
+		Op:            "unfreeze",
+		Actor:         "Unfreeze",
+		TraceID:       string(a),
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Accounts:      []AccountID{a},
+	})
 }
 
 // IsFrozen reports whether the account is currently frozen. Reads and

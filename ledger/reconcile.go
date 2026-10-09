@@ -118,7 +118,23 @@ type ReconciliationReport struct {
 func (l *Ledger) Reconcile(now time.Time) ReconciliationReport {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return l.reconcileLocked(now)
+	report := l.reconcileLocked(now)
+	// Reconcile is read-only, so the version brackets are identical — the
+	// event still records that reconciliation ran, against which ledger
+	// state, and what it found. Emitted under the read lock; the enqueue
+	// never blocks.
+	l.emitAudit(AuditEvent{
+		Op:            "reconcile",
+		Actor:         "Reconcile",
+		TraceID:       fmt.Sprintf("reconcile@%d", report.Version),
+		VersionBefore: report.Version,
+		VersionAfter:  report.Version,
+		Details: map[string]any{
+			"accounting_equation_ok": report.AccountingEquationOK,
+			"discrepancies":          len(report.Discrepancies),
+		},
+	})
+	return report
 }
 
 // reconcileLocked performs the scan. Callers must hold l.mu; the read lock

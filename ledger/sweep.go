@@ -205,6 +205,7 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 		createdAt = now
 	}
 	l.maybePruneIdempotencyKeys(now)
+	versionBefore := l.version
 	entries := make([]JournalEntry, 0, len(legs))
 	for _, leg := range legs {
 		e := JournalEntry{
@@ -229,6 +230,22 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 			createdAt: createdAt,
 		}
 	}
+	sweepEntryIDs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		sweepEntryIDs = append(sweepEntryIDs, e.ID)
+	}
+	l.emitAudit(AuditEvent{
+		Op:            "sweep",
+		Actor:         "PostSweep",
+		TraceID:       s.ID,
+		VersionBefore: versionBefore,
+		VersionAfter:  l.version,
+		EntryIDs:      sweepEntryIDs,
+		Accounts:      append(append([]AccountID{}, s.From...), s.To),
+		Details: map[string]any{
+			"legs": len(legs),
+		},
+	})
 
 	return SweepReceipt{
 		SweepID:   s.ID,

@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -233,6 +234,19 @@ func (l *Ledger) Hold(h Hold) (held Hold, duplicate bool, err error) {
 	if h.IdempotencyKey != "" {
 		l.holdKeys[h.IdempotencyKey] = h.ID
 	}
+	l.emitAudit(AuditEvent{
+		Op:            "hold",
+		Actor:         "Hold",
+		TraceID:       h.ID,
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Accounts:      []AccountID{h.Account},
+		Details: map[string]any{
+			"amount_cents": h.AmountCents,
+			"currency":     h.Currency,
+			"expires_at":   h.ExpiresAt.UTC().Format(time.RFC3339),
+		},
+	})
 
 	return h, false, nil
 }
@@ -324,6 +338,20 @@ func (l *Ledger) Release(id string) (Hold, error) {
 	}
 	h.Status = HoldStatusReleased
 	l.holds[id] = h
+	// Only an actual state transition is audited: replays and releases
+	// of already-terminal holds book nothing and stay silent.
+	l.emitAudit(AuditEvent{
+		Op:            "hold_release",
+		Actor:         "Release",
+		TraceID:       id,
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Accounts:      []AccountID{h.Account},
+		Details: map[string]any{
+			"amount_cents": h.AmountCents,
+			"currency":     h.Currency,
+		},
+	})
 	return h, nil
 }
 
@@ -349,6 +377,21 @@ func (l *Ledger) ExpireHoldsAt(now time.Time) int {
 			l.holds[id] = h
 			marked++
 		}
+	}
+	// A sweep that expires nothing emits no event: the background
+	// sweeper ticks on a timer, and zero-expire ticks would drown the
+	// audit trail in noise.
+	if marked > 0 {
+		l.emitAudit(AuditEvent{
+			Op:            "hold_expire",
+			Actor:         "ExpireHolds",
+			TraceID:       fmt.Sprintf("hold-expire@%d", l.version),
+			VersionBefore: l.version,
+			VersionAfter:  l.version,
+			Details: map[string]any{
+				"expired": marked,
+			},
+		})
 	}
 	return marked
 }
@@ -449,6 +492,7 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	}
 
 	l.maybePruneIdempotencyKeys(now)
+	versionBefore := l.version
 	l.commitEntryLocked(entry)
 	h.Status = HoldStatusCaptured
 	l.holds[c.HoldID] = h
@@ -463,6 +507,20 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	if c.IdempotencyKey != "" {
 		l.captureKeys[c.IdempotencyKey] = receipt
 	}
+	l.emitAudit(AuditEvent{
+		Op:            "hold_capture",
+		Actor:         "Capture",
+		TraceID:       c.HoldID,
+		VersionBefore: versionBefore,
+		VersionAfter:  l.version,
+		EntryIDs:      []string{entry.ID},
+		Accounts:      []AccountID{h.Account, c.To},
+		Details: map[string]any{
+			"captured_cents": entry.AmountCents,
+			"released_cents": receipt.ReleasedCents,
+			"currency":       h.Currency,
+		},
+	})
 
 	return receipt, nil
 }

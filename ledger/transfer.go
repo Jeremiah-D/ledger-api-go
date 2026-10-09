@@ -532,6 +532,7 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	// returned before the first mutation, so there is nothing to roll back.
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
+	versionBefore := l.version
 	for _, e := range entries {
 		l.commitEntryLocked(e)
 	}
@@ -543,6 +544,26 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		}
 		l.transferKeys[t.IdempotencyKey] = ids
 	}
+	entryIDs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		entryIDs = append(entryIDs, e.ID)
+	}
+	l.emitAudit(AuditEvent{
+		Op:            "transfer",
+		Actor:         "PostTransfer",
+		TraceID:       t.ID,
+		VersionBefore: versionBefore,
+		VersionAfter:  l.version,
+		EntryIDs:      entryIDs,
+		Accounts:      []AccountID{t.From, t.To},
+		Details: map[string]any{
+			"amount_cents":   t.AmountCents,
+			"currency":       t.Currency,
+			"fee_cents":      feeCents,
+			"fee_tier_index": tierIndex,
+			"fee_rate_bps":   rateBps,
+		},
+	})
 
 	return TransferReceipt{
 		TransferID:   t.ID,

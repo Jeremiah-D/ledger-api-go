@@ -440,6 +440,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// lock, after all checks passed.
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
+	versionBefore := l.version
 	for _, e := range entries {
 		l.commitEntryLocked(e)
 	}
@@ -451,6 +452,26 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		}
 		l.transferKeys[t.IdempotencyKey] = ids
 	}
+	fxEntryIDs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		fxEntryIDs = append(fxEntryIDs, e.ID)
+	}
+	l.emitAudit(AuditEvent{
+		Op:            "transfer",
+		Actor:         "PostTransfer",
+		TraceID:       t.ID,
+		VersionBefore: versionBefore,
+		VersionAfter:  l.version,
+		EntryIDs:      fxEntryIDs,
+		Accounts:      []AccountID{t.From, t.To},
+		Details: map[string]any{
+			"amount_cents":    t.AmountCents,
+			"currency":        t.Currency,
+			"to_currency":     toCurrency,
+			"converted_cents": converted,
+			"fee_cents":       feeCents,
+		},
+	})
 
 	return TransferReceipt{
 		TransferID:   t.ID,
