@@ -46,6 +46,14 @@ var (
 // charged on top of the transfer amount — the payee receives the full
 // amount, the payer's total outflow is amount + fee.
 //
+// A transfer may also settle in a different currency (see ToCurrency and
+// fx.go): the payee is debited the converted amount in the target
+// currency while the payer is credited the original amount in the source
+// currency, with the FX clearing account as the counterparty of both legs
+// (entry "<transfer ID>" and "<transfer ID>/fx"). The fee leg, when
+// present, stays in the source currency. The receipt discloses the
+// conversion in its FX field.
+//
 // The transfer commits atomically: field validation, fee resolution, the
 // idempotency replay check, and the frozen/overdraft risk checks all run
 // before anything is recorded, so a transfer that fails on any leg —
@@ -59,10 +67,25 @@ type Transfer struct {
 	// Currency is the ISO 4217 alpha-3 code the transfer is denominated
 	// in (e.g. "USD", "EUR"). Empty means the default currency (see
 	// DefaultCurrency). Every leg of the transfer — principal and fee —
-	// is booked in this one currency: the ledger performs no FX
-	// conversion, so a transfer spanning currencies is rejected with
-	// ErrCrossCurrencyTransfer.
+	// is booked in this one currency, unless ToCurrency names a
+	// different settlement currency (see below).
 	Currency string `json:"currency,omitempty"`
+	// ToCurrency names the settlement currency of a cross-currency
+	// transfer: the payee is debited the converted amount in this
+	// currency while the payer is credited the original amount in
+	// Currency, with the configured FX account as the counterparty of
+	// both legs (see fx.go). Empty means "same as Currency": a plain
+	// single-currency transfer that needs no rate. A non-empty code must
+	// be a 3-letter uppercase ISO 4217 code, must differ from Currency,
+	// and needs a configured rate for (Currency, ToCurrency), or
+	// PostTransfer rejects the transfer with ErrFXRateMissing (HTTP
+	// 422). The fee leg, when present, is always booked in Currency on
+	// top of the amount.
+	ToCurrency string `json:"to_currency,omitempty"`
+	// FXAccount overrides the ledger's configured FX clearing account
+	// for this cross-currency transfer. It must differ from From and To.
+	// It is ignored for same-currency transfers.
+	FXAccount AccountID `json:"fx_account,omitempty"`
 	// FeeCents is an explicit per-transfer fee, in cents, charged to the
 	// payer (From) on top of AmountCents and booked to FeeAccount. It must
 	// be non-negative; a positive fee requires FeeAccount. An explicit fee
@@ -99,6 +122,11 @@ type TransferReceipt struct {
 	FeeTierIndex int            `json:"fee_tier_index"`
 	FeeRateBps   int64          `json:"fee_rate_bps"`
 	Duplicate    bool           `json:"duplicate"`
+	// FX discloses the conversion of a cross-currency transfer (see
+	// fx.go). It is set on the original posting; idempotent replays
+	// return FX == nil because the rate table may have changed since —
+	// the replayed journal entries are the authoritative record.
+	FX *FXConversion `json:"fx,omitempty"`
 }
 
 // FeeTier is one band of the tiered transfer fee schedule: transfers of
@@ -387,6 +415,21 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	}
 	t.Currency = currency
 
+	// ToCurrency empty means "settle in the transfer's own currency";
+	// anything else must be a valid code naming a different currency,
+	// taking the cross-currency path (see fx.go).
+	toCurrency := currency
+	if t.ToCurrency != "" {
+		toCurrency, err = normalizeCurrency(t.ToCurrency)
+		if err != nil {
+			return TransferReceipt{}, err
+		}
+		t.ToCurrency = toCurrency
+	}
+	if toCurrency != currency {
+		return l.postTransferFXLocked(t, toCurrency, time.Now())
+	}
+
 	feeCents, feeAccount, tierIndex, rateBps, err := l.resolveFeeLocked(t)
 	if err != nil {
 		return TransferReceipt{}, err
@@ -399,38 +442,8 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	}
 
 	if t.IdempotencyKey != "" {
-		// A transfer that posted a fee leg replays its full receipt via
-		// the transfer key index; otherwise fall back to the shared
-		// entry-level namespace (covers raw-posted keys and pre-fee-leg
-		// transfers).
-		if ids, ok := l.transferKeys[t.IdempotencyKey]; ok {
-			entries := make([]JournalEntry, 0, len(ids))
-			for _, id := range ids {
-				entries = append(entries, l.entries[id])
-			}
-			feeCents := feeCentsOf(entries)
-			// Re-disclose the tier the original transfer was charged
-			// under: the fee policy is construction-time immutable, so
-			// the tier re-derives exactly from the principal amount when
-			// the fee leg went to the policy's revenue account. (An
-			// explicit fee routed to the same account for an identical
-			// amount is indistinguishable — and the disclosed rate still
-			// matches the fee math.)
-			tierIndex, rateBps := -1, int64(0)
-			if len(entries) > 1 && len(l.feeTiers) > 0 && l.feeRevenueAccount != "" &&
-				entries[1].DebitAccount == l.feeRevenueAccount {
-				if idx, rate := l.feeTierFor(entries[0].AmountCents); policyFeeCents(entries[0].AmountCents, rate) == feeCents {
-					tierIndex, rateBps = idx, rate
-				}
-			}
-			return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCents, FeeTierIndex: tierIndex, FeeRateBps: rateBps, Duplicate: true}, nil
-		}
-		if orig, ok := l.byKey[t.IdempotencyKey]; ok {
-			return TransferReceipt{
-				TransferID: t.ID,
-				Entries:    []JournalEntry{orig},
-				Duplicate:  true,
-			}, nil
+		if receipt, ok := l.replayTransferLocked(t); ok {
+			return receipt, nil
 		}
 	}
 
@@ -541,12 +554,75 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	}, nil
 }
 
-// feeCentsOf sums the fee legs of a replayed receipt: every entry after
-// the principal is a fee leg by construction.
+// replayTransferLocked rebuilds the receipt of a previously posted
+// transfer from its idempotency key, without booking anything new.
+// Callers must hold the write lock.
+//
+// A transfer that posted a fee or FX leg replays its full receipt via the
+// transfer key index; otherwise it falls back to the shared entry-level
+// namespace (covers raw-posted keys and pre-fee-leg transfers).
+//
+// The fee leg is found by its "<transfer ID>/fee" entry ID, not by
+// position: FX transfers carry an additional "<transfer ID>/fx" leg, so
+// positional lookup would mistake the FX leg for the fee leg. The tier
+// re-derives from the source-currency amount — the FX leg's amount for FX
+// transfers, the principal's amount otherwise.
+func (l *Ledger) replayTransferLocked(t Transfer) (TransferReceipt, bool) {
+	if ids, ok := l.transferKeys[t.IdempotencyKey]; ok {
+		entries := make([]JournalEntry, 0, len(ids))
+		for _, id := range ids {
+			entries = append(entries, l.entries[id])
+		}
+		feeCents := feeCentsOf(entries)
+		// Re-disclose the tier the original transfer was charged under:
+		// the fee policy is construction-time immutable, so the tier
+		// re-derives exactly from the source-currency amount when the
+		// fee leg went to the policy's revenue account. (An explicit fee
+		// routed to the same account for an identical amount is
+		// indistinguishable — and the disclosed rate still matches the
+		// fee math.)
+		tierIndex, rateBps := -1, int64(0)
+		feeBase := entries[0].AmountCents
+		for _, e := range entries {
+			if strings.HasSuffix(e.ID, "/fx") {
+				feeBase = e.AmountCents // FX transfers: fee computed on the source amount
+				break
+			}
+		}
+		if len(l.feeTiers) > 0 && l.feeRevenueAccount != "" {
+			for _, e := range entries {
+				if strings.HasSuffix(e.ID, "/fee") && e.DebitAccount == l.feeRevenueAccount {
+					if idx, rate := l.feeTierFor(feeBase); policyFeeCents(feeBase, rate) == feeCents {
+						tierIndex, rateBps = idx, rate
+					}
+					break
+				}
+			}
+		}
+		// Replays deliberately omit the FX disclosure (see
+		// TransferReceipt.FX): the rate table may have changed since the
+		// original posting.
+		return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCents, FeeTierIndex: tierIndex, FeeRateBps: rateBps, Duplicate: true}, true
+	}
+	if orig, ok := l.byKey[t.IdempotencyKey]; ok {
+		return TransferReceipt{
+			TransferID: t.ID,
+			Entries:    []JournalEntry{orig},
+			Duplicate:  true,
+		}, true
+	}
+	return TransferReceipt{}, false
+}
+
+// feeCentsOf sums the fee legs of a replayed receipt: fee legs are the
+// entries whose ID ends in "/fee" by construction (see
+// postTransferFXLocked and PostTransfer).
 func feeCentsOf(entries []JournalEntry) int64 {
 	var total int64
-	for _, e := range entries[1:] {
-		total += e.AmountCents
+	for _, e := range entries {
+		if strings.HasSuffix(e.ID, "/fee") {
+			total += e.AmountCents
+		}
 	}
 	return total
 }

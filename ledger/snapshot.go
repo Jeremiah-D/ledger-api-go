@@ -140,6 +140,13 @@ type snapshotConfigLine struct {
 	// zero, which fail-opens for the remainder of that day — operators
 	// should treat a restore as a risk-control reset event.
 	DailyLimits []DailyLimit `json:"daily_limits,omitempty"`
+	// FXRates carries the FX rate table (see SetFXRate) and FXAccount the
+	// ledger-wide FX clearing account (see WithFXAccount); absent in
+	// snapshots written before FX support existed. Restored rates keep
+	// their EffectiveVersion, so restored ledgers disclose the same
+	// conversion provenance as the original.
+	FXRates   []ExchangeRate `json:"fx_rates,omitempty"`
+	FXAccount AccountID      `json:"fx_account,omitempty"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -199,6 +206,21 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 		}
 	}
 
+	if err := l.exportHoldsLocked(enc); err != nil {
+		return err
+	}
+	if err := l.exportIdempotencyLocked(enc); err != nil {
+		return err
+	}
+	if err := l.exportConfigLocked(enc); err != nil {
+		return err
+	}
+	return nil
+}
+
+// exportHoldsLocked writes the hold records, sorted by (CreatedAt, ID)
+// for determinism. Callers must hold l.mu; the read lock suffices.
+func (l *Ledger) exportHoldsLocked(enc *json.Encoder) error {
 	holds := make([]Hold, 0, len(l.holds))
 	for _, h := range l.holds {
 		holds = append(holds, h)
@@ -214,8 +236,13 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
+	return nil
+}
 
-	// Idempotency registries, one record per key, sorted for determinism.
+// exportIdempotencyLocked writes the five idempotency-key namespaces, one
+// record per key, sorted for determinism. Callers must hold l.mu; the
+// read lock suffices.
+func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
 	sortedKeys := func(keys []string) []string {
 		out := append([]string(nil), keys...)
 		sort.Strings(out)
@@ -280,7 +307,12 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
+	return nil
+}
 
+// exportConfigLocked writes the operational config record. Callers must
+// hold l.mu; the read lock suffices.
+func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 	frozen := make([]AccountID, 0, len(l.frozen))
 	for a := range l.frozen {
 		frozen = append(frozen, a)
@@ -305,6 +337,8 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 		FeeRevenueAccount:  l.feeRevenueAccount,
 		IdempotencyTTL:     l.idempotencyTTL.String(),
 		DailyLimits:        l.dailyLimitsLocked(),
+		FXRates:            l.fxRatesLocked(),
+		FXAccount:          l.fxAccount,
 	}
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -384,6 +418,16 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 			if m.Format != snapshotFormatVersion {
 				return fail("line %d: unsupported snapshot format %d (this build reads %d)",
 					lineNo, m.Format, snapshotFormatVersion)
+			}
+			// An incremental snapshot carries base_version; a full
+			// import must refuse it explicitly instead of silently
+			// treating it as a complete journal.
+			var probe struct {
+				BaseVersion *uint64 `json:"base_version"`
+			}
+			if err := json.Unmarshal(line, &probe); err == nil && probe.BaseVersion != nil {
+				return fail("line %d: incremental snapshot (base_version %d) cannot be fully imported; apply it with ImportIncrementalSnapshot",
+					lineNo, *probe.BaseVersion)
 			}
 			meta = &m
 		case "entry":
@@ -628,6 +672,79 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	}
 
 	// Operational config.
+	if err := l.applySnapshotConfigLocked(cfg); err != nil {
+		return fail("%v", err)
+	}
+
+	// The whole point: the rebuilt ledger must prove its own integrity.
+	// A rewritten amount, a deleted or reordered entry, or a spliced link
+	// fails here and the import is rejected — no half-restored ledger is
+	// ever returned.
+	if err := l.verifyChainLocked(); err != nil {
+		return nil, fmt.Errorf("%w: audit chain verification failed: %v", ErrSnapshotInvalid, err)
+	}
+	return l, nil
+}
+
+// applySnapshotConfigLocked installs a snapshot's operational config on
+// the ledger: frozen and overdraft-protected accounts, the sub-account
+// hierarchy, the transfer fee policy, the idempotency TTL, daily outflow
+// limits, and the FX rate table. It validates every row before applying
+// anything: invalid config is an error and leaves the ledger untouched —
+// a restore must never silently drop a risk control or convert at a bad
+// rate. Callers must hold the write lock. For a full restore the ledger
+// starts empty, so installation is a plain overwrite; for an incremental
+// import the same config section carries the latest config, applied the
+// same way.
+func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
+	bad := func(format string, args ...any) error {
+		return fmt.Errorf(format, args...)
+	}
+	// Validate first: nothing is applied until every row checks out.
+	type validatedLimit struct {
+		key   dailyLimitKey
+		limit int64
+	}
+	var limits []validatedLimit
+	for _, dl := range cfg.DailyLimits {
+		if dl.Account == "" {
+			return bad("daily limit with empty account")
+		}
+		cur, err := normalizeCurrency(dl.Currency)
+		if err != nil {
+			return bad("bad daily limit currency %q: %v", dl.Currency, err)
+		}
+		if dl.LimitCents < 0 {
+			return bad("negative daily limit for account %q (%s)", dl.Account, dl.Currency)
+		}
+		limits = append(limits, validatedLimit{dailyLimitKey{account: dl.Account, currency: cur}, dl.LimitCents})
+	}
+	var ttl time.Duration
+	ttlSet := false
+	if cfg.IdempotencyTTL != "" {
+		var err error
+		ttl, err = time.ParseDuration(cfg.IdempotencyTTL)
+		if err != nil {
+			return bad("bad idempotency_ttl %q: %v", cfg.IdempotencyTTL, err)
+		}
+		ttlSet = true
+	}
+	fx := make(map[fxPair]ExchangeRate, len(cfg.FXRates))
+	for _, r := range cfg.FXRates {
+		f, t, err := normalizeFXRate(r.FromCurrency, r.ToCurrency, r.Num, r.Den)
+		if err != nil {
+			return bad("bad FX rate %s->%s: %v", r.FromCurrency, r.ToCurrency, err)
+		}
+		fx[fxPair{from: f, to: t}] = ExchangeRate{
+			FromCurrency:     f,
+			ToCurrency:       t,
+			Num:              r.Num,
+			Den:              r.Den,
+			EffectiveVersion: r.EffectiveVersion,
+		}
+	}
+
+	// Apply: every row above checked out.
 	for _, a := range cfg.Frozen {
 		l.frozen[a] = true
 	}
@@ -637,19 +754,8 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	for c, p := range cfg.Parents {
 		l.parents[c] = p
 	}
-	// Daily outflow limits: invalid limits in a snapshot reject the
-	// import — a restore must never silently drop a risk control.
-	for _, dl := range cfg.DailyLimits {
-		if dl.Account == "" {
-			return fail("daily limit with empty account")
-		}
-		if _, err := normalizeCurrency(dl.Currency); err != nil {
-			return fail("bad daily limit currency %q: %v", dl.Currency, err)
-		}
-		if dl.LimitCents < 0 {
-			return fail("negative daily limit for account %q (%s)", dl.Account, dl.Currency)
-		}
-		l.dailyLimits[dailyLimitKey{account: dl.Account, currency: dl.Currency}] = dl.LimitCents
+	for _, vl := range limits {
+		l.dailyLimits[vl.key] = vl.limit
 	}
 	// The transfer fee policy: prefer the tiered schedule when present;
 	// otherwise rebuild the flat single-tier policy from the legacy
@@ -661,22 +767,12 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 		l.feeTiers = []FeeTier{{MinAmountCents: 0, RateBps: cfg.FeeRateBps}}
 	}
 	l.feeRevenueAccount = cfg.FeeRevenueAccount
-	if cfg.IdempotencyTTL != "" {
-		ttl, err := time.ParseDuration(cfg.IdempotencyTTL)
-		if err != nil {
-			return fail("bad idempotency_ttl %q: %v", cfg.IdempotencyTTL, err)
-		}
+	if ttlSet {
 		l.idempotencyTTL = ttl
 	}
-
-	// The whole point: the rebuilt ledger must prove its own integrity.
-	// A rewritten amount, a deleted or reordered entry, or a spliced link
-	// fails here and the import is rejected — no half-restored ledger is
-	// ever returned.
-	if err := l.verifyChainLocked(); err != nil {
-		return nil, fmt.Errorf("%w: audit chain verification failed: %v", ErrSnapshotInvalid, err)
-	}
-	return l, nil
+	l.fxRates = fx
+	l.fxAccount = cfg.FXAccount
+	return nil
 }
 
 // holdsEqual compares two holds field by field, ignoring time.Location
@@ -779,6 +875,12 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.feeTiers, b.feeTiers) || a.feeRevenueAccount != b.feeRevenueAccount {
+		return false
+	}
+	if a.fxAccount != b.fxAccount {
+		return false
+	}
+	if !reflect.DeepEqual(a.fxRates, b.fxRates) {
 		return false
 	}
 	if a.idempotencyTTL != b.idempotencyTTL {

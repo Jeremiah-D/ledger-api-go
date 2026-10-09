@@ -341,11 +341,55 @@ top and a `by_currency` breakdown of every currency the account holds;
 debit/credit sums.
 
 `POST /transfers` accepts the same `currency` field and books **every
-leg — principal and fee — in that one currency**. This ledger performs
-no FX conversion, so a transfer spanning currencies is rejected with
-`422` (`ledger: cross-currency transfers are not supported`); both
-currency rejections (malformed code `400`, cross-currency `422`) are
-counted in `ledger_currency_rejections_total`.
+leg — principal and fee — in that one currency**, unless `to_currency`
+names a different settlement currency: a **cross-currency transfer**
+converts at the configured rate for the `(currency, to_currency)` pair
+(see below). Malformed codes are rejected with `400`; both are counted in
+`ledger_currency_rejections_total`.
+
+#### FX transfers
+
+Set `to_currency` (different from `currency`) and the ledger converts:
+the payee is debited the converted amount in the target currency while
+the payer is credited the original amount in the source currency, with
+the FX clearing account as the counterparty of both legs. The conversion
+is `floor(amount * rateNum / rateDen)` in exact 128-bit integer
+arithmetic — no float64 ever touches money, and an overflowing conversion
+is rejected before booking. The receipt discloses the conversion in its
+`fx` field (currencies, rate, converted amount, and the ledger version at
+which the rate took effect).
+
+```bash
+curl -s -X POST localhost:8080/transfers \
+  -d '{"transfer_id":"fx-001","from_account":"alice","to_account":"erin","amount_cents":10000,"currency":"USD","to_currency":"EUR"}'
+# 201 {...,"fx":{"from_currency":"USD","to_currency":"EUR","rate_num":108,"rate_den":100,"converted_cents":10800,...}}
+```
+
+Each currency's books stay balanced independently: the two journal
+entries (`<transfer_id>` in the target currency, `<transfer_id>/fx` in
+the source currency) each debit and credit within one currency, so
+`VerifyAccountingEquation` and the audit chain cover FX transfers with no
+special cases. The fee leg, when present, is charged in the **source**
+currency on top of the amount; overdraft and daily-limit checks guard the
+payer's source-currency total outflow (amount + fee) — a EUR balance can
+never cover a USD outflow. A pair with no configured rate is rejected
+with `422`; a transfer with no FX account (neither `fx_account` on the
+request nor `LEDGER_FX_ACCOUNT` configured) is rejected with `400`.
+
+Rates are opt-in structural config, directional (`USD→EUR` and `EUR→USD`
+are independent), and settable at runtime via `SetFXRate` (Go API) or
+`LEDGER_FX_RATES` at startup:
+
+```bash
+LEDGER_FX_ACCOUNT="fx-pnl" \
+LEDGER_FX_RATES="USD:EUR=108/100,USD:CNY=720/100" ./ledger-api-go
+#   1 USD = 1.08 EUR, 1 USD = 7.20 CNY
+```
+
+A malformed rate table fails the startup fast. Rates survive
+disaster-recovery snapshots (with their effective versions) and are
+listed in the `POST /reconcile` report's `fx_rates` section. Cross-currency
+attempts are counted in `ledger_fx_transfers_total`.
 
 Two read-path notes: `GET /accounts/{id}/balance` and
 `GET /accounts/{id}/snapshot` keep their historical meaning — the
@@ -625,6 +669,8 @@ curl -s localhost:8080/metrics
   nothing).
 - `ledger_transfer_fee_cents_total` — total fee cents booked by transfer
   fee legs.
+- `ledger_fx_transfers_total` — `POST /transfers` requests that attempted
+  a cross-currency transfer, including rejected ones.
 - `ledger_sweeps_total` — every `POST /sweeps` request received.
 - `ledger_sweep_idempotency_hits_total` — sweeps that replayed an existing
   idempotency key (returned the original receipt, booked nothing).
@@ -707,6 +753,15 @@ Environment:
   USD outflow at $1000.00). Postings that would exceed the day's budget
   are rejected with `422`. Unset means no limits; an invalid value fails
   startup fast.
+- `LEDGER_FX_ACCOUNT` — the ledger-wide FX clearing account, counterparty
+  of cross-currency transfer legs. Unset means each cross-currency
+  transfer must carry `fx_account`.
+- `LEDGER_FX_RATES` — the FX rate table, `"<from>:<to>=<num>/<den>,..."`
+  (e.g. `LEDGER_FX_RATES="USD:EUR=108/100,USD:CNY=720/100"` for 1 USD =
+  1.08 EUR and 1 USD = 7.20 CNY). Converting `X` source cents books
+  `floor(X * num / den)` target cents. Rates are directional and take
+  effect at ledger version 0. Unset means no rates: any cross-currency
+  transfer is rejected with `422`; an invalid value fails startup fast.
 
 ## Benchmarks
 

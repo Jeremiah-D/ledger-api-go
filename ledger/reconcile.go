@@ -102,6 +102,11 @@ type ReconciliationReport struct {
 	HeldTotals      []CurrencyHoldTotals `json:"held_totals"`
 	IdempotencyKeys IdempotencyKeyHealth `json:"idempotency_keys"`
 	AuditChain      AuditChainHealth     `json:"audit_chain"`
+	// FXRates lists the configured FX conversion rates (see SetFXRate),
+	// sorted by (from, to): the conversion table a settlement operator
+	// audited against. The FX clearing account's own balances are part
+	// of the per-account trial balances above, like any other account.
+	FXRates []ExchangeRate `json:"fx_rates"`
 }
 
 // Reconcile runs a full read-only scan of the ledger and returns the
@@ -128,6 +133,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
+		FXRates:                    l.fxRatesLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit

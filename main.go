@@ -141,6 +141,8 @@ type createTransferRequest struct {
 	ToAccount      ledger.AccountID `json:"to_account"`
 	AmountCents    int64            `json:"amount_cents"`
 	Currency       string           `json:"currency"`
+	ToCurrency     string           `json:"to_currency"`
+	FXAccount      ledger.AccountID `json:"fx_account"`
 	FeeCents       int64            `json:"fee_cents"`
 	FeeAccount     ledger.AccountID `json:"fee_account"`
 	SkipFee        bool             `json:"skip_fee"`
@@ -162,10 +164,13 @@ type createTransferRequest struct {
 // 400; a transfer through a frozen account returns 403; a transfer that
 // would overdraw an overdraft-protected payer returns 422, as does a
 // transfer that would take the payer's daily outflow (amount + fee) above
-// its configured limit, and a transfer whose legs would span currencies
-// (this ledger performs no FX conversion — every transfer is single-currency). The currency field is
+// its configured limit. A cross-currency transfer (to_currency set and
+// different from currency) converts at the configured rate for the pair
+// (see LEDGER_FX_RATES): the payee settles in to_currency, the payer pays
+// in currency, and the receipt discloses the conversion in its fx field;
+// a pair with no configured rate is rejected with 422. The currency field is
 // optional and defaults to USD; when given it must be a 3-letter uppercase
-// ISO 4217 code, and the fee leg is booked in the same currency.
+// ISO 4217 code, and the fee leg is booked in the source currency.
 func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -206,11 +211,16 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		To:             req.ToAccount,
 		AmountCents:    req.AmountCents,
 		Currency:       req.Currency,
+		ToCurrency:     req.ToCurrency,
+		FXAccount:      req.FXAccount,
 		FeeCents:       req.FeeCents,
 		FeeAccount:     req.FeeAccount,
 		SkipFee:        req.SkipFee,
 		IdempotencyKey: req.IdempotencyKey,
 		CreatedAt:      time.Now(),
+	}
+	if req.ToCurrency != "" {
+		s.metrics.FXTransfersTotal.Add(1)
 	}
 
 	receipt, err := s.ledger.PostTransfer(transfer)
@@ -233,6 +243,15 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrCrossCurrencyTransfer) {
 			s.metrics.CurrencyRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrFXRateMissing) {
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrFXAccountNotConfigured) || errors.Is(err, ledger.ErrInvalidFXAccount) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ledger.ErrInvalidCurrency) {
@@ -1007,6 +1026,32 @@ func main() {
 			opts = append(opts, ledger.WithDailyLimit(dl.Account, dl.Currency, dl.LimitCents))
 		}
 		log.Printf("ledger-api-go: daily outflow limits = %d configured", len(limits))
+	}
+
+	// LEDGER_FX_ACCOUNT configures the ledger-wide FX clearing account,
+	// the counterparty of cross-currency transfer legs (see
+	// ledger.WithFXAccount). Unset means cross-currency transfers must
+	// carry fx_account on each request.
+	if raw := os.Getenv("LEDGER_FX_ACCOUNT"); raw != "" {
+		opts = append(opts, ledger.WithFXAccount(ledger.AccountID(raw)))
+		log.Printf("ledger-api-go: FX clearing account = %q", raw)
+	}
+
+	// LEDGER_FX_RATES configures the FX rate table (see ledger.ParseFXRates
+	// for the syntax, e.g. "USD:EUR=108/100,USD:CNY=720/100"). Rates take
+	// effect at ledger version 0 (startup). Unset means no rates: any
+	// cross-currency transfer is rejected with 422. An invalid value fails
+	// the startup fast (log.Fatal): a misconfigured rate table must never
+	// silently convert at a wrong rate.
+	if raw := os.Getenv("LEDGER_FX_RATES"); raw != "" {
+		rates, err := ledger.ParseFXRates(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		for _, r := range rates {
+			opts = append(opts, ledger.WithFXRateOption(r.FromCurrency, r.ToCurrency, r.Num, r.Den))
+		}
+		log.Printf("ledger-api-go: FX rates = %d configured", len(rates))
 	}
 
 	ln, err := net.Listen("tcp", addr)

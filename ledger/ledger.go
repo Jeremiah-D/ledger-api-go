@@ -128,6 +128,13 @@ type Ledger struct {
 	// an empty revenue account) disable the policy.
 	feeTiers          []FeeTier
 	feeRevenueAccount AccountID
+	// fxRates is the directional FX rate table (see fx.go): converting
+	// fromCurrency to toCurrency multiplies by Num/Den and floors to
+	// whole cents. fxAccount is the ledger-wide FX clearing account, the
+	// counterparty of cross-currency transfer legs. Both are structural
+	// config — like frozen and feeTiers — and survive snapshots.
+	fxRates   map[fxPair]ExchangeRate
+	fxAccount AccountID
 	// transferKeys maps a transfer's idempotency key to the IDs of the
 	// journal entries it posted, in commit order (principal, then the fee
 	// leg when one was booked), so a replayed transfer returns its full
@@ -204,6 +211,7 @@ func New(opts ...Option) *Ledger {
 		holdKeys:       make(map[string]string),
 		captureKeys:    make(map[string]CaptureReceipt),
 		sweepKeys:      make(map[string]sweepRecord),
+		fxRates:        make(map[fxPair]ExchangeRate),
 		pruneInterval:  defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
