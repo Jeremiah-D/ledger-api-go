@@ -250,6 +250,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrFXRateExpired) {
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrFXAccountNotConfigured) || errors.Is(err, ledger.ErrInvalidFXAccount) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return

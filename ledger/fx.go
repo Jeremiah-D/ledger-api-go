@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/bits"
 	"sort"
 	"strconv"
@@ -66,6 +67,13 @@ var (
 	// 422-class semantic rejection: the request is well-formed, but the
 	// ledger cannot convert without a rate.
 	ErrFXRateMissing = errors.New("ledger: no FX rate configured for currency pair")
+	// ErrFXRateExpired is returned when a cross-currency transfer names a
+	// (from, to) pair whose rate exists but has passed its expiry. An
+	// expired rate is never used silently: the transfer is rejected with
+	// 422 until the operator installs a fresh rate (see SetFXRateRat).
+	// The rejection records nothing — no journal rows, no chain links, no
+	// version bump — exactly like ErrFXRateMissing.
+	ErrFXRateExpired = errors.New("ledger: FX rate for currency pair has expired")
 	// ErrFXAccountNotConfigured is returned when a cross-currency
 	// transfer needs an FX clearing account and neither the transfer nor
 	// the ledger configured one. It is a 400-class error: the caller can
@@ -94,12 +102,22 @@ type fxPair struct {
 // (structural change, not a posting, so it does not bump the version);
 // receipts disclose the rate that converted them together with this
 // version for auditability.
+//
+// ExpiresAt is the rate's expiry: a cross-currency transfer posted at or
+// after ExpiresAt is rejected with ErrFXRateExpired — a stale rate is
+// never applied silently. The zero time means the rate never expires
+// (the behavior of SetFXRate and the LEDGER_FX_RATES startup config).
+// Expiry is wall-clock time, checked against the transfer's post time;
+// like every other piece of structural config it survives
+// ExportSnapshot/ImportSnapshot, so a restored ledger enforces the same
+// expiry the original would have.
 type ExchangeRate struct {
-	FromCurrency     string `json:"from_currency"`
-	ToCurrency       string `json:"to_currency"`
-	Num              int64  `json:"num"`
-	Den              int64  `json:"den"`
-	EffectiveVersion uint64 `json:"effective_version"`
+	FromCurrency     string    `json:"from_currency"`
+	ToCurrency       string    `json:"to_currency"`
+	Num              int64     `json:"num"`
+	Den              int64     `json:"den"`
+	EffectiveVersion uint64    `json:"effective_version"`
+	ExpiresAt        time.Time `json:"expires_at,omitempty"`
 }
 
 // WithFXAccount configures the ledger-wide FX clearing account used as
@@ -155,6 +173,81 @@ func (l *Ledger) SetFXRate(from, to string, num, den int64) error {
 		EffectiveVersion: l.version,
 	}
 	return nil
+}
+
+// SetFXRateRat installs (or replaces) the conversion rate for the
+// directional pair (from, to) from an exact rational: converting X cents
+// of fromCurrency books floor(X * num / den) cents of toCurrency, where
+// num/den is rate reduced to lowest terms by math/big.
+//
+// Decimal rates are exact here, which is the whole point of the big.Rat
+// path: a rate parsed from "1.10" is exactly 11/10, while the same rate
+// rounded through float64 would be 1.1000000000000000888 — a ratio no
+// integer num/den pair represents, so float64 can never name it. Use
+// ParseFXRateDecimal to turn operator-supplied decimal strings into the
+// *big.Rat this takes.
+//
+// ttl is the rate's lifetime: a non-positive ttl means the rate never
+// expires (same as SetFXRate); a positive ttl sets ExpiresAt to now+ttl,
+// after which cross-currency transfers for the pair are rejected with
+// ErrFXRateExpired instead of converting at a stale rate. A nil or
+// non-positive rate, a ratio whose reduced numerator or denominator does
+// not fit int64, and a negative ttl are rejected with ErrInvalidFXRate.
+//
+// Like SetFXRate, this is a structural change: it takes the write lock,
+// does not bump the ledger version, and survives ExportSnapshot/
+// ImportSnapshot (expiry included).
+func (l *Ledger) SetFXRateRat(from, to string, rate *big.Rat, ttl time.Duration) error {
+	if rate == nil || rate.Sign() <= 0 {
+		return fmt.Errorf("%w: rate must be positive", ErrInvalidFXRate)
+	}
+	// Num/Denom return the reduced numerator and denominator: the exact
+	// ratio, with no float rounding anywhere in the pipeline.
+	num, den := rate.Num(), rate.Denom()
+	if !num.IsInt64() || !den.IsInt64() {
+		return fmt.Errorf("%w: rate %s/%s does not fit int64", ErrInvalidFXRate, num, den)
+	}
+	f, t, err := normalizeFXRate(from, to, num.Int64(), den.Int64())
+	if err != nil {
+		return err
+	}
+	if ttl < 0 {
+		return fmt.Errorf("%w: ttl must not be negative", ErrInvalidFXRate)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	er := ExchangeRate{
+		FromCurrency:     f,
+		ToCurrency:       t,
+		Num:              num.Int64(),
+		Den:              den.Int64(),
+		EffectiveVersion: l.version,
+	}
+	if ttl > 0 {
+		er.ExpiresAt = time.Now().Add(ttl)
+	}
+	l.fxRates[fxPair{from: f, to: t}] = er
+	return nil
+}
+
+// ParseFXRateDecimal parses a decimal rate string ("1.10", "7.2015",
+// "0.85") into an exact *big.Rat for SetFXRateRat. The result is the
+// mathematically exact decimal — "1.10" is 11/10, not the nearest
+// float64 — so the booked conversion is exactly what the operator typed.
+// big.Rat's SetString also accepts "a/b" fractions and exponents; the
+// only hard requirements are that the string parses and the value is
+// positive. An empty or unparsable string, or a non-positive value, is an
+// error.
+func ParseFXRateDecimal(s string) (*big.Rat, error) {
+	s = strings.TrimSpace(s)
+	r, ok := new(big.Rat).SetString(s)
+	if !ok {
+		return nil, fmt.Errorf("%w: cannot parse decimal rate %q", ErrInvalidFXRate, s)
+	}
+	if r.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: rate must be positive", ErrInvalidFXRate)
+	}
+	return r, nil
 }
 
 // RemoveFXRate deletes the conversion rate for (from, to). Cross-currency
@@ -305,18 +398,21 @@ func fxConvertCents(amount, num, den int64) (int64, bool) {
 }
 
 // FXConversion discloses how a cross-currency transfer was converted: the
-// rate that applied (with the ledger version at which it took effect) and
-// the settled target-currency amount. It is carried on TransferReceipt
-// for the original posting; idempotent replays return FX == nil, because
-// the rate table may have changed since — the replayed journal entries
-// are the authoritative record.
+// rate that applied (with the ledger version at which it took effect and
+// the rate's expiry, when the rate carries one) and the settled amounts on
+// both sides — SourceCents before conversion, ConvertedCents after. It is
+// carried on TransferReceipt for the original posting; idempotent replays
+// return FX == nil, because the rate table may have changed since — the
+// replayed journal entries are the authoritative record.
 type FXConversion struct {
-	FromCurrency     string `json:"from_currency"`
-	ToCurrency       string `json:"to_currency"`
-	RateNum          int64  `json:"rate_num"`
-	RateDen          int64  `json:"rate_den"`
-	ConvertedCents   int64  `json:"converted_cents"`
-	EffectiveVersion uint64 `json:"effective_version"`
+	FromCurrency     string    `json:"from_currency"`
+	ToCurrency       string    `json:"to_currency"`
+	SourceCents      int64     `json:"source_cents"`
+	RateNum          int64     `json:"rate_num"`
+	RateDen          int64     `json:"rate_den"`
+	ConvertedCents   int64     `json:"converted_cents"`
+	EffectiveVersion uint64    `json:"effective_version"`
+	RateExpiresAt    time.Time `json:"rate_expires_at,omitempty"`
 }
 
 // postTransferFXLocked records a cross-currency transfer: t.Currency is
@@ -352,6 +448,14 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	rate, ok := l.fxRates[fxPair{from: t.Currency, to: toCurrency}]
 	if !ok {
 		return TransferReceipt{}, ErrFXRateMissing
+	}
+	// A rate past its expiry is never applied silently: the transfer is
+	// rejected until the operator installs a fresh rate. The check runs
+	// against the transfer's post time and after the idempotency replay
+	// check above, so replaying a key posted while the rate was live
+	// still returns the original receipt.
+	if !rate.ExpiresAt.IsZero() && !now.Before(rate.ExpiresAt) {
+		return TransferReceipt{}, ErrFXRateExpired
 	}
 	fxAccount := t.FXAccount
 	if fxAccount == "" {
@@ -468,8 +572,18 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 			"amount_cents":    t.AmountCents,
 			"currency":        t.Currency,
 			"to_currency":     toCurrency,
+			"source_cents":    t.AmountCents,
 			"converted_cents": converted,
-			"fee_cents":       feeCents,
+			"rate_num":        rate.Num,
+			"rate_den":        rate.Den,
+			// The conversion's full provenance, sealed by the audit log's
+			// hash chain (see audit.go): the pre-conversion amount, the
+			// post-conversion amount, and the exact rate that produced
+			// it. The journal's own audit chain already carries both
+			// legs (the /fx leg books the source amount, the principal
+			// the converted amount); this event binds them to the rate.
+			"rate_effective_version": rate.EffectiveVersion,
+			"fee_cents":              feeCents,
 		},
 	})
 
@@ -483,10 +597,12 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		FX: &FXConversion{
 			FromCurrency:     t.Currency,
 			ToCurrency:       toCurrency,
+			SourceCents:      t.AmountCents,
 			RateNum:          rate.Num,
 			RateDen:          rate.Den,
 			ConvertedCents:   converted,
 			EffectiveVersion: rate.EffectiveVersion,
+			RateExpiresAt:    rate.ExpiresAt,
 		},
 	}, nil
 }

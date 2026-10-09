@@ -889,6 +889,7 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			Num:              r.Num,
 			Den:              r.Den,
 			EffectiveVersion: r.EffectiveVersion,
+			ExpiresAt:        r.ExpiresAt,
 		}
 	}
 

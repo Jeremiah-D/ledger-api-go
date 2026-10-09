@@ -477,6 +477,36 @@ disaster-recovery snapshots (with their effective versions) and are
 listed in the `POST /reconcile` report's `fx_rates` section. Cross-currency
 attempts are counted in `ledger_fx_transfers_total`.
 
+#### Exact decimal rates and rate expiry (`SetFXRateRat`)
+
+`SetFXRate(num, den)` takes an integer ratio; `SetFXRateRat(from, to,
+rate *big.Rat, ttl)` takes an **exact rational** plus an optional
+lifetime. Decimal rates are exact here — a rate parsed from `"1.10"` is
+exactly `11/10`, while the same rate rounded through `float64` would be
+`1.1000000000000000888`, a ratio no integer pair represents. Use
+`ParseFXRateDecimal` to turn operator-supplied decimal strings into the
+`*big.Rat` it takes; a ratio that does not fit `int64` is rejected rather
+than silently truncated.
+
+A positive `ttl` gives the rate an expiry (`ExpiresAt`): a cross-currency
+transfer posted at or after the expiry is rejected with `422`
+`{"error":"ledger: FX rate for currency pair has expired"}` — a stale
+rate is never applied silently. Installing a fresh rate unblocks the pair;
+`RemoveFXRate` works as before. The idempotency replay check runs before
+the rate lookup, so replaying a key posted while the rate was live still
+returns the original receipt after expiry. Expiry survives snapshots, is
+visible via `FXRate()`, and expired-rate rejections are counted in
+`ledger_currency_rejections_total`.
+
+The receipt's `fx` field now discloses both sides of the conversion —
+`source_cents` (pre-conversion) and `converted_cents` (post-conversion) —
+plus the rate's expiry when the rate carries one; the structured audit
+log's `transfer` event seals the same provenance (`source_cents`,
+`converted_cents`, `rate_num`, `rate_den`, `rate_effective_version`) in
+its hash-chained `Details`, binding the journal's two legs (the `/fx` leg
+books the source amount, the principal the converted amount) to the exact
+rate that produced them.
+
 Two read-path notes: `GET /accounts/{id}/balance` and
 `GET /accounts/{id}/snapshot` keep their historical meaning — the
 **default-currency** balance — so existing consumers are unaffected; use

@@ -54,7 +54,8 @@ type Metrics struct {
 	DailyLimitRejections atomic.Uint64
 	// CurrencyRejections counts POST /entries, POST /entries/batch, and
 	// POST /transfers requests rejected for currency reasons: a malformed
-	// currency code (400) or a cross-currency transfer (422).
+	// currency code (400), a cross-currency transfer (422), or an expired
+	// FX rate (422).
 	CurrencyRejections atomic.Uint64
 	// FXTransfersTotal counts POST /transfers requests that attempted a
 	// cross-currency transfer (all attempts, including rejected ones).
@@ -210,7 +211,7 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected because they would have taken the account's daily outflow above its configured limit.",
 		m.DailyLimitRejections.Load())
 	writeCounter(&sb, "ledger_currency_rejections_total",
-		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected for currency reasons: malformed currency code or cross-currency transfer.",
+		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected for currency reasons: malformed currency code, cross-currency transfer, or expired FX rate.",
 		m.CurrencyRejections.Load())
 	writeCounter(&sb, "ledger_fx_transfers_total",
 		"Total POST /transfers requests that attempted a cross-currency transfer, including rejected ones.",
