@@ -807,6 +807,41 @@ func (s *server) handleVerifyEntries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "links": links, "head": head})
 }
 
+// handleAuditVerify implements GET /audit/verify: the operator-facing
+// integrity check for the structured audit log's hash chain (LG-32). It
+// replays every audit file — the current file plus history in time
+// order, including .gz archives — recomputing each entry's SHA-256 seal
+// and reporting the first break with its exact position:
+//
+//	200 {"ok":true,"checked_entries":128,"skipped_lines":0,
+//	     "files_checked":3,"head":"9f2c…","first_break":null}
+//	200 {"ok":false,...,"first_break":{"file":"audit-2026-10-09.jsonl",
+//	     "line":42,"entry_id":"tr-7","expected_prev":"ab…",
+//	     "actual_prev":"cd…","reason":"prev_mismatch"},...}
+//
+// Like POST /reconcile, an unhealthy finding is still a successful
+// request: the findings live in the body, so the status is always 200.
+// Corrupt lines are skipped and disclosed as skipped_lines — a skip is
+// not a break. Without LEDGER_AUDIT_DIR there is nothing to verify, so
+// the endpoint 404s fail-closed.
+func (s *server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
+	dir, ok := s.ledger.AuditDir()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "audit log disabled"})
+		return
+	}
+	s.metrics.AuditVerifyTotal.Add(1)
+	rep, err := ledger.VerifyAuditLog(dir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if !rep.Ok {
+		s.metrics.AuditVerifyBreaks.Add(1)
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
 // handleFreezeAccount implements POST /accounts/{id}/freeze: the
 // operator-facing risk-control stop. A frozen account rejects every new
 // POST /entries that names it as either leg with 403, while balance,
@@ -949,6 +984,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
+	mux.HandleFunc("GET /audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)

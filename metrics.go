@@ -106,6 +106,14 @@ type Metrics struct {
 	// queue was full or the log was closed. A growing value means the
 	// disk cannot keep up — alert on it.
 	AuditDroppedTotal atomic.Uint64
+	// AuditVerifyTotal counts GET /audit/verify requests that executed
+	// a full hash-chain verification of the structured audit log.
+	AuditVerifyTotal atomic.Uint64
+	// AuditVerifyBreaks counts audit-log hash-chain verifications that
+	// found a broken chain (the first break is reported in the
+	// response body). Any nonzero value is an integrity incident —
+	// alert on it.
+	AuditVerifyBreaks atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -176,6 +184,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_audit_dropped_total",
 		"Total audit-log events dropped because the async queue was full or the log was closed.",
 		m.AuditDroppedTotal.Load())
+	writeCounter(&sb, "ledger_audit_verify_total",
+		"Total GET /audit/verify requests that executed a full hash-chain verification of the structured audit log.",
+		m.AuditVerifyTotal.Load())
+	writeCounter(&sb, "ledger_audit_verify_breaks_total",
+		"Total audit-log hash-chain verifications that found a broken chain.",
+		m.AuditVerifyBreaks.Load())
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
 		"Total POST /entries, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())

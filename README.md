@@ -788,9 +788,23 @@ of who did what, when, and what changed. Disabled by default; set
 {"ts":"2026-10-09T04:36:23.592704067Z","op":"merge","actor":"PostMerge",
  "trace_id":"merge-2026-10-09","version_before":1,"version_after":2,
  "entry_ids":["merge-2026-10-09/USD"],"accounts":["old-corp","new-corp"],
- "details":{"legs":1}}
+ "details":{"legs":1},
+ "prev_hash":"0000000000000000000000000000000000000000000000000000000000000000",
+ "hash":"9f2c…"}
 ```
 
+- `prev_hash` / `hash` — the tamper-evident hash chain (LG-32): every
+  event is sealed at enqueue time with the previous event's hex SHA-256
+  (`prev_hash`) and its own seal
+  `hash = SHA-256(canonical(entry) || prev_hash)` (standard library
+  only; the first entry links the all-zero genesis marker). The link is
+  assigned under a mutex at the single ordered enqueue point, so the
+  async writer's flush order can never break the chain; a new file's
+  first entry points at the previous file's last seal, so rotation and
+  gzip archiving carry the chain across files unchanged, and a restart
+  recovers the head from the newest sealed entry on disk. Any rewrite,
+  deletion, or reorder breaks recomputation — verify with
+  `GET /audit/verify`.
 - `op` — the operation (`post`, `transfer`, `sweep`, `merge`, `hold`,
   `hold_capture`, `hold_release`, `hold_expire`, `freeze`, `unfreeze`,
   `reconcile`).
@@ -824,6 +838,38 @@ so a `.jsonl` and its `.gz` twin always carry identical events.
 `ledger.ReadAuditLog(dir, "2006-01-02")` reads a day's files (plain and
 gzipped, in order) and skips malformed lines — a damaged audit file never
 fails the read; corrupt lines are counted and reported.
+
+### `GET /audit/verify`
+
+Replays the audit log's hash chain over every audit file — all days,
+oldest first, current file plus history including `.gz` archives — and
+reports whether it is intact. Each entry's `prev_hash` must equal the
+previous entry's `hash`, and each `hash` must recompute from the entry's
+canonical serialization; the first entry must link the all-zero genesis
+marker. Verification stops at the first break (everything after a broken
+link would cascade), and rotation boundaries verify like any other link
+because the chain spans files by design.
+
+```bash
+curl -s localhost:8080/audit/verify
+# {"ok":true,"checked_entries":128,"skipped_lines":0,"files_checked":3,
+#  "head":"9f2c…","first_break":null}
+# {"ok":false,...,"first_break":{"file":"audit-2026-10-09.jsonl","line":42,
+#  "entry_id":"tr-7","expected_prev":"ab…","actual_prev":"cd…",
+#  "reason":"prev_mismatch"},...}
+```
+
+- `200 {"ok":true,…}` — the chain is intact; `head` is the last seal.
+- `200 {"ok":false,"first_break":{…}}` — the chain is broken; `reason`
+  is `hash_mismatch` (entry edited in place), `prev_mismatch` (entry
+  deleted / files reordered), or `missing_hash` (seal stripped). Like
+  `POST /reconcile`, an unhealthy finding is still a 200 — the findings
+  live in the body. `skipped_lines` discloses corrupt lines, which are
+  skipped, never breaks.
+- `404 {"error":"audit log disabled"}` — no `LEDGER_AUDIT_DIR`
+  configured; fail-closed.
+- Counted by `ledger_audit_verify_total` /
+  `ledger_audit_verify_breaks_total` — alert on any nonzero breaks.
 
 ### `GET /metrics`
 
@@ -864,6 +910,11 @@ curl -s localhost:8080/metrics
 - `ledger_audit_dropped_total` — audit-log events dropped because the
   async queue was full or the log was closed. A growing value means the
   disk cannot keep up — alert on it.
+- `ledger_audit_verify_total` — `GET /audit/verify` requests that
+  executed a full hash-chain verification of the audit log.
+- `ledger_audit_verify_breaks_total` — verifications that found a broken
+  audit-log hash chain. Any nonzero value is an integrity incident —
+  alert on it.
 - `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
   served. Snapshot reads are not counted.
 - `ledger_balance_at_queries_total` — `GET /accounts/{id}/balance-at`
@@ -1000,8 +1051,10 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics
 │   ├── snapshot.go            # disaster-recovery snapshots: JSONL export / verified import (entries + chain + holds + idempotency registries + config)
 │   ├── ledger_dr_test.go      # snapshot round-trip, tamper/splice rejection, reconcile-rerun parity
-│   ├── audit.go               # structured compliance audit log: async JSONL writer, daily + size rotation, gzip, corrupt-line-skipping reader
+│   ├── audit.go               # structured compliance audit log: async JSONL writer, daily + size rotation, gzip, corrupt-line-skipping reader, hash-chain sealing at enqueue
+│   ├── audit_chain.go         # SHA-256 audit-log hash chain: canonical seal, full-chain verifier (VerifyAuditLog), restart head recovery
 │   ├── ledger_audit_test.go   # audit event shapes, rotation/gzip, corrupt-line skipping, read-path silence, concurrency
+│   ├── ledger_audit_chain_test.go # hash-chain sealing/linking, tamper + deletion detection, rotation/gzip continuity, corrupt-line skipping, restart recovery
 │   ├── merge.go               # PostMerge: atomic account merge (all currencies → target, debt absorption) + source freeze
 │   ├── ledger_merge_test.go   # merge legs/freeze/idempotency/overdraft/TTL, snapshot + incremental round-trips
 │   ├── timetravel.go          # BalanceAt: point-in-time balance at a ledger version (audit-chain prefix scan)

@@ -53,6 +53,19 @@ type AuditEvent struct {
 	EntryIDs      []string       `json:"entry_ids,omitempty"`
 	Accounts      []AccountID    `json:"accounts,omitempty"`
 	Details       map[string]any `json:"details,omitempty"`
+	// PrevHash links this entry to the previous one: the hex SHA-256
+	// seal of the entry sealed immediately before it (LG-32). The
+	// first entry of the log carries AuditGenesisPrevHash. Because
+	// the link is assigned at enqueue time, it survives daily and
+	// size rotations — a new file's first entry points at the
+	// previous file's last entry — and gzip archiving.
+	PrevHash string `json:"prev_hash"`
+	// Hash is the hex SHA-256 seal of this entry: SHA-256 over the
+	// entry's canonical serialization (fixed field order, excluding
+	// Hash itself) concatenated with PrevHash. Any rewrite of the
+	// entry's content, or any deletion/reorder in the log, breaks
+	// the recomputation — see VerifyAuditLog.
+	Hash string `json:"hash"`
 }
 
 // DefaultAuditMaxBytes is the default per-file size cap for audit files:
@@ -110,6 +123,16 @@ func WithAuditLogQueueSize(n int) AuditLogOption {
 // line per event, from a background goroutine. Ledger operations enqueue
 // with Log (non-blocking); the writer owns all file state.
 //
+// Hash chain (LG-32): every event is sealed at enqueue time with the
+// hex SHA-256 of the previously sealed event (PrevHash) and its own
+// seal (Hash = SHA-256(canonical entry || PrevHash), standard library
+// only). The chain is assigned under a mutex at the single ordered
+// enqueue point, so the async writer's flush order can never break it;
+// rotation (daily/size) and gzip archiving carry the chain across files
+// unchanged, and a restart recovers the head from the newest sealed
+// entry on disk. GET /audit/verify replays the whole chain and reports
+// the first break.
+//
 // Rotation: a new file starts each UTC day, and whenever the current file
 // reaches the size cap. Rotated files are gzipped in the background
 // (audit-2006-01-02.jsonl.gz) so the directory stays compact; the writer
@@ -119,7 +142,10 @@ func WithAuditLogQueueSize(n int) AuditLogOption {
 // (Dropped) but never panics and never propagates to the ledger
 // operation — the audit trail is best-effort by design, and a dead disk
 // must not take down posting. Each event is a single Write syscall, so
-// lines are never torn under normal operation.
+// lines are never torn under normal operation. Note that a write-time
+// drop leaves a gap the hash chain will surface: verification reports
+// the first missing link, which is the honest tamper-evident signal for
+// lost events.
 type AuditLog struct {
 	dir      string
 	maxBytes int64
@@ -130,6 +156,14 @@ type AuditLog struct {
 	closed   atomic.Bool
 	written  atomic.Uint64
 	dropped  atomic.Uint64
+	// chainMu serializes hash-chain sealing: the single ordered point
+	// where an event's PrevHash/Hash are assigned, before enqueue.
+	// The mutex (not the async writer) owns the ordering, so flush
+	// order can never break the chain. chainHead is the hex seal of
+	// the last sealed-and-enqueued event; empty means the genesis
+	// marker applies.
+	chainMu   sync.Mutex
+	chainHead string
 }
 
 // NewAuditLog creates the audit directory (if needed) and starts the
@@ -149,6 +183,10 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 		queue:    make(chan AuditEvent, cfg.queueSize),
 		done:     make(chan struct{}),
 	}
+	// Recover the hash-chain head from the newest sealed entry on
+	// disk (bounded scan), so a restart continues the chain instead
+	// of breaking it at the first new event.
+	a.chainHead = recoverAuditChainHead(dir)
 	a.wg.Add(1)
 	go a.run()
 	return a, nil
@@ -157,16 +195,38 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 // Log enqueues an event for asynchronous writing. It never blocks: when
 // the queue is full, or the log is closed, the event is dropped, counted,
 // and Log returns false.
+//
+// The event is hash-chain sealed here, under chainMu, before enqueue:
+// PrevHash is the previous sealed event's hash (or the genesis marker),
+// and Hash seals this event's canonical serialization. Sealing at the
+// single ordered enqueue point — not in the background writer — means
+// async flush order can never reorder or break the chain. A dropped
+// event does not advance the chain head, so the on-disk chain stays
+// contiguous over exactly the events that were enqueued.
 func (a *AuditLog) Log(ev AuditEvent) bool {
 	if a.closed.Load() {
 		a.dropped.Add(1)
 		return false
 	}
+	a.chainMu.Lock()
+	if ev.Timestamp.IsZero() {
+		ev.Timestamp = time.Now().UTC()
+	}
+	ev.Timestamp = ev.Timestamp.UTC()
+	if a.chainHead == "" {
+		ev.PrevHash = AuditGenesisPrevHash
+	} else {
+		ev.PrevHash = a.chainHead
+	}
+	ev.Hash = sealAuditEvent(ev)
 	select {
 	case a.queue <- ev:
+		a.chainHead = ev.Hash
+		a.chainMu.Unlock()
 		return true
 	default:
 		a.dropped.Add(1)
+		a.chainMu.Unlock()
 		return false
 	}
 }
@@ -180,6 +240,16 @@ func (a *AuditLog) Stats() (written, dropped uint64) {
 
 // Dir returns the audit directory.
 func (a *AuditLog) Dir() string { return a.dir }
+
+// AuditDir reports the audit-log directory when a log is attached
+// (WithAuditLog was used). It lets the HTTP layer run hash-chain
+// verification without reaching into the ledger's internals.
+func (l *Ledger) AuditDir() (string, bool) {
+	if l.audit == nil {
+		return "", false
+	}
+	return l.audit.Dir(), true
+}
 
 // Close stops the writer after draining the queue, waits for in-flight
 // background gzips to finish (so the file set is stable for readers
