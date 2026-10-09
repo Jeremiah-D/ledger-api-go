@@ -89,7 +89,7 @@ func exportLines(t *testing.T, l *Ledger) []string {
 }
 
 func TestSnapshotRoundTripRichLedger(t *testing.T) {
-	now := time.Date(2026, 10, 8, 23, 0, 0, 0, time.UTC)
+	now := time.Now().Truncate(time.Second)
 	src := buildRichLedger(t, now)
 
 	// Export determinism: identical state exports to identical bytes,
@@ -271,7 +271,7 @@ func importMustFail(t *testing.T, raw []byte, wantSub string) {
 }
 
 func TestSnapshotImportRejectsTamperedAmount(t *testing.T) {
-	now := time.Date(2026, 10, 8, 23, 0, 0, 0, time.UTC)
+	now := time.Now().Truncate(time.Second)
 	raw := exportBytes(t, buildRichLedger(t, now))
 	// Rewrite the amount consistently in both the journal and the
 	// idempotency registry, so the tamper reaches the chain check: the
@@ -295,7 +295,7 @@ func TestSnapshotImportRejectsTamperedAmount(t *testing.T) {
 }
 
 func TestSnapshotImportRejectsTamperedLinkHash(t *testing.T) {
-	now := time.Date(2026, 10, 8, 23, 0, 0, 0, time.UTC)
+	now := time.Now().Truncate(time.Second)
 	raw := exportBytes(t, buildRichLedger(t, now))
 	tampered := tamperLine(t, raw,
 		func(m map[string]any) bool { return m["record"] == "link" && m["seq"] == float64(2) },
@@ -313,7 +313,7 @@ func TestSnapshotImportRejectsTamperedLinkHash(t *testing.T) {
 }
 
 func TestSnapshotImportRejectsSplicedLink(t *testing.T) {
-	now := time.Date(2026, 10, 8, 23, 0, 0, 0, time.UTC)
+	now := time.Now().Truncate(time.Second)
 	raw := exportBytes(t, buildRichLedger(t, now))
 	tampered := tamperLine(t, raw,
 		func(m map[string]any) bool { return m["record"] == "link" && m["seq"] == float64(2) },
@@ -322,7 +322,7 @@ func TestSnapshotImportRejectsSplicedLink(t *testing.T) {
 }
 
 func TestSnapshotImportRejectsReorderedJournal(t *testing.T) {
-	now := time.Date(2026, 10, 8, 23, 0, 0, 0, time.UTC)
+	now := time.Now().Truncate(time.Second)
 	raw := exportBytes(t, buildRichLedger(t, now))
 	tampered := tamperLine(t, raw,
 		func(m map[string]any) bool { return m["record"] == "link" && m["seq"] == float64(3) },
@@ -331,7 +331,7 @@ func TestSnapshotImportRejectsReorderedJournal(t *testing.T) {
 }
 
 func TestSnapshotImportRejectsStructuralCorruption(t *testing.T) {
-	now := time.Date(2026, 10, 8, 23, 0, 0, 0, time.UTC)
+	now := time.Now().Truncate(time.Second)
 	good := exportBytes(t, buildRichLedger(t, now))
 
 	importMustFail(t, []byte("this is not json\n"), "")
