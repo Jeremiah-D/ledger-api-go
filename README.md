@@ -283,6 +283,39 @@ The reconcile report lists frozen accounts (`frozen_accounts`), and each
 trial balance carries a `frozen` flag, so the day-end job shows which
 accounts were stopped.
 
+### Period close (`POST /periods/{id}/close` / `POST /periods/{id}/reopen`)
+
+Accounting-period lock for month-end close (fintech compliance). A period
+is a UTC calendar month (`"YYYY-MM"`); closing it locks the books for that
+month: every journal-writing operation — `POST /entries`,
+`POST /entries/batch`, `POST /transfers`, `POST /sweeps`, `POST /merges`,
+hold capture — rejects an entry whose timestamp falls in the closed month
+with `422` (`ErrPeriodClosed`). A posting dated in any open month keeps
+working, and reads (balances, snapshots, trial balances, the audit chain,
+reconcile) are unaffected — a closed month is final, not invisible.
+
+Closing is idempotent, and reopening a never-closed period is a no-op.
+Neither bumps the ledger version (no money moves), but both are recorded
+in the structured audit log's hash chain (`period_close` / `period_reopen`
+events) so the lock action itself is tamper-evident. Replays are exempt:
+an idempotency key posted before the close still replays to its original
+entry after the close, because the replay books nothing new — the same
+replay-first ordering as frozen accounts. The close applies to the entry's
+timestamp, not the account, so backdated postings into a closed month are
+rejected while current-month traffic continues.
+
+```bash
+curl -s -X POST localhost:8080/periods/2025-05/close
+# {"period":"2025-05","closed":true}
+# ... POST /entries with a May timestamp now returns 422 ...
+curl -s -X POST localhost:8080/periods/2025-05/reopen
+# {"period":"2025-05","closed":false}
+```
+
+The reconcile report lists the locked periods (`closed_periods`), and
+period locks survive disaster-recovery snapshots like the frozen-account
+list — a restore never silently reopens a closed month.
+
 ### Overdraft protection
 
 Per-account guard against negative balances (fintech risk control —
@@ -971,6 +1004,10 @@ curl -s localhost:8080/metrics
   fee legs.
 - `ledger_fx_transfers_total` — `POST /transfers` requests that attempted
   a cross-currency transfer, including rejected ones.
+- `ledger_period_rejections_total` — journal-writing requests rejected
+  with `422` because the entry's timestamp fell in a closed accounting
+  period (`POST /entries`, `POST /entries/batch`, `POST /transfers`,
+  `POST /sweeps`, `POST /merges`, `POST /holds/{id}/capture`).
 - `ledger_sweeps_total` — every `POST /sweeps` request received.
 - `ledger_sweep_idempotency_hits_total` — sweeps that replayed an existing
   idempotency key (returned the original receipt, booked nothing).

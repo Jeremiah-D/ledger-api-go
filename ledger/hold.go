@@ -491,6 +491,15 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		return CaptureReceipt{}, ErrAccountOverdraft
 	}
 
+	// The period gate is keyed on the capture entry's final timestamp
+	// (see period.go): a capture posting into a closed accounting period
+	// is rejected with ErrPeriodClosed. It runs after the idempotency
+	// replay check above, so replaying a capture key posted before the
+	// period closed returns the original receipt.
+	if err := l.periodRejectedLocked(entry.CreatedAt); err != nil {
+		return CaptureReceipt{}, err
+	}
+
 	l.maybePruneIdempotencyKeys(now)
 	versionBefore := l.version
 	l.commitEntryLocked(entry)

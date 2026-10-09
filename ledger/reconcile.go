@@ -127,6 +127,12 @@ type ReconciliationReport struct {
 	// frozen — the frozen_accounts list in this report shows the
 	// resulting stops.
 	Merges []AccountMerge `json:"merges"`
+	// ClosedPeriods lists the currently locked accounting periods
+	// ("YYYY-MM", UTC months; see ClosePeriod), sorted: no journal entry
+	// may be booked with a timestamp in one of these months, so the
+	// report's figures for those months are final. Risk and compliance
+	// tooling reads this to know which periods are immutable.
+	ClosedPeriods []string `json:"closed_periods"`
 	// FXApplied is true when the report carries the opt-in base-currency
 	// summary (see ReconcileOptions.BaseCurrency); false on a plain scan.
 	FXApplied bool `json:"fx_applied"`
@@ -286,6 +292,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		HeldTotals:                 l.heldTotalsLocked(now),
 		FXRates:                    l.fxRatesLocked(),
 		Merges:                     l.mergesLocked(),
+		ClosedPeriods:              l.closedPeriodsLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit

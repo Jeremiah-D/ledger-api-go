@@ -175,6 +175,12 @@ type snapshotConfigLine struct {
 	// conversion provenance as the original.
 	FXRates   []ExchangeRate `json:"fx_rates,omitempty"`
 	FXAccount AccountID      `json:"fx_account,omitempty"`
+	// ClosedPeriods carries the locked accounting periods ("YYYY-MM",
+	// see ClosePeriod); absent in snapshots written before period locks
+	// existed. A restore that dropped the locks would reopen closed
+	// months, so periods are part of the operational config like the
+	// frozen-account list.
+	ClosedPeriods []string `json:"closed_periods,omitempty"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -419,6 +425,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		DailyLimits:        l.dailyLimitsLocked(),
 		FXRates:            l.fxRatesLocked(),
 		FXAccount:          l.fxAccount,
+		ClosedPeriods:      l.closedPeriodsLocked(),
 	}
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -892,6 +899,14 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			ExpiresAt:        r.ExpiresAt,
 		}
 	}
+	// Closed periods are validated like every other config row: a
+	// malformed period ID in the snapshot fails the import instead of
+	// silently unlocking a month.
+	for _, id := range cfg.ClosedPeriods {
+		if err := validatePeriodID(id); err != nil {
+			return bad("bad closed period %q: %v", id, err)
+		}
+	}
 
 	// Apply: every row above checked out.
 	for _, a := range cfg.Frozen {
@@ -921,6 +936,11 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	l.fxRates = fx
 	l.fxAccount = cfg.FXAccount
+	// Closed periods are additive like the frozen-account list: a period
+	// locked in the snapshot must stay locked after the restore.
+	for _, id := range cfg.ClosedPeriods {
+		l.closedPeriods[id] = true
+	}
 	return nil
 }
 

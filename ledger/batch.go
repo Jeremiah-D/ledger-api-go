@@ -197,6 +197,20 @@ func (l *Ledger) PostBatch(b Batch) (BatchReceipt, error) {
 		}
 	}
 
+	// 5b. Period gate: a batch entry whose final timestamp lands in a
+	// closed accounting period rejects the whole batch (see period.go).
+	// Replays are exempt — they book nothing new, so they must not fail
+	// on a period that closed after the original posting. CreatedAt was
+	// finalized in step 1.
+	for i := range entries {
+		if replayed[i] {
+			continue
+		}
+		if err := l.periodRejectedLocked(entries[i].CreatedAt); err != nil {
+			return BatchReceipt{}, err
+		}
+	}
+
 	// 6. Overdraft simulation in batch order: each new entry's credit
 	// leg is checked against the account's balance as the batch's
 	// earlier entries left it. A protected payer cannot dodge the guard

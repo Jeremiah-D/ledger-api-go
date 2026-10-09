@@ -194,16 +194,25 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 		}
 	}
 
+	// The period gate is keyed on the sweep's effective post time (see
+	// period.go): a backdated sweep landing in a closed accounting period
+	// is rejected with ErrPeriodClosed. It runs after the idempotency
+	// replay check above, so replaying a key swept before the period
+	// closed returns the original receipt.
+	createdAt := s.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	if err := l.periodRejectedLocked(createdAt); err != nil {
+		return SweepReceipt{}, err
+	}
+
 	// Atomic commit: every leg's journal row, per-account index entries,
 	// balances, totals, chain links, and version bumps land together,
 	// under the one write lock, after all checks passed. Any failure
 	// above returned before the first mutation, so there is nothing to
 	// roll back.
 	now := time.Now()
-	createdAt := s.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = now
-	}
 	l.maybePruneIdempotencyKeys(now)
 	versionBefore := l.version
 	entries := make([]JournalEntry, 0, len(legs))

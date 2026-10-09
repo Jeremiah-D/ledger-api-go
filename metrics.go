@@ -60,6 +60,11 @@ type Metrics struct {
 	// FXTransfersTotal counts POST /transfers requests that attempted a
 	// cross-currency transfer (all attempts, including rejected ones).
 	FXTransfersTotal atomic.Uint64
+	// PeriodRejections counts journal-writing requests rejected with 422
+	// because the entry's timestamp fell in a closed accounting period:
+	// POST /entries, POST /entries/batch, POST /transfers, POST /sweeps,
+	// POST /merges, and POST /holds/{id}/capture.
+	PeriodRejections atomic.Uint64
 	// HoldsTotal counts POST /holds requests received (all attempts,
 	// including duplicates and rejected payloads).
 	HoldsTotal atomic.Uint64
@@ -216,6 +221,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_fx_transfers_total",
 		"Total POST /transfers requests that attempted a cross-currency transfer, including rejected ones.",
 		m.FXTransfersTotal.Load())
+	writeCounter(&sb, "ledger_period_rejections_total",
+		"Total journal-writing requests rejected because the entry's timestamp fell in a closed accounting period: POST /entries, POST /entries/batch, POST /transfers, POST /sweeps, POST /merges, and POST /holds/{id}/capture.",
+		m.PeriodRejections.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

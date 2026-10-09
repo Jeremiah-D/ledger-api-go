@@ -376,9 +376,12 @@ func parseTieredFeeSchedule(spec, account string, fail func(string, ...any) ([]F
 // because the replay books nothing new), then the frozen check on every
 // account the transfer touches (payer, payee, and fee account), then the
 // overdraft check on the payer against its total outflow (amount + fee),
-// then the daily outflow limit check on the same total outflow. Rejected
+// then the daily outflow limit check on the same total outflow, then the
+// period gate (see period.go): a backdated transfer landing in a closed
+// accounting period is rejected with ErrPeriodClosed. Rejected
 // transfers — validation failures, ID conflicts, frozen rejections,
-// overdraft rejections, and daily-limit rejections alike — record
+// overdraft rejections, daily-limit rejections, and closed-period
+// rejections alike — record
 // nothing: no journal rows, no chain links, no version bump.
 //
 // Idempotency shares the ledger-wide key namespace with Post: a key already
@@ -482,6 +485,19 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	// it only evaluates transfers that book something new.
 	if l.dailyLimitRejectedLocked(t.From, t.Currency, totalOutflow, t.CreatedAt) {
 		return TransferReceipt{}, ErrDailyLimitExceeded
+	}
+
+	// The period gate is keyed on the transfer's effective post time: a
+	// backdated transfer landing in a closed accounting period is rejected
+	// with ErrPeriodClosed. It runs after the idempotency replay check
+	// above, so replaying a key posted before the period closed returns
+	// the original receipt.
+	at := t.CreatedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if err := l.periodRejectedLocked(at); err != nil {
+		return TransferReceipt{}, err
 	}
 
 	now := time.Now()

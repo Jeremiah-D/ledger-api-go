@@ -179,7 +179,14 @@ type Ledger struct {
 	// audit is the structured compliance audit log (see audit.go). Nil
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
-	audit          *AuditLog
+	audit *AuditLog
+	// closedPeriods is the set of locked accounting periods ("2006-01",
+	// UTC months; see period.go). Journal entries whose timestamp falls
+	// in a closed period are rejected with ErrPeriodClosed by every
+	// journal-writing operation, so a closed month's books cannot change.
+	// Structural config like frozen — it survives snapshots and is
+	// listed in Reconcile.
+	closedPeriods  map[string]bool
 	chain          []chainLink   // audit chain, one link per successful Post, in order
 	version        uint64        // bumped by every successful Post
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
@@ -274,6 +281,7 @@ func New(opts ...Option) *Ledger {
 		merges:         make(map[string]mergeRecord),
 		mergeKeys:      make(map[string]string),
 		fxRates:        make(map[fxPair]ExchangeRate),
+		closedPeriods:  make(map[string]bool),
 		pruneInterval:  defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
@@ -345,10 +353,14 @@ func validateJournalEntry(e *JournalEntry) error {
 // (payer) account with a configured daily outflow limit (see
 // SetDailyLimit) rejects any post that would take the UTC day's
 // cumulative outflow above the limit with ErrDailyLimitExceeded; the check
-// runs last among the risk controls, so it only ever evaluates postings
-// that book something new. Rejected posts —
-// validation failures, frozen rejections, overdraft rejections, and
-// daily-limit rejections alike —
+// runs last among the account risk controls, so it only ever evaluates postings
+// that book something new. A journal entry whose timestamp falls in a closed
+// accounting period (see period.go) is rejected with ErrPeriodClosed; the
+// period gate runs last overall, after the idempotency replay check, so
+// replaying a key posted before the period closed returns the original
+// entry. Rejected posts —
+// validation failures, frozen rejections, overdraft rejections,
+// daily-limit rejections, and closed-period rejections alike —
 // record nothing: no journal row, no chain link, no version bump.
 //
 // The commit is atomic: while holding the ledger's single mutex, Post
@@ -393,13 +405,23 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		e.CreatedAt = time.Now()
 	}
 
-	// Daily outflow limits are the last risk control in the chain, after
+	// Daily outflow limits are the last of the account risk controls, after
 	// the frozen and overdraft checks: a replay books nothing new, so it
 	// returned above; anything reaching this check books a new outflow.
 	// The limited side is the credit (payer) account — the account funds
 	// leave — matching PostTransfer's payer leg.
 	if l.dailyLimitRejectedLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt) {
 		return JournalEntry{}, false, ErrDailyLimitExceeded
+	}
+
+	// The period gate is the last risk control overall, and it is keyed
+	// on the entry's own timestamp — the last thing finalized above: a
+	// backdated entry landing in a closed accounting period is rejected
+	// with ErrPeriodClosed (see period.go). It runs after the idempotency
+	// replay check, so replaying a key posted before the period closed
+	// returns the original entry instead of failing.
+	if err := l.periodRejectedLocked(e.CreatedAt); err != nil {
+		return JournalEntry{}, false, err
 	}
 
 	l.maybePruneIdempotencyKeys(time.Now())

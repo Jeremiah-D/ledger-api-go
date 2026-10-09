@@ -121,6 +121,11 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrInvalidCurrency) {
 			s.metrics.CurrencyRejections.Add(1)
 		}
@@ -237,6 +242,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -379,6 +389,11 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrInvalidCurrency) {
 			s.metrics.CurrencyRejections.Add(1)
 		}
@@ -444,6 +459,11 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -515,6 +535,11 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -684,6 +709,11 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1001,6 +1031,50 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
+// handleClosePeriod implements POST /periods/{id}/close: locks the
+// accounting period id ("YYYY-MM", UTC month). Journal entries whose
+// timestamp falls in a closed period are rejected with 422
+// (ErrPeriodClosed) by every journal-writing operation, so a closed
+// month's books cannot change — the compliance boundary for backdated
+// postings. Closing is idempotent; a malformed period ID fails 400.
+func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
+		return
+	}
+	if err := s.ledger.ClosePeriod(id); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"period": id, "closed": true})
+}
+
+// handleReopenPeriod implements POST /periods/{id}/reopen: unlocks a
+// period previously closed with POST /periods/{id}/close, so postings
+// dated in that month are accepted again. Reopening a period that was
+// never closed is a no-op.
+func (s *server) handleReopenPeriod(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
+		return
+	}
+	if err := s.ledger.ReopenPeriod(id); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"period": id, "closed": false})
+}
+
 // reconcileRequest is the optional POST /reconcile body. base_currency
 // opts into the base-currency summary: the report's per-currency totals
 // and discrepancies converted through the FX rate table, with the rate
@@ -1104,6 +1178,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
+	mux.HandleFunc("POST /periods/{id}/close", s.handleClosePeriod)
+	mux.HandleFunc("POST /periods/{id}/reopen", s.handleReopenPeriod)
 	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)

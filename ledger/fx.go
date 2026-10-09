@@ -501,6 +501,19 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		return TransferReceipt{}, ErrDailyLimitExceeded
 	}
 
+	// The period gate is keyed on the transfer's effective post time (see
+	// period.go): a backdated transfer landing in a closed accounting
+	// period is rejected with ErrPeriodClosed. It runs after the
+	// idempotency replay check, so replaying a key posted before the
+	// period closed returns the original receipt.
+	at := t.CreatedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if err := l.periodRejectedLocked(at); err != nil {
+		return TransferReceipt{}, err
+	}
+
 	// Every leg is single-currency by construction; the two journal
 	// entries keep each currency's books balanced independently, with the
 	// FX account as the shared counterparty.
