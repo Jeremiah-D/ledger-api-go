@@ -105,6 +105,14 @@ type Ledger struct {
 	// would take a protected credit (payer) account below zero is rejected
 	// with ErrAccountOverdraft (see overdraft.go). Opt-in per account.
 	noOverdraft map[AccountID]bool
+	// dailyLimits maps (account, currency) to the account's daily outflow
+	// limit in cents, and dailyOutflow accumulates the outflow booked per
+	// (account, currency, UTC day). A Post that would take the day's
+	// cumulative outflow above the limit is rejected with
+	// ErrDailyLimitExceeded (see daily_limit.go). Opt-in per account and
+	// currency; structural config, like frozen and noOverdraft.
+	dailyLimits  map[dailyLimitKey]int64
+	dailyOutflow map[dailyLimitKey]int64
 	// parents maps a child account to its parent account in the
 	// sub-account hierarchy (see hierarchy.go). Only accounts with an
 	// assigned parent appear here; clearing the parent deletes the row.
@@ -146,6 +154,7 @@ type Ledger struct {
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
 	pruneInterval  time.Duration // min gap between lazy key sweeps
 	lastKeyPrune   time.Time
+	lastDailyPrune time.Time // last run of the daily-outflow bucket sweep
 }
 
 // Option configures a Ledger.
@@ -186,6 +195,8 @@ func New(opts ...Option) *Ledger {
 		creditTotals:   make(map[accountCurrency]int64),
 		frozen:         make(map[AccountID]bool),
 		noOverdraft:    make(map[AccountID]bool),
+		dailyLimits:    make(map[dailyLimitKey]int64),
+		dailyOutflow:   make(map[dailyLimitKey]int64),
 		parents:        make(map[AccountID]AccountID),
 		transferKeys:   make(map[string][]string),
 		holds:          make(map[string]Hold),
@@ -223,8 +234,14 @@ func New(opts ...Option) *Ledger {
 // books nothing new. A credit (payer) account under overdraft protection
 // (see overdraft.go) rejects any post that would take its balance below
 // zero with ErrAccountOverdraft; the check runs after the frozen check and
-// after the idempotency replay check for the same reason. Rejected posts —
-// validation failures, frozen rejections, and overdraft rejections alike —
+// after the idempotency replay check for the same reason. A credit
+// (payer) account with a configured daily outflow limit (see
+// SetDailyLimit) rejects any post that would take the UTC day's
+// cumulative outflow above the limit with ErrDailyLimitExceeded; the check
+// runs last among the risk controls, so it only ever evaluates postings
+// that book something new. Rejected posts —
+// validation failures, frozen rejections, overdraft rejections, and
+// daily-limit rejections alike —
 // record nothing: no journal row, no chain link, no version bump.
 //
 // The commit is atomic: while holding the ledger's single mutex, Post
@@ -284,12 +301,26 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		return JournalEntry{}, false, ErrAccountOverdraft
 	}
 
+	// CreatedAt is filled before the daily-limit check: the outflow is
+	// booked against the entry's own UTC calendar day, so the timestamp
+	// must be final when the limit is evaluated.
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now()
 	}
 
+	// Daily outflow limits are the last risk control in the chain, after
+	// the frozen and overdraft checks: a replay books nothing new, so it
+	// returned above; anything reaching this check books a new outflow.
+	// The limited side is the credit (payer) account — the account funds
+	// leave — matching PostTransfer's payer leg.
+	if l.dailyLimitRejectedLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt) {
+		return JournalEntry{}, false, ErrDailyLimitExceeded
+	}
+
 	l.maybePruneIdempotencyKeys(time.Now())
+	l.maybePruneDailyOutflowLocked(time.Now())
 	l.commitEntryLocked(e)
+	l.addDailyOutflowLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt)
 
 	return e, false, nil
 }
@@ -437,6 +468,13 @@ type TrialBalance struct {
 	// overdrafts (see EnableOverdraftProtection): Postings that would
 	// take the balance below zero are rejected with ErrAccountOverdraft.
 	OverdraftProtected bool `json:"overdraft_protected"`
+	// DailyLimitCents reports the account's configured daily outflow
+	// limit in the default currency (see SetDailyLimit): postings that
+	// would take the UTC day's cumulative outflow above this number are
+	// rejected with ErrDailyLimitExceeded. 0 means no limit is configured
+	// for the default currency; per-currency limits live in the
+	// reconciliation report and on Ledger.DailyLimit.
+	DailyLimitCents int64 `json:"daily_limit_cents"`
 }
 
 // TrialBalance returns the double-entry breakdown of the given account at
@@ -460,6 +498,7 @@ func (l *Ledger) trialBalanceLocked(a AccountID) TrialBalance {
 		Version:            l.version,
 		Frozen:             l.frozen[a],
 		OverdraftProtected: l.noOverdraft[a],
+		DailyLimitCents:    l.dailyLimits[dailyLimitKey{account: a, currency: DefaultCurrency}],
 	}
 	seen := make(map[string]bool)
 	for k := range l.balances {

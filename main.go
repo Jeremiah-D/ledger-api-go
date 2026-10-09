@@ -57,7 +57,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // A first-time post returns 201; a duplicate idempotency key returns 200
 // with the originally posted entry; invalid entries (including a malformed
 // currency code) return 400; a post through a frozen account returns 403;
-// a post that would overdraw an overdraft-protected account returns 422.
+// a post that would overdraw an overdraft-protected account returns 422,
+// as does a post that would take the payer's daily outflow above its
+// configured limit.
 // The currency field is optional and defaults to USD; when given it must
 // be a 3-letter uppercase ISO 4217 code.
 func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +116,11 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrInvalidCurrency) {
 			s.metrics.CurrencyRejections.Add(1)
 		}
@@ -154,8 +161,9 @@ type createTransferRequest struct {
 // returns 200 with the originally posted receipt; invalid transfers return
 // 400; a transfer through a frozen account returns 403; a transfer that
 // would overdraw an overdraft-protected payer returns 422, as does a
-// transfer whose legs would span currencies (this ledger performs no FX
-// conversion — every transfer is single-currency). The currency field is
+// transfer that would take the payer's daily outflow (amount + fee) above
+// its configured limit, and a transfer whose legs would span currencies
+// (this ledger performs no FX conversion — every transfer is single-currency). The currency field is
 // optional and defaults to USD; when given it must be a 3-letter uppercase
 // ISO 4217 code, and the fee leg is booked in the same currency.
 func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +222,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+			s.metrics.DailyLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -976,6 +989,24 @@ func main() {
 		}
 		opts = append(opts, ledger.WithTransferFeeSchedule(tiers, account))
 		log.Printf("ledger-api-go: transfer fee schedule = %v to %q", tiers, account)
+	}
+
+	// LEDGER_DAILY_OUTFLOW_LIMITS configures per-account per-currency daily
+	// outflow limits (see ledger.ParseDailyLimits for the syntax, e.g.
+	// "cust-123:USD:100000,cust-456:EUR:50000"). Postings that would take
+	// an account's cumulative outflow for the UTC day above its limit are
+	// rejected with 422. Unset means no limits. An invalid value fails the
+	// startup fast (log.Fatal): a misconfigured risk control must never
+	// silently run unenforced.
+	if raw := os.Getenv("LEDGER_DAILY_OUTFLOW_LIMITS"); raw != "" {
+		limits, err := ledger.ParseDailyLimits(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		for _, dl := range limits {
+			opts = append(opts, ledger.WithDailyLimit(dl.Account, dl.Currency, dl.LimitCents))
+		}
+		log.Printf("ledger-api-go: daily outflow limits = %d configured", len(limits))
 	}
 
 	ln, err := net.Listen("tcp", addr)

@@ -43,6 +43,10 @@ curl -s -X POST localhost:8080/entries \
   take its balance below zero → `422`
   `{"error":"ledger: posting would overdraw a protected account"}`. The
   rejection is counted in `ledger_overdraft_rejections_total`.
+- The credit (payer) account has a **daily outflow limit** and the posting
+  would take its UTC-day cumulative outflow above the limit → `422`
+  `{"error":"ledger: posting would exceed the account's daily outflow limit"}`.
+  The rejection is counted in `ledger_daily_limit_rejections_total`.
 
 ### `POST /transfers`
 
@@ -72,8 +76,10 @@ curl -s -X POST localhost:8080/transfers \
   `400`.
 - Either leg names a **frozen** account → `403`; the payer is
   **overdraft-protected** and the transfer would take it below zero →
-  `422`. Both are counted in the shared `ledger_frozen_rejections_total` /
-  `ledger_overdraft_rejections_total` counters.
+  `422`, as is a transfer that would take the payer's daily outflow above
+  its **daily outflow limit**. All are counted in the shared
+  `ledger_frozen_rejections_total` / `ledger_overdraft_rejections_total` /
+  `ledger_daily_limit_rejections_total` counters.
 
 #### Transfer fees
 
@@ -217,6 +223,36 @@ LEDGER_NO_OVERDRAFT_ACCOUNTS="cust-123,cust-456" ./ledger-api-go
 curl -s -X POST localhost:8080/entries \
   -d '{"debit_account":"cash","credit_account":"cust-123","amount_cents":1000}'
 # 422 {"error":"ledger: posting would overdraw a protected account"}
+```
+
+### Daily outflow limits
+
+Per-account, per-currency cap on how much money may leave an account in
+one UTC calendar day (fintech risk control — velocity limits on customer
+cash-outs). Configure with the `LEDGER_DAILY_OUTFLOW_LIMITS` environment
+variable or the `ledger.WithDailyLimit` / `SetDailyLimit` API. A
+`POST /entries` whose credit (payer) leg would take the account's
+cumulative outflow for the UTC day above the limit is rejected with
+`422`; a `POST /transfers` counts the payer's total outflow (amount +
+fee leg) against the same budget.
+
+Outflow accumulates per UTC calendar day of each entry's own timestamp,
+so the window rolls at UTC midnight and backdated entries count toward
+their own day. Limits are opt-in per (account, currency); the check runs
+last among the risk controls (after frozen and overdraft), idempotent
+replays consume no budget, and a rejected posting books nothing. Setting
+or clearing a limit is structural — no version bump — and visible to
+audit tooling: each trial balance carries a `daily_limit_cents` field
+(default currency) and the reconcile report lists every configured limit
+(`daily_limits`). Rejections are counted in
+`ledger_daily_limit_rejections_total`.
+
+```bash
+LEDGER_DAILY_OUTFLOW_LIMITS="cust-123:USD:100000" ./ledger-api-go
+curl -s -X POST localhost:8080/entries \
+  -d '{"debit_account":"cash","credit_account":"cust-123","amount_cents":100000}'
+# 201 on the first $1000.00 of the UTC day, then:
+# 422 {"error":"ledger: posting would exceed the account's daily outflow limit"}
 ```
 
 ### Authorization holds (auth/capture)
@@ -604,6 +640,10 @@ curl -s localhost:8080/metrics
 - `ledger_overdraft_rejections_total` — `POST /entries`, `POST
   /transfers`, and capture requests rejected with `422` because the
   posting would have overdrawn an overdraft-protected account.
+- `ledger_daily_limit_rejections_total` — `POST /entries` and
+  `POST /transfers` requests rejected with `422` because the posting would
+  have taken the account's UTC-day cumulative outflow above its configured
+  daily outflow limit.
 - `ledger_holds_total` — every `POST /holds` request received.
 - `ledger_hold_idempotency_hits_total` — holds that replayed an existing
   idempotency key (returned the original hold, reserved nothing).
@@ -661,6 +701,12 @@ Environment:
   `POST /transfers` without an explicit fee unless the request sets
   `skip_fee`. Unset means no default fee; an invalid value fails startup
   fast.
+- `LEDGER_DAILY_OUTFLOW_LIMITS` — per-account per-currency daily outflow
+  limits, `"<account>:<currency>:<limitCents>,..."` (e.g.
+  `LEDGER_DAILY_OUTFLOW_LIMITS="cust-123:USD:100000"` caps cust-123's daily
+  USD outflow at $1000.00). Postings that would exceed the day's budget
+  are rejected with `422`. Unset means no limits; an invalid value fails
+  startup fast.
 
 ## Benchmarks
 

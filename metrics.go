@@ -46,6 +46,11 @@ type Metrics struct {
 	// capture requests rejected with 422 because they would have
 	// overdrawn an overdraft-protected account.
 	OverdraftRejections atomic.Uint64
+	// DailyLimitRejections counts POST /entries and POST /transfers
+	// requests rejected with 422 because they would have taken the
+	// account's cumulative outflow for the UTC day above its configured
+	// daily outflow limit.
+	DailyLimitRejections atomic.Uint64
 	// CurrencyRejections counts POST /entries and POST /transfers requests
 	// rejected for currency reasons: a malformed currency code (400) or a
 	// cross-currency transfer (422).
@@ -145,6 +150,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
 		"Total POST /entries, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())
+	writeCounter(&sb, "ledger_daily_limit_rejections_total",
+		"Total POST /entries and POST /transfers requests rejected because they would have taken the account's daily outflow above its configured limit.",
+		m.DailyLimitRejections.Load())
 	writeCounter(&sb, "ledger_currency_rejections_total",
 		"Total POST /entries and POST /transfers requests rejected for currency reasons: malformed currency code or cross-currency transfer.",
 		m.CurrencyRejections.Load())

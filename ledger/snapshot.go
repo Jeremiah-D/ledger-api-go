@@ -23,7 +23,7 @@ import (
 //	{"record":"link", ...}            audit-chain links, seq 1..N, matching entry order
 //	{"record":"hold", ...}            authorization holds, by (CreatedAt, ID)
 //	{"record":"idempotency", ...}     the five idempotency-key namespaces
-//	{"record":"config", ...}          operational config (frozen, overdraft, hierarchy, fees, TTL)
+//	{"record":"config", ...}          operational config (frozen, overdraft, hierarchy, fees, TTL, daily limits)
 //
 // The export carries only source-of-truth rows: journal entries, chain
 // links, holds, idempotency registries, and operational config. Derived
@@ -133,6 +133,13 @@ type snapshotConfigLine struct {
 	FeeTiers           []FeeTier               `json:"fee_tiers,omitempty"`
 	FeeRevenueAccount  AccountID               `json:"fee_revenue_account"`
 	IdempotencyTTL     string                  `json:"idempotency_ttl"`
+	// DailyLimits carries the daily outflow limits (see SetDailyLimit);
+	// absent in snapshots written before daily limits existed. The
+	// accumulated per-day outflow counters are deliberately NOT restored:
+	// a disaster-recovery restore resets the current day's counters to
+	// zero, which fail-opens for the remainder of that day — operators
+	// should treat a restore as a risk-control reset event.
+	DailyLimits []DailyLimit `json:"daily_limits,omitempty"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -297,6 +304,7 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 		FeeTiers:           l.feeTiers,
 		FeeRevenueAccount:  l.feeRevenueAccount,
 		IdempotencyTTL:     l.idempotencyTTL.String(),
+		DailyLimits:        l.dailyLimitsLocked(),
 	}
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -629,6 +637,20 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	for c, p := range cfg.Parents {
 		l.parents[c] = p
 	}
+	// Daily outflow limits: invalid limits in a snapshot reject the
+	// import — a restore must never silently drop a risk control.
+	for _, dl := range cfg.DailyLimits {
+		if dl.Account == "" {
+			return fail("daily limit with empty account")
+		}
+		if _, err := normalizeCurrency(dl.Currency); err != nil {
+			return fail("bad daily limit currency %q: %v", dl.Currency, err)
+		}
+		if dl.LimitCents < 0 {
+			return fail("negative daily limit for account %q (%s)", dl.Account, dl.Currency)
+		}
+		l.dailyLimits[dailyLimitKey{account: dl.Account, currency: dl.Currency}] = dl.LimitCents
+	}
 	// The transfer fee policy: prefer the tiered schedule when present;
 	// otherwise rebuild the flat single-tier policy from the legacy
 	// fee_rate_bps field (snapshots predating tiered fees). An empty
@@ -751,6 +773,9 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.parents, b.parents) {
+		return false
+	}
+	if !reflect.DeepEqual(a.dailyLimits, b.dailyLimits) {
 		return false
 	}
 	if !reflect.DeepEqual(a.feeTiers, b.feeTiers) || a.feeRevenueAccount != b.feeRevenueAccount {

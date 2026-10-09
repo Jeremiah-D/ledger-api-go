@@ -90,6 +90,11 @@ type ReconciliationReport struct {
 	// against overdrafts (see EnableOverdraftProtection). Risk tooling
 	// reads this to know which accounts cannot go negative.
 	OverdraftProtectedAccounts []AccountID `json:"overdraft_protected_accounts"`
+	// DailyLimits lists every configured daily outflow limit (see
+	// SetDailyLimit), sorted by (account, currency). Risk tooling reads
+	// this to know which accounts are capped on daily outflow and at
+	// what level.
+	DailyLimits []DailyLimit `json:"daily_limits"`
 	// HeldTotals is the per-currency rollup of active authorization
 	// holds (see hold.go) at report time, sorted by currency code: the
 	// cents currently reserved from available balances. Expired holds
@@ -121,6 +126,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		Discrepancies:              make([]TrialBalanceDiscrepancy, 0),
 		FrozenAccounts:             l.frozenAccountsLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
+		DailyLimits:                l.dailyLimitsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
 	}
 

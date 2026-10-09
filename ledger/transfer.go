@@ -347,10 +347,11 @@ func parseTieredFeeSchedule(spec, account string, fail func(string, ...any) ([]F
 // frozen or protected returns the original receipt instead of failing,
 // because the replay books nothing new), then the frozen check on every
 // account the transfer touches (payer, payee, and fee account), then the
-// overdraft check on the payer against its total outflow (amount + fee).
-// Rejected transfers — validation failures, ID conflicts, frozen
-// rejections, and overdraft rejections alike — record nothing: no journal
-// rows, no chain links, no version bump.
+// overdraft check on the payer against its total outflow (amount + fee),
+// then the daily outflow limit check on the same total outflow. Rejected
+// transfers — validation failures, ID conflicts, frozen rejections,
+// overdraft rejections, and daily-limit rejections alike — record
+// nothing: no journal rows, no chain links, no version bump.
 //
 // Idempotency shares the ledger-wide key namespace with Post: a key already
 // used by either API replays the original entry instead of booking again.
@@ -462,6 +463,14 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		return TransferReceipt{}, ErrAccountOverdraft
 	}
 
+	// Daily outflow limits guard the same total outflow (amount + fee):
+	// the payer's cumulative outflow for the UTC calendar day may not
+	// exceed the configured limit. Runs last among the risk controls, so
+	// it only evaluates transfers that book something new.
+	if l.dailyLimitRejectedLocked(t.From, t.Currency, totalOutflow, t.CreatedAt) {
+		return TransferReceipt{}, ErrDailyLimitExceeded
+	}
+
 	now := time.Now()
 	principal := JournalEntry{
 		ID:             t.ID,
@@ -509,9 +518,11 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	// the one write lock, after all checks passed. Any failure above
 	// returned before the first mutation, so there is nothing to roll back.
 	l.maybePruneIdempotencyKeys(now)
+	l.maybePruneDailyOutflowLocked(now)
 	for _, e := range entries {
 		l.commitEntryLocked(e)
 	}
+	l.addDailyOutflowLocked(t.From, t.Currency, totalOutflow, principal.CreatedAt)
 	if t.IdempotencyKey != "" {
 		ids := make([]string, 0, len(entries))
 		for _, e := range entries {
