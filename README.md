@@ -613,6 +613,48 @@ Report fields:
 | `idempotency_keys`     | `ttl_configured`, `ttl`, `total_keys`, and `expired_eligible` (keys older than the TTL, i.e. the next sweep's eviction set) |
 | `audit_chain`          | `verify_ok` / `verify_error`, `head`, `links`, plus `head_consistent` — the chain-length == ledger-version check with `consistency_error` when the counters desync |
 | `merges`               | every committed account merge, sorted by merge ID: `merge_id`, `from_account`, `to_account`, the per-currency `legs`, and `created_at`. Merged sources stay frozen — cross-check `from_account` against `frozen_accounts` in the same report |
+| `fx_applied`           | `true` when the report carries the opt-in base-currency summary (see below); `false` on a plain scan |
+| `base_currency_summary` | the base-currency rollup, present only when `fx_applied` is `true`: `base_currency`, base-currency `total_debits_cents`/`total_credits_cents`, per-currency `conversions`, converted `discrepancies`, the `fx_snapshot` of rates used, `missing_rates`, and `fx_incomplete` |
+
+#### Base-currency summary (opt-in)
+
+Passing `{"base_currency":"USD"}` in the `POST /reconcile` body folds every
+per-currency totals row and every discrepancy through the FX rate table into
+one reporting-currency rollup — the number a settlement operator actually
+wires. Each currency converts at the rate in effect at scan time
+(`floor(amount * num / den)`, the same integer convention as FX transfers,
+no float64 on money); the report discloses the exact rate it used per
+currency (`fx_snapshot`: `currency`, `rate_num`/`rate_den`, and
+`rate_asof_version` — the ledger version at which the rate took effect; the
+base currency itself converts at identity `1/1` with version `0`).
+
+Currencies with no `(currency -> base)` rate are never silently skipped:
+they are listed in `missing_rates`, the converted figures cover only the
+convertible currencies, and `fx_incomplete` is `true` to mark the partial
+summary. An invalid `base_currency` is a `400`; an empty body keeps the
+legacy report (`fx_applied: false`, no summary key) so existing cron jobs
+are unaffected.
+
+```bash
+curl -s -X POST localhost:8080/reconcile \
+  -d '{"base_currency":"USD"}' | tee reconcile-$(date +%F).json
+```
+
+Trimmed summary shape:
+
+```json
+"fx_applied": true,
+"base_currency_summary": {
+  "base_currency": "USD",
+  "total_debits_cents": 972,
+  "total_credits_cents": 972,
+  "conversions": [{"currency": "EUR", "total_debits_cents": 972, "total_credits_cents": 972}],
+  "discrepancies": [],
+  "fx_snapshot": [{"currency": "EUR", "rate_num": 108, "rate_den": 100, "rate_asof_version": 1}],
+  "missing_rates": [],
+  "fx_incomplete": false
+}
+```
 
 A clean run looks like (trimmed):
 
@@ -949,6 +991,7 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── ledger.go              # Ledger, JournalEntry, Post, Balance, Snapshot, ListEntries
 │   ├── reconcile.go           # end-of-day reconciliation report (equation scan, trial-balance diffs, chain + idempotency checks)
 │   ├── ledger_reconcile_test.go # reconciliation report tests (healthy, tampered, TTL, determinism)
+│   ├── ledger_reconcile_base_test.go # base-currency summary: conversion, missing rates, fx_applied, race
 │   ├── ledger_bench_test.go   # BenchmarkPost: throughput + p99 latency (numbers → README)
 │   ├── ledger_test.go         # validation, idempotency, concurrency tests
 │   ├── hierarchy.go           # sub-account parent links (cycle-guarded) + per-currency balance rollup

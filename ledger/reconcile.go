@@ -3,8 +3,10 @@ package ledger
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"time"
 )
@@ -125,6 +127,90 @@ type ReconciliationReport struct {
 	// frozen — the frozen_accounts list in this report shows the
 	// resulting stops.
 	Merges []AccountMerge `json:"merges"`
+	// FXApplied is true when the report carries the opt-in base-currency
+	// summary (see ReconcileOptions.BaseCurrency); false on a plain scan.
+	FXApplied bool `json:"fx_applied"`
+	// BaseCurrencySummary converts the report's per-currency totals and
+	// discrepancies into one reporting currency through the FX rate
+	// table. Nil unless FXApplied.
+	BaseCurrencySummary *BaseCurrencySummary `json:"base_currency_summary,omitempty"`
+}
+
+// ReconcileOptions tunes Reconcile. BaseCurrency opts into the
+// base-currency summary (see BaseCurrencySummary): every per-currency
+// totals row and every discrepancy is converted into the reporting
+// currency through the FX rate table, the report lists the rates it used,
+// and FXApplied is set. Empty (the default) leaves the report exactly as
+// Reconcile produces it. BaseCurrency must be a 3-letter uppercase ISO
+// 4217 code; anything else fails the scan with ErrInvalidCurrency.
+type ReconcileOptions struct {
+	BaseCurrency string
+}
+
+// ErrBaseCurrencyOverflow is returned by ReconcileWithOptions when one
+// conversion or the converted grand totals do not fit in an int64. Money
+// never silently wraps: with realistic amounts and rates this is
+// unreachable (fxConvertCents already rejects per-amount overflow), but
+// the report refuses to print a wrapped number rather than guessing.
+var ErrBaseCurrencyOverflow = errors.New("ledger: base-currency reconciliation summary overflows int64")
+
+// FXRateSnapshot records which conversion rate produced one row of the
+// base-currency summary: the rate ratio plus the ledger version at which
+// the rate took effect (ExchangeRate.EffectiveVersion), so the report is
+// auditable against later rate changes. The base currency itself converts
+// at the identity rate 1/1 with rate_asof_version 0 — no lookup was
+// needed for it.
+type FXRateSnapshot struct {
+	Currency        string `json:"currency"`
+	RateNum         int64  `json:"rate_num"`
+	RateDen         int64  `json:"rate_den"`
+	RateAsOfVersion uint64 `json:"rate_asof_version"`
+}
+
+// ConvertedDiscrepancy is one trial-balance discrepancy converted into
+// the report's base currency. Currency keeps the original currency the
+// books were kept in; every amount field is in the base currency.
+type ConvertedDiscrepancy struct {
+	Account           AccountID `json:"account"`
+	Currency          string    `json:"currency"`
+	TotalDebitsCents  int64     `json:"total_debits_cents"`
+	TotalCreditsCents int64     `json:"total_credits_cents"`
+	NetBalanceCents   int64     `json:"net_balance_cents"`
+	ExpectedNetCents  int64     `json:"expected_net_cents"`
+	DifferenceCents   int64     `json:"difference_cents"`
+}
+
+// BaseCurrencySummary is the opt-in end-of-day rollup of a reconciliation
+// report into one reporting currency. Each currency's totals convert at
+// the rate in effect at scan time — floor(amount * num / den), the same
+// integer convention as FX transfers, computed with 128-bit intermediates
+// so no float64 ever touches money. Currencies without a (currency ->
+// base) rate are never silently skipped: they are listed in MissingRates,
+// the converted figures cover only the convertible currencies, and
+// FXIncomplete says so explicitly.
+type BaseCurrencySummary struct {
+	BaseCurrency string `json:"base_currency"`
+	// TotalDebitsCents and TotalCreditsCents are the grand totals in the
+	// base currency, summed over Conversions only.
+	TotalDebitsCents  int64 `json:"total_debits_cents"`
+	TotalCreditsCents int64 `json:"total_credits_cents"`
+	// Conversions is one row per converted currency, sorted by currency
+	// code, in the same shape as CurrencyTotals — amounts in the base
+	// currency.
+	Conversions []CurrencyTotals `json:"conversions"`
+	// Discrepancies mirrors the report's discrepancies converted into
+	// the base currency, in the same order; empty on a healthy ledger.
+	Discrepancies []ConvertedDiscrepancy `json:"discrepancies"`
+	// FXSnapshot lists the rate that converted each row of Conversions,
+	// in the same order: the rate ratio plus its effective version.
+	FXSnapshot []FXRateSnapshot `json:"fx_snapshot"`
+	// MissingRates lists the currencies that could not be converted
+	// because no (currency -> base) rate is configured, sorted by
+	// currency code. They are excluded from the converted figures.
+	MissingRates []string `json:"missing_rates"`
+	// FXIncomplete is true exactly when MissingRates is non-empty: the
+	// converted figures are a partial summary, not the whole ledger.
+	FXIncomplete bool `json:"fx_incomplete"`
 }
 
 // Reconcile runs a full read-only scan of the ledger and returns the
@@ -134,9 +220,38 @@ type ReconciliationReport struct {
 // chain check. The caller supplies now (the server passes time.Now()) so
 // tests can pin the timestamp and TTL arithmetic stays deterministic.
 func (l *Ledger) Reconcile(now time.Time) ReconciliationReport {
+	report, _ := l.ReconcileWithOptions(now, ReconcileOptions{})
+	return report
+}
+
+// ReconcileWithOptions runs the same scan as Reconcile and, when
+// opts.BaseCurrency is set, additionally folds every per-currency totals
+// row and every discrepancy through the FX rate table into a
+// base-currency summary. The conversion runs inside the same read lock as
+// the scan, reading the rate table directly (no nested locking — see the
+// LG-13 note below), so the summary describes exactly the ledger state
+// the report was built from. An invalid base currency returns
+// ErrInvalidCurrency; a conversion that does not fit in an int64 returns
+// ErrBaseCurrencyOverflow.
+func (l *Ledger) ReconcileWithOptions(now time.Time, opts ReconcileOptions) (ReconciliationReport, error) {
+	base := ""
+	if opts.BaseCurrency != "" {
+		var err error
+		if base, err = normalizeCurrency(opts.BaseCurrency); err != nil {
+			return ReconciliationReport{}, fmt.Errorf("%w: base currency %q", ErrInvalidCurrency, opts.BaseCurrency)
+		}
+	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	report := l.reconcileLocked(now)
+	if base != "" {
+		summary, err := l.baseCurrencySummaryLocked(base, report.CurrencyTotals, report.Discrepancies)
+		if err != nil {
+			return ReconciliationReport{}, err
+		}
+		report.FXApplied = true
+		report.BaseCurrencySummary = summary
+	}
 	// Reconcile is read-only, so the version brackets are identical — the
 	// event still records that reconciliation ran, against which ledger
 	// state, and what it found. Emitted under the read lock; the enqueue
@@ -151,9 +266,10 @@ func (l *Ledger) Reconcile(now time.Time) ReconciliationReport {
 			"accounting_equation_ok": report.AccountingEquationOK,
 			"discrepancies":          len(report.Discrepancies),
 			"merges":                 len(report.Merges),
+			"fx_applied":             report.FXApplied,
 		},
 	})
-	return report
+	return report, nil
 }
 
 // reconcileLocked performs the scan. Callers must hold l.mu; the read lock
@@ -294,6 +410,130 @@ func (l *Ledger) heldTotalsLocked(now time.Time) []CurrencyHoldTotals {
 		out = append(out, *byCurrency[c])
 	}
 	return out
+}
+
+// baseCurrencySummaryLocked converts the report's per-currency totals and
+// discrepancies into base through the FX rate table. Callers must hold
+// l.mu; the read lock suffices. It reads l.fxRates directly — never the
+// locking FXRate accessor — because the reconciliation scan already holds
+// the read lock; a nested lock call here would be the LG-13 deadlock
+// class of bug. Totals and discrepancies arrive in the report's own
+// deterministic order (currencies sorted, discrepancies account-sorted),
+// so every list the summary emits is sorted without extra work. A
+// discrepancy's currency always appears in the totals pass, so a currency
+// that misses its rate is already in MissingRates by the time the
+// discrepancy pass would look it up.
+func (l *Ledger) baseCurrencySummaryLocked(base string, totals []CurrencyTotals, discrepancies []TrialBalanceDiscrepancy) (*BaseCurrencySummary, error) {
+	summary := &BaseCurrencySummary{
+		BaseCurrency:  base,
+		Conversions:   make([]CurrencyTotals, 0, len(totals)),
+		Discrepancies: make([]ConvertedDiscrepancy, 0, len(discrepancies)),
+		FXSnapshot:    make([]FXRateSnapshot, 0, len(totals)),
+		MissingRates:  make([]string, 0),
+	}
+	var totalDebits, totalCredits int64
+	accumulate := func(d, c int64) bool {
+		var ok bool
+		if totalDebits, ok = addCents(totalDebits, d); !ok {
+			return false
+		}
+		if totalCredits, ok = addCents(totalCredits, c); !ok {
+			return false
+		}
+		return true
+	}
+	for _, row := range totals {
+		if row.Currency == base {
+			// The base currency converts at identity; no rate lookup.
+			summary.Conversions = append(summary.Conversions, row)
+			summary.FXSnapshot = append(summary.FXSnapshot, FXRateSnapshot{
+				Currency: base, RateNum: 1, RateDen: 1, RateAsOfVersion: 0,
+			})
+			if !accumulate(row.TotalDebits, row.TotalCredits) {
+				return nil, ErrBaseCurrencyOverflow
+			}
+			continue
+		}
+		rate, ok := l.fxRates[fxPair{from: row.Currency, to: base}]
+		if !ok {
+			// No rate: listed, excluded, never silently skipped.
+			summary.MissingRates = append(summary.MissingRates, row.Currency)
+			continue
+		}
+		d, ok := fxConvertSignedCents(row.TotalDebits, rate.Num, rate.Den)
+		if !ok {
+			return nil, ErrBaseCurrencyOverflow
+		}
+		c, ok := fxConvertSignedCents(row.TotalCredits, rate.Num, rate.Den)
+		if !ok {
+			return nil, ErrBaseCurrencyOverflow
+		}
+		summary.Conversions = append(summary.Conversions, CurrencyTotals{
+			Currency: row.Currency, TotalDebits: d, TotalCredits: c,
+		})
+		summary.FXSnapshot = append(summary.FXSnapshot, FXRateSnapshot{
+			Currency: row.Currency, RateNum: rate.Num, RateDen: rate.Den,
+			RateAsOfVersion: rate.EffectiveVersion,
+		})
+		if !accumulate(d, c) {
+			return nil, ErrBaseCurrencyOverflow
+		}
+	}
+	for _, disc := range discrepancies {
+		conv := ConvertedDiscrepancy{Account: disc.Account, Currency: disc.Currency}
+		if disc.Currency != base {
+			rate, ok := l.fxRates[fxPair{from: disc.Currency, to: base}]
+			if !ok {
+				// Already listed in MissingRates by the totals pass;
+				// its discrepancy converts with nothing, like its totals.
+				continue
+			}
+			fields := [5]int64{
+				disc.TotalDebitsCents, disc.TotalCreditsCents,
+				disc.NetBalanceCents, disc.ExpectedNetCents, disc.DifferenceCents,
+			}
+			for i, v := range fields {
+				c, ok := fxConvertSignedCents(v, rate.Num, rate.Den)
+				if !ok {
+					return nil, ErrBaseCurrencyOverflow
+				}
+				fields[i] = c
+			}
+			conv.TotalDebitsCents, conv.TotalCreditsCents = fields[0], fields[1]
+			conv.NetBalanceCents, conv.ExpectedNetCents = fields[2], fields[3]
+			conv.DifferenceCents = fields[4]
+		} else {
+			conv.TotalDebitsCents = disc.TotalDebitsCents
+			conv.TotalCreditsCents = disc.TotalCreditsCents
+			conv.NetBalanceCents = disc.NetBalanceCents
+			conv.ExpectedNetCents = disc.ExpectedNetCents
+			conv.DifferenceCents = disc.DifferenceCents
+		}
+		summary.Discrepancies = append(summary.Discrepancies, conv)
+	}
+	summary.TotalDebitsCents = totalDebits
+	summary.TotalCreditsCents = totalCredits
+	summary.FXIncomplete = len(summary.MissingRates) > 0
+	return summary, nil
+}
+
+// fxConvertSignedCents converts a possibly-negative amount at the ratio
+// num/den with the floor convention: non-negative amounts go through
+// fxConvertCents; negative amounts convert by magnitude and re-apply the
+// sign. Report totals are non-negative, but discrepancy fields (net,
+// expected, difference) can dip below zero.
+func fxConvertSignedCents(amount, num, den int64) (int64, bool) {
+	if amount >= 0 {
+		return fxConvertCents(amount, num, den)
+	}
+	if amount == math.MinInt64 {
+		return 0, false
+	}
+	c, ok := fxConvertCents(-amount, num, den)
+	if !ok {
+		return 0, false
+	}
+	return -c, true
 }
 
 // mergesLocked lists every committed account merge, sorted by merge ID,

@@ -844,6 +844,16 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
+// reconcileRequest is the optional POST /reconcile body. base_currency
+// opts into the base-currency summary: the report's per-currency totals
+// and discrepancies converted through the FX rate table, with the rate
+// snapshot, the missing_rates list, and fx_applied=true. An empty body
+// (or an empty base_currency) keeps the legacy report with
+// fx_applied=false. The code must be a 3-letter uppercase ISO 4217 code.
+type reconcileRequest struct {
+	BaseCurrency string `json:"base_currency"`
+}
+
 // handleReconcile implements POST /reconcile, the operator-facing end-of-day
 // reconciliation job. It runs a full read-only scan of the live ledger — the
 // accounting equation, per-account trial balances, idempotency-key health,
@@ -853,13 +863,58 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 // report. The indented JSON body pipes straight into a dated archive:
 //
 //	curl -s -X POST localhost:8080/reconcile | tee reconcile-$(date +%F).json
+//
+// With {"base_currency":"USD"} in the request body, the report additionally
+// carries a base-currency summary of every totals row and discrepancy,
+// converted at the FX rates in effect at scan time:
+//
+//	curl -s -X POST localhost:8080/reconcile \
+//	  -d '{"base_currency":"USD"}' | tee reconcile-$(date +%F).json
 func (s *server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	s.metrics.ReconcileRuns.Add(1)
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	report := s.ledger.Reconcile(time.Now())
+	defer r.Body.Close()
+
+	// Bound the body like every other POST endpoint and decode strictly:
+	// unknown fields fail fast. An empty body means "no options" — the
+	// legacy scan — so existing cron jobs keep working unchanged.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	opts := ledger.ReconcileOptions{}
+	var req reconcileRequest
+	switch err := dec.Decode(&req); {
+	case err == io.EOF:
+		// No body: legacy report, fx_applied=false.
+	case err != nil:
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	default:
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+			return
+		}
+		opts.BaseCurrency = req.BaseCurrency
+	}
+
+	report, err := s.ledger.ReconcileWithOptions(time.Now(), opts)
+	if err != nil {
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		log.Printf("ledger-api-go: POST /reconcile: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "reconcile failed"})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := report.WriteJSON(w); err != nil {
