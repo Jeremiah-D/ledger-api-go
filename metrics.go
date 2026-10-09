@@ -38,22 +38,23 @@ type Metrics struct {
 	// POST /transfers fee legs (principal + fee entries land together, so
 	// the fee is counted once the transfer commits).
 	TransferFeeCentsTotal atomic.Uint64
-	// FrozenRejections counts POST /entries, POST /transfers, POST /sweeps,
-	// POST /merges, and hold requests rejected with 403 because an account
-	// involved was frozen.
+	// FrozenRejections counts POST /entries, POST /entries/batch,
+	// POST /transfers, POST /sweeps, POST /merges, and hold requests
+	// rejected with 403 because an account involved was frozen.
 	FrozenRejections atomic.Uint64
-	// OverdraftRejections counts POST /entries, POST /transfers,
-	// POST /merges, and capture requests rejected with 422 because they
-	// would have overdrawn an overdraft-protected account.
+	// OverdraftRejections counts POST /entries, POST /entries/batch,
+	// POST /transfers, POST /merges, and capture requests rejected with
+	// 422 because they would have overdrawn an overdraft-protected
+	// account.
 	OverdraftRejections atomic.Uint64
-	// DailyLimitRejections counts POST /entries and POST /transfers
-	// requests rejected with 422 because they would have taken the
-	// account's cumulative outflow for the UTC day above its configured
-	// daily outflow limit.
+	// DailyLimitRejections counts POST /entries, POST /entries/batch,
+	// and POST /transfers requests rejected with 422 because they would
+	// have taken the account's cumulative outflow for the UTC day above
+	// its configured daily outflow limit.
 	DailyLimitRejections atomic.Uint64
-	// CurrencyRejections counts POST /entries and POST /transfers requests
-	// rejected for currency reasons: a malformed currency code (400) or a
-	// cross-currency transfer (422).
+	// CurrencyRejections counts POST /entries, POST /entries/batch, and
+	// POST /transfers requests rejected for currency reasons: a malformed
+	// currency code (400) or a cross-currency transfer (422).
 	CurrencyRejections atomic.Uint64
 	// FXTransfersTotal counts POST /transfers requests that attempted a
 	// cross-currency transfer (all attempts, including rejected ones).
@@ -97,6 +98,13 @@ type Metrics struct {
 	// already-posted merge idempotency key and returned the original
 	// receipt.
 	MergeIdempotencyHits atomic.Uint64
+	// BatchTotal counts POST /entries/batch requests received (all attempts,
+	// including duplicates and rejected payloads).
+	BatchTotal atomic.Uint64
+	// BatchIdempotencyHits counts POST /entries/batch requests that replayed
+	// an already-posted batch idempotency key and returned the original
+	// receipt.
+	BatchIdempotencyHits atomic.Uint64
 	// AuditEventsTotal counts audit-log events written to disk. It is
 	// synced from the ledger's audit log on every GET /metrics scrape,
 	// so it stays meaningful even though the events are produced inside
@@ -150,7 +158,7 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total fee cents booked by POST /transfers fee legs.",
 		m.TransferFeeCentsTotal.Load())
 	writeCounter(&sb, "ledger_frozen_rejections_total",
-		"Total POST /entries, POST /transfers, and hold requests rejected because an account was frozen.",
+		"Total POST /entries, POST /entries/batch, POST /transfers, and hold requests rejected because an account was frozen.",
 		m.FrozenRejections.Load())
 	writeCounter(&sb, "ledger_holds_total",
 		"Total POST /holds requests received.", m.HoldsTotal.Load())
@@ -179,6 +187,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_merge_idempotency_hits_total",
 		"Total POST /merges requests that replayed an existing merge idempotency key.",
 		m.MergeIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_batch_total",
+		"Total POST /entries/batch requests received.", m.BatchTotal.Load())
+	writeCounter(&sb, "ledger_batch_idempotency_hits_total",
+		"Total POST /entries/batch requests that replayed an existing batch idempotency key.",
+		m.BatchIdempotencyHits.Load())
 	writeCounter(&sb, "ledger_audit_events_total",
 		"Total audit-log events written to disk.", m.AuditEventsTotal.Load())
 	writeCounter(&sb, "ledger_audit_dropped_total",
@@ -191,13 +204,13 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total audit-log hash-chain verifications that found a broken chain.",
 		m.AuditVerifyBreaks.Load())
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
-		"Total POST /entries, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
+		"Total POST /entries, POST /entries/batch, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())
 	writeCounter(&sb, "ledger_daily_limit_rejections_total",
-		"Total POST /entries and POST /transfers requests rejected because they would have taken the account's daily outflow above its configured limit.",
+		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected because they would have taken the account's daily outflow above its configured limit.",
 		m.DailyLimitRejections.Load())
 	writeCounter(&sb, "ledger_currency_rejections_total",
-		"Total POST /entries and POST /transfers requests rejected for currency reasons: malformed currency code or cross-currency transfer.",
+		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected for currency reasons: malformed currency code or cross-currency transfer.",
 		m.CurrencyRejections.Load())
 	writeCounter(&sb, "ledger_fx_transfers_total",
 		"Total POST /transfers requests that attempted a cross-currency transfer, including rejected ones.",

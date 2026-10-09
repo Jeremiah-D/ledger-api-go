@@ -39,7 +39,13 @@ type JournalEntry struct {
 	AmountCents    int64     `json:"amount_cents"`
 	Currency       string    `json:"currency,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	// BatchID names the atomic batch this entry was posted in (see
+	// PostBatch in batch.go); it is empty for entries posted individually.
+	// It is query metadata: the audit chain covers the entry itself, and
+	// VerifyChain/Reconcile cover batch entries exactly like ordinary
+	// postings.
+	BatchID   string    `json:"batch_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Validation errors returned by Post.
@@ -156,6 +162,11 @@ type Ledger struct {
 	// replays rebuild the full receipt (see sweep.go). Its own namespace,
 	// like holdKeys/captureKeys, expiring with the TTL.
 	sweepKeys map[string]sweepRecord
+	// batchKeys maps a batch's idempotency key to its batchRecord, so
+	// replays rebuild the full receipt (see batch.go). Its own namespace,
+	// expiring with the TTL like every other key index (see
+	// pruneBatchKeysLocked in batch.go).
+	batchKeys map[string]batchRecord
 	// merges is the authoritative registry of committed account merges
 	// (see merge.go), keyed by merge ID: every PostMerge appends here,
 	// whether or not it carried an idempotency key. It feeds Reconcile's
@@ -259,6 +270,7 @@ func New(opts ...Option) *Ledger {
 		holdKeys:       make(map[string]string),
 		captureKeys:    make(map[string]CaptureReceipt),
 		sweepKeys:      make(map[string]sweepRecord),
+		batchKeys:      make(map[string]batchRecord),
 		merges:         make(map[string]mergeRecord),
 		mergeKeys:      make(map[string]string),
 		fxRates:        make(map[fxPair]ExchangeRate),
@@ -268,6 +280,43 @@ func New(opts ...Option) *Ledger {
 		opt(l)
 	}
 	return l
+}
+
+// validateJournalEntry checks the double-entry fields of e and normalizes
+// its currency in place: non-empty ID, non-empty distinct debit/credit
+// legs, a positive amount, and a valid ISO 4217 code (empty normalizes to
+// the default currency, like Post does). It records nothing, so it is safe
+// to run as the admission gate of multi-entry operations (see PostBatch):
+// a batch validates every entry through this before the first journal row
+// lands. Callers that reuse a validated entry must not mutate its legs,
+// amount, or currency afterwards.
+func validateJournalEntry(e *JournalEntry) error {
+	if e.ID == "" {
+		return ErrEmptyID
+	}
+	if e.DebitAccount == "" {
+		return ErrEmptyDebitAccount
+	}
+	if e.CreditAccount == "" {
+		return ErrEmptyCreditAccount
+	}
+	if e.DebitAccount == e.CreditAccount {
+		return ErrSameAccount
+	}
+	if e.AmountCents <= 0 {
+		return ErrNonPositiveAmount
+	}
+	// Currency is field validation, like the legs and the amount: an
+	// empty code normalizes to the default currency, anything else must
+	// be a 3-letter uppercase ISO 4217 code. Normalization happens here,
+	// before the idempotency replay check, so the journal, the replay
+	// index, and the audit chain all store the canonical code.
+	currency, err := normalizeCurrency(e.Currency)
+	if err != nil {
+		return err
+	}
+	e.Currency = currency
+	return nil
 }
 
 // Post records a journal entry and applies its balance effects.
@@ -314,31 +363,9 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if e.ID == "" {
-		return JournalEntry{}, false, ErrEmptyID
-	}
-	if e.DebitAccount == "" {
-		return JournalEntry{}, false, ErrEmptyDebitAccount
-	}
-	if e.CreditAccount == "" {
-		return JournalEntry{}, false, ErrEmptyCreditAccount
-	}
-	if e.DebitAccount == e.CreditAccount {
-		return JournalEntry{}, false, ErrSameAccount
-	}
-	if e.AmountCents <= 0 {
-		return JournalEntry{}, false, ErrNonPositiveAmount
-	}
-	// Currency is field validation, like the legs and the amount: an
-	// empty code normalizes to the default currency, anything else must
-	// be a 3-letter uppercase ISO 4217 code. Normalization happens here,
-	// before the idempotency replay check, so the journal, the replay
-	// index, and the audit chain all store the canonical code.
-	currency, err := normalizeCurrency(e.Currency)
-	if err != nil {
+	if err := validateJournalEntry(&e); err != nil {
 		return JournalEntry{}, false, err
 	}
-	e.Currency = currency
 
 	if e.IdempotencyKey != "" {
 		if orig, ok := l.byKey[e.IdempotencyKey]; ok {
@@ -479,10 +506,12 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// Hold and capture keys expire on the same schedule, in their own
 	// namespaces (see pruneHoldKeysLocked in hold.go). Sweep keys expire
 	// on the same schedule too (see pruneSweepKeysLocked in sweep.go),
-	// and so do merge keys (see pruneMergeKeysLocked in merge.go).
+	// and so do merge keys (see pruneMergeKeysLocked in merge.go) and
+	// batch keys (see pruneBatchKeysLocked in batch.go).
 	removed += l.pruneHoldKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
 	removed += l.pruneMergeKeysLocked(now)
+	removed += l.pruneBatchKeysLocked(now)
 	return removed
 }
 

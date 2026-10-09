@@ -48,6 +48,48 @@ curl -s -X POST localhost:8080/entries \
   `{"error":"ledger: posting would exceed the account's daily outflow limit"}`.
   The rejection is counted in `ledger_daily_limit_rejections_total`.
 
+### `POST /entries/batch`
+
+Atomic bulk settlement: one request commits several double-entry entries
+(a payroll run, a merchant batch settlement) — either every new entry
+lands or nothing does. One bad leg rejects the whole batch; the frozen /
+overdraft / daily-limit risk controls apply per entry, evaluated
+sequentially in batch order, so a batch cannot dodge a guard by splitting
+one overdrawing outflow into small legs.
+
+```bash
+curl -s -X POST localhost:8080/entries/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"batch_id":"payroll-2026-10","idempotency_key":"bk-001","entries":[
+    {"entry_id":"p-001","debit_account":"alice","credit_account":"payroll","amount_cents":500000,"currency":"USD"},
+    {"entry_id":"p-002","debit_account":"bob","credit_account":"payroll","amount_cents":450000,"currency":"USD"}
+  ]}'
+# 201 {"batch_id":"payroll-2026-10","entries":[...],"duplicate":false}
+```
+
+- First-time batch → `201` with the receipt. The server generates
+  `batch_id` and per-entry `id` values when the client omits them.
+- Re-post with the same batch `idempotency_key` → `200` with the original
+  receipt (`duplicate: true`); nothing is booked again.
+- Each entry's own `idempotency_key` shares the `POST /entries` key
+  namespace: a key already posted resolves to the originally posted entry
+  (returned in the receipt, booked nothing), while the batch's fresh
+  entries commit normally.
+- Invalid batch (empty batch, bad leg, duplicate entry IDs in the batch,
+  an entry ID already journaled, or a duplicated new entry key) → `400`.
+- A leg through a **frozen** account → `403`; a leg that would overdraw an
+  **overdraft-protected** payer or breach a **daily outflow limit** →
+  `422`. Rejections are counted in the same
+  `ledger_frozen/overdraft/daily_limit_rejections_total` counters as
+  single posts.
+- Committed entries carry `batch_id`, so a bulk settlement traces back to
+  its batch; each entry gets its own audit-chain link, so `GET
+  /entries/verify` and `POST /reconcile` cover batch entries exactly like
+  ordinary postings. Batch keys expire with the idempotency TTL like every
+  other key namespace and survive disaster-recovery snapshots.
+- Attempts and replays are counted in `ledger_batch_total` and
+  `ledger_batch_idempotency_hits_total`.
+
 ### `POST /transfers`
 
 The payment-domain view of a posting: instead of debit/credit legs, the
@@ -905,6 +947,10 @@ curl -s localhost:8080/metrics
 - `ledger_merges_total` — every `POST /merges` request received.
 - `ledger_merge_idempotency_hits_total` — merges that replayed an existing
   idempotency key (returned the original receipt, booked nothing).
+- `ledger_batch_total` — every `POST /entries/batch` request received.
+- `ledger_batch_idempotency_hits_total` — batches that replayed an
+  existing batch idempotency key (returned the original receipt, booked
+  nothing).
 - `ledger_audit_events_total` — audit-log events written to disk (synced
   from the ledger's audit log on every scrape).
 - `ledger_audit_dropped_total` — audit-log events dropped because the

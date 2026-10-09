@@ -168,6 +168,7 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	sweepKeys := map[string]sweepRecord{}
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
+	batchKeys := map[string]batchRecord{}
 	var cfg *snapshotConfigLine
 	lineNo := 0
 
@@ -330,6 +331,18 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
 				}
 				mergeKeys[il.Key] = il.MergeID
+			case snapshotNSBatch:
+				if il.Batch == nil {
+					return fail("line %d: batch-namespace record without batch", lineNo)
+				}
+				if _, dup := batchKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				batchKeys[il.Key] = batchRecord{
+					batchID:   il.Batch.BatchID,
+					entryIDs:  il.Batch.EntryIDs,
+					createdAt: il.Batch.CreatedAt,
+				}
 			default:
 				return fail("line %d: unknown idempotency namespace %q", lineNo, il.Namespace)
 			}
@@ -540,6 +553,19 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 			return fail("merge idempotency key %q conflicts with the ledger's registry: refusing merge", k)
 		}
 	}
+	for k, rec := range batchKeys {
+		for _, id := range rec.entryIDs {
+			if _, ok := entryVisible(id); !ok {
+				return fail("batch idempotency key %q references missing entry %q", k, id)
+			}
+		}
+		if existing, ok := l.batchKeys[k]; ok {
+			if existing.batchID != rec.batchID || !reflect.DeepEqual(existing.entryIDs, rec.entryIDs) ||
+				existing.createdAt.UnixNano() != rec.createdAt.UnixNano() {
+				return fail("batch idempotency key %q conflicts with the ledger's registry: refusing merge", k)
+			}
+		}
+	}
 
 	// Commit: everything above checked out, so nothing below can fail.
 	// The journal fold applies the same effects commitEntryLocked does,
@@ -596,6 +622,11 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	for k, mergeID := range mergeKeys {
 		if _, ok := l.mergeKeys[k]; !ok {
 			l.mergeKeys[k] = mergeID
+		}
+	}
+	for k, rec := range batchKeys {
+		if _, ok := l.batchKeys[k]; !ok {
+			l.batchKeys[k] = rec
 		}
 	}
 	// The config section carries the latest operational config and

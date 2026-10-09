@@ -22,7 +22,7 @@ import (
 //	{"record":"entry", ...}           journal entries, in audit-chain (Post) order
 //	{"record":"link", ...}            audit-chain links, seq 1..N, matching entry order
 //	{"record":"hold", ...}            authorization holds, by (CreatedAt, ID)
-//	{"record":"idempotency", ...}     the five idempotency-key namespaces
+//	{"record":"idempotency", ...}     the seven idempotency-key namespaces
 //	{"record":"config", ...}          operational config (frozen, overdraft, hierarchy, fees, TTL, daily limits)
 //
 // The export carries only source-of-truth rows: journal entries, chain
@@ -94,6 +94,13 @@ type snapshotSweep struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// snapshotBatch is the exportable form of the unexported batchRecord.
+type snapshotBatch struct {
+	BatchID   string    `json:"batch_id"`
+	EntryIDs  []string  `json:"entry_ids"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // snapshotMerge is the exportable form of the unexported mergeRecord:
 // one committed account merge (see merge.go).
 type snapshotMerge struct {
@@ -120,6 +127,7 @@ const (
 	snapshotNSCapture  = "capture"   // key -> CaptureReceipt (captureKeys)
 	snapshotNSSweep    = "sweep"     // key -> snapshotSweep (sweepKeys)
 	snapshotNSMergeKey = "merge_key" // key -> merge ID (mergeKeys)
+	snapshotNSBatch    = "batch"     // key -> snapshotBatch (batchKeys)
 )
 
 // snapshotIdempotencyLine carries one idempotency-key registration. Only
@@ -134,6 +142,7 @@ type snapshotIdempotencyLine struct {
 	Receipt   *CaptureReceipt `json:"receipt,omitempty"`
 	Sweep     *snapshotSweep  `json:"sweep,omitempty"`
 	MergeID   string          `json:"merge_id,omitempty"`
+	Batch     *snapshotBatch  `json:"batch,omitempty"`
 }
 
 // snapshotConfigLine carries operational config that a faithful restore
@@ -285,7 +294,7 @@ func (l *Ledger) exportMergesLocked(enc *json.Encoder) error {
 	return nil
 }
 
-// exportIdempotencyLocked writes the six idempotency-key namespaces, one
+// exportIdempotencyLocked writes the seven idempotency-key namespaces, one
 // record per key, sorted for determinism. Callers must hold l.mu; the
 // read lock suffices.
 func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
@@ -365,6 +374,19 @@ func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
+	batchKeyList := make([]string, 0, len(l.batchKeys))
+	for k := range l.batchKeys {
+		batchKeyList = append(batchKeyList, k)
+	}
+	for _, k := range sortedKeys(batchKeyList) {
+		rec := l.batchKeys[k]
+		if err := enc.Encode(snapshotIdempotencyLine{
+			Record: "idempotency", Namespace: snapshotNSBatch, Key: k,
+			Batch: &snapshotBatch{BatchID: rec.batchID, EntryIDs: rec.entryIDs, CreatedAt: rec.createdAt},
+		}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -415,6 +437,7 @@ func journalEntriesEqual(a, b JournalEntry) bool {
 		a.AmountCents == b.AmountCents &&
 		a.Currency == b.Currency &&
 		a.IdempotencyKey == b.IdempotencyKey &&
+		a.BatchID == b.BatchID &&
 		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano()
 }
 
@@ -448,6 +471,7 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	sweepKeys := map[string]sweepRecord{}
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
+	batchKeys := map[string]batchRecord{}
 	var cfg *snapshotConfigLine
 	lineNo := 0
 
@@ -618,6 +642,18 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
 				}
 				mergeKeys[il.Key] = il.MergeID
+			case snapshotNSBatch:
+				if il.Batch == nil {
+					return fail("line %d: batch-namespace record without batch", lineNo)
+				}
+				if _, dup := batchKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				batchKeys[il.Key] = batchRecord{
+					batchID:   il.Batch.BatchID,
+					entryIDs:  il.Batch.EntryIDs,
+					createdAt: il.Batch.CreatedAt,
+				}
 			default:
 				return fail("line %d: unknown idempotency namespace %q", lineNo, il.Namespace)
 			}
@@ -773,6 +809,14 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 			return fail("merge idempotency key %q references missing merge %q", k, mergeID)
 		}
 		l.mergeKeys[k] = mergeID
+	}
+	for k, rec := range batchKeys {
+		for _, id := range rec.entryIDs {
+			if _, ok := l.entries[id]; !ok {
+				return fail("batch idempotency key %q references missing entry %q", k, id)
+			}
+		}
+		l.batchKeys[k] = rec
 	}
 
 	// Operational config.

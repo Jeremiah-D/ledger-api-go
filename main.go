@@ -271,6 +271,123 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, receipt)
 }
 
+type batchEntryRequest struct {
+	EntryID        string           `json:"entry_id"`
+	DebitAccount   ledger.AccountID `json:"debit_account"`
+	CreditAccount  ledger.AccountID `json:"credit_account"`
+	AmountCents    int64            `json:"amount_cents"`
+	Currency       string           `json:"currency"`
+	IdempotencyKey string           `json:"idempotency_key"`
+}
+
+type createBatchRequest struct {
+	BatchID        string              `json:"batch_id"`
+	Entries        []batchEntryRequest `json:"entries"`
+	IdempotencyKey string              `json:"idempotency_key"`
+}
+
+// handleCreateBatch implements POST /entries/batch, the bulk-settlement
+// view of a posting: the caller submits several double-entry legs at once
+// (a payroll run, a merchant batch settlement) and the ledger commits them
+// atomically — either every new entry lands or nothing does. One bad leg
+// rejects the whole batch; a batch through a frozen account, or one that
+// would overdraw an overdraft-protected payer or breach a daily outflow
+// limit, is rejected the same way.
+//
+// The server generates batch_id when the client omits it, and generates
+// entry IDs for entries that omit them. A first-time batch returns 201
+// with the receipt; a duplicate batch idempotency key returns 200 with the
+// originally posted receipt; invalid batches return 400; a batch through
+// a frozen account returns 403; a batch that would overdraw a protected
+// account or breach a daily limit returns 422.
+func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	// Every POST attempt is counted; replays are counted separately below.
+	s.metrics.BatchTotal.Add(1)
+
+	// Same transport contract as POST /entries: bounded body, strict
+	// decoding, no trailing garbage.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req createBatchRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	id := req.BatchID
+	if id == "" {
+		id = newID()
+	}
+	entries := make([]ledger.JournalEntry, 0, len(req.Entries))
+	for _, re := range req.Entries {
+		entryID := re.EntryID
+		if entryID == "" {
+			entryID = newID()
+		}
+		entries = append(entries, ledger.JournalEntry{
+			ID:             entryID,
+			DebitAccount:   re.DebitAccount,
+			CreditAccount:  re.CreditAccount,
+			AmountCents:    re.AmountCents,
+			Currency:       re.Currency,
+			IdempotencyKey: re.IdempotencyKey,
+			CreatedAt:      time.Now(),
+		})
+	}
+	batch := ledger.Batch{
+		ID:             id,
+		Entries:        entries,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	}
+
+	receipt, err := s.ledger.PostBatch(batch)
+	if err != nil {
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if receipt.Duplicate {
+		s.metrics.BatchIdempotencyHits.Add(1)
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
 type createSweepRequest struct {
 	SweepID        string             `json:"sweep_id"`
 	FromAccounts   []ledger.AccountID `json:"from_accounts"`
@@ -971,6 +1088,7 @@ func newServer(l *ledger.Ledger) *server {
 func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
+	mux.HandleFunc("POST /entries/batch", s.handleCreateBatch)
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
 	mux.HandleFunc("POST /sweeps", s.handleCreateSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
