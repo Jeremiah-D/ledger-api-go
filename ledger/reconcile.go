@@ -50,6 +50,18 @@ type AuditChainHealth struct {
 	ConsistencyError string `json:"consistency_error,omitempty"`
 }
 
+// AccountMerge is one committed account merge (see PostMerge) as reported
+// by Reconcile: which source account was consolidated into which target,
+// the per-currency legs that moved, and when. Merged sources stay frozen;
+// cross-check FromAccount against FrozenAccounts in the same report.
+type AccountMerge struct {
+	MergeID     string     `json:"merge_id"`
+	FromAccount AccountID  `json:"from_account"`
+	ToAccount   AccountID  `json:"to_account"`
+	Legs        []MergeLeg `json:"legs"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
 // CurrencyHoldTotals is the per-currency rollup of active authorization
 // holds (see hold.go) at report time: how many cents are currently
 // reserved from available balances, and in how many holds. Currencies are
@@ -107,6 +119,12 @@ type ReconciliationReport struct {
 	// audited against. The FX clearing account's own balances are part
 	// of the per-account trial balances above, like any other account.
 	FXRates []ExchangeRate `json:"fx_rates"`
+	// Merges lists every committed account merge (see PostMerge), sorted
+	// by merge ID: which source account was consolidated into which
+	// target, the per-currency legs, and when. Merged sources stay
+	// frozen — the frozen_accounts list in this report shows the
+	// resulting stops.
+	Merges []AccountMerge `json:"merges"`
 }
 
 // Reconcile runs a full read-only scan of the ledger and returns the
@@ -132,6 +150,7 @@ func (l *Ledger) Reconcile(now time.Time) ReconciliationReport {
 		Details: map[string]any{
 			"accounting_equation_ok": report.AccountingEquationOK,
 			"discrepancies":          len(report.Discrepancies),
+			"merges":                 len(report.Merges),
 		},
 	})
 	return report
@@ -150,6 +169,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		DailyLimits:                l.dailyLimitsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
 		FXRates:                    l.fxRatesLocked(),
+		Merges:                     l.mergesLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit
@@ -272,6 +292,29 @@ func (l *Ledger) heldTotalsLocked(now time.Time) []CurrencyHoldTotals {
 	out := make([]CurrencyHoldTotals, 0, len(currencies))
 	for _, c := range currencies {
 		out = append(out, *byCurrency[c])
+	}
+	return out
+}
+
+// mergesLocked lists every committed account merge, sorted by merge ID,
+// for the reconciliation report. Callers must hold l.mu; the read lock
+// suffices because the scan mutates nothing.
+func (l *Ledger) mergesLocked() []AccountMerge {
+	ids := make([]string, 0, len(l.merges))
+	for id := range l.merges {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]AccountMerge, 0, len(ids))
+	for _, id := range ids {
+		rec := l.merges[id]
+		out = append(out, AccountMerge{
+			MergeID:     rec.mergeID,
+			FromAccount: rec.from,
+			ToAccount:   rec.to,
+			Legs:        rec.legs,
+			CreatedAt:   rec.createdAt,
+		})
 	}
 	return out
 }

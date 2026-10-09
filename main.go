@@ -335,6 +335,78 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, receipt)
 }
 
+type createMergeRequest struct {
+	MergeID        string           `json:"merge_id"`
+	FromAccount    ledger.AccountID `json:"from_account"`
+	ToAccount      ledger.AccountID `json:"to_account"`
+	IdempotencyKey string           `json:"idempotency_key"`
+}
+
+// handleCreateMerge implements POST /merges, the account-lifecycle view
+// of the payment domain: the caller names a source account to
+// decommission (a merchant entity that changed hands, a consolidated
+// sub-account) and the target account that absorbs it. The ledger
+// atomically moves the source's every currency balance to the target —
+// one journal entry per currency, "<merge ID>/<currency>" — and freezes
+// the source in the same commit, so the decommissioned account can never
+// move money again.
+//
+// The server generates merge_id when the client omits it. A first-time
+// merge returns 201 with the receipt; a duplicate idempotency key returns
+// 200 with the originally posted receipt (even though the source is now
+// frozen — the replay books nothing new); invalid merges return 400; a
+// merge touching a frozen account returns 403; a merge that would
+// overdraw an overdraft-protected target (only possible when the source
+// carries negative balances, which the target absorbs as debt) returns
+// 422. A merge whose source held no balances still succeeds and still
+// freezes the source — the freeze is the point — with an empty leg list.
+func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	// Every POST attempt is counted; replays are counted separately below.
+	s.metrics.MergesTotal.Add(1)
+
+	var req createMergeRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	id := req.MergeID
+	if id == "" {
+		id = newID()
+	}
+	receipt, err := s.ledger.PostMerge(ledger.Merge{
+		ID:             id,
+		From:           req.FromAccount,
+		To:             req.ToAccount,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	})
+	if err != nil {
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if receipt.Duplicate {
+		s.metrics.MergeIdempotencyHits.Add(1)
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
 // decodeJSONBody decodes a JSON request body with the same transport
 // contract as POST /entries: bounded body, strict decoding (unknown
 // fields fail fast), no trailing garbage. It returns false after writing
@@ -811,6 +883,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
 	mux.HandleFunc("POST /sweeps", s.handleCreateSweep)
+	mux.HandleFunc("POST /merges", s.handleCreateMerge)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
 	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)

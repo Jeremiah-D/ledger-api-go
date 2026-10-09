@@ -39,12 +39,12 @@ type Metrics struct {
 	// the fee is counted once the transfer commits).
 	TransferFeeCentsTotal atomic.Uint64
 	// FrozenRejections counts POST /entries, POST /transfers, POST /sweeps,
-	// and hold requests rejected with 403 because an account involved was
-	// frozen.
+	// POST /merges, and hold requests rejected with 403 because an account
+	// involved was frozen.
 	FrozenRejections atomic.Uint64
-	// OverdraftRejections counts POST /entries, POST /transfers, and
-	// capture requests rejected with 422 because they would have
-	// overdrawn an overdraft-protected account.
+	// OverdraftRejections counts POST /entries, POST /transfers,
+	// POST /merges, and capture requests rejected with 422 because they
+	// would have overdrawn an overdraft-protected account.
 	OverdraftRejections atomic.Uint64
 	// DailyLimitRejections counts POST /entries and POST /transfers
 	// requests rejected with 422 because they would have taken the
@@ -90,6 +90,13 @@ type Metrics struct {
 	// already-posted sweep idempotency key and returned the original
 	// receipt.
 	SweepIdempotencyHits atomic.Uint64
+	// MergesTotal counts POST /merges requests received (all attempts,
+	// including duplicates and rejected payloads).
+	MergesTotal atomic.Uint64
+	// MergeIdempotencyHits counts POST /merges requests that replayed an
+	// already-posted merge idempotency key and returned the original
+	// receipt.
+	MergeIdempotencyHits atomic.Uint64
 	// AuditEventsTotal counts audit-log events written to disk. It is
 	// synced from the ledger's audit log on every GET /metrics scrape,
 	// so it stays meaningful even though the events are produced inside
@@ -159,6 +166,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_sweep_idempotency_hits_total",
 		"Total POST /sweeps requests that replayed an existing sweep idempotency key.",
 		m.SweepIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_merges_total",
+		"Total POST /merges requests received.", m.MergesTotal.Load())
+	writeCounter(&sb, "ledger_merge_idempotency_hits_total",
+		"Total POST /merges requests that replayed an existing merge idempotency key.",
+		m.MergeIdempotencyHits.Load())
 	writeCounter(&sb, "ledger_audit_events_total",
 		"Total audit-log events written to disk.", m.AuditEventsTotal.Load())
 	writeCounter(&sb, "ledger_audit_dropped_total",

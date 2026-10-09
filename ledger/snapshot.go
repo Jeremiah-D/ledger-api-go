@@ -94,14 +94,32 @@ type snapshotSweep struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// snapshotMerge is the exportable form of the unexported mergeRecord:
+// one committed account merge (see merge.go).
+type snapshotMerge struct {
+	MergeID   string     `json:"merge_id"`
+	From      AccountID  `json:"from_account"`
+	To        AccountID  `json:"to_account"`
+	Legs      []MergeLeg `json:"legs"`
+	EntryIDs  []string   `json:"entry_ids"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// snapshotMergeLine carries one committed account merge, by merge ID.
+type snapshotMergeLine struct {
+	Record string        `json:"record"`
+	Merge  snapshotMerge `json:"merge"`
+}
+
 // Idempotency-key namespaces in a snapshot. One record per key, so every
 // namespace stays independently addressable on import.
 const (
-	snapshotNSEntry    = "entry"    // key -> JournalEntry (byKey)
-	snapshotNSTransfer = "transfer" // key -> []entry IDs (transferKeys)
-	snapshotNSHold     = "hold"     // key -> hold ID (holdKeys)
-	snapshotNSCapture  = "capture"  // key -> CaptureReceipt (captureKeys)
-	snapshotNSSweep    = "sweep"    // key -> snapshotSweep (sweepKeys)
+	snapshotNSEntry    = "entry"     // key -> JournalEntry (byKey)
+	snapshotNSTransfer = "transfer"  // key -> []entry IDs (transferKeys)
+	snapshotNSHold     = "hold"      // key -> hold ID (holdKeys)
+	snapshotNSCapture  = "capture"   // key -> CaptureReceipt (captureKeys)
+	snapshotNSSweep    = "sweep"     // key -> snapshotSweep (sweepKeys)
+	snapshotNSMergeKey = "merge_key" // key -> merge ID (mergeKeys)
 )
 
 // snapshotIdempotencyLine carries one idempotency-key registration. Only
@@ -115,6 +133,7 @@ type snapshotIdempotencyLine struct {
 	HoldID    string          `json:"hold_id,omitempty"`
 	Receipt   *CaptureReceipt `json:"receipt,omitempty"`
 	Sweep     *snapshotSweep  `json:"sweep,omitempty"`
+	MergeID   string          `json:"merge_id,omitempty"`
 }
 
 // snapshotConfigLine carries operational config that a faithful restore
@@ -209,6 +228,9 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 	if err := l.exportHoldsLocked(enc); err != nil {
 		return err
 	}
+	if err := l.exportMergesLocked(enc); err != nil {
+		return err
+	}
 	if err := l.exportIdempotencyLocked(enc); err != nil {
 		return err
 	}
@@ -239,7 +261,31 @@ func (l *Ledger) exportHoldsLocked(enc *json.Encoder) error {
 	return nil
 }
 
-// exportIdempotencyLocked writes the five idempotency-key namespaces, one
+// exportMergesLocked writes the merge records, sorted by merge ID for
+// determinism. Callers must hold l.mu; the read lock suffices.
+func (l *Ledger) exportMergesLocked(enc *json.Encoder) error {
+	ids := make([]string, 0, len(l.merges))
+	for id := range l.merges {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		rec := l.merges[id]
+		if err := enc.Encode(snapshotMergeLine{Record: "merge", Merge: snapshotMerge{
+			MergeID:   rec.mergeID,
+			From:      rec.from,
+			To:        rec.to,
+			Legs:      rec.legs,
+			EntryIDs:  rec.entryIDs,
+			CreatedAt: rec.createdAt,
+		}}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
+	return nil
+}
+
+// exportIdempotencyLocked writes the six idempotency-key namespaces, one
 // record per key, sorted for determinism. Callers must hold l.mu; the
 // read lock suffices.
 func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
@@ -303,6 +349,18 @@ func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
 		if err := enc.Encode(snapshotIdempotencyLine{
 			Record: "idempotency", Namespace: snapshotNSSweep, Key: k,
 			Sweep: &snapshotSweep{SweepID: rec.sweepID, EntryIDs: rec.entryIDs, CreatedAt: rec.createdAt},
+		}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
+	mergeKeyList := make([]string, 0, len(l.mergeKeys))
+	for k := range l.mergeKeys {
+		mergeKeyList = append(mergeKeyList, k)
+	}
+	for _, k := range sortedKeys(mergeKeyList) {
+		if err := enc.Encode(snapshotIdempotencyLine{
+			Record: "idempotency", Namespace: snapshotNSMergeKey, Key: k,
+			MergeID: l.mergeKeys[k],
 		}); err != nil {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
@@ -388,6 +446,8 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	holdKeys := map[string]string{}
 	captureKeys := map[string]CaptureReceipt{}
 	sweepKeys := map[string]sweepRecord{}
+	merges := map[string]mergeRecord{}
+	mergeKeys := map[string]string{}
 	var cfg *snapshotConfigLine
 	lineNo := 0
 
@@ -475,6 +535,28 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 				return fail("line %d: duplicate hold ID %q", lineNo, hl.Hold.ID)
 			}
 			holds[hl.Hold.ID] = hl.Hold
+		case "merge":
+			if meta == nil {
+				return fail("line %d: merge before meta", lineNo)
+			}
+			var ml snapshotMergeLine
+			if err := json.Unmarshal(line, &ml); err != nil {
+				return fail("line %d: malformed merge: %v", lineNo, err)
+			}
+			if ml.Merge.MergeID == "" {
+				return fail("line %d: merge with empty ID", lineNo)
+			}
+			if _, dup := merges[ml.Merge.MergeID]; dup {
+				return fail("line %d: duplicate merge ID %q", lineNo, ml.Merge.MergeID)
+			}
+			merges[ml.Merge.MergeID] = mergeRecord{
+				mergeID:   ml.Merge.MergeID,
+				from:      ml.Merge.From,
+				to:        ml.Merge.To,
+				legs:      ml.Merge.Legs,
+				entryIDs:  ml.Merge.EntryIDs,
+				createdAt: ml.Merge.CreatedAt,
+			}
 		case "idempotency":
 			if meta == nil {
 				return fail("line %d: idempotency record before meta", lineNo)
@@ -528,6 +610,14 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 					entryIDs:  il.Sweep.EntryIDs,
 					createdAt: il.Sweep.CreatedAt,
 				}
+			case snapshotNSMergeKey:
+				if il.MergeID == "" {
+					return fail("line %d: merge_key-namespace record without merge_id", lineNo)
+				}
+				if _, dup := mergeKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				mergeKeys[il.Key] = il.MergeID
 			default:
 				return fail("line %d: unknown idempotency namespace %q", lineNo, il.Namespace)
 			}
@@ -670,6 +760,20 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 		}
 		l.sweepKeys[k] = rec
 	}
+	for id, rec := range merges {
+		for _, eid := range rec.entryIDs {
+			if _, ok := l.entries[eid]; !ok {
+				return fail("merge %q references missing entry %q", id, eid)
+			}
+		}
+		l.merges[id] = rec
+	}
+	for k, mergeID := range mergeKeys {
+		if _, ok := merges[mergeID]; !ok {
+			return fail("merge idempotency key %q references missing merge %q", k, mergeID)
+		}
+		l.mergeKeys[k] = mergeID
+	}
 
 	// Operational config.
 	if err := l.applySnapshotConfigLocked(cfg); err != nil {
@@ -788,6 +892,17 @@ func holdsEqual(a, b Hold) bool {
 		a.Status == b.Status
 }
 
+// mergeRecordsEqual compares two merge registry entries field by field,
+// ignoring time.Location representation (see journalEntriesEqual).
+func mergeRecordsEqual(a, b mergeRecord) bool {
+	return a.mergeID == b.mergeID &&
+		a.from == b.from &&
+		a.to == b.to &&
+		reflect.DeepEqual(a.legs, b.legs) &&
+		reflect.DeepEqual(a.entryIDs, b.entryIDs) &&
+		a.createdAt.UnixNano() == b.createdAt.UnixNano()
+}
+
 // snapshotLedgersEqual is a test helper: it reports whether two ledgers
 // carry the same journaled and operational state, for snapshot
 // round-trip tests. Time fields are compared by instant (not by
@@ -861,6 +976,21 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 			sa.createdAt.UnixNano() != sb.createdAt.UnixNano() {
 			return false
 		}
+	}
+	if len(a.merges) != len(b.merges) {
+		return false
+	}
+	for id, ma := range a.merges {
+		mb, ok := b.merges[id]
+		if !ok || ma.mergeID != mb.mergeID || ma.from != mb.from || ma.to != mb.to ||
+			!reflect.DeepEqual(ma.legs, mb.legs) ||
+			!reflect.DeepEqual(ma.entryIDs, mb.entryIDs) ||
+			ma.createdAt.UnixNano() != mb.createdAt.UnixNano() {
+			return false
+		}
+	}
+	if !reflect.DeepEqual(a.mergeKeys, b.mergeKeys) {
+		return false
 	}
 	if !reflect.DeepEqual(a.frozen, b.frozen) {
 		return false

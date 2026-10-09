@@ -26,9 +26,9 @@ func TestAuditLogEndToEnd(t *testing.T) {
 		`{"debit_account":"cash","credit_account":"rev","amount_cents":100}`); code != http.StatusCreated {
 		t.Fatalf("POST /entries: status=%d, want 201", code)
 	}
-	if code, _ := postJSON(t, srv.URL+"/transfers",
-		`{"transfer_id":"tr1","from_account":"cash","to_account":"treasury","amount_cents":100}`); code != http.StatusCreated {
-		t.Fatalf("POST /transfers: status=%d, want 201", code)
+	if code, _ := postJSON(t, srv.URL+"/merges",
+		`{"merge_id":"mg1","from_account":"cash","to_account":"treasury"}`); code != http.StatusCreated {
+		t.Fatalf("POST /merges: status=%d, want 201", code)
 	}
 	if code, _ := postJSON(t, srv.URL+"/reconcile", `{}`); code != http.StatusOK {
 		t.Fatalf("POST /reconcile: status=%d, want 200", code)
@@ -52,7 +52,7 @@ func TestAuditLogEndToEnd(t *testing.T) {
 	for _, ev := range events {
 		ops[ev.Op]++
 	}
-	for op, want := range map[string]int{"post": 1, "transfer": 1, "reconcile": 1} {
+	for op, want := range map[string]int{"post": 1, "merge": 1, "reconcile": 1} {
 		if ops[op] != want {
 			t.Errorf("op %q: got %d events, want %d (all ops: %v)", op, ops[op], want, ops)
 		}

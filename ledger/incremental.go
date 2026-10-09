@@ -106,6 +106,9 @@ func (l *Ledger) ExportIncrementalSnapshot(w io.Writer, sinceVersion uint64) err
 	if err := l.exportHoldsLocked(enc); err != nil {
 		return err
 	}
+	if err := l.exportMergesLocked(enc); err != nil {
+		return err
+	}
 	if err := l.exportIdempotencyLocked(enc); err != nil {
 		return err
 	}
@@ -163,6 +166,8 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	holdKeys := map[string]string{}
 	captureKeys := map[string]CaptureReceipt{}
 	sweepKeys := map[string]sweepRecord{}
+	merges := map[string]mergeRecord{}
+	mergeKeys := map[string]string{}
 	var cfg *snapshotConfigLine
 	lineNo := 0
 
@@ -242,6 +247,28 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 				return fail("line %d: duplicate hold ID %q", lineNo, hl.Hold.ID)
 			}
 			holds[hl.Hold.ID] = hl.Hold
+		case "merge":
+			if meta == nil {
+				return fail("line %d: merge before meta", lineNo)
+			}
+			var ml snapshotMergeLine
+			if err := json.Unmarshal(line, &ml); err != nil {
+				return fail("line %d: malformed merge: %v", lineNo, err)
+			}
+			if ml.Merge.MergeID == "" {
+				return fail("line %d: merge with empty ID", lineNo)
+			}
+			if _, dup := merges[ml.Merge.MergeID]; dup {
+				return fail("line %d: duplicate merge ID %q", lineNo, ml.Merge.MergeID)
+			}
+			merges[ml.Merge.MergeID] = mergeRecord{
+				mergeID:   ml.Merge.MergeID,
+				from:      ml.Merge.From,
+				to:        ml.Merge.To,
+				legs:      ml.Merge.Legs,
+				entryIDs:  ml.Merge.EntryIDs,
+				createdAt: ml.Merge.CreatedAt,
+			}
 		case "idempotency":
 			if meta == nil {
 				return fail("line %d: idempotency record before meta", lineNo)
@@ -295,6 +322,14 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 					entryIDs:  il.Sweep.EntryIDs,
 					createdAt: il.Sweep.CreatedAt,
 				}
+			case snapshotNSMergeKey:
+				if il.MergeID == "" {
+					return fail("line %d: merge_key-namespace record without merge_id", lineNo)
+				}
+				if _, dup := mergeKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				mergeKeys[il.Key] = il.MergeID
 			default:
 				return fail("line %d: unknown idempotency namespace %q", lineNo, il.Namespace)
 			}
@@ -485,6 +520,26 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 			}
 		}
 	}
+	for id, rec := range merges {
+		for _, eid := range rec.entryIDs {
+			if _, ok := entryVisible(eid); !ok {
+				return fail("merge %q references missing entry %q", id, eid)
+			}
+		}
+		if existing, ok := l.merges[id]; ok && !mergeRecordsEqual(existing, rec) {
+			return fail("merge %q conflicts with the ledger's merge registry: refusing merge", id)
+		}
+	}
+	for k, mergeID := range mergeKeys {
+		if _, ok := l.merges[mergeID]; !ok {
+			if _, ok := merges[mergeID]; !ok {
+				return fail("merge idempotency key %q references missing merge %q", k, mergeID)
+			}
+		}
+		if existing, ok := l.mergeKeys[k]; ok && existing != mergeID {
+			return fail("merge idempotency key %q conflicts with the ledger's registry: refusing merge", k)
+		}
+	}
 
 	// Commit: everything above checked out, so nothing below can fail.
 	// The journal fold applies the same effects commitEntryLocked does,
@@ -531,6 +586,16 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	for k, rec := range sweepKeys {
 		if _, ok := l.sweepKeys[k]; !ok {
 			l.sweepKeys[k] = rec
+		}
+	}
+	for id, rec := range merges {
+		if _, ok := l.merges[id]; !ok {
+			l.merges[id] = rec
+		}
+	}
+	for k, mergeID := range mergeKeys {
+		if _, ok := l.mergeKeys[k]; !ok {
+			l.mergeKeys[k] = mergeID
 		}
 	}
 	// The config section carries the latest operational config and

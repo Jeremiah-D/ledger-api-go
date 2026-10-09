@@ -150,16 +150,25 @@ type Ledger struct {
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the
 	// entry/transfer key namespaces; all of them expire with the TTL.
-	holdKeys       map[string]string
-	captureKeys    map[string]CaptureReceipt
+	holdKeys    map[string]string
+	captureKeys map[string]CaptureReceipt
 	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so
 	// replays rebuild the full receipt (see sweep.go). Its own namespace,
 	// like holdKeys/captureKeys, expiring with the TTL.
 	sweepKeys map[string]sweepRecord
+	// merges is the authoritative registry of committed account merges
+	// (see merge.go), keyed by merge ID: every PostMerge appends here,
+	// whether or not it carried an idempotency key. It feeds Reconcile's
+	// merge history and idempotent replays (via mergeKeys).
+	merges map[string]mergeRecord
+	// mergeKeys maps a merge's idempotency key to its merge ID. Its own
+	// namespace, expiring with the TTL like every other key index (see
+	// pruneMergeKeysLocked in merge.go).
+	mergeKeys map[string]string
 	// audit is the structured compliance audit log (see audit.go). Nil
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
-	audit *AuditLog
+	audit          *AuditLog
 	chain          []chainLink   // audit chain, one link per successful Post, in order
 	version        uint64        // bumped by every successful Post
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
@@ -250,6 +259,8 @@ func New(opts ...Option) *Ledger {
 		holdKeys:       make(map[string]string),
 		captureKeys:    make(map[string]CaptureReceipt),
 		sweepKeys:      make(map[string]sweepRecord),
+		merges:         make(map[string]mergeRecord),
+		mergeKeys:      make(map[string]string),
 		fxRates:        make(map[fxPair]ExchangeRate),
 		pruneInterval:  defaultKeyPruneInterval,
 	}
@@ -467,9 +478,11 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	}
 	// Hold and capture keys expire on the same schedule, in their own
 	// namespaces (see pruneHoldKeysLocked in hold.go). Sweep keys expire
-	// on the same schedule too (see pruneSweepKeysLocked in sweep.go).
+	// on the same schedule too (see pruneSweepKeysLocked in sweep.go),
+	// and so do merge keys (see pruneMergeKeysLocked in merge.go).
 	removed += l.pruneHoldKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
+	removed += l.pruneMergeKeysLocked(now)
 	return removed
 }
 

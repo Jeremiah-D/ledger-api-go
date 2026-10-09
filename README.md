@@ -171,6 +171,50 @@ with the receipt; a duplicate idempotency key returns `200` with the
 original receipt (its own key namespace, expiring with the TTL); invalid
 sweeps return `400`; a sweep touching a frozen account returns `403`.
 
+### `POST /merges`
+
+Account merge: atomically moves **every** currency balance of the source
+account into the target account — one journal entry per currency,
+`<merge ID>/<currency>` — and freezes the source in the same commit. The
+shape is a merchant entity changing hands: the old account is drained to
+exactly zero in every currency and decommissioned, so it can never move
+money again.
+
+```bash
+curl -X POST localhost:8080/merges -d '{
+  "merge_id": "merge-2026-10-09",
+  "from_account": "old-corp",
+  "to_account": "new-corp",
+  "idempotency_key": "merge-old-corp-2026-10-09"
+}'
+# 201 {"merge_id":"merge-2026-10-09","from_account":"old-corp","to_account":"new-corp",
+#      "legs":[{"from_account":"old-corp","to_account":"new-corp","currency":"USD",
+#               "amount_cents":10000,"debt_absorbed":false,"entry_id":"merge-2026-10-09/USD"}],
+#      "entries":[{...}],"source_frozen":true,"duplicate":false}
+```
+
+Unlike a sweep, a merge also consolidates **negative** balances: a
+negative source balance (the account owes money) is absorbed as debt —
+the leg zeroes the source by debiting it and crediting the target, so the
+target's balance decreases. Debt legs are flagged `"debt_absorbed":true`
+in the receipt so readers never mistake them for ordinary credits. When
+the target is overdraft-protected, a merge that would take it below zero
+in any currency — only possible via debt absorption, since positive
+balances only ever grow the target — is rejected with `422`.
+
+Check order is validation, then the idempotency replay check, then the
+merge-ID conflict check, then the frozen check on **both** accounts, then
+the overdraft check on the target. A duplicate idempotency key returns
+`200` with the original receipt even though the source is now frozen
+(the replay books nothing new). A merge from an already-frozen source
+returns `403`. A merge whose source held no balances still succeeds and
+still freezes the source — decommissioning an empty account is the point —
+with an empty leg list. Holds are advisory (as with sweeps): settle or
+release them before merging; daily outflow limits do not apply to merges.
+
+`POST /reconcile` reports every committed merge in its `merges` list, and
+the frozen source shows up in `frozen_accounts` for cross-checking.
+
 ### `POST /accounts/{id}/freeze` and `POST /accounts/{id}/unfreeze`
 
 Risk-control stop for an account (fintech wind-down / fraud hold). A frozen
@@ -568,6 +612,7 @@ Report fields:
 | `held_totals`          | per-currency rollup of active authorization holds (`currency`, `held_cents`, `active_holds`), sorted by currency — the cents currently reserved from available balances; expired holds count as inactive |
 | `idempotency_keys`     | `ttl_configured`, `ttl`, `total_keys`, and `expired_eligible` (keys older than the TTL, i.e. the next sweep's eviction set) |
 | `audit_chain`          | `verify_ok` / `verify_error`, `head`, `links`, plus `head_consistent` — the chain-length == ledger-version check with `consistency_error` when the counters desync |
+| `merges`               | every committed account merge, sorted by merge ID: `merge_id`, `from_account`, `to_account`, the per-currency `legs`, and `created_at`. Merged sources stay frozen — cross-check `from_account` against `frozen_accounts` in the same report |
 
 A clean run looks like (trimmed):
 
@@ -769,6 +814,9 @@ curl -s localhost:8080/metrics
 - `ledger_sweeps_total` — every `POST /sweeps` request received.
 - `ledger_sweep_idempotency_hits_total` — sweeps that replayed an existing
   idempotency key (returned the original receipt, booked nothing).
+- `ledger_merges_total` — every `POST /merges` request received.
+- `ledger_merge_idempotency_hits_total` — merges that replayed an existing
+  idempotency key (returned the original receipt, booked nothing).
 - `ledger_audit_events_total` — audit-log events written to disk (synced
   from the ledger's audit log on every scrape).
 - `ledger_audit_dropped_total` — audit-log events dropped because the
@@ -781,11 +829,11 @@ curl -s localhost:8080/metrics
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
 - `ledger_frozen_rejections_total` — `POST /entries`, `POST /transfers`,
-  `POST /sweeps`, and hold requests rejected with `403` because an account
-  was frozen.
+  `POST /sweeps`, `POST /merges`, and hold requests rejected with `403`
+  because an account was frozen.
 - `ledger_overdraft_rejections_total` — `POST /entries`, `POST
-  /transfers`, and capture requests rejected with `422` because the
-  posting would have overdrawn an overdraft-protected account.
+  /transfers`, `POST /merges`, and capture requests rejected with `422`
+  because the posting would have overdrawn an overdraft-protected account.
 - `ledger_daily_limit_rejections_total` — `POST /entries` and
   `POST /transfers` requests rejected with `422` because the posting would
   have taken the account's UTC-day cumulative outflow above its configured
@@ -911,6 +959,8 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── ledger_dr_test.go      # snapshot round-trip, tamper/splice rejection, reconcile-rerun parity
 │   ├── audit.go               # structured compliance audit log: async JSONL writer, daily + size rotation, gzip, corrupt-line-skipping reader
 │   ├── ledger_audit_test.go   # audit event shapes, rotation/gzip, corrupt-line skipping, read-path silence, concurrency
+│   ├── merge.go               # PostMerge: atomic account merge (all currencies → target, debt absorption) + source freeze
+│   ├── ledger_merge_test.go   # merge legs/freeze/idempotency/overdraft/TTL, snapshot + incremental round-trips
 │   ├── timetravel.go          # BalanceAt: point-in-time balance at a ledger version (audit-chain prefix scan)
 │   ├── ledger_timetravel_test.go# time-travel correctness, currency isolation, future-version rejection, concurrent readers
 │   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts
