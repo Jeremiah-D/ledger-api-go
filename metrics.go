@@ -65,6 +65,11 @@ type Metrics struct {
 	// POST /entries, POST /entries/batch, POST /transfers, POST /sweeps,
 	// POST /merges, and POST /holds/{id}/capture.
 	PeriodRejections atomic.Uint64
+	// DryRunRequests counts POST /entries/dry-run, POST /transfers/dry-run,
+	// and POST /sweeps/dry-run requests received (all attempts, including
+	// would-be rejections). A dry run records nothing by design, so there
+	// is no separate "committed" counter.
+	DryRunRequests atomic.Uint64
 	// HoldsTotal counts POST /holds requests received (all attempts,
 	// including duplicates and rejected payloads).
 	HoldsTotal atomic.Uint64
@@ -224,6 +229,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_period_rejections_total",
 		"Total journal-writing requests rejected because the entry's timestamp fell in a closed accounting period: POST /entries, POST /entries/batch, POST /transfers, POST /sweeps, POST /merges, and POST /holds/{id}/capture.",
 		m.PeriodRejections.Load())
+	writeCounter(&sb, "ledger_dry_runs_total",
+		"Total what-if dry-run requests received (POST /entries/dry-run, POST /transfers/dry-run, POST /sweeps/dry-run), including would-be rejections.",
+		m.DryRunRequests.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

@@ -140,6 +140,89 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, posted)
 }
 
+// handleDryRunEntry implements POST /entries/dry-run, the what-if twin of
+// POST /entries: the request body is decoded exactly like a real posting
+// and the ledger runs the full Post check sequence (field validation,
+// idempotency replay, frozen, overdraft, period, and daily-limit checks)
+// against a private deep copy of its state, then discards the copy. The
+// response reports what the real call would do: the same status code the
+// real POST would return (201-shape as 200 with would_succeed=true, or
+// the rejection status), and on success the per-leg balance deltas and
+// the version bracket. Nothing is recorded — no journal row, no chain
+// link, no version bump, no idempotency-key registration, no audit event.
+func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	s.metrics.DryRunRequests.Add(1)
+
+	// Same transport contract as POST /entries: bounded body, strict
+	// decoding, no trailing garbage.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req createEntryRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	entry := ledger.JournalEntry{
+		ID:             newID(),
+		DebitAccount:   req.DebitAccount,
+		CreditAccount:  req.CreditAccount,
+		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	}
+
+	result, err := s.ledger.DryRunPost(entry)
+	if err != nil {
+		// The same status the real POST /entries would return, so a
+		// client can swap the /dry-run suffix for the real endpoint and
+		// keep its error handling unchanged.
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 type createTransferRequest struct {
 	TransferID     string           `json:"transfer_id"`
 	FromAccount    ledger.AccountID `json:"from_account"`
@@ -284,6 +367,114 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		s.metrics.TransferFeeCentsTotal.Add(uint64(receipt.FeeCents))
 	}
 	writeJSON(w, http.StatusCreated, receipt)
+}
+
+// handleDryRunTransfer implements POST /transfers/dry-run, the what-if
+// twin of POST /transfers: the request body is decoded exactly like a real
+// transfer and the ledger runs the full PostTransfer check sequence —
+// field validation, fee resolution, FX conversion, idempotency replay,
+// frozen/overdraft/daily-limit/period risk checks — against a private deep
+// copy of its state, then discards the copy. The response reports what the
+// real call would do: the same status code the real POST would return, and
+// on success the per-leg balance deltas and the version bracket. Nothing
+// is recorded.
+func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	s.metrics.DryRunRequests.Add(1)
+
+	// Same transport contract as POST /transfers: bounded body, strict
+	// decoding, no trailing garbage.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req createTransferRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	id := req.TransferID
+	if id == "" {
+		id = newID()
+	}
+	transfer := ledger.Transfer{
+		ID:             id,
+		From:           req.FromAccount,
+		To:             req.ToAccount,
+		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
+		ToCurrency:     req.ToCurrency,
+		FXAccount:      req.FXAccount,
+		FeeCents:       req.FeeCents,
+		FeeAccount:     req.FeeAccount,
+		SkipFee:        req.SkipFee,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	}
+
+	result, err := s.ledger.DryRunTransfer(transfer)
+	if err != nil {
+		// The same status the real POST /transfers would return.
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCrossCurrencyTransfer) {
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrFXRateMissing) {
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrFXRateExpired) {
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrFXAccountNotConfigured) || errors.Is(err, ledger.ErrInvalidFXAccount) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 type batchEntryRequest struct {
@@ -475,6 +666,57 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, receipt)
+}
+
+// handleDryRunSweep implements POST /sweeps/dry-run, the what-if twin of
+// POST /sweeps: the request body is decoded exactly like a real sweep and
+// the ledger runs the full PostSweep check sequence — field validation,
+// leg planning against current balances, idempotency replay, ID
+// conflicts, frozen checks, and the period gate — against a private deep
+// copy of its state, then discards the copy. The response reports what the
+// real call would do: the same status code the real POST would return, and
+// on success the per-leg balance deltas and the version bracket. Nothing
+// is recorded.
+func (s *server) handleDryRunSweep(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	s.metrics.DryRunRequests.Add(1)
+
+	var req createSweepRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	id := req.SweepID
+	if id == "" {
+		id = newID()
+	}
+	result, err := s.ledger.DryRunSweep(ledger.Sweep{
+		ID:             id,
+		From:           req.FromAccounts,
+		To:             req.ToAccount,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	})
+	if err != nil {
+		// The same status the real POST /sweeps would return.
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 type createMergeRequest struct {
@@ -1168,8 +1410,11 @@ func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /entries", s.handleCreateEntry)
 	mux.HandleFunc("POST /entries/batch", s.handleCreateBatch)
+	mux.HandleFunc("POST /entries/dry-run", s.handleDryRunEntry)
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
+	mux.HandleFunc("POST /transfers/dry-run", s.handleDryRunTransfer)
 	mux.HandleFunc("POST /sweeps", s.handleCreateSweep)
+	mux.HandleFunc("POST /sweeps/dry-run", s.handleDryRunSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)

@@ -257,6 +257,46 @@ release them before merging; daily outflow limits do not apply to merges.
 `POST /reconcile` reports every committed merge in its `merges` list, and
 the frozen source shows up in `frozen_accounts` for cross-checking.
 
+### What-if dry-run (`POST /entries/dry-run`, `POST /transfers/dry-run`, `POST /sweeps/dry-run`)
+
+Answers "what would happen if I submitted this now?" without changing
+anything. The request body is decoded exactly like the real endpoint, and
+the ledger runs the **full** check sequence — field validation, idempotency
+replay, frozen, overdraft, period, and daily-limit checks, plus fee
+resolution and FX conversion for transfers, leg planning for sweeps —
+against a private deep copy of its state, then discards the copy. Because
+the simulation executes the same code path as the real call, the result
+cannot drift from it.
+
+A dry run that would succeed returns `200` with the balance and version
+changes the real call would cause:
+
+```bash
+curl -X POST localhost:8080/entries/dry-run -d '{
+  "debit_account": "cash", "credit_account": "equity", "amount_cents": 500
+}'
+# 200 {"would_succeed":true,"duplicate":false,
+#      "version_before":0,"version_after":1,
+#      "legs":[{"entry_id":"...","debit_account":"cash","credit_account":"equity",
+#               "amount_cents":500,"currency":"USD",
+#               "debit_balance_before_cents":0,"debit_balance_after_cents":500,
+#               "credit_balance_before_cents":0,"credit_balance_after_cents":-500}]}
+```
+
+A dry run that would fail returns **the same status code the real call
+would return** — `400` for bad fields, `403` for frozen accounts, `422`
+for overdrafts, closed periods, and daily-limit breaches — so a client can
+swap the `/dry-run` suffix for the real endpoint and keep its error
+handling unchanged. Zero side effects either way: no journal row, no chain
+link, no version bump, no idempotency-key registration, no audit event.
+Idempotent replays are reported honestly (`"duplicate":true`, zero balance
+movement), exactly what the real call would return.
+
+The result is advisory: it describes the ledger at the instant the
+simulation ran. A concurrent writer can change the outcome between the dry
+run and the real submission, so the real call must still handle
+rejections. Dry-run requests are counted in `ledger_dry_runs_total`.
+
 ### `POST /accounts/{id}/freeze` and `POST /accounts/{id}/unfreeze`
 
 Risk-control stop for an account (fintech wind-down / fraud hold). A frozen
@@ -1008,6 +1048,9 @@ curl -s localhost:8080/metrics
   with `422` because the entry's timestamp fell in a closed accounting
   period (`POST /entries`, `POST /entries/batch`, `POST /transfers`,
   `POST /sweeps`, `POST /merges`, `POST /holds/{id}/capture`).
+- `ledger_dry_runs_total` — what-if dry-run requests received
+  (`POST /entries/dry-run`, `POST /transfers/dry-run`,
+  `POST /sweeps/dry-run`), including would-be rejections.
 - `ledger_sweeps_total` — every `POST /sweeps` request received.
 - `ledger_sweep_idempotency_hits_total` — sweeps that replayed an existing
   idempotency key (returned the original receipt, booked nothing).
