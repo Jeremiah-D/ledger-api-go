@@ -643,6 +643,52 @@ report := restored.Reconcile(time.Now())
 // report.AccountingEquationOK && report.AuditChain.VerifyOK => safe to promote
 ```
 
+#### Incremental snapshots (`ledger/incremental.go`)
+
+For bandwidth-efficient backup and replica sync, the ledger can export
+only what changed since a base version:
+
+```go
+var delta bytes.Buffer
+if err := l.ExportIncrementalSnapshot(&delta, baseVersion); err != nil { /* ... */ }
+// delta holds:
+//   {"record":"meta","base_version":N,...}   exactly one, always first
+//   {"record":"entry",...}                   journal entries with seq > N, in chain order
+//   {"record":"link",...}                    their audit-chain links
+//   {"record":"hold",...}                    full holds section
+//   {"record":"idempotency",...}             full idempotency registries (all five namespaces)
+//   {"record":"config",...}                 current operational config (incl. FX rates)
+```
+
+The journal is the volume — that is what stays incremental. Holds,
+registries, and config are compact state, always carried whole, which
+keeps the merge rules simple: the replica applies the delta with
+`ImportIncrementalSnapshot`:
+
+```go
+if err := replica.ImportIncrementalSnapshot(bytes.NewReader(deltaBytes)); err != nil {
+    log.Fatalf("delta rejected: %v", err) // replica untouched — re-sync from its actual version
+}
+```
+
+Continuity is the core invariant: the delta's `base_version` must equal
+the replica's current version. A delta from an older version (overlap) or
+a newer version (gap) is rejected with `ErrSnapshotInvalid` — a replica
+that missed a delta re-syncs from the base it actually has, never skips.
+New entries must be absent from the replica; the staged links are proven
+to hash onto the replica's chain head before anything is committed (a
+splice, reorder, or tampered entry fails there); holds and idempotency
+rows merge (identical rows merge cleanly, conflicting rows reject the
+import); and the config section carries the latest operational config.
+The import finishes with a full audit-chain verification over old and new
+links. Every section is validated before the first mutation, so a
+rejected delta leaves the replica untouched. An empty delta
+(`baseVersion == current version`) is legal and syncs config/registry
+state with no new journal rows.
+
+A full `ImportSnapshot` explicitly refuses a meta carrying `base_version`,
+so the two snapshot kinds can never be confused.
+
 ### `GET /metrics`
 
 Prometheus-format counters, rendered by hand with the standard library
