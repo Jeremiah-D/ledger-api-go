@@ -141,6 +141,12 @@ type ReconciliationReport struct {
 	// audited against. The FX clearing account's own balances are part
 	// of the per-account trial balances above, like any other account.
 	FXRates []ExchangeRate `json:"fx_rates"`
+	// FXRateVersions reports the FX rate-table snapshot history (LG-45,
+	// see fx_snapshot.go): the current snapshot version and whether
+	// versions 1..current are all present. A broken continuity means
+	// snapshot history was lost — the current table still converts, but
+	// some historical transfer's table is no longer reproducible.
+	FXRateVersions FXRateVersionReport `json:"fx_rate_versions"`
 	// Merges lists every committed account merge (see PostMerge), sorted
 	// by merge ID: which source account was consolidated into which
 	// target, the per-currency legs, and when. Merged sources stay
@@ -330,6 +336,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		LowBalanceThresholds:       l.lowBalanceThresholdsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
 		FXRates:                    l.fxRatesLocked(),
+		FXRateVersions:             l.fxRateVersionReportLocked(),
 		Merges:                     l.mergesLocked(),
 		ClosedPeriods:              l.closedPeriodsLocked(),
 		ActiveTransferSchedules:    l.activeScheduleCountLocked(),

@@ -703,6 +703,23 @@ disaster-recovery snapshots (with their effective versions) and are
 listed in the `POST /reconcile` report's `fx_rates` section. Cross-currency
 attempts are counted in `ledger_fx_transfers_total`.
 
+#### Rate-table snapshot versioning
+
+Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,
+`RemoveFXRate`, and rates installed at construction) bumps a snapshot
+version and persists a **full copy of the table** at the new version
+(`ledger.FXRateTableSnapshot(version)`). Each FX receipt pins the
+snapshot version in effect when it posted
+(`fx.rate_snapshot_version`), so a historical audit reproduces exactly
+the table that converted any transfer — even after the rate was replaced
+or removed. Every mutation also emits an `fx_rate_change` audit event
+(flat version bracket, like `freeze`). `POST /reconcile` reports the
+history in `fx_rate_versions` (`current_version`, `total_snapshots`,
+`continuity_ok`): a gap in versions 1..current means snapshot history was
+lost and historical reproduction for the missing versions is gone. The
+version counter and snapshots survive disaster-recovery snapshots;
+imports of pre-versioning snapshots rebuild version 1 from the table.
+
 #### Exact decimal rates and rate expiry (`SetFXRateRat`)
 
 `SetFXRate(num, den)` takes an integer ratio; `SetFXRateRat(from, to,

@@ -183,6 +183,15 @@ type snapshotConfigLine struct {
 	// conversion provenance as the original.
 	FXRates   []ExchangeRate `json:"fx_rates,omitempty"`
 	FXAccount AccountID      `json:"fx_account,omitempty"`
+	// FXSnapshotVersion and FXRateTableSnapshots carry the FX rate-table
+	// snapshot history (LG-45, see fx_snapshot.go): the current version
+	// counter and the per-version table copies. Absent in snapshots
+	// written before snapshot versioning existed — the import rebuilds
+	// version 1 from the imported table when it is non-empty, so a
+	// restored ledger's history starts honest instead of claiming
+	// version 0 with a populated table.
+	FXSnapshotVersion    uint64                `json:"fx_snapshot_version,omitempty"`
+	FXRateTableSnapshots []FXRateTableSnapshot `json:"fx_rate_table_snapshots,omitempty"`
 	// ClosedPeriods carries the locked accounting periods ("YYYY-MM",
 	// see ClosePeriod); absent in snapshots written before period locks
 	// existed. A restore that dropped the locks would reopen closed
@@ -587,6 +596,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		DailyLimits:          l.dailyLimitsLocked(),
 		FXRates:              l.fxRatesLocked(),
 		FXAccount:            l.fxAccount,
+		FXSnapshotVersion:    l.fxSnapshotVersion,
+		FXRateTableSnapshots: l.fxRateTableSnapshotsLocked(),
 		ClosedPeriods:        l.closedPeriodsLocked(),
 		LowBalanceThresholds: l.lowBalanceThresholdsLocked(),
 		ReviewThresholds:     l.reviewThresholdsLocked(),
@@ -1162,6 +1173,31 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			ExpiresAt:        r.ExpiresAt,
 		}
 	}
+	// FX snapshot history (LG-45): snapshots present require a nonzero
+	// declared version; each snapshot's version must be unique and
+	// within 1..FXSnapshotVersion, and its rates must validate like the
+	// table itself. Gaps are deliberately NOT rejected — disaster
+	// recovery fail-opens, and Reconcile's continuity check reports the
+	// missing versions instead of blocking the restore.
+	if len(cfg.FXRateTableSnapshots) > 0 && cfg.FXSnapshotVersion == 0 {
+		return bad("fx_rate_table_snapshots present with fx_snapshot_version 0")
+	}
+	seenFXVersions := make(map[uint64]bool, len(cfg.FXRateTableSnapshots))
+	for _, snap := range cfg.FXRateTableSnapshots {
+		if snap.Version == 0 || snap.Version > cfg.FXSnapshotVersion {
+			return bad("fx snapshot version %d out of range 1..%d", snap.Version, cfg.FXSnapshotVersion)
+		}
+		if seenFXVersions[snap.Version] {
+			return bad("duplicate fx snapshot version %d", snap.Version)
+		}
+		seenFXVersions[snap.Version] = true
+		for _, r := range snap.Rates {
+			if _, _, err := normalizeFXRate(r.FromCurrency, r.ToCurrency, r.Num, r.Den); err != nil {
+				return bad("bad FX rate %s->%s in snapshot version %d: %v",
+					r.FromCurrency, r.ToCurrency, snap.Version, err)
+			}
+		}
+	}
 	// Closed periods are validated like every other config row: a
 	// malformed period ID in the snapshot fails the import instead of
 	// silently unlocking a month.
@@ -1235,6 +1271,38 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	l.fxRates = fx
 	l.fxAccount = cfg.FXAccount
+	// FX snapshot history (LG-45): restore the version counter and the
+	// per-version tables. Legacy snapshots predate versioning — rebuild
+	// version 1 from the imported table when it is non-empty, so the
+	// restored ledger's history starts honest (a populated table at
+	// version 0 would be a lie) and transfers keep a reproducible table.
+	l.fxSnapshotVersion = cfg.FXSnapshotVersion
+	l.fxRateSnapshots = make(map[uint64]FXRateTableSnapshot, len(cfg.FXRateTableSnapshots))
+	for _, snap := range cfg.FXRateTableSnapshots {
+		rates := make([]ExchangeRate, len(snap.Rates))
+		copy(rates, snap.Rates)
+		snap.Rates = rates
+		l.fxRateSnapshots[snap.Version] = snap
+	}
+	if len(cfg.FXRateTableSnapshots) == 0 && len(fx) > 0 {
+		rates := make([]ExchangeRate, 0, len(fx))
+		for _, r := range fx {
+			rates = append(rates, r)
+		}
+		sort.Slice(rates, func(i, j int) bool {
+			if rates[i].FromCurrency != rates[j].FromCurrency {
+				return rates[i].FromCurrency < rates[j].FromCurrency
+			}
+			return rates[i].ToCurrency < rates[j].ToCurrency
+		})
+		l.fxSnapshotVersion = 1
+		l.fxRateSnapshots[1] = FXRateTableSnapshot{
+			Version: 1,
+			TakenAt: time.Now().UTC(),
+			Change:  "imported",
+			Rates:   rates,
+		}
+	}
 	// Closed periods are additive like the frozen-account list: a period
 	// locked in the snapshot must stay locked after the restore.
 	for _, id := range cfg.ClosedPeriods {
@@ -1431,6 +1499,11 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.fxRates, b.fxRates) {
+		return false
+	}
+	// FX snapshot history must round-trip too (LG-45): same version
+	// counter, same per-version tables.
+	if !fxSnapshotsEqualLocked(a, b) {
 		return false
 	}
 	if a.idempotencyTTL != b.idempotencyTTL {

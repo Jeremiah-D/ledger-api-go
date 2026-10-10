@@ -172,6 +172,10 @@ func (l *Ledger) SetFXRate(from, to string, num, den int64) error {
 		Den:              den,
 		EffectiveVersion: l.version,
 	}
+	// LG-45: the table changed — bump the snapshot version and persist
+	// the new table, so transfers converting at this rate stay
+	// reproducible after the next change.
+	l.snapshotFXRateTableLocked(fmt.Sprintf("set %s->%s %d/%d", from, to, num, den))
 	return nil
 }
 
@@ -227,6 +231,12 @@ func (l *Ledger) SetFXRateRat(from, to string, rate *big.Rat, ttl time.Duration)
 		er.ExpiresAt = time.Now().Add(ttl)
 	}
 	l.fxRates[fxPair{from: f, to: t}] = er
+	// LG-45: snapshot the new table like SetFXRate does.
+	change := fmt.Sprintf("set %s->%s %d/%d", f, t, er.Num, er.Den)
+	if ttl > 0 {
+		change += fmt.Sprintf(" ttl=%s", ttl)
+	}
+	l.snapshotFXRateTableLocked(change)
 	return nil
 }
 
@@ -269,6 +279,10 @@ func (l *Ledger) RemoveFXRate(from, to string) (bool, error) {
 		return false, nil
 	}
 	delete(l.fxRates, fxPair{from: f, to: t})
+	// LG-45: the table changed — snapshot the removal, so an auditor
+	// can still reproduce the table (with this rate) from the previous
+	// version.
+	l.snapshotFXRateTableLocked(fmt.Sprintf("remove %s->%s", f, t))
 	return true, nil
 }
 
@@ -404,6 +418,11 @@ func fxConvertCents(amount, num, den int64) (int64, bool) {
 // carried on TransferReceipt for the original posting; idempotent replays
 // return FX == nil, because the rate table may have changed since — the
 // replayed journal entries are the authoritative record.
+//
+// RateSnapshotVersion (LG-45) is the FX rate-table snapshot version in
+// effect when the transfer posted: FXRateTableSnapshot(RateSnapshotVersion)
+// reproduces exactly the table that converted it, even after the rate was
+// replaced or removed.
 type FXConversion struct {
 	FromCurrency     string    `json:"from_currency"`
 	ToCurrency       string    `json:"to_currency"`
@@ -413,6 +432,10 @@ type FXConversion struct {
 	ConvertedCents   int64     `json:"converted_cents"`
 	EffectiveVersion uint64    `json:"effective_version"`
 	RateExpiresAt    time.Time `json:"rate_expires_at,omitempty"`
+	// RateSnapshotVersion pins the conversion to one versioned copy of
+	// the rate table (see fx_snapshot.go); 0 is never emitted for a
+	// real conversion (a conversion implies a populated table).
+	RateSnapshotVersion uint64 `json:"rate_snapshot_version"`
 }
 
 // postTransferFXLocked records a cross-currency transfer: t.Currency is
@@ -566,6 +589,9 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		ConvertedCents:   converted,
 		EffectiveVersion: rate.EffectiveVersion,
 		RateExpiresAt:    rate.ExpiresAt,
+		// LG-45: pin the conversion to the current snapshot version —
+		// the receipt stays reproducible after the rate changes.
+		RateSnapshotVersion: l.fxSnapshotVersion,
 	}
 	if receipt, reviewed, err := l.maybeReviewTransferLocked(t, entries, feeCents, tierIndex, rateBps, fxConv, totalOutflow, now); reviewed || err != nil {
 		return receipt, err

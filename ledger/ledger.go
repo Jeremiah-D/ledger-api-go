@@ -191,6 +191,14 @@ type Ledger struct {
 	// config — like frozen and feeTiers — and survive snapshots.
 	fxRates   map[fxPair]ExchangeRate
 	fxAccount AccountID
+	// fxSnapshotVersion counts FX rate-table mutations (LG-45): every
+	// SetFXRate / SetFXRateRat / RemoveFXRate bumps it and persists a
+	// full copy of the table in fxRateSnapshots at the new version, so a
+	// historical audit can reproduce exactly the table that converted
+	// any FX transfer (see fx_snapshot.go). 0 means the table was never
+	// populated.
+	fxSnapshotVersion uint64
+	fxRateSnapshots   map[uint64]FXRateTableSnapshot
 	// transferKeys maps a transfer's idempotency key to the IDs of the
 	// journal entries it posted, in commit order (principal, then the fee
 	// leg when one was booked), so a replayed transfer returns its full
@@ -380,11 +388,22 @@ func New(opts ...Option) *Ledger {
 		scheduleRuns:         make(map[string][]ScheduleRun),
 		scheduleFiring:       make(map[string]bool),
 		fxRates:              make(map[fxPair]ExchangeRate),
+		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
 		closedPeriods:        make(map[string]bool),
 		pruneInterval:        defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
 		opt(l)
+	}
+	// FX rate-table snapshot versioning (LG-45): rates installed at
+	// construction (WithFXRateOption / LEDGER_FX_RATES) become snapshot
+	// version 1, so every rate the ledger ever converts at is
+	// reproducible from a snapshot. The lock is taken because
+	// snapshotFXRateTableLocked emits an audit event, which requires it.
+	if len(l.fxRates) > 0 {
+		l.mu.Lock()
+		l.snapshotFXRateTableLocked("genesis")
+		l.mu.Unlock()
 	}
 	return l
 }
