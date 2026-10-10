@@ -64,6 +64,9 @@ type snapshotMetaLine struct {
 	EntryCount int       `json:"entry_count"`
 	ChainLinks int       `json:"chain_links"`
 	HoldCount  int       `json:"hold_count"`
+	// ScheduleCount is the number of transfer-schedule records that
+	// follow. Absent (zero) in snapshots written before LG-41.
+	ScheduleCount int `json:"schedule_count,omitempty"`
 }
 
 // snapshotEntryLine carries one journal entry, in chain order.
@@ -213,13 +216,14 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 	enc := json.NewEncoder(w)
 
 	meta := snapshotMetaLine{
-		Record:     "meta",
-		Format:     snapshotFormatVersion,
-		ExportedAt: time.Now().UTC(),
-		Version:    l.version,
-		EntryCount: len(l.chain),
-		ChainLinks: len(l.chain),
-		HoldCount:  len(l.holds),
+		Record:        "meta",
+		Format:        snapshotFormatVersion,
+		ExportedAt:    time.Now().UTC(),
+		Version:       l.version,
+		EntryCount:    len(l.chain),
+		ChainLinks:    len(l.chain),
+		HoldCount:     len(l.holds),
+		ScheduleCount: len(l.schedules),
 	}
 	if err := enc.Encode(meta); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -250,6 +254,9 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 		return err
 	}
 	if err := l.exportMergesLocked(enc); err != nil {
+		return err
+	}
+	if err := l.exportSchedulesLocked(enc); err != nil {
 		return err
 	}
 	if err := l.exportIdempotencyLocked(enc); err != nil {
@@ -300,6 +307,32 @@ func (l *Ledger) exportMergesLocked(enc *json.Encoder) error {
 			EntryIDs:  rec.entryIDs,
 			CreatedAt: rec.createdAt,
 		}}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
+	return nil
+}
+
+// snapshotScheduleLine carries one transfer schedule (see schedule.go),
+// in schedule-ID order. The run history is operational and is not
+// exported — only the schedule definition plus its RunSeq/NextRunAt/
+// Status, which is what a restore needs to keep firing.
+type snapshotScheduleLine struct {
+	Record   string           `json:"record"`
+	Schedule TransferSchedule `json:"schedule"`
+}
+
+// exportSchedulesLocked writes the transfer-schedule records, sorted by
+// schedule ID for determinism. Callers must hold l.mu; the read lock
+// suffices.
+func (l *Ledger) exportSchedulesLocked(enc *json.Encoder) error {
+	ids := make([]string, 0, len(l.schedules))
+	for id := range l.schedules {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := enc.Encode(snapshotScheduleLine{Record: "schedule", Schedule: *l.schedules[id]}); err != nil {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
@@ -487,6 +520,7 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
 	batchKeys := map[string]batchRecord{}
+	schedules := map[string]TransferSchedule{}
 	var cfg *snapshotConfigLine
 	lineNo := 0
 
@@ -684,6 +718,21 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 				return fail("line %d: malformed config: %v", lineNo, err)
 			}
 			cfg = &c
+		case "schedule":
+			if meta == nil {
+				return fail("line %d: schedule before meta", lineNo)
+			}
+			var sl snapshotScheduleLine
+			if err := json.Unmarshal(line, &sl); err != nil {
+				return fail("line %d: malformed schedule: %v", lineNo, err)
+			}
+			if _, dup := schedules[sl.Schedule.ID]; dup {
+				return fail("line %d: duplicate schedule ID %q", lineNo, sl.Schedule.ID)
+			}
+			if err := validateScheduleRecord(&sl.Schedule); err != nil {
+				return fail("line %d: invalid schedule %q: %v", lineNo, sl.Schedule.ID, err)
+			}
+			schedules[sl.Schedule.ID] = sl.Schedule
 		default:
 			return fail("line %d: unknown record type %q", lineNo, env.Record)
 		}
@@ -704,6 +753,9 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	}
 	if len(holds) != meta.HoldCount {
 		return fail("hold count %d does not match meta hold_count %d", len(holds), meta.HoldCount)
+	}
+	if len(schedules) != meta.ScheduleCount {
+		return fail("schedule count %d does not match meta schedule_count %d", len(schedules), meta.ScheduleCount)
 	}
 	// In a healthy ledger every Post bumps the version and appends exactly
 	// one link, so version == links; a snapshot claiming otherwise was not
@@ -765,6 +817,28 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	for _, h := range holdList {
 		l.holds[h.ID] = h
 		l.holdsByAccount[h.Account] = append(l.holdsByAccount[h.Account], h.ID)
+	}
+
+	// Transfer schedules, rebuilt in export (ID) order. The run history
+	// is operational and intentionally not restored — the definition plus
+	// RunSeq/NextRunAt/Status is what keeps the plans firing. The
+	// scheduleKeys index is rebuilt from the idempotency keys so creation
+	// idempotency survives the restore.
+	scheduleIDs := make([]string, 0, len(schedules))
+	for id := range schedules {
+		scheduleIDs = append(scheduleIDs, id)
+	}
+	sort.Strings(scheduleIDs)
+	for _, id := range scheduleIDs {
+		s := schedules[id]
+		rec := s
+		l.schedules[id] = &rec
+		if s.IdempotencyKey != "" {
+			if _, dup := l.scheduleKeys[s.IdempotencyKey]; dup {
+				return fail("duplicate schedule idempotency key %q", s.IdempotencyKey)
+			}
+			l.scheduleKeys[s.IdempotencyKey] = id
+		}
 	}
 
 	// Idempotency registries, with referential checks: a registry row that
@@ -996,6 +1070,29 @@ func mergeRecordsEqual(a, b mergeRecord) bool {
 		a.createdAt.UnixNano() == b.createdAt.UnixNano()
 }
 
+// schedulesEqual compares two transfer schedules field by field,
+// ignoring time.Location representation (see journalEntriesEqual).
+func schedulesEqual(a, b *TransferSchedule) bool {
+	return a.ID == b.ID &&
+		a.From == b.From &&
+		a.To == b.To &&
+		a.AmountCents == b.AmountCents &&
+		a.Currency == b.Currency &&
+		a.ToCurrency == b.ToCurrency &&
+		a.FXAccount == b.FXAccount &&
+		a.FeeCents == b.FeeCents &&
+		a.FeeAccount == b.FeeAccount &&
+		a.SkipFee == b.SkipFee &&
+		a.Memo == b.Memo &&
+		a.Interval == b.Interval &&
+		a.NextRunAt.UnixNano() == b.NextRunAt.UnixNano() &&
+		a.EndsAt.UnixNano() == b.EndsAt.UnixNano() &&
+		a.IdempotencyKey == b.IdempotencyKey &&
+		a.Status == b.Status &&
+		a.RunSeq == b.RunSeq &&
+		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano()
+}
+
 // snapshotLedgersEqual is a test helper: it reports whether two ledgers
 // carry the same journaled and operational state, for snapshot
 // round-trip tests. Time fields are compared by instant (not by
@@ -1083,6 +1180,18 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		}
 	}
 	if !reflect.DeepEqual(a.mergeKeys, b.mergeKeys) {
+		return false
+	}
+	if len(a.schedules) != len(b.schedules) {
+		return false
+	}
+	for id, sa := range a.schedules {
+		sb, ok := b.schedules[id]
+		if !ok || !schedulesEqual(sa, sb) {
+			return false
+		}
+	}
+	if !reflect.DeepEqual(a.scheduleKeys, b.scheduleKeys) {
 		return false
 	}
 	if !reflect.DeepEqual(a.frozen, b.frozen) {

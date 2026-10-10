@@ -145,6 +145,11 @@ type ReconciliationReport struct {
 	// discrepancies into one reporting currency through the FX rate
 	// table. Nil unless FXApplied.
 	BaseCurrencySummary *BaseCurrencySummary `json:"base_currency_summary,omitempty"`
+	// ActiveTransferSchedules counts the recurring transfer plans (see
+	// schedule.go) currently firing on their cadence. Paused, cancelled,
+	// and completed plans are not counted. Operations tooling reads this
+	// to know how many schedules the next sweep may fire.
+	ActiveTransferSchedules int `json:"active_transfer_schedules"`
 }
 
 // ReconcileOptions tunes Reconcile. BaseCurrency opts into the
@@ -299,6 +304,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FXRates:                    l.fxRatesLocked(),
 		Merges:                     l.mergesLocked(),
 		ClosedPeriods:              l.closedPeriodsLocked(),
+		ActiveTransferSchedules:    l.activeScheduleCountLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit

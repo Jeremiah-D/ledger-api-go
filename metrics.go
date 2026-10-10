@@ -38,6 +38,11 @@ type Metrics struct {
 	// POST /transfers fee legs (principal + fee entries land together, so
 	// the fee is counted once the transfer commits).
 	TransferFeeCentsTotal atomic.Uint64
+	// ScheduledTransfersTotal counts scheduled-transfer runs the sweeper
+	// fired successfully (see StartScheduleSweeper): each run that posted
+	// through PostTransfer, including duplicate replays after a crash.
+	// Failed runs are recorded in the audit log, not here.
+	ScheduledTransfersTotal atomic.Uint64
 	// FrozenRejections counts POST /entries, POST /entries/batch,
 	// POST /transfers, POST /sweeps, POST /merges, and hold requests
 	// rejected with 403 because an account involved was frozen.
@@ -181,6 +186,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_transfer_fee_cents_total",
 		"Total fee cents booked by POST /transfers fee legs.",
 		m.TransferFeeCentsTotal.Load())
+	writeCounter(&sb, "ledger_scheduled_transfers_total",
+		"Total scheduled-transfer runs fired by the sweeper.",
+		m.ScheduledTransfersTotal.Load())
 	writeCounter(&sb, "ledger_frozen_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, and hold requests rejected because an account was frozen.",
 		m.FrozenRejections.Load())

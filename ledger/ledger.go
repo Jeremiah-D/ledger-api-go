@@ -213,6 +213,18 @@ type Ledger struct {
 	// namespace, expiring with the TTL like every other key index (see
 	// pruneMergeKeysLocked in merge.go).
 	mergeKeys map[string]string
+	// schedules is the registry of recurring transfer plans (see
+	// schedule.go), keyed by schedule ID. scheduleKeys maps a schedule
+	// creation's idempotency key to its schedule ID — its own namespace,
+	// like mergeKeys. scheduleRuns holds each schedule's bounded run
+	// history (newest appended; evicted past maxScheduleRuns). All three
+	// are structural state and survive snapshots; the run history does
+	// not. scheduleFiring marks schedules with a sweep in flight so
+	// concurrent SweepDue calls serialize per schedule.
+	schedules      map[string]*TransferSchedule
+	scheduleKeys   map[string]string
+	scheduleRuns   map[string][]ScheduleRun
+	scheduleFiring map[string]bool
 	// audit is the structured compliance audit log (see audit.go). Nil
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
@@ -328,6 +340,10 @@ func New(opts ...Option) *Ledger {
 		batchKeys:            make(map[string]batchRecord),
 		merges:               make(map[string]mergeRecord),
 		mergeKeys:            make(map[string]string),
+		schedules:            make(map[string]*TransferSchedule),
+		scheduleKeys:         make(map[string]string),
+		scheduleRuns:         make(map[string][]ScheduleRun),
+		scheduleFiring:       make(map[string]bool),
 		fxRates:              make(map[fxPair]ExchangeRate),
 		closedPeriods:        make(map[string]bool),
 		pruneInterval:        defaultKeyPruneInterval,

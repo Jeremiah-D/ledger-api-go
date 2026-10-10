@@ -178,6 +178,30 @@ malformed value fails the startup fast (`log.Fatal`) instead of
 silently mispricing transfers. Total fee cents booked are exposed as
 `ledger_transfer_fee_cents_total`.
 
+### Scheduled transfers (`POST /transfer-schedules`)
+
+Recurring transfer plans — payroll, rent, loan servicing. `POST
+/transfer-schedules` registers a plan (`schedule_id`, legs, amount,
+currency, optional fee/FX fields like a transfer, `interval` as a Go
+duration string such as `"24h"`, `next_run_at` RFC3339, optional
+`ends_at`); the background sweeper (`LEDGER_SCHEDULE_SWEEP_INTERVAL`,
+e.g. `"1m"`) fires every due plan via `Ledger.SweepDue`. Each run posts
+through the full `PostTransfer` validation chain (frozen, overdraft,
+daily-limit, period, fee policy) under the idempotency key
+`"<schedule_id>/run/<seq>"`, so a crash between the commit and the
+schedule-state advance replays instead of double-booking. A failed run
+is recorded (run history + `schedule_run_failed` audit event) and keeps
+its `NextRunAt` so the next sweep retries the same run — one plan's
+rejection never blocks the others, and missed runs are skipped (counted
+as `skipped_runs`) rather than caught up. Plans support
+pause/resume/cancel (`POST /transfer-schedules/{id}/pause|resume|cancel`;
+cancelled/completed are terminal), run history (`GET
+/transfer-schedules/{id}/runs`, newest first, `?limit=`), and the
+`Reconcile` report counts active plans (`active_transfer_schedules`).
+Fired runs increment `ledger_scheduled_transfers_total`. Schedules are
+structural state: they survive disaster-recovery snapshots (run history
+does not).
+
 ### `POST /sweeps`
 
 Treasury sweep: atomically moves the positive per-currency balances of the
@@ -1223,6 +1247,15 @@ Environment:
   The first tick fires after one full interval; SIGINT/SIGTERM stops the
   worker with the server. Unset or invalid means disabled — expiry stays
   lazy by predicate and available on demand via `POST /holds/expire`.
+- `LEDGER_SCHEDULE_SWEEP_INTERVAL` — enables the background
+  transfer-schedule worker, e.g. `LEDGER_SCHEDULE_SWEEP_INTERVAL=1m`.
+  While enabled, the server fires due transfer schedules on the interval
+  (the same `SweepDue` scan: idempotent per-run keys, failed runs
+  retried next tick, missed runs skipped) and counts every fired run in
+  `ledger_scheduled_transfers_total`. The first tick fires after one
+  full interval; SIGINT/SIGTERM stops the worker with the server. Unset
+  or invalid means disabled — plans stay registered but never fire until
+  the worker is enabled.
 - `LEDGER_SNAPSHOT_BACKUP_DIR` — enables the periodic snapshot backup
   worker (LG-39): the server exports disaster-recovery snapshots to this
   directory on `LEDGER_SNAPSHOT_BACKUP_INTERVAL` (e.g. `1h`). Every

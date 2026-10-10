@@ -809,6 +809,175 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 // fields fail fast), no trailing garbage. It returns false after writing
 // the error response when decoding fails. Callers must check the HTTP
 // method before calling it; it always closes the body.
+type createTransferScheduleRequest struct {
+	ScheduleID     string           `json:"schedule_id"`
+	FromAccount    ledger.AccountID `json:"from_account"`
+	ToAccount      ledger.AccountID `json:"to_account"`
+	AmountCents    int64            `json:"amount_cents"`
+	Currency       string           `json:"currency"`
+	ToCurrency     string           `json:"to_currency"`
+	FXAccount      ledger.AccountID `json:"fx_account"`
+	FeeCents       int64            `json:"fee_cents"`
+	FeeAccount     ledger.AccountID `json:"fee_account"`
+	SkipFee        bool             `json:"skip_fee"`
+	Memo           string           `json:"memo"`
+	// Interval is a Go duration string ("24h", "168h"): the fixed cadence
+	// between runs. Cron expressions are not supported.
+	Interval string `json:"interval"`
+	// NextRunAt is RFC3339: the nominal due time of the first run. A past
+	// time fires on the next sweep.
+	NextRunAt string `json:"next_run_at"`
+	// EndsAt is RFC3339, optional: the plan completes once the next run
+	// would fall after it.
+	EndsAt         string `json:"ends_at"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// handleCreateTransferSchedule implements POST /transfer-schedules: it
+// registers a recurring transfer plan (see ledger.TransferSchedule).
+// A first-time schedule returns 201; a duplicate idempotency key returns
+// 200 with the original schedule and duplicate=true; malformed requests
+// return 400. Firing is done by the background schedule sweeper (see
+// LEDGER_SCHEDULE_SWEEP_INTERVAL), not by this endpoint.
+func (s *server) handleCreateTransferSchedule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req createTransferScheduleRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	interval, err := time.ParseDuration(req.Interval)
+	if err != nil || interval <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid interval: must be a positive Go duration string (e.g. \"24h\")"})
+		return
+	}
+	var nextRunAt time.Time
+	if req.NextRunAt != "" {
+		nextRunAt, err = time.Parse(time.RFC3339, req.NextRunAt)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid next_run_at: must be RFC3339"})
+			return
+		}
+	}
+	var endsAt time.Time
+	if req.EndsAt != "" {
+		endsAt, err = time.Parse(time.RFC3339, req.EndsAt)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ends_at: must be RFC3339"})
+			return
+		}
+	}
+
+	id := req.ScheduleID
+	if id == "" {
+		id = newID()
+	}
+	sched, duplicate, err := s.ledger.CreateTransferSchedule(ledger.TransferSchedule{
+		ID:             id,
+		From:           req.FromAccount,
+		To:             req.ToAccount,
+		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
+		ToCurrency:     req.ToCurrency,
+		FXAccount:      req.FXAccount,
+		FeeCents:       req.FeeCents,
+		FeeAccount:     req.FeeAccount,
+		SkipFee:        req.SkipFee,
+		Memo:           req.Memo,
+		Interval:       interval,
+		NextRunAt:      nextRunAt,
+		EndsAt:         endsAt,
+		IdempotencyKey: req.IdempotencyKey,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, map[string]any{"schedule": sched, "duplicate": true})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"schedule": sched, "duplicate": false})
+}
+
+// handleGetTransferSchedule implements GET /transfer-schedules/{id}.
+func (s *server) handleGetTransferSchedule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	sched, err := s.ledger.GetTransferSchedule(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, sched)
+}
+
+// handleListScheduleRuns implements GET /transfer-schedules/{id}/runs:
+// the schedule's run history, newest first. ?limit=N caps the rows.
+func (s *server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		var err error
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid limit: must be a non-negative integer"})
+			return
+		}
+	}
+	id := r.PathValue("id")
+	runs, err := s.ledger.ListScheduleRuns(id, limit)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"schedule_id": id, "runs": runs})
+}
+
+// scheduleTransition runs one pause/resume/cancel transition for
+// POST /transfer-schedules/{id}/{pause,resume,cancel}.
+func (s *server) scheduleTransition(w http.ResponseWriter, r *http.Request, action string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	var sched ledger.TransferSchedule
+	var err error
+	switch action {
+	case "pause":
+		sched, err = s.ledger.PauseTransferSchedule(id)
+	case "resume":
+		sched, err = s.ledger.ResumeTransferSchedule(id)
+	case "cancel":
+		sched, err = s.ledger.CancelTransferSchedule(id)
+	default:
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown action"})
+		return
+	}
+	if err != nil {
+		if errors.Is(err, ledger.ErrScheduleNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrScheduleBadTransition) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, sched)
+}
+
 func (s *server) decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	defer r.Body.Close()
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
@@ -1421,6 +1590,18 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /entries/dry-run", s.handleDryRunEntry)
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
 	mux.HandleFunc("POST /transfers/dry-run", s.handleDryRunTransfer)
+	mux.HandleFunc("POST /transfer-schedules", s.handleCreateTransferSchedule)
+	mux.HandleFunc("GET /transfer-schedules/{id}", s.handleGetTransferSchedule)
+	mux.HandleFunc("GET /transfer-schedules/{id}/runs", s.handleListScheduleRuns)
+	mux.HandleFunc("POST /transfer-schedules/{id}/pause", func(w http.ResponseWriter, r *http.Request) {
+		s.scheduleTransition(w, r, "pause")
+	})
+	mux.HandleFunc("POST /transfer-schedules/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
+		s.scheduleTransition(w, r, "resume")
+	})
+	mux.HandleFunc("POST /transfer-schedules/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		s.scheduleTransition(w, r, "cancel")
+	})
 	mux.HandleFunc("POST /sweeps", s.handleCreateSweep)
 	mux.HandleFunc("POST /sweeps/dry-run", s.handleDryRunSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
@@ -1745,6 +1926,19 @@ func main() {
 		defer sweeper.Stop()
 	}
 
+	// Optional background schedule sweeper: fires due transfer schedules
+	// (see ledger.TransferSchedule) so operators don't need to poll a
+	// sweep endpoint. It shares the server context, so SIGINT/SIGTERM
+	// stops it, and every fired run is counted by
+	// ledger_scheduled_transfers_total. Unset or invalid means disabled.
+	if interval, ok := scheduleSweepInterval(); ok {
+		sweeper := ledger.StartScheduleSweeper(ctx, srv.ledger, interval, func(fired, _ int) {
+			srv.metrics.ScheduledTransfersTotal.Add(uint64(fired))
+		})
+		log.Printf("ledger-api-go: schedule sweep worker started (interval %v)", interval)
+		defer sweeper.Stop()
+	}
+
 	// Optional periodic snapshot backup worker: exports full/incremental
 	// disaster-recovery snapshots to a directory on a ticker, with
 	// retention. It shares the server context, so SIGINT/SIGTERM stops
@@ -1785,6 +1979,24 @@ func auditMaxBytes() int64 {
 		return ledger.DefaultAuditMaxBytes
 	}
 	return n
+}
+
+// scheduleSweepInterval reads LEDGER_SCHEDULE_SWEEP_INTERVAL (a Go
+// duration string, e.g. "1m") for the background transfer-schedule
+// worker. Unset or invalid values mean the worker is disabled; a
+// non-positive duration is invalid and falls back to disabled with a log
+// line.
+func scheduleSweepInterval() (time.Duration, bool) {
+	raw := os.Getenv("LEDGER_SCHEDULE_SWEEP_INTERVAL")
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_SCHEDULE_SWEEP_INTERVAL %q, schedule sweep worker disabled", raw)
+		return 0, false
+	}
+	return d, true
 }
 
 // holdSweepInterval reads LEDGER_HOLD_SWEEP_INTERVAL (a Go duration string,
