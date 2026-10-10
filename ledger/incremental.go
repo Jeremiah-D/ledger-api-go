@@ -16,11 +16,12 @@ import (
 // A full snapshot (see snapshot.go) exports the entire journal. An
 // incremental snapshot exports only what changed since a base version:
 // the chain links (and their journal entries) with seq > base_version,
-// plus the full holds section, the full idempotency registries, and the
-// current config. The journal is the volume — that is what stays
-// incremental; holds, registries, and config are compact state that is
-// always cheap to carry whole, and carrying them whole keeps the merge
-// rules simple and auditable.
+// plus the full holds section, the full transfer-review registry, the
+// full idempotency registries, and the current config. The journal is
+// the volume — that is what stays incremental; holds, reviews,
+// registries, and config are compact state that is always cheap to
+// carry whole, and carrying them whole keeps the merge rules simple and
+// auditable.
 //
 // ExportIncrementalSnapshot(w, sinceVersion) exports the delta from
 // sinceVersion to the current version. ImportIncrementalSnapshot(r)
@@ -28,7 +29,7 @@ import (
 // requires the delta's base_version to equal the ledger's current
 // version (continuity — a gap or an overlap is rejected, never silently
 // skipped or double-applied), folds the new entries in chain order,
-// merges holds and idempotency registries (identical rows merge cleanly;
+// merges holds, transfer reviews, and idempotency registries (identical rows merge cleanly;
 // conflicting rows reject the import), applies the latest config, and
 // finishes with a full VerifyChain over the whole chain — the new links
 // hash onto the old chain's head, so the verification proves the delta
@@ -46,6 +47,7 @@ type incrementalMetaLine struct {
 	EntryCount  int       `json:"entry_count"`
 	ChainLinks  int       `json:"chain_links"`
 	HoldCount   int       `json:"hold_count"`
+	ReviewCount int       `json:"review_count,omitempty"`
 }
 
 // ExportIncrementalSnapshot writes a JSONL incremental snapshot of the
@@ -76,6 +78,7 @@ func (l *Ledger) ExportIncrementalSnapshot(w io.Writer, sinceVersion uint64) err
 		EntryCount:  int(l.version - sinceVersion),
 		ChainLinks:  int(l.version - sinceVersion),
 		HoldCount:   len(l.holds),
+		ReviewCount: len(l.reviews),
 	}
 	if err := enc.Encode(meta); err != nil {
 		return fmt.Errorf("ledger: incremental snapshot export: %w", err)
@@ -107,6 +110,9 @@ func (l *Ledger) ExportIncrementalSnapshot(w io.Writer, sinceVersion uint64) err
 		return err
 	}
 	if err := l.exportMergesLocked(enc); err != nil {
+		return err
+	}
+	if err := l.exportReviewsLocked(enc); err != nil {
 		return err
 	}
 	if err := l.exportIdempotencyLocked(enc); err != nil {
@@ -161,6 +167,7 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	entries := map[string]JournalEntry{}
 	var linkOrder []snapshotLinkLine
 	holds := map[string]Hold{}
+	reviews := map[string]*TransferReview{}
 	byKey := map[string]JournalEntry{}
 	transferKeys := map[string][]string{}
 	holdKeys := map[string]string{}
@@ -248,6 +255,22 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 				return fail("line %d: duplicate hold ID %q", lineNo, hl.Hold.ID)
 			}
 			holds[hl.Hold.ID] = hl.Hold
+		case "review":
+			if meta == nil {
+				return fail("line %d: review before meta", lineNo)
+			}
+			var rl snapshotReviewLine
+			if err := json.Unmarshal(line, &rl); err != nil {
+				return fail("line %d: malformed review: %v", lineNo, err)
+			}
+			if _, dup := reviews[rl.Review.TransferID]; dup {
+				return fail("line %d: duplicate review transfer ID %q", lineNo, rl.Review.TransferID)
+			}
+			if err := validateReviewRecord(&rl.Review); err != nil {
+				return fail("line %d: invalid review: %v", lineNo, err)
+			}
+			rec := rl.Review
+			reviews[rec.TransferID] = &rec
 		case "merge":
 			if meta == nil {
 				return fail("line %d: merge before meta", lineNo)
@@ -390,6 +413,9 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	if len(holds) != meta.HoldCount {
 		return fail("hold count %d does not match meta hold_count %d", len(holds), meta.HoldCount)
 	}
+	if len(reviews) != meta.ReviewCount {
+		return fail("review count %d does not match meta review_count %d", len(reviews), meta.ReviewCount)
+	}
 	if cfg == nil {
 		return fail("missing config record")
 	}
@@ -461,11 +487,53 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 		}
 		stagedHolds[h.ID] = h
 	}
+	// Transfer reviews merge like holds: identical rows merge cleanly;
+	// rows that differ under an existing transfer ID are corruption and
+	// reject the import. A review that changed state on the primary
+	// (pending -> approved) after the replica's base version is such a
+	// conflict — the replica must re-sync from a full snapshot rather
+	// than skip the transition. New pending/rejected/expired reviews
+	// stage their frozen rows here (they have no chain links, so the
+	// review record is their only export); new approved reviews'
+	// rows must already be visible in the journal fold.
+	stagedReviewEntries := make(map[string]JournalEntry)
+	for id, r := range reviews {
+		if existing, ok := l.reviews[id]; ok {
+			if !reviewsEqual(existing, r) {
+				return fail("review %q conflicts with the ledger's review registry: refusing merge", id)
+			}
+			continue
+		}
+		for _, e := range r.Entries {
+			if _, ok := l.entries[e.ID]; ok {
+				if r.Status == ReviewStatusApproved {
+					continue
+				}
+				return fail("review %q entry %q collides with a journaled entry", id, e.ID)
+			}
+			if _, ok := stagedByID[e.ID]; ok {
+				if r.Status == ReviewStatusApproved {
+					continue
+				}
+				return fail("review %q entry %q collides with a staged entry", id, e.ID)
+			}
+			if r.Status == ReviewStatusApproved {
+				return fail("review %q entry %q missing from the journal fold", id, e.ID)
+			}
+			if _, dup := stagedReviewEntries[e.ID]; dup {
+				return fail("review %q entry %q duplicated across reviews", id, e.ID)
+			}
+			stagedReviewEntries[e.ID] = e
+		}
+	}
 	entryVisible := func(id string) (JournalEntry, bool) {
 		if e, ok := l.entries[id]; ok {
 			return e, true
 		}
-		e, ok := stagedByID[id]
+		if e, ok := stagedByID[id]; ok {
+			return e, true
+		}
+		e, ok := stagedReviewEntries[id]
 		return e, ok
 	}
 	holdVisible := func(id string) bool {
@@ -588,6 +656,21 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 			l.holds[h.ID] = h
 			l.holdsByAccount[h.Account] = append(l.holdsByAccount[h.Account], h.ID)
 		}
+	}
+	// New reviews register with their frozen rows (pending, rejected,
+	// expired); approved reviews only register — their rows folded in
+	// with the chain above.
+	for id, r := range reviews {
+		if _, ok := l.reviews[id]; ok {
+			continue
+		}
+		rec := *r
+		l.reviews[id] = &rec
+	}
+	for _, e := range stagedReviewEntries {
+		l.entries[e.ID] = e
+		l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
+		l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
 	}
 	for k, e := range byKey {
 		if _, ok := l.byKey[k]; !ok {

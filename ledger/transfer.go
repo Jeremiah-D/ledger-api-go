@@ -135,6 +135,13 @@ type TransferReceipt struct {
 	// return FX == nil because the rate table may have changed since —
 	// the replayed journal entries are the authoritative record.
 	FX *FXConversion `json:"fx,omitempty"`
+	// ReviewStatus reports the dual-control review state of the
+	// transfer (see review.go): "pending_review" when the transfer was
+	// routed into operator review instead of settling (its legs are
+	// journaled but marked pending, and the payer's funds are frozen),
+	// "approved" once an operator settled it. Empty for transfers that
+	// never entered review.
+	ReviewStatus string `json:"review_status,omitempty"`
 }
 
 // FeeTier is one band of the tiered transfer fee schedule: transfers of
@@ -392,6 +399,15 @@ func parseTieredFeeSchedule(spec, account string, fail func(string, ...any) ([]F
 // rejections alike — record
 // nothing: no journal rows, no chain links, no version bump.
 //
+// After every risk check passes, the dual-control review gate (see
+// review.go) runs last: a transfer at or above the payer's review
+// threshold freezes instead of settling — its legs are journaled with
+// the pending-review marker (visible in journal exports, excluded from
+// balances), the payer's total outflow is deducted from available and
+// reserved against the daily limit, and the receipt carries review_status
+// "pending_review". An operator settles or releases it with
+// ApproveTransferReview / RejectTransferReview.
+//
 // Idempotency shares the ledger-wide key namespace with Post: a key already
 // used by either API replays the original entry instead of booking again.
 // A transfer that posted a fee leg replays the full receipt (principal +
@@ -558,6 +574,15 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		}
 	}
 
+	// The dual-control review gate (see review.go) runs last, after the
+	// period gate: a transfer at or above the payer's review threshold
+	// freezes instead of settling — journal rows marked pending review,
+	// funds deducted from available, nothing touching balances. The
+	// returned receipt carries review_status "pending_review".
+	if receipt, reviewed, err := l.maybeReviewTransferLocked(t, entries, feeCents, tierIndex, rateBps, nil, totalOutflow, now); reviewed || err != nil {
+		return receipt, err
+	}
+
 	// Atomic commit: every leg's journal row, idempotency index entries,
 	// balances, totals, chain links, and version bumps land together, under
 	// the one write lock, after all checks passed. Any failure above
@@ -640,6 +665,14 @@ func (l *Ledger) replayTransferLocked(t Transfer) (TransferReceipt, bool) {
 		for _, id := range ids {
 			entries = append(entries, l.entries[id])
 		}
+		// A replay of a transfer that is still (or was) in dual-control
+		// review returns the review receipt: the review status is looked
+		// up by the original transfer ID (the principal entry's ID),
+		// not the replay request's ID, which may differ.
+		reviewStatus := ""
+		if len(entries) > 0 {
+			reviewStatus = l.reviewStatusLocked(entries[0].ID)
+		}
 		feeCents := feeCentsOf(entries)
 		// Re-disclose the tier the original transfer was charged under:
 		// the fee policy is construction-time immutable, so the tier
@@ -669,7 +702,7 @@ func (l *Ledger) replayTransferLocked(t Transfer) (TransferReceipt, bool) {
 		// Replays deliberately omit the FX disclosure (see
 		// TransferReceipt.FX): the rate table may have changed since the
 		// original posting.
-		return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCents, FeeTierIndex: tierIndex, FeeRateBps: rateBps, Duplicate: true}, true
+		return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCents, FeeTierIndex: tierIndex, FeeRateBps: rateBps, Duplicate: true, ReviewStatus: reviewStatus}, true
 	}
 	if orig, ok := l.byKey[t.IdempotencyKey]; ok {
 		return TransferReceipt{

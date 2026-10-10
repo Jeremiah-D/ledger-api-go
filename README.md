@@ -178,6 +178,66 @@ malformed value fails the startup fast (`log.Fatal`) instead of
 silently mispricing transfers. Total fee cents booked are exposed as
 `ledger_transfer_fee_cents_total`.
 
+#### Large-transfer dual review
+
+Opt-in maker-checker for big money movements (the fintech dual-control
+flow). With a review threshold configured, a transfer whose principal
+amount reaches the threshold does **not** settle: `POST /transfers`
+returns `201` with a receipt carrying `review_status: "pending_review"`,
+its legs journaled with the `pending_review` marker — visible in journal
+exports, excluded from balances, totals, the ledger version, and the
+audit chain — and the payer's funds **frozen atomically** (deducted from
+`available_cents` like an authorization hold, and reserved against the
+daily outflow budget).
+
+An operator then decides, with their identity recorded in the structured
+audit log's hash chain:
+
+```bash
+curl -s -X POST localhost:8080/transfers/tx-2026-007/approve \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer":"op-alice"}'
+# 200 {"transfer_id":"tx-2026-007",...,"review_status":"approved","duplicate":false}
+
+curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer":"op-carol","reason":"sanctions screen"}'
+# 200 {"transfer_id":"tx-2026-007","status":"rejected",...}
+```
+
+- `POST /transfers/{id}/approve` settles the review: the marker flips to
+  effective and the legs commit exactly like a direct transfer (balances,
+  version bumps, chain links — the chain hash covers the marker, so the
+  effective form is tamper-evident). Frozen/overdraft/period checks
+  re-run against current state; a leg through a now-frozen account
+  (`403`), an overdraft-protected payer that can no longer cover the
+  outflow (`422`), or legs dated in a now-closed period (`422`) leave the
+  review pending for a later retry. Approval is **idempotent**:
+  re-approving returns `200` with the original receipt
+  (`duplicate: true`) and settles nothing twice.
+- `POST /transfers/{id}/reject` drops the review without settling: the
+  freeze is released back to `available_cents`. Idempotent; rejecting an
+  approved review returns `409`.
+- Replaying the transfer's `idempotency_key` while the review is pending
+  returns the review receipt (`duplicate: true`, `review_status:
+  "pending_review"`) instead of freezing twice.
+- Reviews can carry an opt-in expiry (`LEDGER_REVIEW_EXPIRY`, e.g.
+  `"24h"`): `POST /transfers/reviews/expire` — or the background worker
+  (`LEDGER_REVIEW_SWEEP_INTERVAL`) — auto-rejects lapsed reviews so
+  frozen funds can never strand in dual-control limbo.
+- `Reconcile` lists every pending review (`pending_reviews`: frozen legs,
+  reserved outflow, expiry) and every per-account threshold
+  (`review_thresholds`); reviews survive disaster-recovery snapshots with
+  their statuses, and `GET /metrics` exposes
+  `ledger_review_pending_total` / `ledger_review_approved_total` /
+  `ledger_review_rejected_total`.
+- Configure with `LEDGER_REVIEW_THRESHOLD` (global, cents, e.g. `"100000"`
+  for $1,000.00) and/or `LEDGER_REVIEW_THRESHOLDS`
+  (`"<account>:<cents>,..."`, e.g. `"treasury:1000000,ops:500000"` — a
+  per-account threshold wins over the global one for that account's
+  outbound transfers). Unset means no review; invalid values fail startup
+  fast.
+
 ### Scheduled transfers (`POST /transfer-schedules`)
 
 Recurring transfer plans — payroll, rent, loan servicing. `POST
@@ -1289,6 +1349,31 @@ Environment:
   first posting that crosses the level emits one `low_balance_breach`
   audit event, counted in `ledger_low_balance_breaches_total`. Unset means
   no alert levels; an invalid value fails startup fast.
+- `LEDGER_REVIEW_THRESHOLD` — ledger-wide large-transfer dual-control
+  threshold in cents (e.g. `LEDGER_REVIEW_THRESHOLD="100000"` for
+  $1,000.00): transfers at or above it enter `pending_review` instead of
+  settling, until an operator approves (`POST /transfers/{id}/approve`)
+  or rejects (`POST /transfers/{id}/reject`) them. Unset or `"0"` means
+  disabled; an invalid value fails startup fast.
+- `LEDGER_REVIEW_THRESHOLDS` — per-account review thresholds,
+  `"<account>:<thresholdCents>,..."` (e.g.
+  `LEDGER_REVIEW_THRESHOLDS="treasury:1000000,ops:500000"`); a per-account
+  threshold wins over `LEDGER_REVIEW_THRESHOLD` for that account's
+  outbound transfers. Unset means none; an invalid value fails startup
+  fast.
+- `LEDGER_REVIEW_EXPIRY` — how long a pending review may wait for a
+  decision, e.g. `LEDGER_REVIEW_EXPIRY=24h`. Lapsed reviews are
+  auto-rejected by `POST /transfers/reviews/expire` or the background
+  worker. Unset means reviews never lapse; invalid values are ignored
+  with a log line.
+- `LEDGER_REVIEW_SWEEP_INTERVAL` — enables the background
+  transfer-review expiry worker, e.g.
+  `LEDGER_REVIEW_SWEEP_INTERVAL=5m`. While enabled, the server
+  auto-rejects lapsed reviews on the interval and counts every expired
+  review in `ledger_review_rejected_total`. The first tick fires after one
+  full interval; SIGINT/SIGTERM stops the worker with the server. Unset
+  or invalid means disabled — expiry stays lazy by predicate and
+  available on demand via `POST /transfers/reviews/expire`.
 - `LEDGER_FX_ACCOUNT` — the ledger-wide FX clearing account, counterparty
   of cross-currency transfer legs. Unset means each cross-currency
   transfer must carry `fx_account`.

@@ -151,6 +151,21 @@ type Metrics struct {
 	// the ledger package. The alert is advisory — it never rejects a
 	// posting — so this counter measures alert volume, not rejections.
 	LowBalanceBreaches atomic.Uint64
+	// ReviewPendingTotal counts POST /transfers requests that entered
+	// dual-control pending review (see ledger.PostTransfer): first-time
+	// freezes only, not idempotent replays of the review receipt.
+	ReviewPendingTotal atomic.Uint64
+	// ReviewApprovedTotal counts POST /transfers/{id}/approve requests
+	// that settled a pending review. Idempotent re-approvals (which
+	// return the original receipt and settle nothing new) are not
+	// counted again.
+	ReviewApprovedTotal atomic.Uint64
+	// ReviewRejectedTotal counts review rejections: POST
+	// /transfers/{id}/reject requests that rejected a pending review,
+	// POST /transfers/reviews/expire runs, and background
+	// review-sweeper ticks, by number of reviews rejected/expired (not
+	// by request).
+	ReviewRejectedTotal atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -262,6 +277,15 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_snapshot_backups_failed_total",
 		"Total periodic snapshot backup ticks that failed after retries.",
 		m.SnapshotBackupsFailed.Load())
+	writeCounter(&sb, "ledger_review_pending_total",
+		"Total POST /transfers requests that entered dual-control pending review (first-time freezes only).",
+		m.ReviewPendingTotal.Load())
+	writeCounter(&sb, "ledger_review_approved_total",
+		"Total POST /transfers/{id}/approve requests that settled a pending review.",
+		m.ReviewApprovedTotal.Load())
+	writeCounter(&sb, "ledger_review_rejected_total",
+		"Total transfer reviews rejected or auto-expired: operator rejects, manual expire runs, and background sweeper ticks.",
+		m.ReviewRejectedTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

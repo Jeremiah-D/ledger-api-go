@@ -54,8 +54,21 @@ type JournalEntry struct {
 	// most 255 UTF-8 characters (see ErrMemoTooLong); longer memos are
 	// rejected with a 400 before anything is recorded. Transfers carry
 	// the memo on the principal entry (see Transfer.Memo).
-	Memo      string    `json:"memo,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Memo string `json:"memo,omitempty"`
+	// PendingReview marks a journal row frozen by the large-transfer
+	// dual-control review (see review.go): the row is booked but not
+	// effective — balances, debit/credit totals, the ledger version,
+	// and the audit chain exclude it until an operator approves the
+	// review, at which point the marker flips to effective and the legs
+	// commit like an ordinary transfer. The audit-chain hash covers the
+	// marker, so rewriting it breaks the chain exactly like rewriting
+	// an amount. It is query metadata like BatchID: VerifyChain and
+	// Reconcile treat pending rows as journaled rows, while Balance,
+	// TrialBalance, and VerifyAccountingEquation only ever see
+	// effective rows (they read balances/totals, which pending rows
+	// never touch).
+	PendingReview bool      `json:"pending_review,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // Validation errors returned by Post.
@@ -181,8 +194,24 @@ type Ledger struct {
 	// transferKeys maps a transfer's idempotency key to the IDs of the
 	// journal entries it posted, in commit order (principal, then the fee
 	// leg when one was booked), so a replayed transfer returns its full
-	// receipt. Keys expire with the TTL like the entry-level index.
+	// receipt. Keys expire with the TTL like the entry-level index —
+	// except keys of still-pending reviews (see pendingReviewByKeyLocked):
+	// dropping a pending review's replay index would turn a later replay
+	// into a transfer-ID conflict instead of the review receipt.
 	transferKeys map[string][]string
+	// reviews is the registry of large-transfer dual-control reviews
+	// (see review.go), keyed by transfer ID: every transfer routed
+	// into pending review registers here, whether or not it carried an
+	// idempotency key. reviewThresholds maps an account to its
+	// per-account review threshold in cents (the payer side; see
+	// SetReviewThreshold), reviewThreshold is the ledger-wide threshold
+	// in cents (0 = disabled), and reviewExpiry is the opt-in pending
+	// review lifetime (0 = reviews never lapse on their own). All four
+	// are structural config and survive snapshots.
+	reviews          map[string]*TransferReview
+	reviewThresholds map[AccountID]int64
+	reviewThreshold  int64
+	reviewExpiry     time.Duration
 	// holds maps hold IDs to authorization holds (see hold.go). Holds are
 	// off-journal reservations: they never appear in entries, the audit
 	// chain, or the version counter. holdsByAccount indexes them per
@@ -332,6 +361,8 @@ func New(opts ...Option) *Ledger {
 		lowBalanceBreached:   make(map[lowBalanceKey]bool),
 		parents:              make(map[AccountID]AccountID),
 		transferKeys:         make(map[string][]string),
+		reviews:              make(map[string]*TransferReview),
+		reviewThresholds:     make(map[AccountID]int64),
 		holds:                make(map[string]Hold),
 		holdsByAccount:       make(map[AccountID][]string),
 		holdKeys:             make(map[string]string),
@@ -618,8 +649,13 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 			delete(l.byKey, key)
 			// A transfer's receipt index expires with its principal key:
 			// after the TTL, reposting the transfer key books brand-new
-			// entries, exactly like the entry-level contract.
-			delete(l.transferKeys, key)
+			// entries, exactly like the entry-level contract — unless
+			// the key belongs to a still-pending review (see review.go):
+			// the review's replay must keep returning the review
+			// receipt, not a transfer-ID conflict.
+			if !l.pendingReviewByKeyLocked(key) {
+				delete(l.transferKeys, key)
+			}
 			removed++
 		}
 	}

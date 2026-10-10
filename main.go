@@ -256,7 +256,12 @@ type createTransferRequest struct {
 // 400; a transfer through a frozen account returns 403; a transfer that
 // would overdraw an overdraft-protected payer returns 422, as does a
 // transfer that would take the payer's daily outflow (amount + fee) above
-// its configured limit. A cross-currency transfer (to_currency set and
+// its configured limit. A transfer at or above the payer's review
+// threshold (see LEDGER_REVIEW_THRESHOLD) does not settle: it returns 201
+// with a receipt carrying review_status "pending_review" — its legs are
+// journaled but marked pending and the payer's funds are frozen — and an
+// operator settles or releases it with POST /transfers/{id}/approve or
+// POST /transfers/{id}/reject. A cross-currency transfer (to_currency set and
 // different from currency) converts at the configured rate for the pair
 // (see LEDGER_FX_RATES): the payee settles in to_currency, the payer pays
 // in currency, and the receipt discloses the conversion in its fx field;
@@ -371,7 +376,150 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	if receipt.FeeCents > 0 {
 		s.metrics.TransferFeeCentsTotal.Add(uint64(receipt.FeeCents))
 	}
+	// First-time freezes are counted; idempotent replays of the review
+	// receipt are counted as idempotency hits above, not here.
+	if receipt.ReviewStatus == ledger.ReviewStatusPending {
+		s.metrics.ReviewPendingTotal.Add(1)
+	}
 	writeJSON(w, http.StatusCreated, receipt)
+}
+
+// reviewDecisionRequest is the body of the operator review endpoints:
+// who is deciding, and (for rejections) why. The reviewer identity is
+// recorded on the review and in the structured audit log's hash chain,
+// so the "who approved what" trail is tamper-evident; it defaults to
+// "operator" when omitted.
+type reviewDecisionRequest struct {
+	Reviewer string `json:"reviewer"`
+	Reason   string `json:"reason"`
+}
+
+// handleApproveTransferReview implements POST /transfers/{id}/approve,
+// the settlement half of the dual-control review: it flips the frozen
+// legs to effective and commits them exactly like a direct POST
+// /transfers — balances apply, the version bumps, chain links land — and
+// returns the settlement receipt with review_status "approved".
+//
+// Approval is idempotent: re-approving returns 200 with the original
+// receipt (duplicate == true) and settles nothing new. An unknown
+// transfer returns 404; approving a rejected or expired review returns
+// 409; a review whose expiry passed is auto-rejected and the approval
+// refused with 422; a leg through a frozen account returns 403; an
+// overdraft-protected payer that can no longer cover the outflow, or
+// legs dated in a now-closed period, return 422 and leave the review
+// pending.
+func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "transfer id required"})
+		return
+	}
+	var req reviewDecisionRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	receipt, err := s.ledger.ApproveTransferReview(id, req.Reviewer)
+	if err != nil {
+		if errors.Is(err, ledger.ErrReviewNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrReviewNotPending) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrReviewExpired) {
+			s.metrics.ReviewRejectedTotal.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if !receipt.Duplicate {
+		s.metrics.ReviewApprovedTotal.Add(1)
+		if receipt.FeeCents > 0 {
+			s.metrics.TransferFeeCentsTotal.Add(uint64(receipt.FeeCents))
+		}
+	}
+	writeJSON(w, http.StatusOK, receipt)
+}
+
+// handleRejectTransferReview implements POST /transfers/{id}/reject:
+// drops a pending review without settling anything, releasing the frozen
+// funds back to the payer's available balance. The legs stay in the
+// journal as historical pending-marked rows.
+//
+// Rejection is idempotent: rejecting an already-rejected or expired
+// review returns 200 with the review as-is. An unknown transfer returns
+// 404; rejecting an approved review returns 409 — a settled transfer
+// cannot be un-settled through review.
+func (s *server) handleRejectTransferReview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "transfer id required"})
+		return
+	}
+	var req reviewDecisionRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	review, changed, err := s.ledger.RejectTransferReview(id, req.Reviewer, req.Reason)
+	if err != nil {
+		if errors.Is(err, ledger.ErrReviewNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrReviewNotPending) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if changed {
+		s.metrics.ReviewRejectedTotal.Add(1)
+	}
+	writeJSON(w, http.StatusOK, review)
+}
+
+// handleExpireReviews implements POST /transfers/reviews/expire: marks
+// every pending review whose expiry has passed as expired, releasing its
+// frozen funds, and reports how many were marked. It is the manual
+// version of the background review sweeper (see
+// LEDGER_REVIEW_SWEEP_INTERVAL); both paths run the same ExpireReviews
+// sweep and feed ledger_review_rejected_total.
+func (s *server) handleExpireReviews(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	expired := s.ledger.ExpireReviews()
+	s.metrics.ReviewRejectedTotal.Add(uint64(expired))
+	writeJSON(w, http.StatusOK, map[string]any{"expired": expired})
 }
 
 // handleDryRunTransfer implements POST /transfers/dry-run, the what-if
@@ -1201,9 +1349,11 @@ func (s *server) handleExpireHolds(w http.ResponseWriter, r *http.Request) {
 // handleBalance implements GET /accounts/{id}/balance.
 //
 // available_cents is the account's spendable funds: net balance minus
-// active authorization holds (see POST /holds). A hold reserves funds
-// without moving them, so balance_cents keeps reporting the journaled
-// net while available_cents reports what can still be authorized.
+// active authorization holds (see POST /holds) minus funds frozen by
+// pending transfer reviews (see POST /transfers/{id}/approve). A hold
+// or a review freeze reserves funds without moving them, so
+// balance_cents keeps reporting the journaled net while
+// available_cents reports what can still be authorized.
 func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	s.metrics.BalanceQueries.Add(1)
 	id := r.PathValue("id")
@@ -1590,6 +1740,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /entries/dry-run", s.handleDryRunEntry)
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
 	mux.HandleFunc("POST /transfers/dry-run", s.handleDryRunTransfer)
+	mux.HandleFunc("POST /transfers/reviews/expire", s.handleExpireReviews)
+	mux.HandleFunc("POST /transfers/{id}/approve", s.handleApproveTransferReview)
+	mux.HandleFunc("POST /transfers/{id}/reject", s.handleRejectTransferReview)
 	mux.HandleFunc("POST /transfer-schedules", s.handleCreateTransferSchedule)
 	mux.HandleFunc("GET /transfer-schedules/{id}", s.handleGetTransferSchedule)
 	mux.HandleFunc("GET /transfer-schedules/{id}/runs", s.handleListScheduleRuns)
@@ -1859,6 +2012,56 @@ func main() {
 		log.Printf("ledger-api-go: low-balance thresholds = %d configured", len(thresholds))
 	}
 
+	// LEDGER_REVIEW_THRESHOLD configures the ledger-wide large-transfer
+	// dual-control threshold in cents (e.g. "100000" for $1,000.00): a
+	// transfer whose principal amount is at or above the threshold does
+	// not settle — it enters pending_review, freezing the payer's funds
+	// until an operator approves (POST /transfers/{id}/approve) or
+	// rejects (POST /transfers/{id}/reject) it (see ledger.WithReviewThreshold).
+	// Unset or "0" means disabled: no transfer is ever reviewed. An
+	// invalid value fails the startup fast (log.Fatal): a misconfigured
+	// risk control must never silently run unenforced.
+	if raw := os.Getenv("LEDGER_REVIEW_THRESHOLD"); raw != "" {
+		threshold, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err != nil || threshold < 0 {
+			log.Fatalf("ledger-api-go: invalid LEDGER_REVIEW_THRESHOLD %q: want a non-negative integer (cents)", raw)
+		}
+		if threshold > 0 {
+			opts = append(opts, ledger.WithReviewThreshold(threshold))
+			log.Printf("ledger-api-go: transfer review threshold = %d cents", threshold)
+		}
+	}
+
+	// LEDGER_REVIEW_THRESHOLDS configures per-account review thresholds
+	// (see ledger.ParseReviewThresholds for the syntax, e.g.
+	// "treasury:1000000,ops:500000"): a per-account threshold wins over
+	// LEDGER_REVIEW_THRESHOLD for that account's outbound transfers.
+	// Unset means no per-account thresholds. An invalid value fails the
+	// startup fast (log.Fatal), like every other risk control.
+	if raw := os.Getenv("LEDGER_REVIEW_THRESHOLDS"); raw != "" {
+		thresholds, err := ledger.ParseReviewThresholds(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		opts = append(opts, ledger.WithReviewThresholds(thresholds))
+		log.Printf("ledger-api-go: per-account review thresholds = %d configured", len(thresholds))
+	}
+
+	// LEDGER_REVIEW_EXPIRY bounds how long a pending review may wait for
+	// an operator decision (a Go duration string, e.g. "24h"): lapsed
+	// reviews are auto-rejected by ExpireReviews (see
+	// ledger.WithReviewExpiry). Unset means reviews never lapse on their
+	// own; invalid values are ignored with a log line (the sweeper stays
+	// disabled), like the sweep intervals below.
+	if raw := os.Getenv("LEDGER_REVIEW_EXPIRY"); raw != "" {
+		if d, err := time.ParseDuration(raw); err != nil {
+			log.Printf("ledger-api-go: ignoring invalid LEDGER_REVIEW_EXPIRY %q: %v", raw, err)
+		} else if d > 0 {
+			opts = append(opts, ledger.WithReviewExpiry(d))
+			log.Printf("ledger-api-go: transfer review expiry = %v", d)
+		}
+	}
+
 	// LEDGER_FX_ACCOUNT configures the ledger-wide FX clearing account,
 	// the counterparty of cross-currency transfer legs (see
 	// ledger.WithFXAccount). Unset means cross-currency transfers must
@@ -1923,6 +2126,20 @@ func main() {
 			srv.metrics.HoldSweeps.Add(1)
 		})
 		log.Printf("ledger-api-go: hold sweep worker started (interval %v)", interval)
+		defer sweeper.Stop()
+	}
+
+	// Optional background review-expiry sweeper: auto-rejects pending
+	// transfer reviews whose expiry has passed so frozen funds can never
+	// strand in dual-control limbo. It shares the server context, so
+	// SIGINT/SIGTERM stops it, and every tick's expired count feeds
+	// ledger_review_rejected_total, the same counter the operator
+	// endpoint increments. Unset or invalid means disabled.
+	if interval, ok := reviewSweepInterval(); ok {
+		sweeper := ledger.StartReviewSweeper(ctx, srv.ledger, interval, func(expired int) {
+			srv.metrics.ReviewRejectedTotal.Add(uint64(expired))
+		})
+		log.Printf("ledger-api-go: review sweep worker started (interval %v)", interval)
 		defer sweeper.Stop()
 	}
 
@@ -2011,6 +2228,23 @@ func holdSweepInterval() (time.Duration, bool) {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		log.Printf("ledger-api-go: ignoring invalid LEDGER_HOLD_SWEEP_INTERVAL %q, hold sweep worker disabled", raw)
+		return 0, false
+	}
+	return d, true
+}
+
+// reviewSweepInterval reads LEDGER_REVIEW_SWEEP_INTERVAL (a Go duration
+// string, e.g. "5m") for the background transfer-review expiry worker.
+// Unset or invalid values mean the worker is disabled; a non-positive
+// duration is invalid and falls back to disabled with a log line.
+func reviewSweepInterval() (time.Duration, bool) {
+	raw := os.Getenv("LEDGER_REVIEW_SWEEP_INTERVAL")
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_REVIEW_SWEEP_INTERVAL %q, review sweep worker disabled", raw)
 		return 0, false
 	}
 	return d, true

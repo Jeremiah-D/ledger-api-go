@@ -553,6 +553,24 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		})
 	}
 
+	// The dual-control review gate (see review.go) runs last, after the
+	// period gate, like in PostTransfer: a cross-currency transfer at or
+	// above the payer's review threshold freezes instead of settling.
+	// The threshold applies to the source-currency principal amount.
+	fxConv := &FXConversion{
+		FromCurrency:     t.Currency,
+		ToCurrency:       toCurrency,
+		SourceCents:      t.AmountCents,
+		RateNum:          rate.Num,
+		RateDen:          rate.Den,
+		ConvertedCents:   converted,
+		EffectiveVersion: rate.EffectiveVersion,
+		RateExpiresAt:    rate.ExpiresAt,
+	}
+	if receipt, reviewed, err := l.maybeReviewTransferLocked(t, entries, feeCents, tierIndex, rateBps, fxConv, totalOutflow, now); reviewed || err != nil {
+		return receipt, err
+	}
+
 	// Atomic commit: journal rows, idempotency index, balances, totals,
 	// chain links, and version bumps land together under the one write
 	// lock, after all checks passed.
@@ -622,15 +640,6 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		FeeTierIndex: tierIndex,
 		FeeRateBps:   rateBps,
 		Duplicate:    false,
-		FX: &FXConversion{
-			FromCurrency:     t.Currency,
-			ToCurrency:       toCurrency,
-			SourceCents:      t.AmountCents,
-			RateNum:          rate.Num,
-			RateDen:          rate.Den,
-			ConvertedCents:   converted,
-			EffectiveVersion: rate.EffectiveVersion,
-			RateExpiresAt:    rate.ExpiresAt,
-		},
+		FX:           fxConv,
 	}, nil
 }

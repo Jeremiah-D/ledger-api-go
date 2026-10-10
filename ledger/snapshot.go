@@ -22,6 +22,7 @@ import (
 //	{"record":"entry", ...}           journal entries, in audit-chain (Post) order
 //	{"record":"link", ...}            audit-chain links, seq 1..N, matching entry order
 //	{"record":"hold", ...}            authorization holds, by (CreatedAt, ID)
+//	{"record":"review", ...}          transfer dual-control reviews, by transfer ID
 //	{"record":"idempotency", ...}     the seven idempotency-key namespaces
 //	{"record":"config", ...}          operational config (frozen, overdraft, hierarchy, fees, TTL, daily limits)
 //
@@ -67,6 +68,10 @@ type snapshotMetaLine struct {
 	// ScheduleCount is the number of transfer-schedule records that
 	// follow. Absent (zero) in snapshots written before LG-41.
 	ScheduleCount int `json:"schedule_count,omitempty"`
+	// ReviewCount is the number of transfer dual-control review records
+	// that follow (see review.go). Absent (zero) in snapshots written
+	// before LG-42.
+	ReviewCount int `json:"review_count,omitempty"`
 }
 
 // snapshotEntryLine carries one journal entry, in chain order.
@@ -190,6 +195,17 @@ type snapshotConfigLine struct {
 	// re-derived from the restored balances on import — a restore must
 	// not backfire stale alerts.
 	LowBalanceThresholds []LowBalanceThreshold `json:"low_balance_thresholds,omitempty"`
+	// ReviewThresholds carries the per-account review thresholds (see
+	// SetReviewThreshold); absent in snapshots written before LG-42.
+	ReviewThresholds []ReviewThreshold `json:"review_thresholds,omitempty"`
+	// ReviewThresholdCents carries the ledger-wide review threshold in
+	// cents (see WithReviewThreshold); absent (zero) in snapshots
+	// written before LG-42 or when the gate is disabled.
+	ReviewThresholdCents int64 `json:"review_threshold_cents,omitempty"`
+	// ReviewExpiry carries the pending-review lifetime (see
+	// WithReviewExpiry) as a duration string; absent when auto-expiry
+	// is disabled.
+	ReviewExpiry string `json:"review_expiry,omitempty"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -224,6 +240,7 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 		ChainLinks:    len(l.chain),
 		HoldCount:     len(l.holds),
 		ScheduleCount: len(l.schedules),
+		ReviewCount:   len(l.reviews),
 	}
 	if err := enc.Encode(meta); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -259,6 +276,9 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 	if err := l.exportSchedulesLocked(enc); err != nil {
 		return err
 	}
+	if err := l.exportReviewsLocked(enc); err != nil {
+		return err
+	}
 	if err := l.exportIdempotencyLocked(enc); err != nil {
 		return err
 	}
@@ -266,6 +286,79 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+// validateReviewRecord checks one imported review record structurally:
+// a non-empty transfer ID, a known status, legs that match the status
+// (pending-marked while frozen, effective once approved), and an
+// approved receipt only on approved reviews.
+func validateReviewRecord(r *TransferReview) error {
+	if r.TransferID == "" {
+		return fmt.Errorf("review with empty transfer ID")
+	}
+	switch r.Status {
+	case ReviewStatusPending, ReviewStatusApproved, ReviewStatusRejected, ReviewStatusExpired:
+	default:
+		return fmt.Errorf("review %q has unknown status %q", r.TransferID, r.Status)
+	}
+	if len(r.Entries) == 0 {
+		return fmt.Errorf("review %q has no entries", r.TransferID)
+	}
+	for _, e := range r.Entries {
+		if e.ID == "" {
+			return fmt.Errorf("review %q has an entry with empty ID", r.TransferID)
+		}
+		// Frozen rows (pending, rejected, expired) must still carry
+		// the marker; approved rows must have flipped to effective —
+		// the chain hash covers the marker, so a mismatch is
+		// corruption, not a warning.
+		if want := r.Status != ReviewStatusApproved; e.PendingReview != want {
+			return fmt.Errorf("review %q entry %q pending_review=%v, want %v for status %q",
+				r.TransferID, e.ID, e.PendingReview, want, r.Status)
+		}
+	}
+	if r.Status == ReviewStatusApproved && r.ApprovedReceipt == nil {
+		return fmt.Errorf("review %q is approved but carries no approval receipt", r.TransferID)
+	}
+	if r.Status != ReviewStatusApproved && r.ApprovedReceipt != nil {
+		return fmt.Errorf("review %q is %s but carries an approval receipt", r.TransferID, r.Status)
+	}
+	return nil
+}
+
+// reviewsEqual compares two review records field by field, ignoring
+// time.Location representation: JSON round-trips preserve the instant
+// but not the exact Location pointer.
+func reviewsEqual(a, b *TransferReview) bool {
+	if a.TransferID != b.TransferID || a.Status != b.Status ||
+		a.FeeCents != b.FeeCents || a.FeeTierIndex != b.FeeTierIndex ||
+		a.FeeRateBps != b.FeeRateBps || a.TotalOutflowCents != b.TotalOutflowCents ||
+		a.ThresholdCents != b.ThresholdCents ||
+		a.ReviewedBy != b.ReviewedBy ||
+		a.CreatedAt.UnixNano() != b.CreatedAt.UnixNano() ||
+		a.ExpiresAt.UnixNano() != b.ExpiresAt.UnixNano() ||
+		a.ReviewedAt.UnixNano() != b.ReviewedAt.UnixNano() ||
+		len(a.Entries) != len(b.Entries) {
+		return false
+	}
+	// The transfer request normalizes the same way on both sides; a
+	// field-by-field compare keeps the check honest without
+	// reflect.DeepEqual's location sensitivity.
+	ta, tb := a.Transfer, b.Transfer
+	if ta.ID != tb.ID || ta.From != tb.From || ta.To != tb.To ||
+		ta.AmountCents != tb.AmountCents || ta.Currency != tb.Currency ||
+		ta.ToCurrency != tb.ToCurrency || ta.FXAccount != tb.FXAccount ||
+		ta.FeeCents != tb.FeeCents || ta.FeeAccount != tb.FeeAccount ||
+		ta.SkipFee != tb.SkipFee || ta.IdempotencyKey != tb.IdempotencyKey ||
+		ta.Memo != tb.Memo || ta.CreatedAt.UnixNano() != tb.CreatedAt.UnixNano() {
+		return false
+	}
+	for i := range a.Entries {
+		if !journalEntriesEqual(a.Entries[i], b.Entries[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // exportHoldsLocked writes the hold records, sorted by (CreatedAt, ID)
@@ -307,6 +400,36 @@ func (l *Ledger) exportMergesLocked(enc *json.Encoder) error {
 			EntryIDs:  rec.entryIDs,
 			CreatedAt: rec.createdAt,
 		}}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
+	return nil
+}
+
+// snapshotReviewLine carries one transfer dual-control review (see
+// review.go), in transfer-ID order. The review carries its legs: for a
+// pending, rejected, or expired review the legs are the frozen,
+// pending-marked journal rows (they have no chain links, so the review
+// record is their only export); for an approved review the legs are the
+// settled, effective rows, already exported as entry/link pairs — the
+// record then restores the registry (status, reviewer, decision time)
+// without re-adding the rows.
+type snapshotReviewLine struct {
+	Record string         `json:"record"`
+	Review TransferReview `json:"review"`
+}
+
+// exportReviewsLocked writes the transfer dual-control review records,
+// sorted by transfer ID for determinism. Callers must hold l.mu; the
+// read lock suffices.
+func (l *Ledger) exportReviewsLocked(enc *json.Encoder) error {
+	ids := make([]string, 0, len(l.reviews))
+	for id := range l.reviews {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := enc.Encode(snapshotReviewLine{Record: "review", Review: *l.reviews[id]}); err != nil {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
@@ -466,6 +589,11 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FXAccount:            l.fxAccount,
 		ClosedPeriods:        l.closedPeriodsLocked(),
 		LowBalanceThresholds: l.lowBalanceThresholdsLocked(),
+		ReviewThresholds:     l.reviewThresholdsLocked(),
+		ReviewThresholdCents: l.reviewThreshold,
+	}
+	if l.reviewExpiry > 0 {
+		cfg.ReviewExpiry = l.reviewExpiry.String()
 	}
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -486,6 +614,7 @@ func journalEntriesEqual(a, b JournalEntry) bool {
 		a.IdempotencyKey == b.IdempotencyKey &&
 		a.BatchID == b.BatchID &&
 		a.Memo == b.Memo &&
+		a.PendingReview == b.PendingReview &&
 		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano()
 }
 
@@ -521,6 +650,7 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	mergeKeys := map[string]string{}
 	batchKeys := map[string]batchRecord{}
 	schedules := map[string]TransferSchedule{}
+	reviews := map[string]*TransferReview{}
 	var cfg *snapshotConfigLine
 	lineNo := 0
 
@@ -733,6 +863,22 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 				return fail("line %d: invalid schedule %q: %v", lineNo, sl.Schedule.ID, err)
 			}
 			schedules[sl.Schedule.ID] = sl.Schedule
+		case "review":
+			if meta == nil {
+				return fail("line %d: review before meta", lineNo)
+			}
+			var rl snapshotReviewLine
+			if err := json.Unmarshal(line, &rl); err != nil {
+				return fail("line %d: malformed review: %v", lineNo, err)
+			}
+			if _, dup := reviews[rl.Review.TransferID]; dup {
+				return fail("line %d: duplicate review transfer ID %q", lineNo, rl.Review.TransferID)
+			}
+			if err := validateReviewRecord(&rl.Review); err != nil {
+				return fail("line %d: invalid review: %v", lineNo, err)
+			}
+			rec := rl.Review
+			reviews[rec.TransferID] = &rec
 		default:
 			return fail("line %d: unknown record type %q", lineNo, env.Record)
 		}
@@ -756,6 +902,9 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	}
 	if len(schedules) != meta.ScheduleCount {
 		return fail("schedule count %d does not match meta schedule_count %d", len(schedules), meta.ScheduleCount)
+	}
+	if len(reviews) != meta.ReviewCount {
+		return fail("review count %d does not match meta review_count %d", len(reviews), meta.ReviewCount)
 	}
 	// In a healthy ledger every Post bumps the version and appends exactly
 	// one link, so version == links; a snapshot claiming otherwise was not
@@ -839,6 +988,38 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 			}
 			l.scheduleKeys[s.IdempotencyKey] = id
 		}
+	}
+
+	// Transfer dual-control reviews, rebuilt in export (transfer-ID)
+	// order. Approved reviews' legs already folded in with the chain
+	// above — the record only restores the registry (status, reviewer,
+	// decision time); their entry IDs are checked referentially.
+	// Pending, rejected, and expired reviews' legs have no chain links,
+	// so the review record is their only export: their rows are
+	// restored into the journal indexes (marked, never into
+	// balances/totals — they were never effective).
+	reviewIDs := make([]string, 0, len(reviews))
+	for id := range reviews {
+		reviewIDs = append(reviewIDs, id)
+	}
+	sort.Strings(reviewIDs)
+	for _, id := range reviewIDs {
+		r := reviews[id]
+		for _, e := range r.Entries {
+			if _, ok := l.entries[e.ID]; ok {
+				if r.Status == ReviewStatusApproved {
+					continue
+				}
+				return fail("review %q entry %q collides with an existing journal entry", id, e.ID)
+			}
+			if r.Status == ReviewStatusApproved {
+				return fail("review %q entry %q missing from the journal fold", id, e.ID)
+			}
+			l.entries[e.ID] = e
+			l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
+			l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
+		}
+		l.reviews[id] = r
 	}
 
 	// Idempotency registries, with referential checks: a registry row that
@@ -989,6 +1170,28 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("bad closed period %q: %v", id, err)
 		}
 	}
+	// Review thresholds are validated like daily limits: a negative
+	// threshold or an empty account fails the import instead of
+	// silently dropping a risk control.
+	for _, rt := range cfg.ReviewThresholds {
+		if rt.Account == "" {
+			return bad("review threshold with empty account")
+		}
+		if rt.ThresholdCents < 0 {
+			return bad("negative review threshold for account %q", rt.Account)
+		}
+	}
+	if cfg.ReviewThresholdCents < 0 {
+		return bad("negative global review threshold %d", cfg.ReviewThresholdCents)
+	}
+	var reviewExpiry time.Duration
+	if cfg.ReviewExpiry != "" {
+		var err error
+		reviewExpiry, err = time.ParseDuration(cfg.ReviewExpiry)
+		if err != nil || reviewExpiry < 0 {
+			return bad("bad review_expiry %q: %v", cfg.ReviewExpiry, err)
+		}
+	}
 
 	// Apply: every row above checked out.
 	for _, a := range cfg.Frozen {
@@ -1037,6 +1240,13 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, id := range cfg.ClosedPeriods {
 		l.closedPeriods[id] = true
 	}
+	// Review thresholds restore like the other risk controls: a restore
+	// that dropped them would silently stop reviewing large transfers.
+	for _, rt := range cfg.ReviewThresholds {
+		l.reviewThresholds[rt.Account] = rt.ThresholdCents
+	}
+	l.reviewThreshold = cfg.ReviewThresholdCents
+	l.reviewExpiry = reviewExpiry
 	// Re-derive the low-balance breach state from the restored
 	// balances: an account already below its threshold counts as
 	// breached, so the first posting after the restore does not backfire

@@ -150,6 +150,19 @@ type ReconciliationReport struct {
 	// and completed plans are not counted. Operations tooling reads this
 	// to know how many schedules the next sweep may fire.
 	ActiveTransferSchedules int `json:"active_transfer_schedules"`
+	// PendingReviews lists every large transfer currently awaiting an
+	// operator decision (see review.go), sorted by (CreatedAt,
+	// TransferID): the frozen legs, the reserved outflow, and each
+	// review's expiry. Reviews whose expiry passed but which
+	// ExpireReviews has not swept yet are excluded — they are already
+	// inactive. Compliance tooling reads this to know which funds are
+	// frozen in dual-control limbo at report time.
+	PendingReviews []TransferReview `json:"pending_reviews"`
+	// ReviewThresholds lists every configured per-account review
+	// threshold (see SetReviewThreshold), sorted by account. The
+	// ledger-wide threshold is not listed here — it applies to every
+	// account without a per-account row.
+	ReviewThresholds []ReviewThreshold `json:"review_thresholds"`
 }
 
 // ReconcileOptions tunes Reconcile. BaseCurrency opts into the
@@ -305,6 +318,8 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		Merges:                     l.mergesLocked(),
 		ClosedPeriods:              l.closedPeriodsLocked(),
 		ActiveTransferSchedules:    l.activeScheduleCountLocked(),
+		PendingReviews:             l.pendingTransferReviewsLocked(now),
+		ReviewThresholds:           l.reviewThresholdsLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit
