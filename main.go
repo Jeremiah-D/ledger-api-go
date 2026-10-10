@@ -1745,6 +1745,23 @@ func main() {
 		defer sweeper.Stop()
 	}
 
+	// Optional periodic snapshot backup worker: exports full/incremental
+	// disaster-recovery snapshots to a directory on a ticker, with
+	// retention. It shares the server context, so SIGINT/SIGTERM stops
+	// it; every tick is counted by ledger_snapshot_backups_total /
+	// ledger_snapshot_backups_failed_total. Unset dir means disabled.
+	if cfg, ok := snapshotBackupConfig(); ok {
+		bk := ledger.StartSnapshotBackup(ctx, srv.ledger, cfg, func(_ string, ok bool) {
+			if ok {
+				srv.metrics.SnapshotBackupsTotal.Add(1)
+			} else {
+				srv.metrics.SnapshotBackupsFailed.Add(1)
+			}
+		})
+		log.Printf("ledger-api-go: snapshot backup worker started (dir %s, interval %v)", cfg.Dir, cfg.Interval)
+		defer bk.Stop()
+	}
+
 	timeout := shutdownTimeout()
 	log.Printf("ledger-api-go listening on %s (shutdown timeout %v)", ln.Addr(), timeout)
 	if err := runServer(ctx, ln, srv.handler(), timeout); err != nil {
@@ -1785,6 +1802,55 @@ func holdSweepInterval() (time.Duration, bool) {
 		return 0, false
 	}
 	return d, true
+}
+
+// snapshotBackupConfig reads the LEDGER_SNAPSHOT_BACKUP_* env vars for the
+// periodic snapshot backup worker (LG-39):
+//
+//   - LEDGER_SNAPSHOT_BACKUP_DIR: backup directory. Unset means the
+//     worker is disabled.
+//   - LEDGER_SNAPSHOT_BACKUP_INTERVAL: Go duration string (e.g. "1h").
+//     Unset or invalid means disabled.
+//   - LEDGER_SNAPSHOT_BACKUP_KEEP_FULL: full backups to retain
+//     (default 7); invalid or non-positive falls back to the default.
+//   - LEDGER_SNAPSHOT_BACKUP_KEEP_INCR: incremental backups to retain
+//     (default 24); invalid or non-positive falls back to the default.
+//   - LEDGER_SNAPSHOT_BACKUP_FULL_EVERY: full snapshot every Nth backup
+//     (default 6); invalid or non-positive falls back to the default.
+func snapshotBackupConfig() (ledger.SnapshotBackupConfig, bool) {
+	dir := os.Getenv("LEDGER_SNAPSHOT_BACKUP_DIR")
+	if dir == "" {
+		return ledger.SnapshotBackupConfig{}, false
+	}
+	raw := os.Getenv("LEDGER_SNAPSHOT_BACKUP_INTERVAL")
+	interval, err := time.ParseDuration(raw)
+	if err != nil || interval <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_SNAPSHOT_BACKUP_INTERVAL %q, snapshot backup worker disabled", raw)
+		return ledger.SnapshotBackupConfig{}, false
+	}
+	cfg := ledger.SnapshotBackupConfig{
+		Dir:             dir,
+		Interval:        interval,
+		KeepFull:        snapshotBackupKeep("LEDGER_SNAPSHOT_BACKUP_KEEP_FULL", ledger.DefaultSnapshotBackupKeepFull),
+		KeepIncremental: snapshotBackupKeep("LEDGER_SNAPSHOT_BACKUP_KEEP_INCR", ledger.DefaultSnapshotBackupKeepIncremental),
+		FullEvery:       snapshotBackupKeep("LEDGER_SNAPSHOT_BACKUP_FULL_EVERY", ledger.DefaultSnapshotBackupFullEvery),
+	}
+	return cfg, true
+}
+
+// snapshotBackupKeep reads an integer env var for the backup worker;
+// invalid or non-positive values fall back to def with a log line.
+func snapshotBackupKeep(name string, def int) int {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid %s %q, using %d", name, raw, def)
+		return def
+	}
+	return n
 }
 
 // shutdownTimeout reads SHUTDOWN_TIMEOUT (a Go duration string, e.g. "15s").

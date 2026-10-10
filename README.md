@@ -1153,6 +1153,10 @@ curl -s localhost:8080/metrics
 - `ledger_hold_sweeps_total` — hold-expiry sweeps: `POST /holds/expire`
   requests received plus background hold-sweeper ticks (see
   `LEDGER_HOLD_SWEEP_INTERVAL` below).
+- `ledger_snapshot_backups_total` — successful periodic snapshot backup
+  ticks (full and incremental; see `LEDGER_SNAPSHOT_BACKUP_DIR` below).
+- `ledger_snapshot_backups_failed_total` — periodic snapshot backup
+  ticks that failed after retries.
 
 ## Running
 
@@ -1188,6 +1192,19 @@ Environment:
   The first tick fires after one full interval; SIGINT/SIGTERM stops the
   worker with the server. Unset or invalid means disabled — expiry stays
   lazy by predicate and available on demand via `POST /holds/expire`.
+- `LEDGER_SNAPSHOT_BACKUP_DIR` — enables the periodic snapshot backup
+  worker (LG-39): the server exports disaster-recovery snapshots to this
+  directory on `LEDGER_SNAPSHOT_BACKUP_INTERVAL` (e.g. `1h`). Every
+  `LEDGER_SNAPSHOT_BACKUP_FULL_EVERY`-th backup (default 6) is a full
+  snapshot, the rest are incremental deltas from the last successful
+  backup; the worker keeps the newest `LEDGER_SNAPSHOT_BACKUP_KEEP_FULL`
+  (default 7) full and `LEDGER_SNAPSHOT_BACKUP_KEEP_INCR` (default 24)
+  incremental files and deletes older ones. Writes are atomic (temp file
+  + rename), exports retry on failure, every successful backup is
+  recorded in the audit log (`snapshot_backup`), and ticks are counted
+  in `ledger_snapshot_backups_total` /
+  `ledger_snapshot_backups_failed_total`. Unset dir or invalid interval
+  means disabled.
 - `LEDGER_TRANSFER_FEE` — default transfer fee policy. Flat form
   `"<rateBps>:<revenueAccount>"` (e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`
   for 2.5%), or tiered form `"<minCents>:<rateBps>,...@<revenueAccount>"`

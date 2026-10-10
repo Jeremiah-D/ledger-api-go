@@ -391,8 +391,3 @@ func TestFXTransferInvalidTargetCurrency(t *testing.T) {
 	}
 }
 
-func (l *Ledger) Version() uint64 {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.version
-}

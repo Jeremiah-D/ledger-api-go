@@ -70,6 +70,12 @@ type Metrics struct {
 	// would-be rejections). A dry run records nothing by design, so there
 	// is no separate "committed" counter.
 	DryRunRequests atomic.Uint64
+	// SnapshotBackupsTotal counts successful periodic snapshot backup
+	// ticks (full and incremental).
+	SnapshotBackupsTotal atomic.Uint64
+	// SnapshotBackupsFailed counts periodic snapshot backup ticks that
+	// failed after retries.
+	SnapshotBackupsFailed atomic.Uint64
 	// HoldsTotal counts POST /holds requests received (all attempts,
 	// including duplicates and rejected payloads).
 	HoldsTotal atomic.Uint64
@@ -242,6 +248,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_dry_runs_total",
 		"Total what-if dry-run requests received (POST /entries/dry-run, POST /transfers/dry-run, POST /sweeps/dry-run), including would-be rejections.",
 		m.DryRunRequests.Load())
+	writeCounter(&sb, "ledger_snapshot_backups_total",
+		"Total successful periodic snapshot backup ticks (full and incremental).",
+		m.SnapshotBackupsTotal.Load())
+	writeCounter(&sb, "ledger_snapshot_backups_failed_total",
+		"Total periodic snapshot backup ticks that failed after retries.",
+		m.SnapshotBackupsFailed.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

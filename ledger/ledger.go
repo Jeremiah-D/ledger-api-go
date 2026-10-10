@@ -513,6 +513,14 @@ func (l *Ledger) Balance(a AccountID) int64 {
 	return l.BalanceIn(a, DefaultCurrency)
 }
 
+// Version returns the ledger's current journal version: the count of
+// committed journal entries. Read-only.
+func (l *Ledger) Version() uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.version
+}
+
 // BalanceIn returns the current net balance (in cents) of the given
 // account in the given currency. Unknown accounts, and accounts with no
 // postings in that currency, have a zero balance. An empty currency means
