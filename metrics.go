@@ -26,6 +26,9 @@ type Metrics struct {
 	BalanceAtQueries atomic.Uint64
 	// VerifyRequests counts GET /entries/verify requests served.
 	VerifyRequests atomic.Uint64
+	// AnchorsTotal counts POST /entries/anchor requests that signed a
+	// chain-head checkpoint.
+	AnchorsTotal atomic.Uint64
 	// ReconcileRuns counts POST /reconcile requests served.
 	ReconcileRuns atomic.Uint64
 	// TransfersTotal counts POST /transfers requests received (all attempts,
@@ -191,6 +194,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /accounts/{id}/balance-at requests served.", m.BalanceAtQueries.Load())
 	writeCounter(&sb, "ledger_verify_requests_total",
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
+	writeCounter(&sb, "ledger_anchors_total",
+		"Total POST /entries/anchor requests that signed a chain-head checkpoint.", m.AnchorsTotal.Load())
 	writeCounter(&sb, "ledger_reconcile_runs_total",
 		"Total POST /reconcile requests served.", m.ReconcileRuns.Load())
 	writeCounter(&sb, "ledger_transfers_total",

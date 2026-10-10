@@ -1515,9 +1515,12 @@ func (s *server) handleRollup(w http.ResponseWriter, r *http.Request) {
 
 // handleVerifyEntries implements GET /entries/verify. It recomputes the
 // ledger's tamper-evident audit chain and reports whether it is intact:
-// 200 {"ok":true,"links":N,"head":"<hex>"} on success. A broken chain is an
-// operator-level integrity incident, not a client error, so verification
-// failure returns 500 {"ok":false,"error":"..."}.
+// 200 {"ok":true,"links":N,"head":"<hex>","anchor":{...}} on success. The
+// anchor section is the external-anchoring status (LG-44): whether a key
+// is configured, how many checkpoints exist, the latest checkpoint, and
+// whether the checkpoint history verifies against the live chain. A
+// broken chain is an operator-level integrity incident, not a client
+// error, so verification failure returns 500 {"ok":false,"error":"..."}.
 func (s *server) handleVerifyEntries(w http.ResponseWriter, r *http.Request) {
 	s.metrics.VerifyRequests.Add(1)
 	if err := s.ledger.VerifyChain(); err != nil {
@@ -1525,7 +1528,28 @@ func (s *server) handleVerifyEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	head, links := s.ledger.ChainHead()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "links": links, "head": head})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"links":  links,
+		"head":   head,
+		"anchor": s.ledger.AnchorStatus(),
+	})
+}
+
+// handleAnchorCheckpoint implements POST /entries/anchor: signs the
+// current audit-chain head with the configured Ed25519 key and appends
+// the checkpoint to checkpoints.jsonl (see ledger.Anchor). 200 returns
+// the checkpoint. Without a configured anchor key or audit directory the
+// server cannot anchor — a deployment misconfiguration, so 500, not 404:
+// there is nothing for the caller to fix in the request.
+func (s *server) handleAnchorCheckpoint(w http.ResponseWriter, r *http.Request) {
+	cp, err := s.ledger.Anchor()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.metrics.AnchorsTotal.Add(1)
+	writeJSON(w, http.StatusOK, cp)
 }
 
 // handleAuditVerify implements GET /audit/verify: the operator-facing
@@ -1770,6 +1794,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
+	mux.HandleFunc("POST /entries/anchor", s.handleAnchorCheckpoint)
 	mux.HandleFunc("GET /audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)
@@ -2107,6 +2132,22 @@ func main() {
 		defer al.Close()
 		opts = append(opts, ledger.WithAuditLog(al))
 		log.Printf("ledger-api-go: audit log enabled (dir %s)", dir)
+	}
+
+	// LEDGER_ANCHOR_KEY configures the Ed25519 key used to sign audit-chain
+	// head checkpoints (see ledger.ParseAnchorKey: hex of a 32-byte seed
+	// or a 64-byte private key). Anchoring itself is operator-driven via
+	// POST /entries/anchor; checkpoints land in LEDGER_AUDIT_DIR as
+	// checkpoints.jsonl. Unset means unconfigured. An invalid value fails
+	// the startup fast (log.Fatal): a misconfigured signing key must never
+	// silently run unanchored.
+	if raw := os.Getenv("LEDGER_ANCHOR_KEY"); raw != "" {
+		key, err := ledger.ParseAnchorKey(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		opts = append(opts, ledger.WithAnchorKey(key))
+		log.Printf("ledger-api-go: anchor key configured")
 	}
 
 	// SIGINT/SIGTERM cancel the context; runServer then drains in-flight

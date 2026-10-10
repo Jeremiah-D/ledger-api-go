@@ -50,6 +50,21 @@ type AuditChainHealth struct {
 	Links            uint64 `json:"links"`
 	HeadConsistent   bool   `json:"head_consistent"`
 	ConsistencyError string `json:"consistency_error,omitempty"`
+	// AnchorCheckpoints is the number of external chain-head anchors
+	// (see AnchorCheckpoint, LG-44) loaded from checkpoints.jsonl.
+	AnchorCheckpoints int `json:"anchor_checkpoints"`
+	// AnchorOK reports the external anchor continuity check: every
+	// checkpoint's seq strictly increases, its head hash matches the
+	// chain link at its seq, and (with a configured key) its signature
+	// verifies. Vacuously true with zero checkpoints — no anchor taken
+	// yet is not a break. A missing anchor cadence is an operator
+	// policy decision, not something the ledger can infer.
+	AnchorOK bool `json:"anchor_ok"`
+	// AnchorError describes the first anchor verification failure: a
+	// reordered/duplicated checkpoint file, a head hash that no longer
+	// matches the chain (journal rewritten after anchoring), a forged
+	// signature, or an anchor past the chain end (truncated chain).
+	AnchorError string `json:"anchor_error,omitempty"`
 }
 
 // AccountMerge is one committed account merge (see PostMerge) as reported
@@ -627,6 +642,20 @@ func (l *Ledger) auditChainHealthLocked() AuditChainHealth {
 				"ledger: audit chain head link seq is %d, want ledger version %d",
 				l.chain[n-1].seq, l.version)
 		}
+	}
+
+	// External anchors (LG-44): replay every checkpoint against the live
+	// chain. The checkpoint list is loaded lazily and guarded by its own
+	// mutex (see anchor.go); reading the count takes that mutex, while
+	// verifyAnchorsLocked runs under this function's l.mu.
+	l.ensureCheckpointsLoaded()
+	l.anchor.mu.Lock()
+	h.AnchorCheckpoints = len(l.anchor.checkpoints)
+	l.anchor.mu.Unlock()
+	if err := l.verifyAnchorsLocked(); err != nil {
+		h.AnchorError = err.Error()
+	} else {
+		h.AnchorOK = true
 	}
 	return h
 }

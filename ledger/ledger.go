@@ -280,6 +280,10 @@ type Ledger struct {
 	pruneInterval  time.Duration // min gap between lazy key sweeps
 	lastKeyPrune   time.Time
 	lastDailyPrune time.Time // last run of the daily-outflow bucket sweep
+	// anchor holds the external audit-chain anchoring state (LG-44):
+	// the configured Ed25519 key and the loaded checkpoints. See
+	// anchor.go for the lock-order contract.
+	anchor anchorState
 }
 
 // Option configures a Ledger.

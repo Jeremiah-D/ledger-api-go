@@ -884,14 +884,49 @@ SHA-256 hash (`SHA-256(prevHash || entry)`); idempotent replays add no link.
 
 ```bash
 curl -s localhost:8080/entries/verify
-# {"ok":true,"links":128,"head":"9f2c..."}   # empty ledger: links=0, head=64 zeros
+# {"ok":true,"links":128,"head":"9f2c...","anchor":{"configured":true,...}}   # empty ledger: links=0, head=64 zeros
 ```
 
-- `200 {"ok":true,"links":N,"head":"<hex>"}` — the chain is intact; `head`
-  moves if and only if a new entry was posted.
+- `200 {"ok":true,"links":N,"head":"<hex>","anchor":{...}}` — the chain is
+  intact; `head` moves if and only if a new entry was posted. The `anchor`
+  section is the external-anchoring status (see below): `configured`,
+  `key_id`, `checkpoints`, `latest`, `verified`, and `error` when the
+  checkpoint history does not check out.
 - `500 {"ok":false,"error":"..."}` — verification failed (rewritten entry,
   missing journal row, spliced/reordered chain). This is an
   operator-level integrity incident, not a client error.
+
+### External audit-chain anchoring (`POST /entries/anchor`)
+
+For compliance and third-party attestation, the audit-chain head can be
+anchored externally: `POST /entries/anchor` signs the current head with a
+configured Ed25519 key (standard library `crypto/ed25519`) and appends an
+`AnchorCheckpoint{seq, head_hash, anchored_at, key_id, signature}` as one
+JSON line to `checkpoints.jsonl` in the audit directory (fsync'd before
+the call returns). The signature covers a domain-separated canonical
+message (`"LEDGER-ANCHOR/v1:" || BE64(seq) || headHash || BE64(unixnano)`),
+so it can never be transplanted into another protocol.
+
+```bash
+curl -s -X POST localhost:8080/entries/anchor
+# {"seq":128,"head_hash":"9f2c...","anchored_at":"2026-10-10T...Z","key_id":"ab12...","signature":"..."}
+```
+
+- The key comes from `LEDGER_ANCHOR_KEY` (hex of a 32-byte seed or a
+  64-byte private key; invalid values fail the startup fast). The key
+  itself never leaves the process — snapshots, checkpoints, and the audit
+  log only ever record the `key_id` (public-key prefix).
+- Anchoring is operator-driven (e.g. from the day-end reconcile job);
+  `Anchor()` is idempotent for an unchanged head — re-anchoring without
+  new posts returns the existing checkpoint instead of appending a
+  duplicate.
+- `GET /entries/verify` replays every checkpoint against the live chain:
+  sequence numbers must strictly increase, each `head_hash` must equal the
+  chain link at its `seq`, and each signature must verify. The Reconcile
+  report's `audit_chain` section carries `anchor_checkpoints`, `anchor_ok`,
+  and `anchor_error` — a rewritten journal, a reordered checkpoint file,
+  or a forged signature surfaces there.
+- `ledger_anchors_total` counts anchors in `/metrics`.
 
 ### `POST /reconcile`
 
@@ -1392,6 +1427,10 @@ Environment:
   `104857600` = 100 MiB). Past the cap the writer rotates to a new file;
   rotated files are gzipped in the background. Unset or invalid means the
   default.
+- `LEDGER_ANCHOR_KEY` — the Ed25519 key for external audit-chain
+  anchoring (see above): hex of a 32-byte seed or a 64-byte private key.
+  Checkpoints land in `LEDGER_AUDIT_DIR` as `checkpoints.jsonl`. Unset
+  means unconfigured; an invalid value fails startup fast.
 
 ## Benchmarks
 
