@@ -1746,6 +1746,148 @@ func (s *server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// parseSettlementExpected parses one ?expected= query value of
+// GET /settlement: "<account>:<currency>:<cents>". The account may not be
+// empty; cents is a signed integer (negative expectations are legal for
+// accounts that net out negative). The currency code itself is validated
+// by the ledger when the report runs.
+func parseSettlementExpected(raw string) (ledger.SettlementExpectationKey, int64, error) {
+	parts := strings.Split(raw, ":")
+	if len(parts) != 3 || parts[0] == "" {
+		return ledger.SettlementExpectationKey{}, 0,
+			errors.New("invalid expected value " + strconv.Quote(raw) + `: want "account:currency:cents"`)
+	}
+	cents, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return ledger.SettlementExpectationKey{}, 0,
+			errors.New("invalid expected value " + strconv.Quote(raw) + ": cents must be an integer")
+	}
+	return ledger.SettlementExpectationKey{Account: ledger.AccountID(parts[0]), Currency: parts[1]}, cents, nil
+}
+
+// parseSettlementTolerance parses one ?tolerance= query value of
+// GET /settlement: "<account>:<currency>:<absCents>:<bps>". Bounds are
+// checked by the ledger when the report runs (abs >= 0, 0 <= bps <=
+// 10000); here only the shape and the integers are validated.
+func parseSettlementTolerance(raw string) (ledger.SettlementExpectationKey, ledger.SettlementTolerance, error) {
+	var zero ledger.SettlementTolerance
+	parts := strings.Split(raw, ":")
+	if len(parts) != 4 || parts[0] == "" {
+		return ledger.SettlementExpectationKey{}, zero,
+			errors.New("invalid tolerance value " + strconv.Quote(raw) + `: want "account:currency:absCents:bps"`)
+	}
+	abs, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return ledger.SettlementExpectationKey{}, zero,
+			errors.New("invalid tolerance value " + strconv.Quote(raw) + ": absCents must be an integer")
+	}
+	bps, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil {
+		return ledger.SettlementExpectationKey{}, zero,
+			errors.New("invalid tolerance value " + strconv.Quote(raw) + ": bps must be an integer")
+	}
+	key := ledger.SettlementExpectationKey{Account: ledger.AccountID(parts[0]), Currency: parts[1]}
+	return key, ledger.SettlementTolerance{AbsCents: abs, Bps: bps}, nil
+}
+
+// handleSettlement implements GET /settlement, the operator-facing
+// end-of-day settlement view (LG-43): per-(merchant account, UTC day,
+// currency) debit/credit/net aggregation with the configured channel
+// dimension, optional expected-net reconciliation alerts, and export
+// formats for the fintech settlement workflow.
+//
+// Query parameters (all optional):
+//
+//	day        "YYYY-MM-DD" UTC calendar day; default today (UTC).
+//	expected   repeatable "<account>:<currency>:<cents>": the day-net the
+//	           payment provider's settlement file says the account should
+//	           have; checked against the ledger's actual net.
+//	tolerance  repeatable "<account>:<currency>:<absCents>:<bps>": the
+//	           opt-in alert threshold for that expectation. Expectations
+//	           without a tolerance row alert on any nonzero difference.
+//	format     json (default), csv (the cells view), or sql (SQL text
+//	           dump for sqlite3 import — see ledger.SettlementReport.WriteSQL).
+//
+// Like POST /reconcile, an unhealthy finding (mismatch alerts) is still
+// a successful 200: the report carries the alerts, and the HTTP layer
+// does not turn reconciliation findings into errors.
+func (s *server) handleSettlement(w http.ResponseWriter, r *http.Request) {
+	s.metrics.SettlementRuns.Add(1)
+	q := r.URL.Query()
+
+	format := q.Get("format")
+	if format == "" {
+		format = "json"
+	}
+	switch format {
+	case "json", "csv", "sql":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `format must be one of "json", "csv", "sql"`})
+		return
+	}
+
+	opts := ledger.SettlementOptions{Day: q.Get("day")}
+	for _, raw := range q["expected"] {
+		key, want, err := parseSettlementExpected(raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if opts.ExpectedNets == nil {
+			opts.ExpectedNets = map[ledger.SettlementExpectationKey]int64{}
+		}
+		opts.ExpectedNets[key] = want
+	}
+	for _, raw := range q["tolerance"] {
+		key, tol, err := parseSettlementTolerance(raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if opts.Tolerances == nil {
+			opts.Tolerances = map[ledger.SettlementExpectationKey]ledger.SettlementTolerance{}
+		}
+		opts.Tolerances[key] = tol
+	}
+
+	report, err := s.ledger.Settlement(time.Now(), opts)
+	if err != nil {
+		if errors.Is(err, ledger.ErrInvalidSettlementDay) ||
+			errors.Is(err, ledger.ErrInvalidCurrency) ||
+			errors.Is(err, ledger.ErrInvalidSettlementTolerance) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		log.Printf("ledger-api-go: GET /settlement: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "settlement failed"})
+		return
+	}
+	s.metrics.SettlementAlerts.Add(uint64(len(report.Mismatches)))
+
+	switch format {
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=settlement-"+report.Day+".csv")
+		w.WriteHeader(http.StatusOK)
+		if err := report.WriteCSV(w); err != nil {
+			log.Printf("ledger-api-go: GET /settlement csv encode error: %v", err)
+		}
+	case "sql":
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=settlement-"+report.Day+".sql")
+		w.WriteHeader(http.StatusOK)
+		if err := report.WriteSQL(w); err != nil {
+			log.Printf("ledger-api-go: GET /settlement sql encode error: %v", err)
+		}
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := report.WriteJSON(w); err != nil {
+			log.Printf("ledger-api-go: GET /settlement encode error: %v", err)
+		}
+	}
+}
+
 func newRouter(l *ledger.Ledger) http.Handler {
 	return newServer(l).handler()
 }
@@ -1783,6 +1925,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /sweeps/dry-run", s.handleDryRunSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
+	mux.HandleFunc("GET /settlement", s.handleSettlement)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
 	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)
 	mux.HandleFunc("POST /holds/{id}/capture", s.handleCaptureHold)

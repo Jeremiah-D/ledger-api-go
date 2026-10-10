@@ -215,6 +215,12 @@ type snapshotConfigLine struct {
 	// WithReviewExpiry) as a duration string; absent when auto-expiry
 	// is disabled.
 	ReviewExpiry string `json:"review_expiry,omitempty"`
+	// SettlementChannels carries the account->channel mappings for the
+	// settlement view (see SetSettlementChannel); absent in snapshots
+	// written before LG-43. The mappings are structural config like
+	// daily limits, so a disaster-recovery restore keeps the channel
+	// dimension instead of silently flattening every row to "".
+	SettlementChannels []SettlementChannel `json:"settlement_channels,omitempty"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -602,6 +608,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		LowBalanceThresholds: l.lowBalanceThresholdsLocked(),
 		ReviewThresholds:     l.reviewThresholdsLocked(),
 		ReviewThresholdCents: l.reviewThreshold,
+		SettlementChannels:   l.settlementChannelsLocked(),
 	}
 	if l.reviewExpiry > 0 {
 		cfg.ReviewExpiry = l.reviewExpiry.String()
@@ -1229,6 +1236,18 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 	}
 
+	// Settlement channel mappings are validated like every other config
+	// row: an empty account or an over-long channel label fails the
+	// import instead of silently dropping the channel dimension.
+	for _, sc := range cfg.SettlementChannels {
+		if sc.Account == "" {
+			return bad("settlement channel with empty account")
+		}
+		if len(sc.Channel) > maxSettlementChannelLen {
+			return bad("settlement channel label too long for account %q", sc.Account)
+		}
+	}
+
 	// Apply: every row above checked out.
 	for _, a := range cfg.Frozen {
 		l.frozen[a] = true
@@ -1241,6 +1260,10 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	for _, vl := range limits {
 		l.dailyLimits[vl.key] = vl.limit
+	}
+	// Settlement channel mappings: restore the channel dimension.
+	for _, sc := range cfg.SettlementChannels {
+		l.settlementChannels[sc.Account] = sc.Channel
 	}
 	// Low-balance alert levels are validated like daily limits: an
 	// empty account or a bad currency fails the import instead of

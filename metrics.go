@@ -169,6 +169,13 @@ type Metrics struct {
 	// review-sweeper ticks, by number of reviews rejected/expired (not
 	// by request).
 	ReviewRejectedTotal atomic.Uint64
+	// SettlementRuns counts GET /settlement requests served (all
+	// formats: json, csv, sql).
+	SettlementRuns atomic.Uint64
+	// SettlementAlerts counts settlement mismatch alerts across served
+	// settlement reports: the day-end reconciliation breaks an operator
+	// works through, not posting rejections.
+	SettlementAlerts atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -291,6 +298,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_review_rejected_total",
 		"Total transfer reviews rejected or auto-expired: operator rejects, manual expire runs, and background sweeper ticks.",
 		m.ReviewRejectedTotal.Load())
+	writeCounter(&sb, "ledger_settlement_runs_total",
+		"Total GET /settlement requests served (all formats).",
+		m.SettlementRuns.Load())
+	writeCounter(&sb, "ledger_settlement_alerts_total",
+		"Total settlement mismatch alerts across served settlement reports.",
+		m.SettlementAlerts.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

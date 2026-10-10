@@ -1045,6 +1045,59 @@ Daily cron example (midnight, keep 90 days of reports):
 Reports from a healthy ledger are byte-identical when scanned at the same
 `generated_at`, so plain `diff` works for day-over-day comparisons.
 
+### `GET /settlement`
+
+The merchant settlement view (LG-43): the end-of-day question a payments
+operator asks — for each merchant account, how much money moved today, in
+which currency, and does the day's net match what the payment provider's
+settlement file says it should be? Aggregation runs under a single read
+lock like `POST /reconcile`, so the report describes one consistent point
+in time.
+
+- **Merchant dimension**: the account. Each `cells` row aggregates one
+  `(account, UTC calendar day, currency)`: `debit_cents`, `credit_cents`,
+  `net_cents` (debits − credits), and the `entry_ids` behind the row for
+  drill-down, sorted by `(account, currency)`. There is no tag/metadata
+  dimension on journal entries, so the channel dimension (e.g. `alipay`,
+  `wechat-pay`) is structural config set in the `ledger` package:
+  `SetSettlementChannel(account, channel)` (empty channel clears); it does
+  not bump the ledger version and survives disaster-recovery snapshots.
+  Journal entries marked `PendingReview` are excluded — they are booked
+  but not effective, so including them would lie about moved money.
+- **Reconciliation alerts**: pass the day's expected nets from the
+  provider's settlement file (`?expected=merch-a:USD:2900`, repeatable) and
+  opt-in tolerances (`?tolerance=merch-a:USD:100:50` — 100 cents absolute,
+  50 bps relative, repeatable). Any `(account, currency)` whose actual
+  day-net differs from the expected net beyond its tolerance lands in
+  `mismatches` with `difference_cents` (actual − expected) and the
+  tolerance that was exceeded. An expectation with no tolerance row uses
+  zero tolerance: any nonzero difference alerts. Like `POST /reconcile`,
+  alerts are always `200` — the findings live in the report, not the
+  status code.
+- **Exports**: `?format=csv` downloads the cells view (`day,account,
+  channel,currency,debit_cents,credit_cents,net_cents,entry_count,
+  entry_ids` with semicolon-joined entry IDs); `?format=sql` downloads a
+  **SQL text dump** (`CREATE TABLE` + `INSERT` for `settlement_cells` and
+  `settlement_mismatches`). The Go standard library has no SQLite driver,
+  so this is deliberately a `.sql` text file, not a `.db` binary — import
+  it with a real `sqlite3`:
+
+```bash
+curl -s 'localhost:8080/settlement?day=2026-10-10&format=sql' -o settlement.sql
+sqlite3 settlement.db < settlement.sql
+sqlite3 settlement.db 'SELECT account, currency, net_cents FROM settlement_cells ORDER BY 1,2;'
+```
+
+```bash
+# JSON report for the day, with one expectation and a tolerance
+curl -s 'localhost:8080/settlement?day=2026-10-10&expected=merch-a:USD:2900&tolerance=merch-a:USD:100:0' | head -40
+```
+
+Malformed `day` (`YYYY-MM-DD` required), `format`, `expected`, or
+`tolerance` values are `400`; the currency codes and tolerance bounds in
+`expected`/`tolerance` are validated by the ledger when the report runs
+(`abs_cents >= 0`, `0 <= bps <= 10000`).
+
 ### Disaster-recovery snapshots (`ledger/snapshot.go`)
 
 The ledger can be exported to a JSONL disaster-recovery snapshot and
@@ -1072,7 +1125,8 @@ point in time) and is byte-deterministic for identical state, so
 balances, totals, and indexes are refolded from the journal in chain
 order, holds and all five idempotency-key namespaces are restored with
 referential checks, and operational config (frozen accounts, overdraft
-guards, sub-account hierarchy, transfer fee policy, idempotency TTL) comes
+guards, sub-account hierarchy, transfer fee policy, idempotency TTL,
+settlement channel mappings) comes
 back intact. The import finishes with a full audit-chain verification —
 a rewritten amount, spliced link, reordered journal, or dangling registry
 reference rejects the whole import (`ErrSnapshotInvalid`); no
@@ -1324,6 +1378,11 @@ curl -s localhost:8080/metrics
   ticks (full and incremental; see `LEDGER_SNAPSHOT_BACKUP_DIR` below).
 - `ledger_snapshot_backups_failed_total` — periodic snapshot backup
   ticks that failed after retries.
+- `ledger_settlement_runs_total` — `GET /settlement` requests served
+  (all formats: `json`, `csv`, `sql`).
+- `ledger_settlement_alerts_total` — settlement mismatch alerts across
+  served settlement reports: the day-end breaks an operator works
+  through, not posting rejections.
 
 ## Running
 

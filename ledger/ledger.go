@@ -168,6 +168,13 @@ type Ledger struct {
 	// config, like dailyLimits.
 	lowBalanceThresholds map[lowBalanceKey]int64
 	lowBalanceBreached   map[lowBalanceKey]bool
+	// settlementChannels maps an account to its settlement channel (the
+	// payment rail the merchant settles through, e.g. "alipay"), the
+	// channel dimension of the settlement view (see settlement.go).
+	// Structural config, like frozen and dailyLimits: setting or
+	// clearing a mapping does not bump the ledger version and survives
+	// disaster-recovery snapshots.
+	settlementChannels map[AccountID]string
 	lowBalanceBreaches   uint64
 	// parents maps a child account to its parent account in the
 	// sub-account hierarchy (see hierarchy.go). Only accounts with an
@@ -371,6 +378,7 @@ func New(opts ...Option) *Ledger {
 		dailyOutflow:         make(map[dailyLimitKey]int64),
 		lowBalanceThresholds: make(map[lowBalanceKey]int64),
 		lowBalanceBreached:   make(map[lowBalanceKey]bool),
+		settlementChannels:   make(map[AccountID]string),
 		parents:              make(map[AccountID]AccountID),
 		transferKeys:         make(map[string][]string),
 		reviews:              make(map[string]*TransferReview),
