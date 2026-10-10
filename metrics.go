@@ -31,6 +31,9 @@ type Metrics struct {
 	AnchorsTotal atomic.Uint64
 	// ReconcileRuns counts POST /reconcile requests served.
 	ReconcileRuns atomic.Uint64
+	// ReconcileExportRuns counts POST /reconcile/export requests served
+	// (signed reconcile exports, LG-46).
+	ReconcileExportRuns atomic.Uint64
 	// TransfersTotal counts POST /transfers requests received (all attempts,
 	// including duplicates and rejected payloads).
 	TransfersTotal atomic.Uint64
@@ -205,6 +208,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /entries/anchor requests that signed a chain-head checkpoint.", m.AnchorsTotal.Load())
 	writeCounter(&sb, "ledger_reconcile_runs_total",
 		"Total POST /reconcile requests served.", m.ReconcileRuns.Load())
+	writeCounter(&sb, "ledger_reconcile_export_runs_total",
+		"Total POST /reconcile/export requests served.", m.ReconcileExportRuns.Load())
 	writeCounter(&sb, "ledger_transfers_total",
 		"Total POST /transfers requests received.", m.TransfersTotal.Load())
 	writeCounter(&sb, "ledger_transfer_idempotency_hits_total",

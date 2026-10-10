@@ -1678,6 +1678,40 @@ type reconcileRequest struct {
 	BaseCurrency string `json:"base_currency"`
 }
 
+// reconcileBodyError is a body-parsing failure with its HTTP status.
+type reconcileBodyError struct {
+	status int
+	msg    string
+}
+
+// parseReconcileBody decodes the optional POST /reconcile[/export] body.
+// Shared by both endpoints: the body is bounded, strictly decoded, and an
+// empty body means "no options" — the legacy scan — so existing cron jobs
+// keep working unchanged.
+func parseReconcileBody(r *http.Request) (ledger.ReconcileOptions, *reconcileBodyError) {
+	opts := ledger.ReconcileOptions{}
+	var req reconcileRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	switch err := dec.Decode(&req); {
+	case err == io.EOF:
+		// No body: legacy report, fx_applied=false.
+		return opts, nil
+	case err != nil:
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return opts, &reconcileBodyError{http.StatusRequestEntityTooLarge, "request body too large"}
+		}
+		return opts, &reconcileBodyError{http.StatusBadRequest, "invalid JSON body: " + err.Error()}
+	default:
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
+			return opts, &reconcileBodyError{http.StatusBadRequest, "invalid JSON body: unexpected trailing data"}
+		}
+		opts.BaseCurrency = req.BaseCurrency
+		return opts, nil
+	}
+}
+
 // handleReconcile implements POST /reconcile, the operator-facing end-of-day
 // reconciliation job. It runs a full read-only scan of the live ledger — the
 // accounting equation, per-account trial balances, idempotency-key health,
@@ -1703,30 +1737,12 @@ func (s *server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	// Bound the body like every other POST endpoint and decode strictly:
-	// unknown fields fail fast. An empty body means "no options" — the
-	// legacy scan — so existing cron jobs keep working unchanged.
+	// unknown fields fail fast.
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	opts := ledger.ReconcileOptions{}
-	var req reconcileRequest
-	switch err := dec.Decode(&req); {
-	case err == io.EOF:
-		// No body: legacy report, fx_applied=false.
-	case err != nil:
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
-			return
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+	opts, berr := parseReconcileBody(r)
+	if berr != nil {
+		writeJSON(w, berr.status, map[string]string{"error": berr.msg})
 		return
-	default:
-		if err := dec.Decode(&struct{}{}); err != io.EOF {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
-			return
-		}
-		opts.BaseCurrency = req.BaseCurrency
 	}
 
 	report, err := s.ledger.ReconcileWithOptions(time.Now(), opts)
@@ -1744,6 +1760,50 @@ func (s *server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	if err := report.WriteJSON(w); err != nil {
 		log.Printf("ledger-api-go: POST /reconcile encode error: %v", err)
 	}
+}
+
+// handleReconcileExport implements POST /reconcile/export (LG-46): the
+// same end-of-day scan as POST /reconcile, returned as a signed package
+// {report, signature, key_id} — the deterministic report plus the anchor
+// key's Ed25519 signature over its canonical bytes, for offline archival
+// and third-party verification. The request body is the same optional
+// {"base_currency": "..."} as POST /reconcile.
+//
+// Without a configured anchor key (LEDGER_ANCHOR_KEY) the server cannot
+// sign — a deployment misconfiguration, so 500, not 404: there is nothing
+// for the caller to fix in the request.
+//
+//	curl -s -X POST localhost:8080/reconcile/export | tee reconcile-$(date +%F).signed.json
+func (s *server) handleReconcileExport(w http.ResponseWriter, r *http.Request) {
+	s.metrics.ReconcileExportRuns.Add(1)
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	opts, berr := parseReconcileBody(r)
+	if berr != nil {
+		writeJSON(w, berr.status, map[string]string{"error": berr.msg})
+		return
+	}
+
+	exp, err := s.ledger.ExportSignedReconcile(time.Now(), opts)
+	if err != nil {
+		if errors.Is(err, ledger.ErrAnchorKeyNotConfigured) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		log.Printf("ledger-api-go: POST /reconcile/export: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "reconcile export failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, exp)
 }
 
 // parseSettlementExpected parses one ?expected= query value of
@@ -1925,6 +1985,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /sweeps/dry-run", s.handleDryRunSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
+	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
 	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)

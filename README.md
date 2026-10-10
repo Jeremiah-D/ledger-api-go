@@ -1016,6 +1016,34 @@ Trimmed summary shape:
 }
 ```
 
+#### Signed reconcile export (offline-verifiable)
+
+`POST /reconcile/export` runs the same scan as `POST /reconcile` and
+returns a signed package for compliance archival: the deterministic
+report plus the anchor key's Ed25519 signature over its canonical bytes,
+`{"report": {...}, "signature": "<hex>", "key_id": "<hex>"}`. The request
+body is the same optional `{"base_currency": "..."}` as `POST /reconcile`.
+A third party holding the operator's public key re-verifies the package
+offline — no trust in the ledger's storage, no callback to the server:
+
+1. Take the `report` bytes exactly as received.
+2. `message = "LEDGER-RECONCILE-EXPORT/v1:" || report bytes`.
+3. Ed25519-verify `signature` against `message`; check `key_id` is the hex
+   of the public key's first 8 bytes.
+
+The domain prefix keeps export signatures untransplantable into the
+LG-44 anchor protocol and vice versa. The export is read-only (no
+version bump, no chain link) and emits a `reconcile_export` audit event
+naming the signing key. Without a configured `LEDGER_ANCHOR_KEY` the
+endpoint fails closed with `500` — signing is a deployment
+precondition, not a request problem.
+
+```bash
+curl -s -X POST localhost:8080/reconcile/export | tee reconcile-$(date +%F).signed.json
+```
+
+`ledger_reconcile_export_runs_total` counts export requests in `/metrics`.
+
 A clean run looks like (trimmed):
 
 ```json
@@ -1346,6 +1374,8 @@ curl -s localhost:8080/metrics
   requests served.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
+- `ledger_reconcile_export_runs_total` — `POST /reconcile/export`
+  requests served (signed reconcile exports).
 - `ledger_frozen_rejections_total` — `POST /entries`, `POST /transfers`,
   `POST /sweeps`, `POST /merges`, and hold requests rejected with `403`
   because an account was frozen.

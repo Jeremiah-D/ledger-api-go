@@ -117,6 +117,7 @@ func TestMetricsStartAtZero(t *testing.T) {
 		"ledger_balance_queries_total",
 		"ledger_verify_requests_total",
 		"ledger_reconcile_runs_total",
+		"ledger_reconcile_export_runs_total",
 	} {
 		v, ok := m[name]
 		if !ok {
