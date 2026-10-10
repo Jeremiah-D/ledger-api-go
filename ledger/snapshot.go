@@ -452,6 +452,7 @@ func journalEntriesEqual(a, b JournalEntry) bool {
 		a.Currency == b.Currency &&
 		a.IdempotencyKey == b.IdempotencyKey &&
 		a.BatchID == b.BatchID &&
+		a.Memo == b.Memo &&
 		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano()
 }
 

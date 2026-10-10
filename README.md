@@ -47,6 +47,10 @@ curl -s -X POST localhost:8080/entries \
   would take its UTC-day cumulative outflow above the limit → `422`
   `{"error":"ledger: posting would exceed the account's daily outflow limit"}`.
   The rejection is counted in `ledger_daily_limit_rejections_total`.
+- `memo`: optional free-form note, at most 255 UTF-8 characters (an order
+  ID, an invoice reference, a reconciliation tag). It is journaled with
+  the entry, covered by the audit-chain hash, queryable via
+  `GET /entries?memo=`, and echoed by dry-run legs. Overlong memos → `400`.
 
 ### `POST /entries/batch`
 
@@ -122,6 +126,9 @@ curl -s -X POST localhost:8080/transfers \
   its **daily outflow limit**. All are counted in the shared
   `ledger_frozen_rejections_total` / `ledger_overdraft_rejections_total` /
   `ledger_daily_limit_rejections_total` counters.
+- `memo` (optional, ≤ 255 UTF-8 characters) is carried onto the principal
+  journal entry (on cross-currency transfers, onto the `<id>/fx`
+  source-currency leg); the fee leg carries no memo.
 
 #### Transfer fees
 
@@ -747,6 +754,11 @@ curl -s 'localhost:8080/entries?since=2026-10-01T00:00:00Z&limit=100'
 - `cursor`: opaque cursor from the previous response's `next_cursor`.
   Resumption is keyed on entry ID, so entries posted between two pages are
   never duplicated or skipped.
+- `memo`: optional keyword filter — only entries whose memo note contains
+  it as a case-sensitive substring are returned. It composes with the
+  time window and cursor pagination (a cursor from a filtered page resumes
+  the same filtered sequence), so reconciliation tooling can page through
+  every entry tagged with an order ID or invoice reference.
 - Malformed timestamps, cursors, or limits → `400` with an `{"error": ...}` body.
 
 ### `GET /entries/verify`

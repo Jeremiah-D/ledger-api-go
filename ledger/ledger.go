@@ -15,8 +15,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // AccountID identifies an account in the ledger.
@@ -44,7 +46,15 @@ type JournalEntry struct {
 	// It is query metadata: the audit chain covers the entry itself, and
 	// VerifyChain/Reconcile cover batch entries exactly like ordinary
 	// postings.
-	BatchID   string    `json:"batch_id,omitempty"`
+	BatchID string `json:"batch_id,omitempty"`
+	// Memo is a free-form business note attached to the entry at post
+	// time (an order ID, an invoice reference, a reconciliation tag).
+	// It is part of the journaled record: the audit-chain hash covers
+	// it, snapshots carry it, and GET /entries?memo= filters on it. At
+	// most 255 UTF-8 characters (see ErrMemoTooLong); longer memos are
+	// rejected with a 400 before anything is recorded. Transfers carry
+	// the memo on the principal entry (see Transfer.Memo).
+	Memo      string    `json:"memo,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -57,7 +67,23 @@ var (
 	ErrNonPositiveAmount  = errors.New("ledger: amount must be greater than zero")
 	ErrInvalidCursor      = errors.New("ledger: pagination cursor is invalid")
 	ErrInvalidLimit       = errors.New("ledger: limit must be between 1 and 1000")
+	ErrMemoTooLong        = errors.New("ledger: memo must be at most 255 UTF-8 characters")
 )
+
+// maxMemoRunes caps a journal entry's memo at 255 UTF-8 characters. Long
+// enough for an order ID plus a human note, short enough to keep journal
+// rows and the audit chain bounded.
+const maxMemoRunes = 255
+
+// checkMemoLength rejects memos longer than maxMemoRunes UTF-8
+// characters. Callers: validateJournalEntry (Post and PostBatch entries)
+// and PostTransfer (transfer-level memo).
+func checkMemoLength(memo string) error {
+	if utf8.RuneCountInString(memo) > maxMemoRunes {
+		return ErrMemoTooLong
+	}
+	return nil
+}
 
 // maxPageSize caps a single ListEntries page.
 const maxPageSize = 1000
@@ -327,6 +353,12 @@ func validateJournalEntry(e *JournalEntry) error {
 	if e.AmountCents <= 0 {
 		return ErrNonPositiveAmount
 	}
+	// The memo is field validation like the legs and the amount: a note
+	// longer than maxMemoRunes UTF-8 characters is rejected before
+	// anything is recorded.
+	if err := checkMemoLength(e.Memo); err != nil {
+		return err
+	}
 	// Currency is field validation, like the legs and the amount: an
 	// empty code normalizes to the default currency, anything else must
 	// be a 3-letter uppercase ISO 4217 code. Normalization happens here,
@@ -449,6 +481,13 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		{account: e.DebitAccount, currency: e.Currency},
 		{account: e.CreditAccount, currency: e.Currency},
 	}, e.ID, "Post")
+	postDetails := map[string]any{
+		"amount_cents": e.AmountCents,
+		"currency":     e.Currency,
+	}
+	if e.Memo != "" {
+		postDetails["memo"] = e.Memo
+	}
 	l.emitAudit(AuditEvent{
 		Op:            "post",
 		Actor:         "Post",
@@ -457,10 +496,7 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		VersionAfter:  l.version,
 		EntryIDs:      []string{e.ID},
 		Accounts:      []AccountID{e.DebitAccount, e.CreditAccount},
-		Details: map[string]any{
-			"amount_cents": e.AmountCents,
-			"currency":     e.Currency,
-		},
+		Details:       postDetails,
 	})
 
 	return e, false, nil
@@ -749,6 +785,18 @@ func (l *Ledger) VerifyAccountingEquation() error {
 // entry named by a cursor can never move. A cursor naming an entry outside
 // the requested window is rejected with ErrInvalidCursor.
 func (l *Ledger) ListEntries(since, until time.Time, cursor string, limit int) (page []JournalEntry, nextCursor string, err error) {
+	return l.ListEntriesFiltered(since, until, cursor, limit, "")
+}
+
+// ListEntriesFiltered is ListEntries with an additional memo keyword
+// filter (see JournalEntry.Memo): when memo is non-empty, only entries
+// whose memo contains it as a substring are returned. The keyword filter
+// composes with the time window and the cursor pagination — a cursor from
+// a filtered page resumes the same filtered sequence, because the cursor
+// names an entry by ID and the filter is re-applied before pagination.
+// The match is a case-sensitive substring search: memo notes are
+// identifiers (order IDs, invoice references), where case matters.
+func (l *Ledger) ListEntriesFiltered(since, until time.Time, cursor string, limit int, memo string) (page []JournalEntry, nextCursor string, err error) {
 	if limit < 1 || limit > maxPageSize {
 		return nil, "", ErrInvalidLimit
 	}
@@ -764,6 +812,9 @@ func (l *Ledger) ListEntries(since, until time.Time, cursor string, limit int) (
 			continue
 		}
 		if !e.CreatedAt.Before(until) {
+			continue
+		}
+		if memo != "" && !strings.Contains(e.Memo, memo) {
 			continue
 		}
 		filtered = append(filtered, e)

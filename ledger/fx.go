@@ -533,6 +533,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 			CreditAccount: t.From,
 			AmountCents:   t.AmountCents,
 			Currency:      t.Currency,
+			Memo:          t.Memo,
 			CreatedAt:     t.CreatedAt,
 		},
 	}
@@ -576,6 +577,26 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
 	l.evaluateLowBalanceLocked(touchedAccounts(entries), t.ID, "PostTransfer")
+	fxDetails := map[string]any{
+		"amount_cents":    t.AmountCents,
+		"currency":        t.Currency,
+		"to_currency":     toCurrency,
+		"source_cents":    t.AmountCents,
+		"converted_cents": converted,
+		"rate_num":        rate.Num,
+		"rate_den":        rate.Den,
+		// The conversion's full provenance, sealed by the audit log's
+		// hash chain (see audit.go): the pre-conversion amount, the
+		// post-conversion amount, and the exact rate that produced
+		// it. The journal's own audit chain already carries both
+		// legs (the /fx leg books the source amount, the principal
+		// the converted amount); this event binds them to the rate.
+		"rate_effective_version": rate.EffectiveVersion,
+		"fee_cents":              feeCents,
+	}
+	if t.Memo != "" {
+		fxDetails["memo"] = t.Memo
+	}
 	l.emitAudit(AuditEvent{
 		Op:            "transfer",
 		Actor:         "PostTransfer",
@@ -584,23 +605,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		VersionAfter:  l.version,
 		EntryIDs:      fxEntryIDs,
 		Accounts:      []AccountID{t.From, t.To},
-		Details: map[string]any{
-			"amount_cents":    t.AmountCents,
-			"currency":        t.Currency,
-			"to_currency":     toCurrency,
-			"source_cents":    t.AmountCents,
-			"converted_cents": converted,
-			"rate_num":        rate.Num,
-			"rate_den":        rate.Den,
-			// The conversion's full provenance, sealed by the audit log's
-			// hash chain (see audit.go): the pre-conversion amount, the
-			// post-conversion amount, and the exact rate that produced
-			// it. The journal's own audit chain already carries both
-			// legs (the /fx leg books the source amount, the principal
-			// the converted amount); this event binds them to the rate.
-			"rate_effective_version": rate.EffectiveVersion,
-			"fee_cents":              feeCents,
-		},
+		Details:       fxDetails,
 	})
 
 	return TransferReceipt{

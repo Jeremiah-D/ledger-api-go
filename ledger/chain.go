@@ -28,8 +28,10 @@ type chainLink struct {
 // hashChainLink computes SHA-256(prevHash || canonical(entry)). Strings are
 // length-prefixed so adjacent fields cannot be confused ("a"+"bc" vs
 // "ab"+"c"); integers are fixed-width big-endian; CreatedAt uses UnixNano
-// so the encoding is independent of time.Location. All inputs come from the
-// standard library — no third-party crypto is involved.
+// so the encoding is independent of time.Location. The memo is covered
+// too: rewriting a journaled business note breaks the chain exactly like
+// rewriting an amount (see LG-38). All inputs come from the standard
+// library — no third-party crypto is involved.
 func hashChainLink(prevHash [32]byte, e JournalEntry) [32]byte {
 	h := sha256.New()
 	h.Write(prevHash[:])
@@ -50,6 +52,7 @@ func hashChainLink(prevHash [32]byte, e JournalEntry) [32]byte {
 	writeInt(e.AmountCents)
 	writeString(e.Currency)
 	writeString(e.IdempotencyKey)
+	writeString(e.Memo)
 	writeInt(e.CreatedAt.UnixNano())
 	var out [32]byte
 	copy(out[:], h.Sum(nil))

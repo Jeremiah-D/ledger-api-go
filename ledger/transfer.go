@@ -98,9 +98,17 @@ type Transfer struct {
 	FeeAccount AccountID `json:"fee_account,omitempty"`
 	// SkipFee suppresses the ledger's default fee policy for this
 	// transfer. An explicit FeeCents still applies.
-	SkipFee        bool      `json:"skip_fee,omitempty"`
-	IdempotencyKey string    `json:"idempotency_key,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	SkipFee        bool   `json:"skip_fee,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// Memo is a free-form business note carried onto the principal
+	// journal entry (see JournalEntry.Memo): an order ID, an invoice
+	// reference, a reconciliation tag. At most 255 UTF-8 characters
+	// (see ErrMemoTooLong); the fee leg carries no memo. On
+	// cross-currency transfers the memo rides the source-currency leg
+	// (the payer-outflow leg, ID "<transfer ID>/fx"), mirroring the
+	// same-currency principal whose credit leg is the payer.
+	Memo      string    `json:"memo,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // TransferReceipt reports what PostTransfer committed.
@@ -429,6 +437,13 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		}
 		t.ToCurrency = toCurrency
 	}
+	// The memo is field validation, like the legs and the amount: a note
+	// longer than maxMemoRunes UTF-8 characters is rejected before
+	// anything is recorded. Validated once here, before the same/FX
+	// currency branch, so both paths enforce it.
+	if err := checkMemoLength(t.Memo); err != nil {
+		return TransferReceipt{}, err
+	}
 	if toCurrency != currency {
 		return l.postTransferFXLocked(t, toCurrency, time.Now())
 	}
@@ -508,6 +523,7 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		AmountCents:    t.AmountCents,
 		Currency:       t.Currency,
 		IdempotencyKey: t.IdempotencyKey,
+		Memo:           t.Memo,
 		CreatedAt:      t.CreatedAt,
 	}
 	if principal.CreatedAt.IsZero() {
@@ -567,6 +583,16 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
 	l.evaluateLowBalanceLocked(touchedAccounts(entries), t.ID, "PostTransfer")
+	transferDetails := map[string]any{
+		"amount_cents":   t.AmountCents,
+		"currency":       t.Currency,
+		"fee_cents":      feeCents,
+		"fee_tier_index": tierIndex,
+		"fee_rate_bps":   rateBps,
+	}
+	if t.Memo != "" {
+		transferDetails["memo"] = t.Memo
+	}
 	l.emitAudit(AuditEvent{
 		Op:            "transfer",
 		Actor:         "PostTransfer",
@@ -575,13 +601,7 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		VersionAfter:  l.version,
 		EntryIDs:      entryIDs,
 		Accounts:      []AccountID{t.From, t.To},
-		Details: map[string]any{
-			"amount_cents":   t.AmountCents,
-			"currency":       t.Currency,
-			"fee_cents":      feeCents,
-			"fee_tier_index": tierIndex,
-			"fee_rate_bps":   rateBps,
-		},
+		Details:       transferDetails,
 	})
 
 	return TransferReceipt{

@@ -36,6 +36,7 @@ type createEntryRequest struct {
 	AmountCents    int64            `json:"amount_cents"`
 	Currency       string           `json:"currency"`
 	IdempotencyKey string           `json:"idempotency_key"`
+	Memo           string           `json:"memo"`
 }
 
 func newID() string {
@@ -101,6 +102,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		AmountCents:    req.AmountCents,
 		Currency:       req.Currency,
 		IdempotencyKey: req.IdempotencyKey,
+		Memo:           req.Memo,
 		CreatedAt:      time.Now(),
 	}
 
@@ -186,6 +188,7 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		AmountCents:    req.AmountCents,
 		Currency:       req.Currency,
 		IdempotencyKey: req.IdempotencyKey,
+		Memo:           req.Memo,
 		CreatedAt:      time.Now(),
 	}
 
@@ -235,6 +238,7 @@ type createTransferRequest struct {
 	FeeAccount     ledger.AccountID `json:"fee_account"`
 	SkipFee        bool             `json:"skip_fee"`
 	IdempotencyKey string           `json:"idempotency_key"`
+	Memo           string           `json:"memo"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
@@ -305,6 +309,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		FeeAccount:     req.FeeAccount,
 		SkipFee:        req.SkipFee,
 		IdempotencyKey: req.IdempotencyKey,
+		Memo:           req.Memo,
 		CreatedAt:      time.Now(),
 	}
 	if req.ToCurrency != "" {
@@ -423,6 +428,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		FeeAccount:     req.FeeAccount,
 		SkipFee:        req.SkipFee,
 		IdempotencyKey: req.IdempotencyKey,
+		Memo:           req.Memo,
 		CreatedAt:      time.Now(),
 	}
 
@@ -484,6 +490,7 @@ type batchEntryRequest struct {
 	AmountCents    int64            `json:"amount_cents"`
 	Currency       string           `json:"currency"`
 	IdempotencyKey string           `json:"idempotency_key"`
+	Memo           string           `json:"memo"`
 }
 
 type createBatchRequest struct {
@@ -553,6 +560,7 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			AmountCents:    re.AmountCents,
 			Currency:       re.Currency,
 			IdempotencyKey: re.IdempotencyKey,
+			Memo:           re.Memo,
 			CreatedAt:      time.Now(),
 		})
 	}
@@ -1551,7 +1559,10 @@ func (s *server) handleListAccountEntries(w http.ResponseWriter, r *http.Request
 // Omitted since means the beginning of time; omitted until means no upper
 // bound. limit defaults to 100 and is capped at 1000. The response is
 // {"entries":[...], "next_cursor":"..."}; an empty next_cursor marks the last
-// page. Malformed timestamps, cursors, or limits return 400.
+// page. Malformed timestamps, cursors, or limits return 400. An optional
+// ?memo= keyword filters to entries whose memo note contains it as a
+// case-sensitive substring; the filter composes with the time window and
+// cursor pagination (see ListEntriesFiltered).
 func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	since, until, limit, err := parseEntryListQuery(r.URL.Query())
 	if err != nil {
@@ -1559,7 +1570,7 @@ func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, next, err := s.ledger.ListEntries(since, until, r.URL.Query().Get("cursor"), limit)
+	page, next, err := s.ledger.ListEntriesFiltered(since, until, r.URL.Query().Get("cursor"), limit, r.URL.Query().Get("memo"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
