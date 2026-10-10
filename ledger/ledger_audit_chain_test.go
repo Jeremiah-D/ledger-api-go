@@ -88,7 +88,11 @@ func TestAuditChainSealLinksEntries(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	events, corrupt, err := ReadAuditLog(al.Dir(), time.Now().UTC().Format("2006-01-02"))
+	// The writer buckets files by the event's own timestamp day, and the
+	// sealTestEvent fixture pins 2026-10-09 — read that day, not "today",
+	// so the test is day-boundary independent.
+	day := sealTestEvent("post", "trace-a", 0).Timestamp.UTC().Format("2006-01-02")
+	events, corrupt, err := ReadAuditLog(al.Dir(), day)
 	if err != nil {
 		t.Fatalf("ReadAuditLog: %v", err)
 	}

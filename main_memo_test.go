@@ -46,9 +46,15 @@ func TestHTTPMemoEntryAndQuery(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("overlong memo status = %d, want 400", code)
 	}
-	resp2, _ := http.Get(srv.URL + "/entries?memo=xxxxxxxx")
+	resp2, err := http.Get(srv.URL + "/entries?memo=xxxxxxxx")
+	if err != nil {
+		t.Fatalf("GET /entries?memo=: %v", err)
+	}
 	defer resp2.Body.Close()
-	body2, _ := io.ReadAll(resp2.Body)
+	body2, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		t.Fatalf("read listing: %v", err)
+	}
 	if strings.Contains(string(body2), "xxxxxxxxxxxxxxxx") {
 		t.Fatal("overlong memo entry was recorded")
 	}
