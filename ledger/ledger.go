@@ -224,6 +224,15 @@ type Ledger struct {
 	// Structural config like frozen — it survives snapshots and is
 	// listed in Reconcile.
 	closedPeriods  map[string]bool
+	// balanceHook is the opt-in balance-change notification callback
+	// (see balance_hook.go): every committed Post/Transfer/Capture/
+	// Sweep/Merge dispatches one BalanceChange per touched (account,
+	// currency) asynchronously, with panic isolation and a configurable
+	// per-callback timeout. Nil disables notifications entirely (the
+	// default): the commit path then behaves exactly as before, with no
+	// extra allocation.
+	balanceHook        BalanceChangeHook
+	balanceHookTimeout time.Duration // per-callback timeout; <= 0 means defaultBalanceHookTimeout
 	chain          []chainLink   // audit chain, one link per successful Post, in order
 	version        uint64        // bumped by every successful Post
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
@@ -472,6 +481,11 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	l.maybePruneIdempotencyKeys(time.Now())
 	l.maybePruneDailyOutflowLocked(time.Now())
 	versionBefore := l.version
+	// Pre-commit balance snapshot for the opt-in balance-change hook
+	// (see balance_hook.go): a no-op allocation-free nil map when no
+	// hook is registered.
+	hookTouched := touchedAccounts([]JournalEntry{e})
+	hookOld := l.balanceSnapshotLocked(hookTouched)
 	l.commitEntryLocked(e)
 	l.addDailyOutflowLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt)
 	// Low-balance alert evaluation: strictly after the atomic commit
@@ -498,6 +512,10 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		Accounts:      []AccountID{e.DebitAccount, e.CreditAccount},
 		Details:       postDetails,
 	})
+	// Balance-change notification: strictly after the atomic commit
+	// zone, advisory only — the hook runs asynchronously and can
+	// neither fail nor alter this posting.
+	l.fireBalanceHooksLocked(hookTouched, hookOld, e.ID)
 
 	return e, false, nil
 }

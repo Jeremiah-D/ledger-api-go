@@ -452,6 +452,37 @@ curl -s localhost:8080/metrics | grep low_balance
 # ledger_low_balance_breaches_total 1
 ```
 
+### Balance-change notification hooks
+
+Opt-in per-account balance-change callbacks for downstream fintech
+plumbing — payment notifications, settlement webhooks, cache
+invalidation. Register with `ledger.WithBalanceChangeHook` /
+`SetBalanceChangeHook` (Go API). Every committed `Post`, `Transfer`,
+`Capture`, `Sweep`, and `Merge` dispatches one `BalanceChange` event per
+touched (account, currency): `account`, `currency`, `old_balance_cents`,
+`new_balance_cents`, `delta_cents` (negative on the paying side),
+`version` (the ledger version after the commit), and `trace`
+(the entry / transfer / sweep / merge ID, or the hold ID for captures).
+The payer's delta nets the full outflow (amount + fee).
+
+Events are fully materialized after the atomic commit zone and
+dispatched asynchronously — one goroutine per event — so a slow hook
+can never block the commit path. Hook failures are isolated: a
+panicking callback is recovered, and a callback that overruns its
+per-call timeout (default 5s, configurable via
+`WithBalanceChangeHookTimeout` / `SetBalanceChangeHookTimeout`) is
+abandoned. Neither can alter or roll back the committed entries.
+Idempotent replays and rejected operations fire nothing. With no hook
+registered (the default), the commit path allocates nothing and behaves
+exactly as before.
+
+```go
+l := ledger.New(ledger.WithBalanceChangeHook(func(ev ledger.BalanceChange) {
+    // fan out to the payments notification service / webhook queue
+    notify(ev.Account, ev.Currency, ev.DeltaCents, ev.Trace)
+}))
+```
+
 ### Authorization holds (auth/capture)
 
 Fintech pre-authorization flow: `POST /holds` reserves funds on an

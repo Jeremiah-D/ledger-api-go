@@ -232,6 +232,16 @@ func (l *Ledger) PostMerge(m Merge) (MergeReceipt, error) {
 	l.maybePruneIdempotencyKeys(now)
 	versionBefore := l.version
 	entries := make([]JournalEntry, 0, len(legs))
+	// Pre-commit balance snapshot for the opt-in balance-change hook
+	// (see balance_hook.go): the legs are fully planned above, so the
+	// touched set is exact. Nil when no hook is registered.
+	hookTouched := make([]accountCurrency, 0, 2*len(legs))
+	for _, leg := range legs {
+		hookTouched = append(hookTouched,
+			accountCurrency{account: m.From, currency: leg.Currency},
+			accountCurrency{account: m.To, currency: leg.Currency})
+	}
+	hookOld := l.balanceSnapshotLocked(hookTouched)
 	for _, leg := range legs {
 		e := JournalEntry{
 			ID:          leg.EntryID,
@@ -282,6 +292,9 @@ func (l *Ledger) PostMerge(m Merge) (MergeReceipt, error) {
 			"legs": len(legs),
 		},
 	})
+	// Balance-change notification: strictly after the atomic commit
+	// zone, advisory only — async dispatch, hook failures isolated.
+	l.fireBalanceHooksLocked(hookTouched, hookOld, m.ID)
 
 	return MergeReceipt{
 		MergeID:      m.ID,

@@ -565,6 +565,10 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
 	versionBefore := l.version
+	// Pre-commit balance snapshot for the opt-in balance-change hook
+	// (see balance_hook.go): nil when no hook is registered.
+	hookTouched := touchedAccounts(entries)
+	hookOld := l.balanceSnapshotLocked(hookTouched)
 	for _, e := range entries {
 		l.commitEntryLocked(e)
 	}
@@ -603,6 +607,9 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		Accounts:      []AccountID{t.From, t.To},
 		Details:       transferDetails,
 	})
+	// Balance-change notification: strictly after the atomic commit
+	// zone, advisory only — async dispatch, hook failures isolated.
+	l.fireBalanceHooksLocked(hookTouched, hookOld, t.ID)
 
 	return TransferReceipt{
 		TransferID:   t.ID,

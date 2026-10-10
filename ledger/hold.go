@@ -502,6 +502,10 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 
 	l.maybePruneIdempotencyKeys(now)
 	versionBefore := l.version
+	// Pre-commit balance snapshot for the opt-in balance-change hook
+	// (see balance_hook.go): nil when no hook is registered.
+	hookTouched := touchedAccounts([]JournalEntry{entry})
+	hookOld := l.balanceSnapshotLocked(hookTouched)
 	l.commitEntryLocked(entry)
 	h.Status = HoldStatusCaptured
 	l.holds[c.HoldID] = h
@@ -533,6 +537,9 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 			"currency":       h.Currency,
 		},
 	})
+	// Balance-change notification: strictly after the atomic commit
+	// zone, advisory only — async dispatch, hook failures isolated.
+	l.fireBalanceHooksLocked(hookTouched, hookOld, c.HoldID)
 
 	return receipt, nil
 }
