@@ -133,6 +133,13 @@ type Metrics struct {
 	// response body). Any nonzero value is an integrity incident —
 	// alert on it.
 	AuditVerifyBreaks atomic.Uint64
+	// LowBalanceBreaches counts low-balance alert events emitted by the
+	// ledger (see ledger.SetLowBalanceThreshold). It is synced from the
+	// ledger on every GET /metrics scrape, like the audit-log counters,
+	// so it stays meaningful even though the events are produced inside
+	// the ledger package. The alert is advisory — it never rejects a
+	// posting — so this counter measures alert volume, not rejections.
+	LowBalanceBreaches atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -214,6 +221,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_audit_verify_breaks_total",
 		"Total audit-log hash-chain verifications that found a broken chain.",
 		m.AuditVerifyBreaks.Load())
+	writeCounter(&sb, "ledger_low_balance_breaches_total",
+		"Total low-balance alert events emitted (advisory; never a rejection).",
+		m.LowBalanceBreaches.Load())
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())

@@ -109,6 +109,11 @@ type ReconciliationReport struct {
 	// this to know which accounts are capped on daily outflow and at
 	// what level.
 	DailyLimits []DailyLimit `json:"daily_limits"`
+	// LowBalanceThresholds lists every configured low-balance alert
+	// level (see SetLowBalanceThreshold), sorted by (account,
+	// currency). Operations tooling reads this to know which accounts
+	// alert on low balances and at what level.
+	LowBalanceThresholds []LowBalanceThreshold `json:"low_balance_thresholds"`
 	// HeldTotals is the per-currency rollup of active authorization
 	// holds (see hold.go) at report time, sorted by currency code: the
 	// cents currently reserved from available balances. Expired holds
@@ -289,6 +294,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FrozenAccounts:             l.frozenAccountsLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
+		LowBalanceThresholds:       l.lowBalanceThresholdsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
 		FXRates:                    l.fxRatesLocked(),
 		Merges:                     l.mergesLocked(),

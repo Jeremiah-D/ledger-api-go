@@ -564,6 +564,9 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	for _, e := range entries {
 		entryIDs = append(entryIDs, e.ID)
 	}
+	// Low-balance alert evaluation: strictly after the atomic commit
+	// zone, read-only (see low_balance.go). Advisory only.
+	l.evaluateLowBalanceLocked(touchedAccounts(entries), t.ID, "PostTransfer")
 	l.emitAudit(AuditEvent{
 		Op:            "transfer",
 		Actor:         "PostTransfer",

@@ -243,6 +243,9 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 	for _, e := range entries {
 		sweepEntryIDs = append(sweepEntryIDs, e.ID)
 	}
+	// Low-balance alert evaluation: strictly after the atomic commit
+	// zone, read-only (see low_balance.go). Advisory only.
+	l.evaluateLowBalanceLocked(touchedAccounts(entries), s.ID, "PostSweep")
 	l.emitAudit(AuditEvent{
 		Op:            "sweep",
 		Actor:         "PostSweep",

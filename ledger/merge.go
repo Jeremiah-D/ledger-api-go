@@ -267,6 +267,9 @@ func (l *Ledger) PostMerge(m Merge) (MergeReceipt, error) {
 	// balances are what version tracks, and the freeze changes none.
 	l.frozen[m.From] = true
 
+	// Low-balance alert evaluation: strictly after the atomic commit
+	// zone, read-only (see low_balance.go). Advisory only.
+	l.evaluateLowBalanceLocked(touchedAccounts(entries), m.ID, "PostMerge")
 	l.emitAudit(AuditEvent{
 		Op:            "merge",
 		Actor:         "PostMerge",

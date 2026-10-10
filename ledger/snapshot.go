@@ -181,6 +181,12 @@ type snapshotConfigLine struct {
 	// months, so periods are part of the operational config like the
 	// frozen-account list.
 	ClosedPeriods []string `json:"closed_periods,omitempty"`
+	// LowBalanceThresholds carries the low-balance alert levels (see
+	// SetLowBalanceThreshold); absent in snapshots written before
+	// low-balance alerts existed. The alert state (breached flags) is
+	// re-derived from the restored balances on import — a restore must
+	// not backfire stale alerts.
+	LowBalanceThresholds []LowBalanceThreshold `json:"low_balance_thresholds,omitempty"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -414,18 +420,19 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		parents[c] = p
 	}
 	cfg := snapshotConfigLine{
-		Record:             "config",
-		Frozen:             frozen,
-		OverdraftProtected: overdraft,
-		Parents:            parents,
-		FeeRateBps:         flatFeeRateBps(l.feeTiers),
-		FeeTiers:           l.feeTiers,
-		FeeRevenueAccount:  l.feeRevenueAccount,
-		IdempotencyTTL:     l.idempotencyTTL.String(),
-		DailyLimits:        l.dailyLimitsLocked(),
-		FXRates:            l.fxRatesLocked(),
-		FXAccount:          l.fxAccount,
-		ClosedPeriods:      l.closedPeriodsLocked(),
+		Record:               "config",
+		Frozen:               frozen,
+		OverdraftProtected:   overdraft,
+		Parents:              parents,
+		FeeRateBps:           flatFeeRateBps(l.feeTiers),
+		FeeTiers:             l.feeTiers,
+		FeeRevenueAccount:    l.feeRevenueAccount,
+		IdempotencyTTL:       l.idempotencyTTL.String(),
+		DailyLimits:          l.dailyLimitsLocked(),
+		FXRates:              l.fxRatesLocked(),
+		FXAccount:            l.fxAccount,
+		ClosedPeriods:        l.closedPeriodsLocked(),
+		LowBalanceThresholds: l.lowBalanceThresholdsLocked(),
 	}
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -921,6 +928,20 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, vl := range limits {
 		l.dailyLimits[vl.key] = vl.limit
 	}
+	// Low-balance alert levels are validated like daily limits: an
+	// empty account or a bad currency fails the import instead of
+	// silently dropping an alert level. Negative thresholds are legal
+	// (a balance level, not an outflow).
+	for _, lt := range cfg.LowBalanceThresholds {
+		if lt.Account == "" {
+			return bad("low-balance threshold with empty account")
+		}
+		cur, err := normalizeCurrency(lt.Currency)
+		if err != nil {
+			return bad("bad low-balance threshold currency %q: %v", lt.Currency, err)
+		}
+		l.lowBalanceThresholds[lowBalanceKey{account: lt.Account, currency: cur}] = lt.ThresholdCents
+	}
 	// The transfer fee policy: prefer the tiered schedule when present;
 	// otherwise rebuild the flat single-tier policy from the legacy
 	// fee_rate_bps field (snapshots predating tiered fees). An empty
@@ -941,6 +962,12 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, id := range cfg.ClosedPeriods {
 		l.closedPeriods[id] = true
 	}
+	// Re-derive the low-balance breach state from the restored
+	// balances: an account already below its threshold counts as
+	// breached, so the first posting after the restore does not backfire
+	// a stale alert. Silent — a restore emits no events and bumps no
+	// counters.
+	l.recomputeLowBalanceBreachesLocked()
 	return nil
 }
 
@@ -1067,6 +1094,14 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.dailyLimits, b.dailyLimits) {
+		return false
+	}
+	// Low-balance alert levels must round-trip; the breached flags are
+	// deliberately excluded, like the per-day outflow counters: a
+	// restore re-derives breach state from the restored balances (see
+	// recomputeLowBalanceBreachesLocked), and the live alert state may
+	// have legitimately moved on since the export.
+	if !reflect.DeepEqual(a.lowBalanceThresholds, b.lowBalanceThresholds) {
 		return false
 	}
 	if !reflect.DeepEqual(a.feeTiers, b.feeTiers) || a.feeRevenueAccount != b.feeRevenueAccount {

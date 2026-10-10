@@ -1443,6 +1443,9 @@ func (s *server) handler() http.Handler {
 			s.metrics.AuditEventsTotal.Store(written)
 			s.metrics.AuditDroppedTotal.Store(dropped)
 		}
+		// The low-balance breach counter lives in the ledger too (the
+		// alert fires inside Post/Transfer/..., not in a handler).
+		s.metrics.LowBalanceBreaches.Store(s.ledger.LowBalanceBreachCount())
 		s.metrics.handleMetrics(w, r)
 	})
 	return mux
@@ -1643,6 +1646,25 @@ func main() {
 			opts = append(opts, ledger.WithDailyLimit(dl.Account, dl.Currency, dl.LimitCents))
 		}
 		log.Printf("ledger-api-go: daily outflow limits = %d configured", len(limits))
+	}
+
+	// LEDGER_LOW_BALANCE_THRESHOLDS configures per-account per-currency
+	// low-balance alert levels (see ledger.ParseLowBalanceThresholds for
+	// the syntax, e.g. "cust-123:USD:50000,cust-456:EUR:-10000"). The
+	// first posting that takes an account's balance below its level emits
+	// one low_balance_breach audit event; the alert is advisory and never
+	// rejects a posting. Unset means no alert levels. An invalid value
+	// fails the startup fast (log.Fatal): a misconfigured alert level
+	// must never silently run unenforced.
+	if raw := os.Getenv("LEDGER_LOW_BALANCE_THRESHOLDS"); raw != "" {
+		thresholds, err := ledger.ParseLowBalanceThresholds(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		for _, lt := range thresholds {
+			opts = append(opts, ledger.WithLowBalanceThreshold(lt.Account, lt.Currency, lt.ThresholdCents))
+		}
+		log.Printf("ledger-api-go: low-balance thresholds = %d configured", len(thresholds))
 	}
 
 	// LEDGER_FX_ACCOUNT configures the ledger-wide FX clearing account,

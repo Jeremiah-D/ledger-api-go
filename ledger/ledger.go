@@ -119,6 +119,17 @@ type Ledger struct {
 	// currency; structural config, like frozen and noOverdraft.
 	dailyLimits  map[dailyLimitKey]int64
 	dailyOutflow map[dailyLimitKey]int64
+	// lowBalanceThresholds maps (account, currency) to the account's
+	// low-balance alert level in cents, and lowBalanceBreached marks the
+	// (account, currency) pairs currently in breach (silenced until the
+	// balance recovers to the threshold). A posting that takes a balance
+	// below its threshold emits one low_balance_breach audit event and
+	// bumps lowBalanceBreaches (see low_balance.go). Advisory only —
+	// never a rejection. Opt-in per account and currency; structural
+	// config, like dailyLimits.
+	lowBalanceThresholds map[lowBalanceKey]int64
+	lowBalanceBreached   map[lowBalanceKey]bool
+	lowBalanceBreaches   uint64
 	// parents maps a child account to its parent account in the
 	// sub-account hierarchy (see hierarchy.go). Only accounts with an
 	// assigned parent appear here; clearing the parent deletes the row.
@@ -260,29 +271,31 @@ func WithOverdraftProtection(accounts ...AccountID) Option {
 // idempotency keys never expire.
 func New(opts ...Option) *Ledger {
 	l := &Ledger{
-		balances:       make(map[accountCurrency]int64),
-		entries:        make(map[string]JournalEntry),
-		byKey:          make(map[string]JournalEntry),
-		byAccount:      make(map[AccountID][]string),
-		debitTotals:    make(map[accountCurrency]int64),
-		creditTotals:   make(map[accountCurrency]int64),
-		frozen:         make(map[AccountID]bool),
-		noOverdraft:    make(map[AccountID]bool),
-		dailyLimits:    make(map[dailyLimitKey]int64),
-		dailyOutflow:   make(map[dailyLimitKey]int64),
-		parents:        make(map[AccountID]AccountID),
-		transferKeys:   make(map[string][]string),
-		holds:          make(map[string]Hold),
-		holdsByAccount: make(map[AccountID][]string),
-		holdKeys:       make(map[string]string),
-		captureKeys:    make(map[string]CaptureReceipt),
-		sweepKeys:      make(map[string]sweepRecord),
-		batchKeys:      make(map[string]batchRecord),
-		merges:         make(map[string]mergeRecord),
-		mergeKeys:      make(map[string]string),
-		fxRates:        make(map[fxPair]ExchangeRate),
-		closedPeriods:  make(map[string]bool),
-		pruneInterval:  defaultKeyPruneInterval,
+		balances:             make(map[accountCurrency]int64),
+		entries:              make(map[string]JournalEntry),
+		byKey:                make(map[string]JournalEntry),
+		byAccount:            make(map[AccountID][]string),
+		debitTotals:          make(map[accountCurrency]int64),
+		creditTotals:         make(map[accountCurrency]int64),
+		frozen:               make(map[AccountID]bool),
+		noOverdraft:          make(map[AccountID]bool),
+		dailyLimits:          make(map[dailyLimitKey]int64),
+		dailyOutflow:         make(map[dailyLimitKey]int64),
+		lowBalanceThresholds: make(map[lowBalanceKey]int64),
+		lowBalanceBreached:   make(map[lowBalanceKey]bool),
+		parents:              make(map[AccountID]AccountID),
+		transferKeys:         make(map[string][]string),
+		holds:                make(map[string]Hold),
+		holdsByAccount:       make(map[AccountID][]string),
+		holdKeys:             make(map[string]string),
+		captureKeys:          make(map[string]CaptureReceipt),
+		sweepKeys:            make(map[string]sweepRecord),
+		batchKeys:            make(map[string]batchRecord),
+		merges:               make(map[string]mergeRecord),
+		mergeKeys:            make(map[string]string),
+		fxRates:              make(map[fxPair]ExchangeRate),
+		closedPeriods:        make(map[string]bool),
+		pruneInterval:        defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
 		opt(l)
@@ -429,6 +442,13 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	versionBefore := l.version
 	l.commitEntryLocked(e)
 	l.addDailyOutflowLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt)
+	// Low-balance alert evaluation: strictly after the atomic commit
+	// zone, read-only (see low_balance.go). Advisory only — it can
+	// neither fail nor alter this posting.
+	l.evaluateLowBalanceLocked([]accountCurrency{
+		{account: e.DebitAccount, currency: e.Currency},
+		{account: e.CreditAccount, currency: e.Currency},
+	}, e.ID, "Post")
 	l.emitAudit(AuditEvent{
 		Op:            "post",
 		Actor:         "Post",
@@ -600,6 +620,14 @@ type TrialBalance struct {
 	// for the default currency; per-currency limits live in the
 	// reconciliation report and on Ledger.DailyLimit.
 	DailyLimitCents int64 `json:"daily_limit_cents"`
+	// LowBalanceThresholdCents reports the account's configured
+	// low-balance alert level in the default currency (see
+	// SetLowBalanceThreshold): the first posting that takes the balance
+	// below this number emits one low_balance_breach audit event. 0
+	// means no threshold is configured for the default currency;
+	// per-currency thresholds live in the reconciliation report and on
+	// Ledger.LowBalanceThreshold.
+	LowBalanceThresholdCents int64 `json:"low_balance_threshold_cents"`
 }
 
 // TrialBalance returns the double-entry breakdown of the given account at
@@ -618,12 +646,13 @@ func (l *Ledger) TrialBalance(a AccountID) TrialBalance {
 // read lock as the rest of the report.
 func (l *Ledger) trialBalanceLocked(a AccountID) TrialBalance {
 	tb := TrialBalance{
-		Account:            a,
-		Currency:           DefaultCurrency,
-		Version:            l.version,
-		Frozen:             l.frozen[a],
-		OverdraftProtected: l.noOverdraft[a],
-		DailyLimitCents:    l.dailyLimits[dailyLimitKey{account: a, currency: DefaultCurrency}],
+		Account:                  a,
+		Currency:                 DefaultCurrency,
+		Version:                  l.version,
+		Frozen:                   l.frozen[a],
+		OverdraftProtected:       l.noOverdraft[a],
+		DailyLimitCents:          l.dailyLimits[dailyLimitKey{account: a, currency: DefaultCurrency}],
+		LowBalanceThresholdCents: l.lowBalanceThresholds[lowBalanceKey{account: a, currency: DefaultCurrency}],
 	}
 	seen := make(map[string]bool)
 	for k := range l.balances {

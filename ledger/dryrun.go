@@ -75,34 +75,36 @@ type DryRunResult struct {
 // against stale state.
 func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	c := &Ledger{
-		balances:       make(map[accountCurrency]int64, len(l.balances)),
-		entries:        make(map[string]JournalEntry, len(l.entries)),
-		byKey:          make(map[string]JournalEntry, len(l.byKey)),
-		byAccount:      make(map[AccountID][]string, len(l.byAccount)),
-		debitTotals:    make(map[accountCurrency]int64, len(l.debitTotals)),
-		creditTotals:   make(map[accountCurrency]int64, len(l.creditTotals)),
-		frozen:         make(map[AccountID]bool, len(l.frozen)),
-		noOverdraft:    make(map[AccountID]bool, len(l.noOverdraft)),
-		dailyLimits:    make(map[dailyLimitKey]int64, len(l.dailyLimits)),
-		dailyOutflow:   make(map[dailyLimitKey]int64, len(l.dailyOutflow)),
-		parents:        make(map[AccountID]AccountID, len(l.parents)),
-		transferKeys:   make(map[string][]string, len(l.transferKeys)),
-		holds:          make(map[string]Hold, len(l.holds)),
-		holdsByAccount: make(map[AccountID][]string, len(l.holdsByAccount)),
-		holdKeys:       make(map[string]string, len(l.holdKeys)),
-		captureKeys:    make(map[string]CaptureReceipt, len(l.captureKeys)),
-		sweepKeys:      make(map[string]sweepRecord, len(l.sweepKeys)),
-		batchKeys:      make(map[string]batchRecord, len(l.batchKeys)),
-		merges:         make(map[string]mergeRecord, len(l.merges)),
-		mergeKeys:      make(map[string]string, len(l.mergeKeys)),
-		fxRates:        make(map[fxPair]ExchangeRate, len(l.fxRates)),
-		closedPeriods:  make(map[string]bool, len(l.closedPeriods)),
-		chain:          append([]chainLink(nil), l.chain...),
-		version:        l.version,
-		idempotencyTTL: l.idempotencyTTL,
-		pruneInterval:  l.pruneInterval,
-		lastKeyPrune:   l.lastKeyPrune,
-		lastDailyPrune: l.lastDailyPrune,
+		balances:             make(map[accountCurrency]int64, len(l.balances)),
+		entries:              make(map[string]JournalEntry, len(l.entries)),
+		byKey:                make(map[string]JournalEntry, len(l.byKey)),
+		byAccount:            make(map[AccountID][]string, len(l.byAccount)),
+		debitTotals:          make(map[accountCurrency]int64, len(l.debitTotals)),
+		creditTotals:         make(map[accountCurrency]int64, len(l.creditTotals)),
+		frozen:               make(map[AccountID]bool, len(l.frozen)),
+		noOverdraft:          make(map[AccountID]bool, len(l.noOverdraft)),
+		dailyLimits:          make(map[dailyLimitKey]int64, len(l.dailyLimits)),
+		dailyOutflow:         make(map[dailyLimitKey]int64, len(l.dailyOutflow)),
+		parents:              make(map[AccountID]AccountID, len(l.parents)),
+		transferKeys:         make(map[string][]string, len(l.transferKeys)),
+		holds:                make(map[string]Hold, len(l.holds)),
+		holdsByAccount:       make(map[AccountID][]string, len(l.holdsByAccount)),
+		holdKeys:             make(map[string]string, len(l.holdKeys)),
+		captureKeys:          make(map[string]CaptureReceipt, len(l.captureKeys)),
+		sweepKeys:            make(map[string]sweepRecord, len(l.sweepKeys)),
+		batchKeys:            make(map[string]batchRecord, len(l.batchKeys)),
+		merges:               make(map[string]mergeRecord, len(l.merges)),
+		mergeKeys:            make(map[string]string, len(l.mergeKeys)),
+		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
+		closedPeriods:        make(map[string]bool, len(l.closedPeriods)),
+		lowBalanceThresholds: make(map[lowBalanceKey]int64, len(l.lowBalanceThresholds)),
+		lowBalanceBreached:   make(map[lowBalanceKey]bool, len(l.lowBalanceBreached)),
+		chain:                append([]chainLink(nil), l.chain...),
+		version:              l.version,
+		idempotencyTTL:       l.idempotencyTTL,
+		pruneInterval:        l.pruneInterval,
+		lastKeyPrune:         l.lastKeyPrune,
+		lastDailyPrune:       l.lastDailyPrune,
 		// audit intentionally nil: the dry run emits nothing.
 	}
 	for k, v := range l.balances {
@@ -174,6 +176,13 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	for k, v := range l.closedPeriods {
 		c.closedPeriods[k] = v
 	}
+	for k, v := range l.lowBalanceThresholds {
+		c.lowBalanceThresholds[k] = v
+	}
+	for k, v := range l.lowBalanceBreached {
+		c.lowBalanceBreached[k] = v
+	}
+	c.lowBalanceBreaches = l.lowBalanceBreaches
 	return c
 }
 
