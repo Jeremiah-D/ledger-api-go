@@ -2249,6 +2249,10 @@ func (s *server) handler() http.Handler {
 		// The rules-engine leg counter likewise lives in the ledger: the
 		// legs commit inside Post, not in a handler.
 		s.metrics.JournalRuleLegsTotal.Store(s.ledger.RuleLegsCommitted())
+		// The balance-health violation counter lives in the ledger too:
+		// violations are detected by the background watchdog inside the
+		// ledger package, not in a handler.
+		s.metrics.BalanceHealthViolations.Store(s.ledger.HealthViolationCount())
 		s.metrics.handleMetrics(w, r)
 	})
 	return mux
@@ -2633,6 +2637,21 @@ func main() {
 		defer sweeper.Stop()
 	}
 
+	// Optional background balance-health watchdog: periodically
+	// re-checks the invariants the write path promises (negative
+	// balances on protected accounts, accounting-equation spot check,
+	// chain/version continuity) and reports breaks as structured audit
+	// events plus ledger_balance_health_violations_total. It shares the
+	// server context, so SIGINT/SIGTERM stops it. Unset or invalid means
+	// disabled.
+	if interval, ok := healthWatchInterval(); ok {
+		hw := ledger.StartHealthWatch(ctx, srv.ledger, interval, func(vs []ledger.HealthViolation) {
+			log.Printf("ledger-api-go: balance health watchdog: %d violation(s)", len(vs))
+		})
+		log.Printf("ledger-api-go: balance health watchdog started (interval %v)", interval)
+		defer hw.Stop()
+	}
+
 	// Optional periodic snapshot backup worker: exports full/incremental
 	// disaster-recovery snapshots to a directory on a ticker, with
 	// retention. It shares the server context, so SIGINT/SIGTERM stops
@@ -2705,6 +2724,24 @@ func holdSweepInterval() (time.Duration, bool) {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		log.Printf("ledger-api-go: ignoring invalid LEDGER_HOLD_SWEEP_INTERVAL %q, hold sweep worker disabled", raw)
+		return 0, false
+	}
+	return d, true
+}
+
+// healthWatchInterval reads LEDGER_HEALTH_WATCH_INTERVAL (a Go duration
+// string, e.g. "5m") for the background balance-health watchdog (see
+// ledger.StartHealthWatch). Unset or invalid values mean the worker is
+// disabled; a non-positive duration is invalid and falls back to disabled
+// with a log line.
+func healthWatchInterval() (time.Duration, bool) {
+	raw := os.Getenv("LEDGER_HEALTH_WATCH_INTERVAL")
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_HEALTH_WATCH_INTERVAL %q, balance health watchdog disabled", raw)
 		return 0, false
 	}
 	return d, true

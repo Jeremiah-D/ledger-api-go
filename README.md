@@ -1552,6 +1552,21 @@ Environment:
   full interval; SIGINT/SIGTERM stops the worker with the server. Unset
   or invalid means disabled — plans stay registered but never fire until
   the worker is enabled.
+- `LEDGER_HEALTH_WATCH_INTERVAL` — enables the background balance-health
+  watchdog, e.g. `LEDGER_HEALTH_WATCH_INTERVAL=5m`. Each tick re-checks
+  the invariants the write path promises — negative balances on
+  overdraft-protected accounts (the only accounts the write path
+  guarantees can never go negative; credit-normal accounts legitimately
+  carry negative balances), an accounting-equation spot check over a
+  rotating quarter of the (account, currency) keys (full coverage every
+  four ticks), and audit-chain/version continuity
+  (`len(chain) == version`, head seq in step). Every break is recorded
+  as a structured audit event (`balance_health_violation`) and counted
+  in `ledger_balance_health_violations_total`. The scan is read-only:
+  the watchdog never writes to the books — it verifies the write-path
+  gates held, after bugs, bad restores, or config drift. The first tick
+  fires after one full interval; SIGINT/SIGTERM stops the worker with
+  the server. Unset or invalid means disabled.
 - `LEDGER_SNAPSHOT_BACKUP_DIR` — enables the periodic snapshot backup
   worker (LG-39): the server exports disaster-recovery snapshots to this
   directory on `LEDGER_SNAPSHOT_BACKUP_INTERVAL` (e.g. `1h`). Every
