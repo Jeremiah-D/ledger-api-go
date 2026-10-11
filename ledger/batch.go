@@ -304,6 +304,15 @@ func (l *Ledger) PostBatch(b Batch) (BatchReceipt, error) {
 			"new_entries": len(committedIDs) - countTrue(replayed),
 		},
 	})
+	// Domain outbox: only freshly committed entries — replayed entries
+	// were already emitted by their original commit.
+	var fresh []JournalEntry
+	for i, e := range entries {
+		if !replayed[i] {
+			fresh = append(fresh, e)
+		}
+	}
+	l.emitOutboxEntriesLocked(fresh)
 
 	return BatchReceipt{BatchID: b.ID, Entries: entries, Duplicate: false}, nil
 }

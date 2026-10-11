@@ -154,6 +154,18 @@ type Metrics struct {
 	// queue was full or the log was closed. A growing value means the
 	// disk cannot keep up — alert on it.
 	AuditDroppedTotal atomic.Uint64
+	// OutboxEventsTotal counts domain events durably written to the
+	// outbox (see ledger.NewOutbox). It is synced from the ledger on
+	// every GET /metrics scrape, like the audit-log counters, so it
+	// stays meaningful even though the events are produced inside the
+	// ledger package.
+	OutboxEventsTotal atomic.Uint64
+	// OutboxDroppedTotal counts outbox events dropped because the outbox
+	// was closed or a disk write/fsync failed. Unlike the audit log's
+	// drops, an outbox drop means a committed operation has no domain
+	// event in the stream — a gap downstream consumers can detect via
+	// seq. Any nonzero growth is an incident — alert on it.
+	OutboxDroppedTotal atomic.Uint64
 	// AuditVerifyTotal counts GET /audit/verify requests that executed
 	// a full hash-chain verification of the structured audit log.
 	AuditVerifyTotal atomic.Uint64
@@ -309,6 +321,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_audit_dropped_total",
 		"Total audit-log events dropped because the async queue was full or the log was closed.",
 		m.AuditDroppedTotal.Load())
+	writeCounter(&sb, "ledger_outbox_events_total",
+		"Total domain events durably written to the outbox (LG-53).",
+		m.OutboxEventsTotal.Load())
+	writeCounter(&sb, "ledger_outbox_dropped_total",
+		"Total outbox events dropped because the outbox was closed or a disk write/fsync failed (a stream gap — alert on growth).",
+		m.OutboxDroppedTotal.Load())
 	writeCounter(&sb, "ledger_audit_verify_total",
 		"Total GET /audit/verify requests that executed a full hash-chain verification of the structured audit log.",
 		m.AuditVerifyTotal.Load())

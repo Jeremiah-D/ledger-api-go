@@ -374,6 +374,8 @@ func (l *Ledger) ClosePeriodWithClosing(id string) (ClosingReceipt, error) {
 			"retained_earnings":  string(retained),
 		},
 	})
+	// Domain outbox: one entry_posted per closing entry.
+	l.emitOutboxEntriesLocked(entries)
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
 	l.fireBalanceHooksLocked(hookTouched, hookOld, id)

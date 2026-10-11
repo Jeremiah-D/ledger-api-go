@@ -632,6 +632,11 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		Accounts:      []AccountID{t.From, t.To},
 		Details:       transferDetails,
 	})
+	// Domain outbox: entry_posted per leg, then the transfer_posted
+	// envelope. Pending-review transfers never reach here (they return
+	// from maybeReviewTransferLocked above); their legs emit at
+	// ApproveTransferReview instead.
+	l.emitOutboxTransferLocked(t, feeCents, entries, nil)
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
 	l.fireBalanceHooksLocked(hookTouched, hookOld, t.ID)

@@ -662,6 +662,25 @@ func (l *Ledger) ApproveTransferReview(transferID, reviewer string) (TransferRec
 			"reviewed_by":  reviewer,
 		},
 	})
+	// Domain outbox: the approval settles the legs — one entry_posted
+	// per effectuated entry, then the review_approved envelope. The
+	// original transfer_posted was never emitted (the transfer froze
+	// into review instead of settling), so the envelope carries the
+	// transfer's identity for downstream correlation.
+	l.emitOutboxEntriesLocked(r.Entries)
+	l.emitOutboxLocked(OutboxEvent{
+		Type:        OutboxReviewApproved,
+		Account:     r.Transfer.From,
+		EntryID:     r.Entries[0].ID,
+		AmountCents: r.Transfer.AmountCents,
+		Currency:    r.Transfer.Currency,
+		Details: map[string]any{
+			"transfer_id": r.TransferID,
+			"to":          string(r.Transfer.To),
+			"fee_cents":   r.FeeCents,
+			"reviewed_by": reviewer,
+		},
+	})
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
 	l.fireBalanceHooksLocked(hookTouched, hookOld, r.TransferID)
@@ -720,6 +739,23 @@ func (l *Ledger) RejectTransferReview(transferID, reviewer, reason string) (revi
 		Accounts:      []AccountID{r.Transfer.From, r.Transfer.To},
 		Details:       details,
 	})
+	// Domain outbox: the rejection settles nothing — no entry_posted —
+	// but the review's outcome is itself a domain fact.
+	rejectDetails := map[string]any{
+		"transfer_id": r.TransferID,
+		"to":          string(r.Transfer.To),
+		"reviewed_by": reviewer,
+	}
+	if reason != "" {
+		rejectDetails["reason"] = reason
+	}
+	l.emitOutboxLocked(OutboxEvent{
+		Type:        OutboxReviewRejected,
+		Account:     r.Transfer.From,
+		AmountCents: r.Transfer.AmountCents,
+		Currency:    r.Transfer.Currency,
+		Details:     rejectDetails,
+	})
 	out := *r
 	return &out, true, nil
 }
@@ -767,10 +803,12 @@ func (l *Ledger) ExpireReviewsAt(now time.Time) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	marked := 0
+	var expired []*TransferReview
 	for _, r := range l.reviews {
 		if r.Status == ReviewStatusPending && reviewExpiredLocked(r, now) {
 			l.expireReviewLocked(r, now)
 			marked++
+			expired = append(expired, r)
 		}
 	}
 	// A sweep that expires nothing emits no event: the background
@@ -778,6 +816,20 @@ func (l *Ledger) ExpireReviewsAt(now time.Time) int {
 	// audit trail in noise (see ExpireHoldsAt for the convention).
 	if marked > 0 {
 		l.emitReviewExpireAuditLocked(marked)
+		// Domain outbox: one review_expired per review — the expiry
+		// releases the reserved funds back to available, a domain fact.
+		for _, r := range expired {
+			l.emitOutboxLocked(OutboxEvent{
+				Type:        OutboxReviewExpired,
+				Account:     r.Transfer.From,
+				AmountCents: r.Transfer.AmountCents,
+				Currency:    r.Transfer.Currency,
+				Details: map[string]any{
+					"transfer_id": r.TransferID,
+					"to":          string(r.Transfer.To),
+				},
+			})
+		}
 	}
 	return marked
 }

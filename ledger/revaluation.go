@@ -518,6 +518,8 @@ func (l *Ledger) RevalueBalances(asOf time.Time, baseCurrency string) (Revaluati
 				"entries_committed": len(committed),
 			},
 		})
+		// Domain outbox: one entry_posted per revaluation entry.
+		l.emitOutboxEntriesLocked(committed)
 		// Balance-change notification: strictly after the commit zone,
 		// advisory only — async dispatch, hook failures isolated.
 		l.fireBalanceHooksLocked(allTouched, allOld, fmt.Sprintf("revaluation@%d", asOfUnix))

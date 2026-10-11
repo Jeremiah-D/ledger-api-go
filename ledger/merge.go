@@ -292,6 +292,15 @@ func (l *Ledger) PostMerge(m Merge) (MergeReceipt, error) {
 			"legs": len(legs),
 		},
 	})
+	// Domain outbox: one entry_posted per merge leg, plus the source
+	// account's freeze, which the merge applies in this same critical
+	// section.
+	l.emitOutboxEntriesLocked(entries)
+	l.emitOutboxLocked(OutboxEvent{
+		Type:    OutboxAccountFrozen,
+		Account: m.From,
+		Details: map[string]any{"reason": "merge"},
+	})
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
 	l.fireBalanceHooksLocked(hookTouched, hookOld, m.ID)

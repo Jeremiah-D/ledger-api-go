@@ -1484,6 +1484,78 @@ so a `.jsonl` and its `.gz` twin always carry identical events.
 gzipped, in order) and skips malformed lines — a damaged audit file never
 fails the read; corrupt lines are counted and reported.
 
+### Domain event outbox (`ledger/outbox.go`) — `GET /events`
+
+The audit log answers "who did what, when". The outbox answers "what
+domain facts changed" — an append-only JSONL stream of the ledger's state
+changes, for downstream consumers (indexers, notification fan-out,
+warehouse loaders). Disabled by default; set `LEDGER_OUTBOX_DIR` to
+enable. The two are deliberately decoupled: the audit log records every
+operation (including config changes and dry runs that commit nothing);
+the outbox records only committed domain facts.
+
+Event envelope — `{seq,type,at,account?,entry_id?,amount_cents?,currency?,details?}`:
+
+```json
+{"seq":7,"type":"transfer_posted","at":"2026-10-11T05:56:34Z",
+ "account":"alice","entry_id":"tx-2026-001","amount_cents":10000,
+ "currency":"USD",
+ "details":{"transfer_id":"tx-2026-001","to":"bob","fee_cents":25}}
+```
+
+- `seq` — process-global monotonic sequence, assigned inside the commit
+  critical section, so seq order is commit order. It is the pagination
+  cursor for `GET /events`.
+- `type` — the domain fact: `entry_posted` (every committed journal row:
+  posts, batches, transfer/fee/FX legs, rule-derived legs, sweep/merge
+  legs, reversals, closing and revaluation entries), `transfer_posted`
+  (the business envelope — legs first, envelope last, in seq order),
+  `hold_created`, `hold_captured`, `hold_released`, `hold_expired`,
+  `account_frozen`, `account_unfrozen`, `review_approved`,
+  `review_rejected`, `review_expired`, `entry_reversed`.
+- `account` — the event's primary account (debit account for
+  `entry_posted`, payer for transfers, hold account for holds). The
+  `?account=` query filter also matches either leg of an `entry_posted`
+  event.
+- `details` — event-specific facts (the second leg, memos, batch IDs,
+  hold IDs, reviewer names, FX rate provenance). The envelope stays
+  stable; details may grow.
+
+Crash semantics — at-least-once, stated honestly: emission is
+synchronous inside the commit critical section and each event is
+fsync'd before the operation returns success, so a crash can never lose
+a committed event (verified by a crash-simulation test that abandons the
+outbox handle without closing it). Duplicates are possible on
+caller retry across a crash or idempotency-key expiry — consumers must
+dedupe on `(type, entry_id)` or tolerate replays. A disk failure at emit
+time is counted (`ledger_outbox_dropped_total` — alert on growth) but
+never fails the posting; seq gaps on read are the visible symptom.
+Unlike the audit log, the outbox carries no hash chain: it is a consumer
+stream, not tamper evidence.
+
+Emission points mirror the operation's commit: idempotent replays emit
+nothing (the original commit already emitted), pending-review transfers
+emit at approval, dry runs emit nothing, and snapshot imports emit
+nothing (a restore is not a domain event). Files are one per UTC day
+(`outbox-2006-01-02.jsonl`), no size rotation; a restart continues the
+seq from the highest value on disk. Corrupt lines are skipped and
+counted on read. The fsync-per-event cost applies only when the outbox
+is attached; the [Benchmarks](#benchmarks) numbers were measured without
+it.
+
+```bash
+curl -s "localhost:8080/events?type=transfer_posted&limit=100"
+# {"events":[{...}],"next_cursor":"…","corrupt_lines":0}
+# 404 {"error":"domain event outbox disabled (LEDGER_OUTBOX_DIR unset)"}
+#   — no LEDGER_OUTBOX_DIR configured; fail-closed.
+```
+
+`GET /events` query parameters: `since`/`until` (RFC3339, `until`
+exclusive), `type` (comma-separated event types), `account`, `limit`
+(1–1000, default 100), `cursor` (opaque; the response's `next_cursor`
+resumes after it, empty on the last page). Invalid cursors/limits are
+`400`.
+
 ### `GET /audit/verify`
 
 Replays the audit log's hash chain over every audit file — all days,
@@ -1572,6 +1644,11 @@ curl -s localhost:8080/metrics
 - `ledger_audit_dropped_total` — audit-log events dropped because the
   async queue was full or the log was closed. A growing value means the
   disk cannot keep up — alert on it.
+- `ledger_outbox_events_total` — domain events durably written to the
+  outbox (synced from the ledger on every scrape).
+- `ledger_outbox_dropped_total` — outbox events dropped because the
+  outbox was closed or a disk write/fsync failed. A growing value means
+  the stream has gaps — alert on it.
 - `ledger_audit_verify_total` — `GET /audit/verify` requests that
   executed a full hash-chain verification of the audit log.
 - `ledger_audit_verify_breaks_total` — verifications that found a broken
@@ -1776,6 +1853,11 @@ Environment:
   anchoring (see above): hex of a 32-byte seed or a 64-byte private key.
   Checkpoints land in `LEDGER_AUDIT_DIR` as `checkpoints.jsonl`. Unset
   means unconfigured; an invalid value fails startup fast.
+- `LEDGER_OUTBOX_DIR` — enables the domain-event outbox (see above):
+  every committed state change is appended as JSONL to this directory,
+  one file per UTC day, fsync'd per event. Unset means disabled. The
+  directory is created if needed; an unwritable directory fails startup
+  fast. The outbox is closed on graceful shutdown.
 
 ## Benchmarks
 

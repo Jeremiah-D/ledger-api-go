@@ -655,6 +655,15 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		Accounts:      []AccountID{t.From, t.To},
 		Details:       fxDetails,
 	})
+	// Domain outbox: entry_posted per leg (principal + FX leg + fee
+	// leg), then the transfer_posted envelope with the conversion's
+	// provenance.
+	l.emitOutboxTransferLocked(t, feeCents, entries, map[string]any{
+		"to_currency":     toCurrency,
+		"converted_cents": converted,
+		"rate_num":        rate.Num,
+		"rate_den":        rate.Den,
+	})
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
 	l.fireBalanceHooksLocked(hookTouched, hookOld, t.ID)

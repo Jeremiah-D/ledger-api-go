@@ -1722,6 +1722,69 @@ func (s *server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
+// handleOutboxEvents implements GET /events: the operator-facing query
+// API over the domain-event outbox (LG-53).
+//
+//	GET /events?since=<rfc3339>&until=<rfc3339>&type=<t1,t2>&account=<id>&limit=100&cursor=<opaque>
+//
+//   - since/until bound the event time (RFC3339, optional; until is
+//     exclusive).
+//   - type filters to one or more comma-separated event types
+//     (entry_posted, transfer_posted, hold_created, ...); omitted means
+//     all types.
+//   - account matches the event's account or either leg of an
+//     entry_posted event.
+//   - limit caps the page at 1..1000 (default 100).
+//   - cursor is the opaque page cursor (base64url of the last seen seq);
+//     the response's next_cursor resumes after it, and is empty on the
+//     last page.
+//
+// Without LEDGER_OUTBOX_DIR the endpoint 404s fail-closed: there is no
+// stream to query, and the 404 says so explicitly.
+func (s *server) handleOutboxEvents(w http.ResponseWriter, r *http.Request) {
+	dir, ok := s.ledger.OutboxDir()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "domain event outbox disabled (LEDGER_OUTBOX_DIR unset)"})
+		return
+	}
+	q := r.URL.Query()
+	since, until, limit, err := parseEntryListQuery(q)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	var types []string
+	if v := firstQuery(q, "type"); v != "" {
+		for _, t := range strings.Split(v, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				types = append(types, t)
+			}
+		}
+	}
+	afterSeq, err := ledger.DecodeOutboxCursor(firstQuery(q, "cursor"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	events, next, corrupt, err := ledger.ReadOutboxEvents(dir, ledger.OutboxQuery{
+		Since:    since,
+		Until:    until,
+		Types:    types,
+		Account:  ledger.AccountID(firstQuery(q, "account")),
+		AfterSeq: afterSeq,
+		Limit:    limit,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events":        events,
+		"next_cursor":   next,
+		"corrupt_lines": corrupt,
+	})
+}
+
 // handleFreezeAccount implements POST /accounts/{id}/freeze: the
 // operator-facing risk-control stop. A frozen account rejects every new
 // POST /entries that names it as either leg with 403, while balance,
@@ -2424,6 +2487,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
 	mux.HandleFunc("POST /entries/anchor", s.handleAnchorCheckpoint)
 	mux.HandleFunc("GET /audit/verify", s.handleAuditVerify)
+	mux.HandleFunc("GET /events", s.handleOutboxEvents)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
@@ -2437,6 +2501,12 @@ func (s *server) handler() http.Handler {
 		if written, dropped, ok := s.ledger.AuditStats(); ok {
 			s.metrics.AuditEventsTotal.Store(written)
 			s.metrics.AuditDroppedTotal.Store(dropped)
+		}
+		// The outbox lives in the ledger package too: the events are
+		// emitted inside commits, not in handlers.
+		if written, dropped, ok := s.ledger.OutboxStats(); ok {
+			s.metrics.OutboxEventsTotal.Store(written)
+			s.metrics.OutboxDroppedTotal.Store(dropped)
 		}
 		// The low-balance breach counter lives in the ledger too (the
 		// alert fires inside Post/Transfer/..., not in a handler).
@@ -2777,6 +2847,21 @@ func main() {
 		defer al.Close()
 		opts = append(opts, ledger.WithAuditLog(al))
 		log.Printf("ledger-api-go: audit log enabled (dir %s)", dir)
+	}
+
+	// LEDGER_OUTBOX_DIR enables the domain-event outbox (see
+	// ledger/outbox.go): every committed state change is appended as
+	// JSONL to the directory, one file per UTC day, fsync'd per event.
+	// Unset means disabled. The outbox is closed (file handle released)
+	// on shutdown after the background workers stop.
+	if dir := os.Getenv("LEDGER_OUTBOX_DIR"); dir != "" {
+		ob, err := ledger.NewOutbox(dir)
+		if err != nil {
+			log.Fatalf("ledger-api-go: outbox: %v", err)
+		}
+		defer ob.Close()
+		opts = append(opts, ledger.WithOutbox(ob))
+		log.Printf("ledger-api-go: domain event outbox enabled (dir %s)", dir)
 	}
 
 	// LEDGER_ANCHOR_KEY configures the Ed25519 key used to sign audit-chain

@@ -247,6 +247,18 @@ func (l *Ledger) Hold(h Hold) (held Hold, duplicate bool, err error) {
 			"expires_at":   h.ExpiresAt.UTC().Format(time.RFC3339),
 		},
 	})
+	// Domain outbox: the hold is a domain fact even though it books no
+	// journal row (holds are off-journal by design).
+	l.emitOutboxLocked(OutboxEvent{
+		Type:        OutboxHoldCreated,
+		Account:     h.Account,
+		AmountCents: h.AmountCents,
+		Currency:    h.Currency,
+		Details: map[string]any{
+			"hold_id":    h.ID,
+			"expires_at": h.ExpiresAt.UTC().Format(time.RFC3339),
+		},
+	})
 
 	return h, false, nil
 }
@@ -356,6 +368,13 @@ func (l *Ledger) Release(id string) (Hold, error) {
 			"currency":     h.Currency,
 		},
 	})
+	l.emitOutboxLocked(OutboxEvent{
+		Type:        OutboxHoldReleased,
+		Account:     h.Account,
+		AmountCents: h.AmountCents,
+		Currency:    h.Currency,
+		Details:     map[string]any{"hold_id": id},
+	})
 	return h, nil
 }
 
@@ -375,11 +394,13 @@ func (l *Ledger) ExpireHoldsAt(now time.Time) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	marked := 0
+	var expired []Hold
 	for id, h := range l.holds {
 		if h.Status == HoldStatusActive && !now.Before(h.ExpiresAt) {
 			h.Status = HoldStatusExpired
 			l.holds[id] = h
 			marked++
+			expired = append(expired, h)
 		}
 	}
 	// A sweep that expires nothing emits no event: the background
@@ -396,6 +417,18 @@ func (l *Ledger) ExpireHoldsAt(now time.Time) int {
 				"expired": marked,
 			},
 		})
+		// Domain outbox: unlike the batched audit event, the outbox
+		// gets one hold_expired per hold — downstream consumers track
+		// holds individually.
+		for _, h := range expired {
+			l.emitOutboxLocked(OutboxEvent{
+				Type:        OutboxHoldExpired,
+				Account:     h.Account,
+				AmountCents: h.AmountCents,
+				Currency:    h.Currency,
+				Details:     map[string]any{"hold_id": h.ID},
+			})
+		}
 	}
 	return marked
 }
@@ -539,6 +572,22 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 			"captured_cents": entry.AmountCents,
 			"released_cents": receipt.ReleasedCents,
 			"currency":       h.Currency,
+		},
+	})
+	// Domain outbox: the capture settles money — one entry_posted for
+	// the settlement leg, then the hold_captured envelope.
+	l.emitOutboxEntriesLocked([]JournalEntry{entry})
+	l.emitOutboxLocked(OutboxEvent{
+		Type:        OutboxHoldCaptured,
+		Account:     h.Account,
+		EntryID:     entry.ID,
+		AmountCents: entry.AmountCents,
+		Currency:    h.Currency,
+		Details: map[string]any{
+			"hold_id":        c.HoldID,
+			"to":             string(c.To),
+			"captured_cents": entry.AmountCents,
+			"released_cents": receipt.ReleasedCents,
 		},
 	})
 	// Balance-change notification: strictly after the atomic commit

@@ -228,6 +228,17 @@ func (l *Ledger) ReverseEntry(entryID string, idempotencyKey string) (reversal J
 			"currency":          reversal.Currency,
 		},
 	})
+	// Domain outbox: the reversal is itself a journal row (entry_posted),
+	// plus the entry_reversed envelope naming the corrected entry.
+	l.emitOutboxEntriesLocked([]JournalEntry{reversal})
+	l.emitOutboxLocked(OutboxEvent{
+		Type:        OutboxEntryReversed,
+		Account:     reversal.DebitAccount,
+		EntryID:     reversalID,
+		AmountCents: reversal.AmountCents,
+		Currency:    reversal.Currency,
+		Details:     map[string]any{"reversed_entry_id": entryID},
+	})
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
 	l.fireBalanceHooksLocked(hookTouched, hookOld, reversalID)

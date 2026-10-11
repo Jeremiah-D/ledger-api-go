@@ -45,6 +45,10 @@ func (l *Ledger) Freeze(a AccountID) {
 		VersionAfter:  l.version,
 		Accounts:      []AccountID{a},
 	})
+	l.emitOutboxLocked(OutboxEvent{
+		Type:    OutboxAccountFrozen,
+		Account: a,
+	})
 }
 
 // Unfreeze lifts a freeze previously applied with Freeze. Unfreezing an
@@ -61,6 +65,10 @@ func (l *Ledger) Unfreeze(a AccountID) {
 		VersionBefore: l.version,
 		VersionAfter:  l.version,
 		Accounts:      []AccountID{a},
+	})
+	l.emitOutboxLocked(OutboxEvent{
+		Type:    OutboxAccountUnfrozen,
+		Account: a,
 	})
 }
 

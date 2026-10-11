@@ -15,6 +15,8 @@ package ledger
 // Zero side effects, by construction:
 //   - the clone carries no audit log, so the dry run emits no audit
 //     events and advances no hash chain;
+//   - the clone carries no outbox, so the dry run emits no domain
+//     events into the live outbox stream;
 //   - the clone's maps are deep copies, so the live ledger's journal,
 //     balances, version, and idempotency indexes are untouched;
 //   - no version bump, no key registration, no prune sweeps on the live
@@ -109,6 +111,9 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		lastKeyPrune:         l.lastKeyPrune,
 		lastDailyPrune:       l.lastDailyPrune,
 		// audit intentionally nil: the dry run emits nothing.
+		// outbox intentionally nil: the dry run emits no domain events
+		// either — the twin's simulated commits must not pollute the
+		// live outbox stream.
 	}
 	for k, v := range l.balances {
 		c.balances[k] = v

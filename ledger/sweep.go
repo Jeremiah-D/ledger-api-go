@@ -268,6 +268,8 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 			"legs": len(legs),
 		},
 	})
+	// Domain outbox: one entry_posted per sweep leg.
+	l.emitOutboxEntriesLocked(entries)
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
 	l.fireBalanceHooksLocked(hookTouched, hookOld, s.ID)

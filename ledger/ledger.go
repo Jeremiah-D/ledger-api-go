@@ -274,6 +274,11 @@ type Ledger struct {
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
 	audit *AuditLog
+	// outbox is the domain-event outbox (see outbox.go). Nil means
+	// disabled: state changes skip event construction entirely and the
+	// read path is unaffected. The dry-run twin (see dryrun.go) always
+	// carries a nil outbox, so simulations emit no domain events.
+	outbox *Outbox
 	// closedPeriods is the set of locked accounting periods ("2006-01",
 	// UTC months; see period.go). Journal entries whose timestamp falls
 	// in a closed period are rejected with ErrPeriodClosed by every
@@ -681,6 +686,9 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		Accounts:      accounts,
 		Details:       postDetails,
 	})
+	// Domain outbox: one entry_posted per committed journal row
+	// (principal plus any journal-rule derived legs).
+	l.emitOutboxEntriesLocked(committed)
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — the hook runs asynchronously and can
 	// neither fail nor alter this posting.
