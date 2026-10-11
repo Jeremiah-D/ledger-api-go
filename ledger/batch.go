@@ -108,7 +108,15 @@ type batchRecord struct {
 func (l *Ledger) PostBatch(b Batch) (BatchReceipt, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.postBatchLocked(b)
+}
 
+// postBatchLocked is PostBatch's body. Multileg operations that must
+// commit their batch atomically with their own session bookkeeping —
+// multilateral netting (see netting.go) — call this under the write lock
+// instead of PostBatch, so the batch commit and the session registration
+// land in one critical section. Callers must hold the write lock.
+func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 	if b.ID == "" {
 		return BatchReceipt{}, ErrEmptyBatchID
 	}

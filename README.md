@@ -1414,6 +1414,37 @@ curl -s 'localhost:8080/aging?account=cust-123'
 Malformed `asof` (RFC3339 required) or `alert_overdue_cents` (integer
 required) are `400`.
 
+### Multilateral netting (`ledger/netting.go`)
+
+The clearinghouse view (LG-56): at cut-off time, given a set of
+participant accounts with bilateral obligations already on the books,
+what is the smallest set of transfers that settles everybody? A
+participant's net position in a currency is its current net balance —
+positive means net creditor (to receive), negative means net debtor (to
+pay) — and netting runs per currency, isolated like the accounting
+equation. The greedy plan repeatedly matches the largest creditor
+against the largest debtor for `min(claim, debt)`; each leg zeroes at
+least one participant, so the transfer count is always ≤ N−1 (N =
+account count), with any leftover residual owed to or from parties
+outside the set.
+
+`NetPositions(accounts)` computes the positions (read-only);
+`PlanNetting(sessionID, accounts)` builds the read-only plan;
+`PostNetting(sessionID, accounts)` books every leg in one atomic batch
+through the full Post gate order (validation → idempotency replay →
+chart direction → frozen → overdraft → daily-limit → period), so any
+failing leg rejects the whole session with zero bookings. The session
+key is deterministic (`netting:<sessionID>`): reposting returns the
+original `NettingReport` — before/after positions plus the per-leg
+detail (from/to/amount/currency/entry ID) — with `duplicate: true` and
+books nothing new.
+
+```go
+report, err := l.PostNetting("cutoff-2026-10-11", []ledger.AccountID{"merch-a", "merch-b", "merch-c"})
+// report.Transfers: [{from_account:"merch-a", to_account:"merch-b", amount_cents:..., currency:"USD", entry_id:"cutoff-2026-10-11/net/USD/0"}, ...]
+// report.Before / report.After: per-(account, currency) net positions around the settlement
+```
+
 ### Disaster-recovery snapshots (`ledger/snapshot.go`)
 
 The ledger can be exported to a JSONL disaster-recovery snapshot and

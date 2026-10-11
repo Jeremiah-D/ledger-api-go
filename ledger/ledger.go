@@ -255,6 +255,15 @@ type Ledger struct {
 	// expiring with the TTL like every other key index (see
 	// pruneBatchKeysLocked in batch.go).
 	batchKeys map[string]batchRecord
+	// nettingKeys maps a netting session's deterministic key
+	// ("netting:<sessionID>") to its nettingRecord, so reposts rebuild
+	// the exact original report (see netting.go). Its own namespace,
+	// expiring with the TTL like every other key index (see
+	// pruneNettingKeysLocked). In-memory only: unlike the other key
+	// namespaces it does not round-trip through disaster-recovery
+	// snapshots — the journaled settlement entries do, so the money is
+	// safe; only the replay shortcut is lost.
+	nettingKeys map[string]nettingRecord
 	// merges is the authoritative registry of committed account merges
 	// (see merge.go), keyed by merge ID: every PostMerge appends here,
 	// whether or not it carried an idempotency key. It feeds Reconcile's
@@ -451,6 +460,7 @@ func New(opts ...Option) *Ledger {
 		captureKeys:          make(map[string]CaptureReceipt),
 		sweepKeys:            make(map[string]sweepRecord),
 		batchKeys:            make(map[string]batchRecord),
+		nettingKeys:          make(map[string]nettingRecord),
 		merges:               make(map[string]mergeRecord),
 		mergeKeys:            make(map[string]string),
 		schedules:            make(map[string]*TransferSchedule),
@@ -833,11 +843,14 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// namespaces (see pruneHoldKeysLocked in hold.go). Sweep keys expire
 	// on the same schedule too (see pruneSweepKeysLocked in sweep.go),
 	// and so do merge keys (see pruneMergeKeysLocked in merge.go) and
-	// batch keys (see pruneBatchKeysLocked in batch.go).
+	// batch keys (see pruneBatchKeysLocked in batch.go). Netting session
+	// keys expire on the same schedule, in their own namespace (see
+	// pruneNettingKeysLocked in netting.go).
 	removed += l.pruneHoldKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
 	removed += l.pruneMergeKeysLocked(now)
 	removed += l.pruneBatchKeysLocked(now)
+	removed += l.pruneNettingKeysLocked(now)
 	return removed
 }
 
