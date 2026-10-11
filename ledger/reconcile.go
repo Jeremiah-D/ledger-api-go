@@ -184,6 +184,18 @@ type ReconciliationReport struct {
 	// ledger-wide threshold is not listed here — it applies to every
 	// account without a per-account row.
 	ReviewThresholds []ReviewThreshold `json:"review_thresholds"`
+	// RevaluationAccount is the configured P&L account for unrealized FX
+	// gains/losses (see SetRevaluationAccount); empty when FX
+	// revaluation is not configured.
+	RevaluationAccount AccountID `json:"revaluation_account,omitempty"`
+	// RevaluationImpact lists every (account, currency) revaluation
+	// baseline (see RevalueBalances), sorted by (account, currency,
+	// base): the last remeasured carrying value in the base currency and
+	// the rate that produced it. This is the unrealized FX position the
+	// revaluation entries have recognized so far — the P&L account above
+	// accumulates the gains/losses, and each row here shows the carrying
+	// value behind them.
+	RevaluationImpact []RevaluationPosition `json:"revaluation_impact"`
 }
 
 // ReconcileOptions tunes Reconcile. BaseCurrency opts into the
@@ -342,6 +354,8 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		ActiveTransferSchedules:    l.activeScheduleCountLocked(),
 		PendingReviews:             l.pendingTransferReviewsLocked(now),
 		ReviewThresholds:           l.reviewThresholdsLocked(),
+		RevaluationAccount:         l.revalAccount,
+		RevaluationImpact:          l.revaluationPositionsLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit

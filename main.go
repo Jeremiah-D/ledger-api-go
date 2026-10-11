@@ -1032,6 +1032,61 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, reversal)
 }
 
+// createRevaluationRequest is the body of POST /revaluations. AsOf is
+// RFC3339 and optional (default now); it is the measurement time — it
+// timestamps the revaluation entries, keys their deterministic IDs, and
+// gates the period check. BaseCurrency is required: the reporting
+// currency every foreign balance is remeasured into.
+type createRevaluationRequest struct {
+	AsOf         string `json:"asof"`
+	BaseCurrency string `json:"base_currency"`
+}
+
+// handleCreateRevaluation implements POST /revaluations, the period-end FX
+// revaluation (see ledger.RevalueBalances): every non-base-currency
+// balance is remeasured at the current FX rate table, and the unrealized
+// gain/loss since the last revaluation is booked as ordinary journal
+// entries against the configured revaluation P&L account.
+//
+// The run is best-effort per (account, currency), not atomic: the 200
+// response carries the full report with each item's outcome (revalued,
+// unchanged, skipped_*, failed), so one missing rate or frozen account
+// never blocks the rest. Only actually committed entries move
+// ledger_revaluations_total. A malformed base currency or asof returns
+// 400; a missing revaluation P&L account configuration returns 400 with
+// a message telling the operator to configure it.
+func (s *server) handleCreateRevaluation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req createRevaluationRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	var asOf time.Time
+	if req.AsOf != "" {
+		var err error
+		asOf, err = time.Parse(time.RFC3339, req.AsOf)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid asof: want RFC3339"})
+			return
+		}
+	}
+
+	report, err := s.ledger.RevalueBalances(asOf, req.BaseCurrency)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// ledger_revaluations_total counts committed revaluation entries, not
+	// runs or requests: only booked gains/losses move it.
+	s.metrics.RevaluationsTotal.Add(uint64(len(report.Entries)))
+	writeJSON(w, http.StatusOK, report)
+}
+
 // decodeJSONBody decodes a JSON request body with the same transport
 // contract as POST /entries: bounded body, strict decoding (unknown
 // fields fail fast), no trailing garbage. It returns false after writing
@@ -2346,6 +2401,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /sweeps/dry-run", s.handleDryRunSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
 	mux.HandleFunc("POST /entries/{id}/reverse", s.handleReverseEntry)
+	mux.HandleFunc("POST /revaluations", s.handleCreateRevaluation)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
@@ -2690,6 +2746,16 @@ func main() {
 			opts = append(opts, ledger.WithFXRateOption(r.FromCurrency, r.ToCurrency, r.Num, r.Den))
 		}
 		log.Printf("ledger-api-go: FX rates = %d configured", len(rates))
+	}
+
+	// LEDGER_REVAL_ACCOUNT configures the P&L account that receives the
+	// gain/loss legs of FX revaluations (see ledger.WithRevaluationAccount
+	// and POST /revaluations). Unset means revaluation is disabled:
+	// POST /revaluations is rejected with 400 until the operator
+	// configures the account.
+	if raw := os.Getenv("LEDGER_REVAL_ACCOUNT"); raw != "" {
+		opts = append(opts, ledger.WithRevaluationAccount(ledger.AccountID(raw)))
+		log.Printf("ledger-api-go: revaluation P&L account = %q", raw)
 	}
 
 	ln, err := net.Listen("tcp", addr)

@@ -858,6 +858,50 @@ returns the original receipt after expiry. Expiry survives snapshots, is
 visible via `FXRate()`, and expired-rate rejections are counted in
 `ledger_currency_rejections_total`.
 
+#### FX revaluation (`POST /revaluations`)
+
+Period-end remeasurement: every non-base-currency balance is revalued at
+the current rate table into the reporting currency, and the unrealized FX
+gain/loss since the last revaluation is booked as ordinary journal
+entries against the configured revaluation P&L account
+(`LEDGER_REVAL_ACCOUNT`, or `ledger.WithRevaluationAccount` /
+`SetRevaluationAccount` in the Go API; unset means `POST /revaluations`
+is rejected with `400`).
+
+```bash
+curl -X POST localhost:8080/revaluations \
+  -d '{"asof":"2026-10-11T12:00:00Z","base_currency":"USD"}'
+# 200 {"as_of":"...","base_currency":"USD","rate_version":3,
+#      "items":[{"account":"trader","currency":"EUR","base_currency":"USD",
+#        "foreign_balance_cents":10000,"rate_num":12,"rate_den":10,
+#        "prior_base_value_cents":11000,"new_base_value_cents":12000,
+#        "delta_cents":1000,"entry_id":".../trader/EUR/reval","status":"revalued"},...],
+#      "entries":[{...}]}
+```
+
+Each revaluation is one base-currency entry per `(account, currency)`:
+a gain books debit `account@base` / credit `reval-pnl@base`, a loss the
+mirror image — so the account's base-currency row is its unrealized
+carrying value and the per-currency accounting equation holds by
+construction. The first revaluation books the full converted value
+(initial recognition); later runs book only the delta against the stored
+baseline, so an unchanged book and rate table book nothing. Entry IDs are
+deterministic (`<asof unix>/<account>/<currency>/reval`), making a repeat
+run for the same `asof` idempotent.
+
+The run is **best-effort per account/currency, not atomic**: each item
+reports `revalued` | `unchanged` | `skipped_duplicate` |
+`skipped_no_rate` | `skipped_rate_expired` | `failed`, so one missing rate
+or frozen account never blocks the rest. Entries run the `POST` risk
+gates in order (frozen, overdraft, daily-limit, period — keyed on the
+`asof`, so a revaluation can never book into a closed period) but never
+trigger journal rules and never enter dual-control review, like
+period-closing entries. `POST /reconcile` reports the unrealized position
+in `revaluation_impact` (per-account carrying values and their rates) and
+the P&L account in `revaluation_account`; committed entries are counted
+in `ledger_revaluations_total`. Baselines and the P&L account survive
+disaster-recovery snapshots.
+
 The receipt's `fx` field now discloses both sides of the conversion —
 `source_cents` (pre-conversion) and `converted_cents` (post-conversion) —
 plus the rate's expiry when the rate carries one; the structured audit
@@ -1516,6 +1560,9 @@ curl -s localhost:8080/metrics
 - `ledger_reversals_total` — reversal journal entries committed by
   `POST /entries/{id}/reverse` (idempotent replays book nothing new and are
   not counted twice).
+- `ledger_revaluations_total` — revaluation journal entries committed by
+  `POST /revaluations` (one per account/currency whose carrying value
+  moved; no-op runs move it by zero).
 - `ledger_batch_total` — every `POST /entries/batch` request received.
 - `ledger_batch_idempotency_hits_total` — batches that replayed an
   existing batch idempotency key (returned the original receipt, booked
@@ -1713,6 +1760,9 @@ Environment:
   `floor(X * num / den)` target cents. Rates are directional and take
   effect at ledger version 0. Unset means no rates: any cross-currency
   transfer is rejected with `422`; an invalid value fails startup fast.
+- `LEDGER_REVAL_ACCOUNT` — the P&L account receiving the gain/loss legs of
+  FX revaluations (`POST /revaluations`). Unset means revaluation is
+  disabled: the endpoint is rejected with `400` until configured.
 - `LEDGER_AUDIT_DIR` — enables the structured audit log (see above):
   every mutating operation and every reconcile run is appended as JSONL
   to this directory, with daily rotation and a per-file size cap. Unset

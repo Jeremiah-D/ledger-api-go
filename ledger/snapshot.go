@@ -233,8 +233,17 @@ type snapshotConfigLine struct {
 	// snapshots written before period-closing entries existed. A restore
 	// that dropped the mapping would leave closing unconfigured, so the
 	// mapping round-trips like the other structural config.
-	ClosingPLAccounts      []AccountID `json:"closing_pl_accounts,omitempty"`
-	ClosingRetainedEarnings AccountID  `json:"closing_retained_earnings,omitempty"`
+	ClosingPLAccounts       []AccountID `json:"closing_pl_accounts,omitempty"`
+	ClosingRetainedEarnings AccountID   `json:"closing_retained_earnings,omitempty"`
+	// RevalAccount carries the configured revaluation P&L account (see
+	// SetRevaluationAccount); absent in snapshots written before FX
+	// revaluation existed. RevalBaselines carries every revaluation
+	// baseline (see RevalueBalances); absent when nothing was ever
+	// revalued. Both must round-trip: a restore that dropped the
+	// baselines would re-book full carrying values as gains on the next
+	// revaluation.
+	RevalAccount   AccountID             `json:"reval_account,omitempty"`
+	RevalBaselines []RevaluationPosition `json:"reval_baselines,omitempty"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -625,6 +634,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		SettlementChannels:   l.settlementChannelsLocked(),
 		JournalRules:         l.journalRulesLocked(),
 		JournalRuleVersion:   l.journalRuleVersion,
+		RevalAccount:         l.revalAccount,
+		RevalBaselines:       l.revaluationPositionsLocked(),
 	}
 	plAccounts, retainedEarnings := l.closingAccountsLocked()
 	if retainedEarnings != "" {
@@ -1292,6 +1303,37 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		validatedRules = append(validatedRules, r)
 	}
 
+	// Revaluation baselines are validated like every other config row: an
+	// empty account, a bad currency, or a malformed rate fails the import
+	// instead of silently installing a baseline the next revaluation
+	// would misread. Currencies are normalized to canonical form.
+	validatedReval := make([]RevaluationPosition, 0, len(cfg.RevalBaselines))
+	seenRevalKeys := make(map[revalKey]bool, len(cfg.RevalBaselines))
+	for _, rp := range cfg.RevalBaselines {
+		if rp.Account == "" {
+			return bad("revaluation baseline with empty account")
+		}
+		cur, err := normalizeCurrency(rp.Currency)
+		if err != nil {
+			return bad("bad revaluation baseline currency %q: %v", rp.Currency, err)
+		}
+		base, err := normalizeCurrency(rp.BaseCurrency)
+		if err != nil {
+			return bad("bad revaluation baseline base currency %q: %v", rp.BaseCurrency, err)
+		}
+		if _, _, err := normalizeFXRate(cur, base, rp.RateNum, rp.RateDen); err != nil {
+			return bad("bad revaluation baseline rate %s->%s: %v", cur, base, err)
+		}
+		k := revalKey{account: rp.Account, currency: cur, base: base}
+		if seenRevalKeys[k] {
+			return bad("duplicate revaluation baseline for account %q (%s->%s)", rp.Account, cur, base)
+		}
+		seenRevalKeys[k] = true
+		rp.Currency = cur
+		rp.BaseCurrency = base
+		validatedReval = append(validatedReval, rp)
+	}
+
 	// Apply: every row above checked out.
 	for _, a := range cfg.Frozen {
 		l.frozen[a] = true
@@ -1400,6 +1442,21 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	l.reviewThreshold = cfg.ReviewThresholdCents
 	l.reviewExpiry = reviewExpiry
+	// The revaluation P&L account and baselines restore like the other
+	// structural config: a restore that dropped the baselines would
+	// re-book full carrying values as gains on the next revaluation.
+	l.revalAccount = cfg.RevalAccount
+	l.revalBaselines = make(map[revalKey]revalBaseline, len(validatedReval))
+	for _, rp := range validatedReval {
+		l.revalBaselines[revalKey{account: rp.Account, currency: rp.Currency, base: rp.BaseCurrency}] = revalBaseline{
+			foreignBalance: rp.ForeignBalance,
+			baseValue:      rp.BaseValue,
+			rateNum:        rp.RateNum,
+			rateDen:        rp.RateDen,
+			rateVersion:    rp.RateVersion,
+			revaluedAt:     rp.RevaluedAt,
+		}
+	}
 	// Re-derive the low-balance breach state from the restored
 	// balances: an account already below its threshold counts as
 	// breached, so the first posting after the restore does not backfire
@@ -1407,6 +1464,28 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// counters.
 	l.recomputeLowBalanceBreachesLocked()
 	return nil
+}
+
+// revalPositionsEqual compares two sorted revaluation position lists,
+// ignoring time.Location representation (see journalEntriesEqual).
+func revalPositionsEqual(a, b []RevaluationPosition) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Account != b[i].Account ||
+			a[i].Currency != b[i].Currency ||
+			a[i].BaseCurrency != b[i].BaseCurrency ||
+			a[i].ForeignBalance != b[i].ForeignBalance ||
+			a[i].BaseValue != b[i].BaseValue ||
+			a[i].RateNum != b[i].RateNum ||
+			a[i].RateDen != b[i].RateDen ||
+			a[i].RateVersion != b[i].RateVersion ||
+			a[i].RevaluedAt.UnixNano() != b[i].RevaluedAt.UnixNano() {
+			return false
+		}
+	}
+	return true
 }
 
 // holdsEqual compares two holds field by field, ignoring time.Location
@@ -1599,6 +1678,16 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.fxRates, b.fxRates) {
+		return false
+	}
+	// The revaluation account and baselines must round-trip: a restore
+	// that dropped them would misprice the next revaluation. Times are
+	// compared by instant, like journal entries (see
+	// journalEntriesEqual).
+	if a.revalAccount != b.revalAccount {
+		return false
+	}
+	if !revalPositionsEqual(a.revaluationPositionsLocked(), b.revaluationPositionsLocked()) {
 		return false
 	}
 	// FX snapshot history must round-trip too (LG-45): same version

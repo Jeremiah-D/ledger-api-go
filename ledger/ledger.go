@@ -323,6 +323,22 @@ type Ledger struct {
 	// not books: it is in-memory only and does not round-trip through
 	// snapshots.
 	ruleLegsCommitted atomic.Uint64
+	// revalAccount is the P&L account that receives the gain/loss legs
+	// of FX revaluations (see RevalueBalances in revaluation.go). Empty
+	// means revaluation is not configured: RevalueBalances refuses with
+	// ErrRevaluationAccountNotConfigured (fail-closed). Structural
+	// config, like feeRevenueAccount — it survives snapshots.
+	revalAccount AccountID
+	// revalBaselines tracks the last remeasured carrying value per
+	// (account, foreign currency, base currency) (see revaluation.go):
+	// the foreign balance and its base-currency value at the last
+	// revaluation, plus the rate that produced it. The next revaluation
+	// books only the delta against this baseline, so repeated runs with
+	// an unchanged book and rate table book nothing. Structural state,
+	// like the idempotency indexes — it survives snapshots, because a
+	// restore that dropped it would re-book full carrying values as
+	// gains.
+	revalBaselines map[revalKey]revalBaseline
 	chain          []chainLink   // audit chain, one link per successful Post, in order
 	version        uint64        // bumped by every successful Post
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
@@ -434,6 +450,7 @@ func New(opts ...Option) *Ledger {
 		closedPeriods:        make(map[string]bool),
 		closingPL:            make(map[AccountID]bool),
 		journalRules:         make(map[string]JournalRule),
+		revalBaselines:       make(map[revalKey]revalBaseline),
 		pruneInterval:        defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
