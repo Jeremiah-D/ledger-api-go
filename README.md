@@ -349,6 +349,37 @@ release them before merging; daily outflow limits do not apply to merges.
 `POST /reconcile` reports every committed merge in its `merges` list, and
 the frozen source shows up in `frozen_accounts` for cross-checking.
 
+### `POST /entries/{id}/reverse` (reversal / 冲正)
+
+Reverses a posted journal entry: appends a new entry with the debit and
+credit legs swapped (`<entry ID>/reversal`), netting the original's
+balance effects to zero. The original entry is never modified — the audit
+chain stays append-only, so both the mistake and its correction remain
+visible forever. The shape is a payment-operations correction: a
+fat-fingered amount, a duplicate posting found after the fact, a transfer
+sent to the wrong account.
+
+```bash
+curl -X POST localhost:8080/entries/9f2c.../reverse -d '{}'
+# 201 {"id":"9f2c.../reversal","debit_account":"bank","credit_account":"alice",
+#      "amount_cents":1000,"currency":"USD","memo":"reversal_of:9f2c...","duplicate":false}
+```
+
+The reversal ID is deterministic, so the operation is idempotent:
+repeating the request (no key, or the same `idempotency_key`) returns
+`200` with the existing reversal instead of booking again — even if an
+involved account was frozen afterwards, because the replay books nothing
+new. A *new* idempotency key on an already-reversed entry returns `409`
+(the deterministic ID cannot express a second reversal of the same
+entry). Reversals run the full `POST` risk gate order — frozen `403`,
+overdraft `422`, daily-limit `422`, closed period `422` — and never
+trigger journal rules or enter dual-control review. Reversing a transfer
+reverses one journal entry at a time: reverse the principal entry and its
+`<transfer ID>/fee` leg individually, each by its journal entry ID. A
+pending-review entry cannot be reversed (`409` — approve or reject the
+review instead). Reversals are searchable via `GET /entries?memo=reversal_of:`
+and counted by `ledger_reversals_total`.
+
 ### What-if dry-run (`POST /entries/dry-run`, `POST /transfers/dry-run`, `POST /sweeps/dry-run`)
 
 Answers "what would happen if I submitted this now?" without changing
@@ -1482,6 +1513,9 @@ curl -s localhost:8080/metrics
 - `ledger_merges_total` — every `POST /merges` request received.
 - `ledger_merge_idempotency_hits_total` — merges that replayed an existing
   idempotency key (returned the original receipt, booked nothing).
+- `ledger_reversals_total` — reversal journal entries committed by
+  `POST /entries/{id}/reverse` (idempotent replays book nothing new and are
+  not counted twice).
 - `ledger_batch_total` — every `POST /entries/batch` request received.
 - `ledger_batch_idempotency_hits_total` — batches that replayed an
   existing batch idempotency key (returned the original receipt, booked

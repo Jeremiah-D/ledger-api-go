@@ -126,6 +126,13 @@ type Metrics struct {
 	// already-posted merge idempotency key and returned the original
 	// receipt.
 	MergeIdempotencyHits atomic.Uint64
+	// ReversalsTotal counts reversal journal entries committed by
+	// POST /entries/{id}/reverse (see ledger.ReverseEntry). Only
+	// first-time reversals are counted: idempotent replays return the
+	// existing reversal and book nothing new, so they are not counted
+	// twice. Rejected reversals are counted in the frozen/overdraft/
+	// daily-limit/period rejection counters, like the other writers.
+	ReversalsTotal atomic.Uint64
 	// BatchTotal counts POST /entries/batch requests received (all attempts,
 	// including duplicates and rejected payloads).
 	BatchTotal atomic.Uint64
@@ -281,6 +288,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_merge_idempotency_hits_total",
 		"Total POST /merges requests that replayed an existing merge idempotency key.",
 		m.MergeIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_reversals_total",
+		"Total reversal journal entries committed by POST /entries/{id}/reverse (idempotent replays not counted twice).",
+		m.ReversalsTotal.Load())
 	writeCounter(&sb, "ledger_batch_total",
 		"Total POST /entries/batch requests received.", m.BatchTotal.Load())
 	writeCounter(&sb, "ledger_batch_idempotency_hits_total",

@@ -952,6 +952,86 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, receipt)
 }
 
+// createReversalRequest is the body of POST /entries/{id}/reverse. The
+// idempotency key is optional: the reversal ID itself
+// ("<entry ID>/reversal") is deterministic, so a keyless retry returns the
+// existing reversal with 200. A *new* key on an already-reversed entry
+// signals a distinct reversal intent and is rejected with 409.
+type createReversalRequest struct {
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// handleReverseEntry implements POST /entries/{id}/reverse, the
+// accounting correction for a posted journal entry (冲正): it appends a
+// new entry with the debit/credit legs swapped, netting the original's
+// balance effects to zero. The original entry is never modified — the
+// audit chain stays append-only.
+//
+// A first-time reversal returns 201 with the reversal entry. Repeating
+// the request (no key, or the same idempotency key) returns 200 with the
+// originally created reversal, even if the involved accounts were frozen
+// afterwards — the replay books nothing new. A new idempotency key on an
+// already-reversed entry returns 409 (the deterministic ID cannot express
+// a second reversal of the same entry). An unknown entry ID returns 404;
+// a pending-review entry returns 409 (approve or reject the review
+// instead); a frozen account returns 403; overdraft, daily-limit, and
+// closed-period rejections return 422; anything else is a 400.
+func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req createReversalRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	entryID := r.PathValue("id")
+	reversal, duplicate, err := s.ledger.ReverseEntry(entryID, req.IdempotencyKey)
+	if err != nil {
+		if errors.Is(err, ledger.ErrEntryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAlreadyReversed) || errors.Is(err, ledger.ErrReversalOfPendingReview) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, reversal)
+		return
+	}
+	// ledger_reversals_total counts committed reversal entries, not
+	// requests: idempotent replays book nothing new and are not counted
+	// twice.
+	s.metrics.ReversalsTotal.Add(1)
+	writeJSON(w, http.StatusCreated, reversal)
+}
+
 // decodeJSONBody decodes a JSON request body with the same transport
 // contract as POST /entries: bounded body, strict decoding (unknown
 // fields fail fast), no trailing garbage. It returns false after writing
@@ -2265,6 +2345,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /sweeps", s.handleCreateSweep)
 	mux.HandleFunc("POST /sweeps/dry-run", s.handleDryRunSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
+	mux.HandleFunc("POST /entries/{id}/reverse", s.handleReverseEntry)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
