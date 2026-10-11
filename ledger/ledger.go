@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -289,6 +290,24 @@ type Ledger struct {
 	// extra allocation.
 	balanceHook        BalanceChangeHook
 	balanceHookTimeout time.Duration // per-callback timeout; <= 0 means defaultBalanceHookTimeout
+	// journalRules maps rule IDs to opt-in automatic journaling rules
+	// (see rules.go): on Post, every enabled rule whose match predicate
+	// fits the principal entry appends its derived legs atomically.
+	// Empty by default — rules are opt-in, and a ledger without rules
+	// posts exactly as before. Rule changes are structural config, like
+	// frozen and dailyLimits: they do not bump the journal version and
+	// they survive disaster-recovery snapshots.
+	journalRules map[string]JournalRule
+	// journalRuleVersion counts journal-rule mutations: every
+	// SetJournalRule and DeleteJournalRule bumps it. The counter
+	// round-trips through the snapshot config record, so a restored
+	// ledger carries the same rule-set generation as the source.
+	journalRuleVersion uint64
+	// ruleLegsCommitted counts derived journal legs ever committed by
+	// the rules engine. Operational metric (surfaced on GET /metrics),
+	// not books: it is in-memory only and does not round-trip through
+	// snapshots.
+	ruleLegsCommitted atomic.Uint64
 	chain          []chainLink   // audit chain, one link per successful Post, in order
 	version        uint64        // bumped by every successful Post
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
@@ -398,6 +417,7 @@ func New(opts ...Option) *Ledger {
 		fxRates:              make(map[fxPair]ExchangeRate),
 		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
 		closedPeriods:        make(map[string]bool),
+		journalRules:         make(map[string]JournalRule),
 		pruneInterval:        defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
@@ -503,6 +523,14 @@ func validateJournalEntry(e *JournalEntry) error {
 //
 // Idempotent replays append no chain link: the chain records journaled
 // entries, and a replay journals nothing new.
+//
+// Opt-in journal rules (see rules.go and SetJournalRule) may append
+// derived legs to the posting: after the principal clears every gate
+// above, each matching enabled rule appends its legs as full journal
+// entries (own chain links, deterministic IDs "<entry ID>/rule/<rule
+// ID>/<i>"), each re-checked through the frozen/overdraft/daily-limit/
+// period gates. The commit stays atomic across principal and derived legs,
+// and the audit event lists every committed entry ID.
 func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -556,23 +584,42 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		return JournalEntry{}, false, err
 	}
 
+	// Journal rules (see rules.go) fire only after the principal entry
+	// clears the full Post gate order above — validation, idempotency
+	// replay, frozen, overdraft, daily-limit, period. A replay returns the
+	// original entry without re-firing rules; a principal that fails any
+	// gate records nothing, derived legs included. Each derived leg
+	// re-runs the account risk gates in the same order (frozen, then
+	// overdraft and daily-limit on the aggregate per-credit-account
+	// outflow, then the period gate on the shared timestamp): a leg that
+	// fails any gate rejects the whole Post, and the commit below is
+	// atomic across the principal and its derived legs — readers never
+	// observe a principal without its rule legs.
+	derived, ruleIDs, err := l.derivedRuleLegsLocked(e)
+	if err != nil {
+		return JournalEntry{}, false, err
+	}
+
 	l.maybePruneIdempotencyKeys(time.Now())
 	l.maybePruneDailyOutflowLocked(time.Now())
 	versionBefore := l.version
+	committed := make([]JournalEntry, 0, 1+len(derived))
+	committed = append(committed, e)
+	committed = append(committed, derived...)
 	// Pre-commit balance snapshot for the opt-in balance-change hook
 	// (see balance_hook.go): a no-op allocation-free nil map when no
 	// hook is registered.
-	hookTouched := touchedAccounts([]JournalEntry{e})
+	hookTouched := touchedAccounts(committed)
 	hookOld := l.balanceSnapshotLocked(hookTouched)
-	l.commitEntryLocked(e)
-	l.addDailyOutflowLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt)
+	for _, c := range committed {
+		l.commitEntryLocked(c)
+		l.addDailyOutflowLocked(c.CreditAccount, c.Currency, c.AmountCents, c.CreatedAt)
+	}
+	l.ruleLegsCommitted.Add(uint64(len(derived)))
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only — it can
 	// neither fail nor alter this posting.
-	l.evaluateLowBalanceLocked([]accountCurrency{
-		{account: e.DebitAccount, currency: e.Currency},
-		{account: e.CreditAccount, currency: e.Currency},
-	}, e.ID, "Post")
+	l.evaluateLowBalanceLocked(hookTouched, e.ID, "Post")
 	postDetails := map[string]any{
 		"amount_cents": e.AmountCents,
 		"currency":     e.Currency,
@@ -580,14 +627,25 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	if e.Memo != "" {
 		postDetails["memo"] = e.Memo
 	}
+	if len(ruleIDs) > 0 {
+		postDetails["rules_applied"] = ruleIDs
+	}
+	entryIDs := make([]string, 0, len(committed))
+	accounts := []AccountID{e.DebitAccount, e.CreditAccount}
+	for _, c := range committed {
+		entryIDs = append(entryIDs, c.ID)
+	}
+	for _, d := range derived {
+		accounts = append(accounts, d.DebitAccount, d.CreditAccount)
+	}
 	l.emitAudit(AuditEvent{
 		Op:            "post",
 		Actor:         "Post",
 		TraceID:       e.ID,
 		VersionBefore: versionBefore,
 		VersionAfter:  l.version,
-		EntryIDs:      []string{e.ID},
-		Accounts:      []AccountID{e.DebitAccount, e.CreditAccount},
+		EntryIDs:      entryIDs,
+		Accounts:      accounts,
 		Details:       postDetails,
 	})
 	// Balance-change notification: strictly after the atomic commit

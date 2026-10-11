@@ -179,6 +179,17 @@ type Metrics struct {
 	// settlement reports: the day-end reconciliation breaks an operator
 	// works through, not posting rejections.
 	SettlementAlerts atomic.Uint64
+	// JournalRuleSetsTotal counts PUT /rules requests received (all
+	// attempts, including rejected payloads and illegal rules).
+	JournalRuleSetsTotal atomic.Uint64
+	// JournalRuleDeletesTotal counts DELETE /rules requests received.
+	JournalRuleDeletesTotal atomic.Uint64
+	// JournalRuleLegsTotal counts derived journal legs committed by the
+	// opt-in journal rules engine (see ledger.SetJournalRule). It is
+	// synced from the ledger on every GET /metrics scrape, like the
+	// audit-log counters, so it stays meaningful even though the legs
+	// are committed inside the ledger package.
+	JournalRuleLegsTotal atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -309,6 +320,14 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_settlement_alerts_total",
 		"Total settlement mismatch alerts across served settlement reports.",
 		m.SettlementAlerts.Load())
+	writeCounter(&sb, "ledger_journal_rule_sets_total",
+		"Total PUT /rules requests received, including rejected payloads and illegal rules.",
+		m.JournalRuleSetsTotal.Load())
+	writeCounter(&sb, "ledger_journal_rule_deletes_total",
+		"Total DELETE /rules requests received.", m.JournalRuleDeletesTotal.Load())
+	writeCounter(&sb, "ledger_journal_rule_legs_total",
+		"Total derived journal legs committed by the opt-in journal rules engine.",
+		m.JournalRuleLegsTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

@@ -1624,6 +1624,116 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
+// setJournalRuleRequest is the body of PUT /rules/{id}: the rule fields.
+// The rule ID comes from the path.
+type setJournalRuleRequest struct {
+	Enabled            bool             `json:"enabled"`
+	Description        string           `json:"description,omitempty"`
+	MatchDebitAccount  ledger.AccountID `json:"match_debit_account,omitempty"`
+	MatchCreditAccount ledger.AccountID `json:"match_credit_account,omitempty"`
+	MatchCurrency      string           `json:"match_currency,omitempty"`
+	MinAmountCents     int64            `json:"min_amount_cents,omitempty"`
+	MaxAmountCents     int64            `json:"max_amount_cents,omitempty"`
+	Legs               []ledger.RuleLeg `json:"legs"`
+}
+
+// handleSetJournalRule implements PUT /rules/{id}: creates or replaces an
+// opt-in automatic journaling rule (see ledger.SetJournalRule). An
+// illegal rule fails 400 with the validation error and stores nothing;
+// rule changes are recorded in the structured audit log (op "rule_set").
+func (s *server) handleSetJournalRule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	s.metrics.JournalRuleSetsTotal.Add(1)
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rule id required"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req setJournalRuleRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	rule := ledger.JournalRule{
+		ID:                 id,
+		Enabled:            req.Enabled,
+		Description:        req.Description,
+		MatchDebitAccount:  req.MatchDebitAccount,
+		MatchCreditAccount: req.MatchCreditAccount,
+		MatchCurrency:      req.MatchCurrency,
+		MinAmountCents:     req.MinAmountCents,
+		MaxAmountCents:     req.MaxAmountCents,
+		Legs:               req.Legs,
+	}
+	if err := s.ledger.SetJournalRule(rule); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	stored, _ := s.ledger.GetJournalRule(id)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rule":         stored,
+		"rule_version": s.ledger.JournalRuleVersion(),
+	})
+}
+
+// handleDeleteJournalRule implements DELETE /rules/{id}: removes an
+// automatic journaling rule. Deleting a rule that was never set is a
+// no-op reporting deleted=false. The change is recorded in the structured
+// audit log (op "rule_delete").
+func (s *server) handleDeleteJournalRule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	s.metrics.JournalRuleDeletesTotal.Add(1)
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rule id required"})
+		return
+	}
+	deleted := s.ledger.DeleteJournalRule(id)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted":      deleted,
+		"rule_version": s.ledger.JournalRuleVersion(),
+	})
+}
+
+// handleListJournalRules implements GET /rules: lists the installed
+// automatic journaling rules, sorted by rule ID, with the rule-set
+// mutation counter.
+func (s *server) handleListJournalRules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rules":        s.ledger.JournalRules(),
+		"rule_version": s.ledger.JournalRuleVersion(),
+	})
+}
+
 // handleClosePeriod implements POST /periods/{id}/close: locks the
 // accounting period id ("YYYY-MM", UTC month). Journal entries whose
 // timestamp falls in a closed period are rejected with 422
@@ -1993,6 +2103,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
+	mux.HandleFunc("PUT /rules/{id}", s.handleSetJournalRule)
+	mux.HandleFunc("DELETE /rules/{id}", s.handleDeleteJournalRule)
+	mux.HandleFunc("GET /rules", s.handleListJournalRules)
 	mux.HandleFunc("POST /periods/{id}/close", s.handleClosePeriod)
 	mux.HandleFunc("POST /periods/{id}/reopen", s.handleReopenPeriod)
 	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)
@@ -2017,6 +2130,9 @@ func (s *server) handler() http.Handler {
 		// The low-balance breach counter lives in the ledger too (the
 		// alert fires inside Post/Transfer/..., not in a handler).
 		s.metrics.LowBalanceBreaches.Store(s.ledger.LowBalanceBreachCount())
+		// The rules-engine leg counter likewise lives in the ledger: the
+		// legs commit inside Post, not in a handler.
+		s.metrics.JournalRuleLegsTotal.Store(s.ledger.RuleLegsCommitted())
 		s.metrics.handleMetrics(w, r)
 	})
 	return mux

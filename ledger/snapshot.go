@@ -221,6 +221,13 @@ type snapshotConfigLine struct {
 	// daily limits, so a disaster-recovery restore keeps the channel
 	// dimension instead of silently flattening every row to "".
 	SettlementChannels []SettlementChannel `json:"settlement_channels,omitempty"`
+	// JournalRules carries the opt-in automatic journaling rules (see
+	// SetJournalRule); absent in snapshots written before journal rules
+	// existed. JournalRuleVersion is the rule-set mutation counter: every
+	// rule set/delete bumps it, and the import restores the counter, so a
+	// restored ledger carries the same rule-set generation as the source.
+	JournalRules       []JournalRule `json:"journal_rules,omitempty"`
+	JournalRuleVersion uint64        `json:"journal_rule_version,omitempty"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -609,6 +616,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		ReviewThresholds:     l.reviewThresholdsLocked(),
 		ReviewThresholdCents: l.reviewThreshold,
 		SettlementChannels:   l.settlementChannelsLocked(),
+		JournalRules:         l.journalRulesLocked(),
+		JournalRuleVersion:   l.journalRuleVersion,
 	}
 	if l.reviewExpiry > 0 {
 		cfg.ReviewExpiry = l.reviewExpiry.String()
@@ -1248,6 +1257,29 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 	}
 
+	// Journal rules are validated like every other config row: an illegal
+	// rule in the snapshot fails the import instead of silently installing
+	// a rule that could never have been created through SetJournalRule.
+	// Match currencies are normalized to their canonical form, like
+	// SetJournalRule does.
+	validatedRules := make([]JournalRule, 0, len(cfg.JournalRules))
+	for _, r := range cfg.JournalRules {
+		if err := ValidateJournalRule(r); err != nil {
+			return bad("bad journal rule %q: %v", r.ID, err)
+		}
+		legs := make([]RuleLeg, len(r.Legs))
+		copy(legs, r.Legs)
+		r.Legs = legs
+		if r.MatchCurrency != "" {
+			cur, err := normalizeCurrency(r.MatchCurrency)
+			if err != nil {
+				return bad("bad journal rule %q currency %q: %v", r.ID, r.MatchCurrency, err)
+			}
+			r.MatchCurrency = cur
+		}
+		validatedRules = append(validatedRules, r)
+	}
+
 	// Apply: every row above checked out.
 	for _, a := range cfg.Frozen {
 		l.frozen[a] = true
@@ -1265,6 +1297,14 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, sc := range cfg.SettlementChannels {
 		l.settlementChannels[sc.Account] = sc.Channel
 	}
+	// Journal rules restore like the other structural config: the rule
+	// set and its mutation counter round-trip together, so the restored
+	// ledger carries the same rule-set generation as the source.
+	l.journalRules = make(map[string]JournalRule, len(validatedRules))
+	for _, r := range validatedRules {
+		l.journalRules[r.ID] = r
+	}
+	l.journalRuleVersion = cfg.JournalRuleVersion
 	// Low-balance alert levels are validated like daily limits: an
 	// empty account or a bad currency fails the import instead of
 	// silently dropping an alert level. Negative thresholds are legal
@@ -1516,6 +1556,14 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.feeTiers, b.feeTiers) || a.feeRevenueAccount != b.feeRevenueAccount {
+		return false
+	}
+	// Journal rules must round-trip: the same rule set and the same
+	// rule-set mutation counter (see snapshotConfigLine).
+	if a.journalRuleVersion != b.journalRuleVersion {
+		return false
+	}
+	if !reflect.DeepEqual(a.journalRules, b.journalRules) {
 		return false
 	}
 	if a.fxAccount != b.fxAccount {

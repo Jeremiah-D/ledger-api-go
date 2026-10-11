@@ -19,6 +19,7 @@ The design borrows its posting semantics from a publicly described concept: **"i
 - A per-account index maps each account to the IDs of the entries that touched it (as debit or credit leg), so per-account listing scans only that account's entries instead of the whole journal.
 - Every post appends a tamper-evident audit-chain link: `SHA-256(prevHash || entry)` over a length-prefixed encoding of the entry's fields (standard library only). Rewriting a journaled entry, deleting a link, or splicing the chain breaks the hash continuity, and `VerifyChain` / `GET /entries/verify` detect it by recomputation.
 - A thin `net/http` JSON API exposes the ledger: no external dependencies.
+- Opt-in journal rules (`PUT /rules/{id}`): match raw postings on account/currency/amount range and auto-append derived journal legs (tax withholding, platform fees). Rules fire only after the principal clears the full `Post` check order; each derived leg re-runs the frozen/overdraft/daily-limit/period gates on the aggregate outflow, the commit is atomic, illegal rules are rejected at construction, rule changes land in the structured audit log, and the rule set round-trips through snapshots.
 
 ## API
 
@@ -474,6 +475,52 @@ curl -s -X POST localhost:8080/entries \
   -d '{"debit_account":"cash","credit_account":"cust-123","amount_cents":1000}'
 # 422 {"error":"ledger: posting would overdraw a protected account"}
 ```
+
+### Journal rules (`PUT /rules/{id}` / `DELETE /rules/{id}` / `GET /rules`)
+
+Opt-in automatic journaling: rules that match raw journal postings on
+debit account, credit account, currency, and amount range, and auto-append
+derived journal legs — the classic payment-fintech automations (tax
+withholding on a revenue posting, a platform service fee on a merchant
+payout). Rules are off by default; each rule must be explicitly enabled.
+
+A rule fires only after the principal entry clears the full `Post` check
+order (validation → idempotency replay → frozen → overdraft → daily-limit
+→ period). Each derived leg is a full journal entry — its own audit-chain
+link, deterministic ID `<entry ID>/rule/<rule ID>/<leg index>`, memo
+`rule:<rule ID>:<label>` — and re-runs the risk gates in the same order,
+with overdraft and daily-limit evaluated on the aggregate outflow per
+credit account (principal + derived legs, like a transfer's fee leg). A
+leg that fails any gate rejects the whole `Post`; the commit is atomic
+across principal and derived legs, and idempotent replays never re-fire
+rules. Derived legs never re-trigger rules, so rule sets cannot cascade.
+Illegal rules (empty ID, no legs, ambiguous or non-positive amounts, a
+rate above 100% of the principal, impossible match bounds) are rejected
+at construction with `400` and stored nothing.
+
+Rule changes are structural config: they don't bump the journal version,
+they're recorded in the structured audit log's hash chain (`rule_set` /
+`rule_delete` events), and they round-trip through disaster-recovery
+snapshots together with the rule-set mutation counter.
+
+```bash
+curl -s -X PUT localhost:8080/rules/tax-withholding \
+  -d '{"enabled":true,"match_credit_account":"revenue","match_currency":"USD",
+       "legs":[{"debit_account":"revenue","credit_account":"tax-payable",
+                "rate_bps":800,"label":"withholding"}]}'
+# {"rule":{...},"rule_version":1}
+curl -s -X POST localhost:8080/entries \
+  -d '{"debit_account":"cash","credit_account":"revenue","amount_cents":10000,"currency":"USD"}'
+# 201 — books the principal plus an 800-cent withholding leg to tax-payable
+curl -s localhost:8080/rules
+# {"rules":[{...}],"rule_version":1}
+curl -s -X DELETE localhost:8080/rules/tax-withholding
+# {"deleted":true,"rule_version":2}
+```
+
+`GET /metrics` exposes `ledger_journal_rule_sets_total`,
+`ledger_journal_rule_deletes_total`, and `ledger_journal_rule_legs_total`
+(derived legs committed by the engine).
 
 ### Daily outflow limits
 
