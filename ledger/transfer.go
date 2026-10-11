@@ -518,6 +518,11 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		}
 	}
 
+	// Expired timed freezes release lazily before the frozen gate, like in
+	// Post (see FreezeUntil): a deadline that passed must not keep
+	// rejecting transfers.
+	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
+
 	if l.frozenLocked(t.From) || l.frozenLocked(t.To) ||
 		(feeAccount != "" && l.frozenLocked(feeAccount)) {
 		return TransferReceipt{}, ErrAccountFrozen

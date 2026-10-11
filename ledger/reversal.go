@@ -224,7 +224,10 @@ func (l *Ledger) ReverseEntry(entryID string, idempotencyKey string) (reversal J
 	// The risk gates run in Post order on the swapped legs: the reversal
 	// moves real money back, so it earns the same protections as the
 	// original posting. The frozen check runs after the idempotency
-	// replay above, like Post — a replay books nothing new.
+	// replay above, like Post — a replay books nothing new. Expired timed
+	// freezes release lazily before the frozen gate, like in Post (see
+	// FreezeUntil).
+	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
 	if l.frozenLocked(reversal.DebitAccount) || l.frozenLocked(reversal.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountFrozen
 	}

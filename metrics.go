@@ -53,6 +53,11 @@ type Metrics struct {
 	// POST /transfers, POST /sweeps, POST /merges, and hold requests
 	// rejected with 403 because an account involved was frozen.
 	FrozenRejections atomic.Uint64
+	// FreezeAutoReleasesTotal counts automatic account unfreezes: timed
+	// freezes (see ledger.FreezeUntil) whose deadline passed, released
+	// by the write-path lazy check, the background freeze sweeper, or an
+	// explicit ledger.ExpireFrozenAccounts call.
+	FreezeAutoReleasesTotal atomic.Uint64
 	// OverdraftRejections counts POST /entries, POST /entries/batch,
 	// POST /transfers, POST /merges, and capture requests rejected with
 	// 422 because they would have overdrawn an overdraft-protected
@@ -403,6 +408,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_journal_rule_legs_total",
 		"Total derived journal legs committed by the opt-in journal rules engine.",
 		m.JournalRuleLegsTotal.Load())
+	writeCounter(&sb, "ledger_freeze_auto_releases_total",
+		"Total automatic account unfreezes: timed freezes whose deadline passed, released by the write-path lazy check, the background freeze sweeper, or an explicit ExpireFrozenAccounts call.",
+		m.FreezeAutoReleasesTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

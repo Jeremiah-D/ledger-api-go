@@ -187,7 +187,22 @@ type Ledger struct {
 	byAccount    map[AccountID][]string    // entry IDs per account, in Post order
 	debitTotals  map[accountCurrency]int64 // total cents ever debited per (account, currency)
 	creditTotals map[accountCurrency]int64 // total cents ever credited per (account, currency)
-	frozen       map[AccountID]bool // risk-control stops; frozen accounts reject new posts (see freeze.go)
+	frozen       map[AccountID]bool        // risk-control stops; frozen accounts reject new posts (see freeze.go)
+	// frozenUntil carries the opt-in automatic-unfreeze deadline per
+	// frozen account (see FreezeUntil in freeze.go): an account whose
+	// deadline has passed is unfrozen lazily on the next write-path
+	// frozen check or by the background freeze sweeper (see
+	// freeze_sweep.go). Only accounts frozen with a deadline appear
+	// here; a manual Freeze stores the zero time by deleting any
+	// deadline, so a manual freeze never auto-releases.
+	frozenUntil map[AccountID]time.Time
+	// frozenAutoReleases counts automatic unfreezes (see FreezeUntil):
+	// every lazy write-path release and every background-sweeper (or
+	// explicit ExpireFrozenAccounts) release bumps it. Operational
+	// metric, surfaced on GET /metrics as
+	// ledger_freeze_auto_releases_total; not books, so it does not
+	// round-trip through snapshots.
+	frozenAutoReleases atomic.Uint64
 	// chart maps an account to its registered chart-of-accounts type
 	// (see chart.go): an opt-in posting-direction control. Accounts
 	// without a row here skip the direction check. Structural config,
@@ -223,7 +238,7 @@ type Ledger struct {
 	// clearing a mapping does not bump the ledger version and survives
 	// disaster-recovery snapshots.
 	settlementChannels map[AccountID]string
-	lowBalanceBreaches   uint64
+	lowBalanceBreaches uint64
 	// parents maps a child account to its parent account in the
 	// sub-account hierarchy (see hierarchy.go). Only accounts with an
 	// assigned parent appear here; clearing the parent deletes the row.
@@ -341,7 +356,7 @@ type Ledger struct {
 	// journal-writing operation, so a closed month's books cannot change.
 	// Structural config like frozen — it survives snapshots and is
 	// listed in Reconcile.
-	closedPeriods  map[string]bool
+	closedPeriods map[string]bool
 	// closingPL and closingRetained configure the opt-in period-closing
 	// mapping (see closing.go): the P&L accounts zeroed at period close
 	// and the retained-earnings account that receives them. An empty
@@ -485,6 +500,7 @@ func New(opts ...Option) *Ledger {
 		debitTotals:          make(map[accountCurrency]int64),
 		creditTotals:         make(map[accountCurrency]int64),
 		frozen:               make(map[AccountID]bool),
+		frozenUntil:          make(map[AccountID]time.Time),
 		chart:                make(map[AccountID]AccountType),
 		noOverdraft:          make(map[AccountID]bool),
 		dailyLimits:          make(map[dailyLimitKey]int64),
@@ -685,6 +701,12 @@ func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry
 	if err := l.chartDirectionRejectedLocked(e); err != nil {
 		return JournalEntry{}, false, err
 	}
+
+	// Expired timed freezes are released lazily on the write path: a
+	// freeze whose auto-unfreeze deadline has passed must not keep
+	// rejecting new posts (see FreezeUntil). The release runs before the
+	// frozen gate below, so this Post sees the account unfrozen.
+	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
 
 	if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountFrozen

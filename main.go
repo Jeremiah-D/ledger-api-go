@@ -1116,17 +1116,17 @@ func (s *server) handleCreateRevaluation(w http.ResponseWriter, r *http.Request)
 // the error response when decoding fails. Callers must check the HTTP
 // method before calling it; it always closes the body.
 type createTransferScheduleRequest struct {
-	ScheduleID     string           `json:"schedule_id"`
-	FromAccount    ledger.AccountID `json:"from_account"`
-	ToAccount      ledger.AccountID `json:"to_account"`
-	AmountCents    int64            `json:"amount_cents"`
-	Currency       string           `json:"currency"`
-	ToCurrency     string           `json:"to_currency"`
-	FXAccount      ledger.AccountID `json:"fx_account"`
-	FeeCents       int64            `json:"fee_cents"`
-	FeeAccount     ledger.AccountID `json:"fee_account"`
-	SkipFee        bool             `json:"skip_fee"`
-	Memo           string           `json:"memo"`
+	ScheduleID  string           `json:"schedule_id"`
+	FromAccount ledger.AccountID `json:"from_account"`
+	ToAccount   ledger.AccountID `json:"to_account"`
+	AmountCents int64            `json:"amount_cents"`
+	Currency    string           `json:"currency"`
+	ToCurrency  string           `json:"to_currency"`
+	FXAccount   ledger.AccountID `json:"fx_account"`
+	FeeCents    int64            `json:"fee_cents"`
+	FeeAccount  ledger.AccountID `json:"fee_account"`
+	SkipFee     bool             `json:"skip_fee"`
+	Memo        string           `json:"memo"`
 	// Interval is a Go duration string ("24h", "168h"): the fixed cadence
 	// between runs. Cron expressions are not supported.
 	Interval string `json:"interval"`
@@ -1750,19 +1750,19 @@ func (s *server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 // handleOutboxEvents implements GET /events: the operator-facing query
 // API over the domain-event outbox (LG-53).
 //
-//	GET /events?since=<rfc3339>&until=<rfc3339>&type=<t1,t2>&account=<id>&limit=100&cursor=<opaque>
+//		GET /events?since=<rfc3339>&until=<rfc3339>&type=<t1,t2>&account=<id>&limit=100&cursor=<opaque>
 //
-//   - since/until bound the event time (RFC3339, optional; until is
-//     exclusive).
-//   - type filters to one or more comma-separated event types
-//     (entry_posted, transfer_posted, hold_created, ...); omitted means
-//     all types.
-//   - account matches the event's account or either leg of an
-//     entry_posted event.
-//   - limit caps the page at 1..1000 (default 100).
-//   - cursor is the opaque page cursor (base64url of the last seen seq);
-//     the response's next_cursor resumes after it, and is empty on the
-//     last page.
+//	  - since/until bound the event time (RFC3339, optional; until is
+//	    exclusive).
+//	  - type filters to one or more comma-separated event types
+//	    (entry_posted, transfer_posted, hold_created, ...); omitted means
+//	    all types.
+//	  - account matches the event's account or either leg of an
+//	    entry_posted event.
+//	  - limit caps the page at 1..1000 (default 100).
+//	  - cursor is the opaque page cursor (base64url of the last seen seq);
+//	    the response's next_cursor resumes after it, and is empty on the
+//	    last page.
 //
 // Without LEDGER_OUTBOX_DIR the endpoint 404s fail-closed: there is no
 // stream to query, and the 404 says so explicitly.
@@ -1810,12 +1810,24 @@ func (s *server) handleOutboxEvents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// freezeAccountRequest is the optional body of POST
+// /accounts/{id}/freeze: an RFC3339 timestamp at which the freeze lifts
+// automatically (see ledger.FreezeUntil). Omitted (or an empty body)
+// means a manual freeze, exactly like before timed freezes existed.
+type freezeAccountRequest struct {
+	Until *time.Time `json:"until,omitempty"`
+}
+
 // handleFreezeAccount implements POST /accounts/{id}/freeze: the
 // operator-facing risk-control stop. A frozen account rejects every new
 // POST /entries that names it as either leg with 403, while balance,
 // snapshot, trial-balance, entries, chain verification, and the
 // end-of-day reconcile keep working. Freezing is idempotent and does not
 // bump the ledger version (balances are unchanged by a freeze).
+//
+// The optional {"until": "<RFC3339>"} body schedules the freeze to lift
+// automatically at that time (a timed freeze); without it the freeze is
+// manual. A non-future timestamp is rejected with 400.
 func (s *server) handleFreezeAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -1826,8 +1838,25 @@ func (s *server) handleFreezeAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	s.ledger.Freeze(ledger.AccountID(id))
-	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": true})
+	var req freezeAccountRequest
+	if r.ContentLength != 0 {
+		if !s.decodeJSONBody(w, r, &req) {
+			return
+		}
+	}
+	until := time.Time{}
+	if req.Until != nil {
+		until = *req.Until
+	}
+	if err := s.ledger.FreezeUntil(ledger.AccountID(id), until); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	resp := map[string]any{"account": id, "frozen": true}
+	if deadline, ok := s.ledger.FreezeAutoUnfreezeAt(ledger.AccountID(id)); ok {
+		resp["auto_unfreeze_at"] = deadline.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleUnfreezeAccount implements POST /accounts/{id}/unfreeze: lifts a
@@ -2539,6 +2568,10 @@ func (s *server) handler() http.Handler {
 		// The rules-engine leg counter likewise lives in the ledger: the
 		// legs commit inside Post, not in a handler.
 		s.metrics.JournalRuleLegsTotal.Store(s.ledger.RuleLegsCommitted())
+		// The freeze auto-release counter lives in the ledger too:
+		// releases happen inside the write path and the background
+		// sweeper, not in a handler.
+		s.metrics.FreezeAutoReleasesTotal.Store(s.ledger.FrozenAutoReleases())
 		// The balance-health violation counter lives in the ledger too:
 		// violations are detected by the background watchdog inside the
 		// ledger package, not in a handler.
@@ -2953,6 +2986,20 @@ func main() {
 		defer sweeper.Stop()
 	}
 
+	// Optional background freeze-expiry sweeper: releases timed account
+	// freezes whose auto-unfreeze deadline has passed (see
+	// ledger.FreezeUntil), so operators don't need write traffic to lift
+	// an expired freeze. It shares the server context, so SIGINT/SIGTERM
+	// stops it. The per-tick released count is already counted by the
+	// ledger itself (FrozenAutoReleases, surfaced on GET /metrics), so
+	// the callback only exists for observability symmetry with the other
+	// sweepers. Unset or invalid means disabled.
+	if interval, ok := freezeSweepInterval(); ok {
+		sweeper := ledger.StartFreezeSweeper(ctx, srv.ledger, interval, func(int) {})
+		log.Printf("ledger-api-go: freeze sweep worker started (interval %v)", interval)
+		defer sweeper.Stop()
+	}
+
 	// Optional background balance-health watchdog: periodically
 	// re-checks the invariants the write path promises (negative
 	// balances on protected accounts, accounting-equation spot check,
@@ -3040,6 +3087,25 @@ func holdSweepInterval() (time.Duration, bool) {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		log.Printf("ledger-api-go: ignoring invalid LEDGER_HOLD_SWEEP_INTERVAL %q, hold sweep worker disabled", raw)
+		return 0, false
+	}
+	return d, true
+}
+
+// freezeSweepInterval reads LEDGER_FREEZE_SWEEP_INTERVAL (a Go duration
+// string, e.g. "1m") for the background freeze-expiry worker that
+// releases timed account freezes whose auto-unfreeze deadline has passed
+// (see ledger.StartFreezeSweeper). Unset or invalid values mean the
+// worker is disabled; a non-positive duration is invalid and falls back
+// to disabled with a log line.
+func freezeSweepInterval() (time.Duration, bool) {
+	raw := os.Getenv("LEDGER_FREEZE_SWEEP_INTERVAL")
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_FREEZE_SWEEP_INTERVAL %q, freeze sweep worker disabled", raw)
 		return 0, false
 	}
 	return d, true

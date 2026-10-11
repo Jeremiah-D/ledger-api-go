@@ -461,9 +461,30 @@ curl -s -X POST localhost:8080/accounts/cash/unfreeze
 # {"account":"cash","frozen":false}
 ```
 
-The reconcile report lists frozen accounts (`frozen_accounts`), and each
-trial balance carries a `frozen` flag, so the day-end job shows which
-accounts were stopped.
+A freeze can be *timed*: pass `{"until": "<RFC3339>"}` to schedule the
+freeze to lift automatically at that time (`ledger.FreezeUntil`).
+A zero/absent `until` is a manual freeze, exactly as before; a non-future
+timestamp is rejected with `400`. When the deadline passes, the freeze is
+released either lazily — every write path (`POST /entries`, transfers,
+batches, reversals, holds) checks for expired timed freezes before its
+frozen gate — or by the background freeze sweeper
+(`LEDGER_FREEZE_SWEEP_INTERVAL`, Go duration string; unset/disabled by
+default), or an explicit `ExpireFrozenAccounts` call. Every automatic
+release is recorded as a `frozen_auto_released` structured audit event
+and counted by `ledger_freeze_auto_releases_total` on `GET /metrics`.
+A manual `Freeze` clears any scheduled deadline, so a manual freeze never
+auto-releases; timed-freeze deadlines round-trip through snapshots.
+
+```bash
+curl -s -X POST localhost:8080/accounts/cash/freeze \
+  -H 'Content-Type: application/json' -d '{"until":"2026-10-12T08:00:00Z"}'
+# {"account":"cash","frozen":true,"auto_unfreeze_at":"2026-10-12T08:00:00Z"}
+```
+
+The reconcile report lists frozen accounts (`frozen_accounts`), annotates
+timed freezes with their deadline (`frozen_account_auto_unfreeze_at`),
+and each trial balance carries a `frozen` flag, so the day-end job shows
+which accounts were stopped.
 
 ### Period close (`POST /periods/{id}/close` / `POST /periods/{id}/reopen`)
 
@@ -1593,7 +1614,7 @@ of who did what, when, and what changed. Disabled by default; set
   `GET /audit/verify`.
 - `op` — the operation (`post`, `transfer`, `sweep`, `merge`, `hold`,
   `hold_capture`, `hold_release`, `hold_expire`, `freeze`, `unfreeze`,
-  `reconcile`).
+  `frozen_auto_released`, `reconcile`).
 - `actor` — the in-process ledger entrypoint that performed it
   (`Post`, `PostTransfer`, …). HTTP handlers call through these
   entrypoints; correlate with the HTTP access log by timestamp for
@@ -1887,6 +1908,14 @@ Environment:
   The first tick fires after one full interval; SIGINT/SIGTERM stops the
   worker with the server. Unset or invalid means disabled — expiry stays
   lazy by predicate and available on demand via `POST /holds/expire`.
+- `LEDGER_FREEZE_SWEEP_INTERVAL` — enables the background freeze-expiry
+  worker, e.g. `LEDGER_FREEZE_SWEEP_INTERVAL=1m`. While enabled, the
+  server releases timed account freezes whose auto-unfreeze deadline has
+  passed on the interval (the same `ExpireFrozenAccounts` sweep; every
+  release is a `frozen_auto_released` audit event and bumps
+  `ledger_freeze_auto_releases_total`). The first tick fires after one
+  full interval; SIGINT/SIGTERM stops the worker with the server. Unset
+  or invalid means disabled — release stays lazy on the write path.
 - `LEDGER_SCHEDULE_SWEEP_INTERVAL` — enables the background
   transfer-schedule worker, e.g. `LEDGER_SCHEDULE_SWEEP_INTERVAL=1m`.
   While enabled, the server fires due transfer schedules on the interval

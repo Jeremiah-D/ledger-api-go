@@ -251,6 +251,20 @@ type snapshotConfigLine struct {
 	// revaluation.
 	RevalAccount   AccountID             `json:"reval_account,omitempty"`
 	RevalBaselines []RevaluationPosition `json:"reval_baselines,omitempty"`
+	// FrozenAutoUnfreeze carries the timed-freeze deadlines (see
+	// FreezeUntil in freeze.go); absent in snapshots written before
+	// timed freezes existed. A restore that dropped them would turn a
+	// timed freeze into a manual one, so deadlines round-trip like the
+	// frozen-account list itself.
+	FrozenAutoUnfreeze []FrozenAutoUnfreeze `json:"frozen_auto_unfreeze,omitempty"`
+}
+
+// FrozenAutoUnfreeze pairs a frozen account with its scheduled
+// automatic-unfreeze time (see FreezeUntil). It is the snapshot record
+// form of the Ledger.frozenUntil index.
+type FrozenAutoUnfreeze struct {
+	Account        AccountID `json:"account"`
+	AutoUnfreezeAt time.Time `json:"auto_unfreeze_at"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -653,10 +667,40 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 	if l.reviewExpiry > 0 {
 		cfg.ReviewExpiry = l.reviewExpiry.String()
 	}
+	cfg.FrozenAutoUnfreeze = l.frozenAutoUnfreezeLocked()
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
 	}
 	return nil
+}
+
+// frozenAutoUnfreezeLocked returns the timed-freeze deadlines sorted by
+// account, the snapshot record form of the frozenUntil index. Callers
+// must hold l.mu (either lock suffices; export holds the read lock).
+func (l *Ledger) frozenAutoUnfreezeLocked() []FrozenAutoUnfreeze {
+	out := make([]FrozenAutoUnfreeze, 0, len(l.frozenUntil))
+	for a, until := range l.frozenUntil {
+		out = append(out, FrozenAutoUnfreeze{Account: a, AutoUnfreezeAt: until})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Account < out[j].Account })
+	return out
+}
+
+// frozenUntilEqual compares two freeze-deadline indexes by instant, not by
+// time.Location representation: JSON round-trips preserve the instant but
+// not the exact Location pointer, so reflect.DeepEqual would report a
+// restored index as different.
+func frozenUntilEqual(a, b map[AccountID]time.Time) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || !va.Equal(vb) {
+			return false
+		}
+	}
+	return true
 }
 
 // journalEntriesEqual compares two journal entries field by field,
@@ -1360,6 +1404,18 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, a := range cfg.Frozen {
 		l.frozen[a] = true
 	}
+	// Timed-freeze deadlines restore like the frozen list: an empty
+	// account fails the import instead of installing a deadline that
+	// could never have been created. The account is marked frozen as
+	// well, in case a deadline row names an account the Frozen list
+	// missed (a restore must not leave a deadline without its freeze).
+	for _, fu := range cfg.FrozenAutoUnfreeze {
+		if fu.Account == "" {
+			return bad("frozen auto-unfreeze deadline with empty account")
+		}
+		l.frozen[fu.Account] = true
+		l.frozenUntil[fu.Account] = fu.AutoUnfreezeAt
+	}
 	for _, a := range cfg.OverdraftProtected {
 		l.noOverdraft[a] = true
 	}
@@ -1671,6 +1727,9 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.frozen, b.frozen) {
+		return false
+	}
+	if !frozenUntilEqual(a.frozenUntil, b.frozenUntil) {
 		return false
 	}
 	if !reflect.DeepEqual(a.noOverdraft, b.noOverdraft) {

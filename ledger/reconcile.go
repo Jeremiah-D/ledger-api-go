@@ -115,6 +115,11 @@ type ReconciliationReport struct {
 	TrialBalances        []TrialBalance            `json:"trial_balances"`
 	Discrepancies        []TrialBalanceDiscrepancy `json:"discrepancies"`
 	FrozenAccounts       []AccountID               `json:"frozen_accounts"`
+	// FrozenAccountAutoUnfreeze annotates every timed-frozen account
+	// with its scheduled automatic-unfreeze time (see FreezeUntil in
+	// freeze.go); manually frozen accounts are absent from the map.
+	// Empty when no timed freezes exist.
+	FrozenAccountAutoUnfreeze map[AccountID]time.Time `json:"frozen_account_auto_unfreeze_at,omitempty"`
 	// OverdraftProtectedAccounts lists the accounts currently guarded
 	// against overdrafts (see EnableOverdraftProtection). Risk tooling
 	// reads this to know which accounts cannot go negative.
@@ -350,6 +355,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		TrialBalances:              make([]TrialBalance, 0, len(l.balances)),
 		Discrepancies:              make([]TrialBalanceDiscrepancy, 0),
 		FrozenAccounts:             l.frozenAccountsLocked(),
+		FrozenAccountAutoUnfreeze:  l.frozenUntilCopyLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
 		LowBalanceThresholds:       l.lowBalanceThresholdsLocked(),

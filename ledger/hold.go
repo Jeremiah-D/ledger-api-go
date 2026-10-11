@@ -214,7 +214,9 @@ func (l *Ledger) Hold(h Hold) (held Hold, duplicate bool, err error) {
 	// A frozen account cannot take on new reservations. The check runs
 	// after the replay check for the same reason as in Post: a replay
 	// reserves nothing new, so it must not fail on a freeze that landed
-	// after the original hold.
+	// after the original hold. Expired timed freezes release lazily
+	// before the frozen gate, like in Post (see FreezeUntil).
+	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
 	if l.frozenLocked(h.Account) {
 		return Hold{}, false, ErrAccountFrozen
 	}

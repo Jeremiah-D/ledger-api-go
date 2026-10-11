@@ -218,7 +218,9 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 
 	// 5. Chart direction + frozen checks on every new entry's legs
 	// (see chart.go). Replays book nothing new, so they are exempt —
-	// mirroring Post's replay-first order.
+	// mirroring Post's replay-first order. Expired timed freezes release
+	// lazily before the frozen gates, like in Post (see FreezeUntil).
+	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
 	for i := range entries {
 		if replayed[i] {
 			continue
