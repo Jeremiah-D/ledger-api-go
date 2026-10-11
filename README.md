@@ -1089,6 +1089,47 @@ curl -s "localhost:8080/accounts/cash/balance-at?version=2"
 # {"account":"cash","currency":"USD","version":2,"balance_cents":200}
 ```
 
+### `GET /balance-history`
+
+Balance time-series query: the sampled balance history of one
+(account, currency) over a time window — the read side of the background
+recorder (`ledger/balance_history.go`). Where `/balance-at` replays the
+journal per query (O(version) each time), the recorder amortizes that
+into a background time series: every tick samples all (account,
+currency) balances and appends one JSON row per key to per-day JSONL
+files (`balance-history-YYYY-MM-DD.jsonl`), so a history query is a
+bounded file scan. Each row carries `version`, so a sample can be
+cross-checked against `/balance-at` — the primitive behind
+reconciliation dashboards and payment reporting ("show me this
+settlement account's balance over the last 30 days").
+
+```bash
+curl -s "localhost:8080/balance-history?account=cash&currency=USD&since=2026-10-01T00:00:00Z&until=2026-10-31T00:00:00Z"
+# {"account":"cash","currency":"USD","points":[
+#   {"account":"cash","currency":"USD","balance_cents":12500,"version":42,"at":"2026-10-11T07:00:00.123Z"},
+#   ...]}
+```
+
+- `account` is required (`400` without it); `currency` defaults to USD;
+  `since`/`until` are optional RFC 3339 bounds (`400` on malformed
+  input). Points come back ordered by `(at, version)`.
+- With no history directory configured the endpoint answers `404`
+  fail-closed — an unconfigured series is a missing feature, not an
+  empty history.
+- The series is append-only and the recorder holds no cursor: after a
+  disaster-recovery snapshot restore, a worker pointed at the same
+  directory keeps appending to the current day's file — old rows are
+  never rewritten, so the series continues instead of resetting. The
+  directory is process configuration, not ledger state, and is
+  deliberately not part of the snapshot.
+- Retention is by file modification time
+  (`LEDGER_BALANCE_HISTORY_MAX_AGE_MS`, default 90 days); only the
+  recorder's own files are ever pruned. Sampling is read-only: the
+  recorder takes the read lock, writes nothing to the books, and never
+  bumps the version. Ticks are counted in
+  `ledger_balance_history_snapshots_total` (one per tick, not per row);
+  failed ticks are logged and retried on the next tick.
+
 ### `GET /accounts/{id}/entries`
 
 Per-account, time-windowed, cursor-paginated journal export — every entry
@@ -1846,6 +1887,10 @@ curl -s localhost:8080/metrics
   found by the background health watchdog (advisory integrity signal).
   Synced from the ledger on every scrape. Any nonzero value is an
   incident — alert on it.
+- `ledger_balance_history_snapshots_total` — balance-history snapshot
+  ticks completed by the background recorder (see
+  `LEDGER_BALANCE_HISTORY_DIR` below). One per tick, not per row — it
+  measures that the time series is alive, not its volume.
 - `ledger_holds_total` — every `POST /holds` request received.
 - `ledger_hold_idempotency_hits_total` — holds that replayed an existing
   idempotency key (returned the original hold, reserved nothing).
@@ -1953,6 +1998,24 @@ Environment:
   in `ledger_snapshot_backups_total` /
   `ledger_snapshot_backups_failed_total`. Unset dir or invalid interval
   means disabled.
+- `LEDGER_BALANCE_HISTORY_DIR` (+ `LEDGER_BALANCE_HISTORY_INTERVAL`,
+  `LEDGER_BALANCE_HISTORY_MAX_AGE_MS`) — enables the background
+  balance-history recorder, e.g. `LEDGER_BALANCE_HISTORY_INTERVAL=5m`.
+  While enabled, the server samples every (account, currency) balance on
+  the interval and appends one row per key to append-only per-day JSONL
+  files (`balance-history-YYYY-MM-DD.jsonl`) in this directory, readable
+  via `GET /balance-history`. Files older than
+  `LEDGER_BALANCE_HISTORY_MAX_AGE_MS` (default 90 days, in milliseconds)
+  are pruned on every tick. Sampling is read-only — the recorder holds
+  the read lock only for the capture, writes nothing to the books, and
+  never bumps the version; failed ticks are logged and retried next
+  tick. Successful ticks are counted in
+  `ledger_balance_history_snapshots_total`. The directory is process
+  configuration, not ledger state: after a disaster-recovery snapshot
+  restore, pointing the new process at the same directory resumes the
+  series — old rows are never rewritten. The first tick fires after one
+  full interval; SIGINT/SIGTERM stops the worker with the server. Unset
+  dir or invalid interval means disabled.
 - `LEDGER_TRANSFER_FEE` — default transfer fee policy. Flat form
   `"<rateBps>:<revenueAccount>"` (e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`
   for 2.5%), or tiered form `"<minCents>:<rateBps>,...@<revenueAccount>"`
@@ -2075,12 +2138,15 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── ledger_merge_test.go   # merge legs/freeze/idempotency/overdraft/TTL, snapshot + incremental round-trips
 │   ├── timetravel.go          # BalanceAt: point-in-time balance at a ledger version (audit-chain prefix scan)
 │   ├── ledger_timetravel_test.go# time-travel correctness, currency isolation, future-version rejection, concurrent readers
+│   ├── balance_history.go       # balance time-series recorder: (account,currency) snapshots → append-only per-day JSONL, retention pruning, history query
+│   ├── ledger_balance_history_test.go# snapshot/query/prune/worker/snapshot-restore continuity, concurrency
 │   └── ledger_list_test.go    # cursor pagination, time windows, interleaved inserts
 ├── main.go                    # net/http JSON API (thin assembly only)
 ├── metrics.go                 # Prometheus-format /metrics counters (stdlib only)
 ├── metrics_test.go            # /metrics exposition + counter semantics tests
 ├── main_test.go               # HTTP handler tests (httptest)
 ├── main_timetravel_test.go    # GET /accounts/{id}/balance-at handler tests (httptest)
+├── main_balance_history_test.go # GET /balance-history handler + env config + /metrics exposition (httptest)
 ├── main_reconcile_test.go     # POST /reconcile handler tests (httptest)
 ├── main_graceful_test.go      # SIGTERM drain: in-flight requests complete, listener closes
 └── .github/workflows/ci.yml

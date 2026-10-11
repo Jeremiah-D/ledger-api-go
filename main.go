@@ -28,6 +28,10 @@ type server struct {
 	ledger       *ledger.Ledger
 	metrics      *Metrics
 	maxBodyBytes int64
+	// balanceHistoryDir is the directory the balance-history recorder
+	// writes to (LEDGER_BALANCE_HISTORY_DIR). Empty means unconfigured,
+	// and GET /balance-history answers 404 fail-closed.
+	balanceHistoryDir string
 }
 
 type createEntryRequest struct {
@@ -1591,6 +1595,60 @@ func (s *server) handleBalanceAt(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleBalanceHistory implements GET /balance-history: the balance time
+// series the background recorder samples (see ledger/balance_history.go),
+// for reconciliation dashboards and fintech reporting. Query parameters:
+// account (required), currency (default USD), since/until (optional
+// RFC 3339 bounds). With no history directory configured the endpoint
+// answers 404 fail-closed rather than inventing an empty series.
+func (s *server) handleBalanceHistory(w http.ResponseWriter, r *http.Request) {
+	if s.balanceHistoryDir == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "balance history not configured"})
+		return
+	}
+	q := r.URL.Query()
+	account := q.Get("account")
+	if account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account query parameter is required"})
+		return
+	}
+	currency := q.Get("currency")
+	if currency == "" {
+		currency = ledger.DefaultCurrency
+	}
+	var since, until time.Time
+	if raw := q.Get("since"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "since must be RFC 3339"})
+			return
+		}
+		since = t
+	}
+	if raw := q.Get("until"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "until must be RFC 3339"})
+			return
+		}
+		until = t
+	}
+	points, err := ledger.QueryBalanceHistory(s.balanceHistoryDir, ledger.AccountID(account), currency, since, until)
+	if err != nil {
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read balance history"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":  account,
+		"currency": currency,
+		"points":   points,
+	})
+}
+
 // handleTrialBalance implements GET /accounts/{id}/trial-balance.
 // Returns the account's double-entry breakdown — total debits, total
 // credits, and net balance — at the current ledger version. Net balance
@@ -2548,6 +2606,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
+	mux.HandleFunc("GET /balance-history", s.handleBalanceHistory)
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		// The audit log lives in the ledger package; sync its counters
 		// into the HTTP metrics on every scrape so the exposition stays
@@ -3032,6 +3091,27 @@ func main() {
 		defer bk.Stop()
 	}
 
+	// Optional background balance-history recorder: samples every
+	// (account, currency) balance on the interval and appends the rows to
+	// append-only per-day JSONL files in the configured directory,
+	// pruned to the configured retention window. It shares the server
+	// context, so SIGINT/SIGTERM stops it, and every successful tick is
+	// counted by ledger_balance_history_snapshots_total; failed ticks are
+	// logged and retried next tick. Unset dir or invalid interval means
+	// disabled — the series is purely additive, so nothing else changes.
+	if cfg, ok := balanceHistoryConfig(); ok {
+		rec := ledger.StartBalanceHistoryRecorder(ctx, srv.ledger, cfg, func(points int, err error) {
+			if err != nil {
+				log.Printf("ledger-api-go: balance history tick failed: %v", err)
+				return
+			}
+			srv.metrics.BalanceHistorySnapshots.Add(1)
+		})
+		srv.balanceHistoryDir = cfg.Dir
+		log.Printf("ledger-api-go: balance history worker started (dir %s, interval %v)", cfg.Dir, cfg.Interval)
+		defer rec.Stop()
+	}
+
 	timeout := shutdownTimeout()
 	log.Printf("ledger-api-go listening on %s (shutdown timeout %v)", ln.Addr(), timeout)
 	if err := runServer(ctx, ln, srv.handler(), timeout); err != nil {
@@ -3178,6 +3258,48 @@ func snapshotBackupConfig() (ledger.SnapshotBackupConfig, bool) {
 		FullEvery:       snapshotBackupKeep("LEDGER_SNAPSHOT_BACKUP_FULL_EVERY", ledger.DefaultSnapshotBackupFullEvery),
 	}
 	return cfg, true
+}
+
+// balanceHistoryConfig reads LEDGER_BALANCE_HISTORY_DIR (the directory
+// the recorder appends per-day balance JSONL to) and
+// LEDGER_BALANCE_HISTORY_INTERVAL (a Go duration string, e.g. "5m") for
+// the background balance-history recorder. Unset dir means disabled; an
+// unset or invalid interval means disabled with a log line — the journal
+// itself is the source of truth, so history collection is purely
+// additive and never required for correctness.
+func balanceHistoryConfig() (ledger.BalanceHistoryConfig, bool) {
+	dir := os.Getenv("LEDGER_BALANCE_HISTORY_DIR")
+	if dir == "" {
+		return ledger.BalanceHistoryConfig{}, false
+	}
+	raw := os.Getenv("LEDGER_BALANCE_HISTORY_INTERVAL")
+	interval, err := time.ParseDuration(raw)
+	if err != nil || interval <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_BALANCE_HISTORY_INTERVAL %q, balance history worker disabled", raw)
+		return ledger.BalanceHistoryConfig{}, false
+	}
+	return ledger.BalanceHistoryConfig{
+		Dir:      dir,
+		Interval: interval,
+		MaxAgeMs: balanceHistoryMaxAgeMs(),
+	}, true
+}
+
+// balanceHistoryMaxAgeMs reads LEDGER_BALANCE_HISTORY_MAX_AGE_MS (a
+// millisecond count) for the recorder's retention window. Unset means
+// the default; invalid or non-positive values fall back to the default
+// with a log line.
+func balanceHistoryMaxAgeMs() int64 {
+	raw := os.Getenv("LEDGER_BALANCE_HISTORY_MAX_AGE_MS")
+	if raw == "" {
+		return ledger.DefaultBalanceHistoryMaxAgeMs
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_BALANCE_HISTORY_MAX_AGE_MS %q, using %d", raw, ledger.DefaultBalanceHistoryMaxAgeMs)
+		return ledger.DefaultBalanceHistoryMaxAgeMs
+	}
+	return n
 }
 
 // snapshotBackupKeep reads an integer env var for the backup worker;

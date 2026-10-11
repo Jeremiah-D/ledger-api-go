@@ -243,6 +243,11 @@ type Metrics struct {
 	// violations are detected inside the ledger package. Any nonzero
 	// value is an integrity incident — alert on it.
 	BalanceHealthViolations atomic.Uint64
+	// BalanceHistorySnapshots counts balance-history snapshot ticks
+	// completed by the background recorder (see
+	// LEDGER_BALANCE_HISTORY_DIR): one per tick that wrote rows, not per
+	// row — it measures that the time series is alive, not its volume.
+	BalanceHistorySnapshots atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -373,6 +378,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_balance_health_violations_total",
 		"Total balance-health violations found by the background health watchdog (advisory integrity signal; any nonzero value is an incident).",
 		m.BalanceHealthViolations.Load())
+	writeCounter(&sb, "ledger_balance_history_snapshots_total",
+		"Total balance-history snapshot ticks completed by the background recorder (one per tick, not per row).",
+		m.BalanceHistorySnapshots.Load())
 	writeCounter(&sb, "ledger_dry_runs_total",
 		"Total what-if dry-run requests received (POST /entries/dry-run, POST /transfers/dry-run, POST /sweeps/dry-run), including would-be rejections.",
 		m.DryRunRequests.Load())
