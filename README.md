@@ -585,6 +585,52 @@ aggregates per-category books in `account_type_totals` (sorted by type
 and currency — total assets, total liabilities, and so on), and
 `GET /metrics` exposes `ledger_chart_direction_rejections_total`.
 
+### Accruals (Go API: `AccrueInterest` / `AccrueFee` / `AccruedTotal` / `ReverseAccrual`)
+
+Systematic adjusting entries for interest and fees (fintech month-end
+accruals). One entry per (kind, expense account, payable account, UTC
+calendar day): debit the expense account, credit the payable account.
+Entry IDs are deterministic —
+`accrual/<kind>/<expense>/<payable>/<YYYY-MM-DD>` — so re-running a day's
+accrual is idempotent: the second call returns the original entry and
+books nothing new.
+
+```go
+// Daily interest at 5%/yr on a $10,000 principal: floor(1000000*500/10000/365).
+l.AccrueInterest("interest-expense", "interest-payable", 1000000, 500, asof, capCents)
+// A fixed fee accrual of exactly 2500 cents.
+l.AccrueFee("fee-expense", "fee-payable", 2500, asof, capCents)
+// Cumulative net accrual for the triple, over a time window.
+l.AccruedTotal("fee-expense", "fee-payable", ledger.AccrualKindFee, since, until)
+// Reverse one accrual: books the mirror entry under "<accrual ID>/reversal".
+l.ReverseAccrual(accrualID, asof)
+```
+
+`capCents` caps the cumulative net accrual: a run that would push the
+total over the cap is rejected with `ErrAccrualCapExceeded` and books
+nothing (zero disables capping; the cap check and the post run under the
+same write lock, so concurrent accruals cannot both slip past it).
+`ReverseAccrual` admits exactly one reversal per accrual — reversing
+twice returns the existing reversal — and `AccruedTotal` is net of
+reversals.
+
+Accruals are ordinary journal entries — own audit-chain link, version
+bump, covered by `VerifyAccountingEquation` and `Reconcile` — with two
+deliberate differences, mirroring the closing-entries design: they never
+fire the journal rules engine (system adjustments must not cascade
+operator-configured rules) and never enter dual-control review. They
+otherwise run the full `Post` gate order (validation, idempotency
+replay, chart direction, frozen, overdraft, daily-limit, period). The
+memo `accrual:<kind>` makes accrual rows discoverable via
+`GET /entries?memo=accrual:fee`.
+
+Note the chart interaction: accruals debit an expense and credit a
+liability — the normal direction under a registered chart — but their
+reversals debit the liability, which a strict chart rejects with
+`ErrAccountDirectionMismatch`. Reversing against a registered chart must
+route through a dedicated contra account; accounts that book reversals
+stay unregistered.
+
 ### Journal rules (`PUT /rules/{id}` / `DELETE /rules/{id}` / `GET /rules`)
 
 Opt-in automatic journaling: rules that match raw journal postings on
