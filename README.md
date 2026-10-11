@@ -484,8 +484,9 @@ list — a restore never silently reopens a closed month.
 The standard period-end close: with `?closing=true`, closing the period
 first books closing entries that zero the period's profit-and-loss
 accounts into a retained-earnings account, then locks the month. The P&L
-set and the retained-earnings account are opt-in structural config (no
-account-type classification is built in):
+set and the retained-earnings account are opt-in structural config (the
+chart-of-accounts types are a separate, optional control — see "Chart of
+accounts" below):
 
 ```bash
 curl -s -X PUT localhost:8080/closing-accounts \
@@ -545,6 +546,44 @@ curl -s -X POST localhost:8080/entries \
   -d '{"debit_account":"cash","credit_account":"cust-123","amount_cents":1000}'
 # 422 {"error":"ledger: posting would overdraw a protected account"}
 ```
+
+### Chart of accounts (Go API: `RegisterAccountType`)
+
+Opt-in five-category classification — `asset`, `liability`, `equity`,
+`revenue`, `expense` — with posting-direction enforcement on
+`POST /entries`, `POST /entries/batch`, and their dry-run twins. The
+debit leg must name an asset or expense account (a debit increases them)
+and the credit leg a liability, equity, or revenue account (a credit
+increases them); a reverse-direction posting is rejected with `422`
+(`ErrAccountDirectionMismatch`) and books nothing — no journal row, no
+chain link, no version bump.
+
+```go
+l.RegisterAccountType("cash", ledger.AccountTypeAsset)
+l.RegisterAccountType("loan", ledger.AccountTypeLiability)
+// debit loan / credit cash now fails: debiting a liability is the
+// reverse direction.
+```
+
+Unregistered accounts skip the check entirely, so a ledger that never
+registers anything posts exactly as before. Contra and clearing accounts
+that legitimately book both directions — a payable credited by accruals
+and debited by their reversals, an FX clearing account, suspense —
+should stay unregistered or use dedicated contra accounts: this is the
+strict statement-account control accounting software applies, not a
+blanket double-entry rule.
+
+Ordering: the direction check runs after the idempotency replay check
+and before the frozen check — a key posted before the account was
+registered still replays to its original entry, because the replay books
+nothing new. Registrations are structural config like the frozen-account
+list: they don't bump the journal version and they survive
+disaster-recovery snapshots (a tampered type fails the import instead of
+installing a classification that could never have been created). Each
+trial balance carries an `account_type` field, the reconcile report
+aggregates per-category books in `account_type_totals` (sorted by type
+and currency — total assets, total liabilities, and so on), and
+`GET /metrics` exposes `ledger_chart_direction_rejections_total`.
 
 ### Journal rules (`PUT /rules/{id}` / `DELETE /rules/{id}` / `GET /rules`)
 

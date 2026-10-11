@@ -129,6 +129,13 @@ type ReconciliationReport struct {
 	// currency). Operations tooling reads this to know which accounts
 	// alert on low balances and at what level.
 	LowBalanceThresholds []LowBalanceThreshold `json:"low_balance_thresholds"`
+	// AccountTypeTotals aggregates the chart-of-accounts categories
+	// (see RegisterAccountType), sorted by (type, currency): the
+	// per-category books across every registered account. Risk and
+	// compliance tooling reads this for statement-level rollups —
+	// total assets, total liabilities, and so on. Empty when no
+	// account has a registered type.
+	AccountTypeTotals []AccountTypeTotals `json:"account_type_totals"`
 	// HeldTotals is the per-currency rollup of active authorization
 	// holds (see hold.go) at report time, sorted by currency code: the
 	// cents currently reserved from available balances. Expired holds
@@ -346,6 +353,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
 		LowBalanceThresholds:       l.lowBalanceThresholdsLocked(),
+		AccountTypeTotals:          l.accountTypeTotalsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
 		FXRates:                    l.fxRatesLocked(),
 		FXRateVersions:             l.fxRateVersionReportLocked(),

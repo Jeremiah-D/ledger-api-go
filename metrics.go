@@ -58,6 +58,11 @@ type Metrics struct {
 	// 422 because they would have overdrawn an overdraft-protected
 	// account.
 	OverdraftRejections atomic.Uint64
+	// ChartDirectionRejections counts POST /entries, POST /entries/batch,
+	// and POST /entries/dry-run requests rejected with 422 because a
+	// leg of the entry booked against the account's registered
+	// chart-of-accounts type (see ledger.RegisterAccountType).
+	ChartDirectionRejections atomic.Uint64
 	// DailyLimitRejections counts POST /entries, POST /entries/batch,
 	// and POST /transfers requests rejected with 422 because they would
 	// have taken the account's cumulative outflow for the UTC day above
@@ -339,6 +344,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())
+	writeCounter(&sb, "ledger_chart_direction_rejections_total",
+		"Total POST /entries, POST /entries/batch, and POST /entries/dry-run requests rejected because a leg of the entry booked against the account's registered chart-of-accounts type.",
+		m.ChartDirectionRejections.Load())
 	writeCounter(&sb, "ledger_daily_limit_rejections_total",
 		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected because they would have taken the account's daily outflow above its configured limit.",
 		m.DailyLimitRejections.Load())

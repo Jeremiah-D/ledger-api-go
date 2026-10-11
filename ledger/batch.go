@@ -185,13 +185,17 @@ func (l *Ledger) PostBatch(b Batch) (BatchReceipt, error) {
 		}
 	}
 
-	// 5. Frozen checks on every new entry's legs. Replays book nothing
-	// new, so they are exempt — mirroring Post's replay-first order.
+	// 5. Chart direction + frozen checks on every new entry's legs
+	// (see chart.go). Replays book nothing new, so they are exempt —
+	// mirroring Post's replay-first order.
 	for i := range entries {
 		if replayed[i] {
 			continue
 		}
 		e := &entries[i]
+		if err := l.chartDirectionRejectedLocked(*e); err != nil {
+			return BatchReceipt{}, err
+		}
 		if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 			return BatchReceipt{}, ErrAccountFrozen
 		}

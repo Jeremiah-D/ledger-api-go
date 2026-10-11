@@ -146,7 +146,13 @@ type Ledger struct {
 	byAccount    map[AccountID][]string    // entry IDs per account, in Post order
 	debitTotals  map[accountCurrency]int64 // total cents ever debited per (account, currency)
 	creditTotals map[accountCurrency]int64 // total cents ever credited per (account, currency)
-	frozen       map[AccountID]bool        // risk-control stops; frozen accounts reject new posts (see freeze.go)
+	frozen       map[AccountID]bool // risk-control stops; frozen accounts reject new posts (see freeze.go)
+	// chart maps an account to its registered chart-of-accounts type
+	// (see chart.go): an opt-in posting-direction control. Accounts
+	// without a row here skip the direction check. Structural config,
+	// like frozen and noOverdraft: registering or clearing a type does
+	// not bump the journal version and survives snapshots.
+	chart map[AccountID]AccountType
 	// noOverdraft marks accounts guarded against overdrafts: a Post that
 	// would take a protected credit (payer) account below zero is rejected
 	// with ErrAccountOverdraft (see overdraft.go). Opt-in per account.
@@ -428,6 +434,7 @@ func New(opts ...Option) *Ledger {
 		debitTotals:          make(map[accountCurrency]int64),
 		creditTotals:         make(map[accountCurrency]int64),
 		frozen:               make(map[AccountID]bool),
+		chart:                make(map[AccountID]AccountType),
 		noOverdraft:          make(map[AccountID]bool),
 		dailyLimits:          make(map[dailyLimitKey]int64),
 		dailyOutflow:         make(map[dailyLimitKey]int64),
@@ -536,7 +543,12 @@ func validateJournalEntry(e *JournalEntry) error {
 // entry through it with ErrAccountFrozen. The frozen check runs after the
 // idempotency replay check: replaying a key that was posted before the
 // freeze returns the original entry instead of failing, because the replay
-// books nothing new. A credit (payer) account under overdraft protection
+// books nothing new. A posting whose legs book against the accounts'
+// registered chart-of-accounts types (see chart.go) — a debit leg on a
+// liability/equity/revenue account, or a credit leg on an asset/expense
+// account — is rejected with ErrAccountDirectionMismatch; the direction
+// check runs after the replay check and before the frozen check for the
+// same reason. A credit (payer) account under overdraft protection
 // (see overdraft.go) rejects any post that would take its balance below
 // zero with ErrAccountOverdraft; the check runs after the frozen check and
 // after the idempotency replay check for the same reason. A credit
@@ -549,7 +561,8 @@ func validateJournalEntry(e *JournalEntry) error {
 // period gate runs last overall, after the idempotency replay check, so
 // replaying a key posted before the period closed returns the original
 // entry. Rejected posts —
-// validation failures, frozen rejections, overdraft rejections,
+// validation failures, frozen rejections, chart-direction rejections,
+// overdraft rejections,
 // daily-limit rejections, and closed-period rejections alike —
 // record nothing: no journal row, no chain link, no version bump.
 //
@@ -572,7 +585,16 @@ func validateJournalEntry(e *JournalEntry) error {
 func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.postLocked(e, true)
+}
 
+// postLocked is Post's body. When fireRules is false, the journal rules
+// engine is skipped: the principal still clears every gate and commits a
+// full journal row (chain link, version bump, balance effects), but no
+// derived legs are evaluated. System postings that must not cascade
+// through operator-configured rules (accruals, see accrual.go) use the
+// skip path. Callers must hold the write lock.
+func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry, duplicate bool, err error) {
 	if err := validateJournalEntry(&e); err != nil {
 		return JournalEntry{}, false, err
 	}
@@ -581,6 +603,17 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 		if orig, ok := l.byKey[e.IdempotencyKey]; ok {
 			return orig, true, nil
 		}
+	}
+
+	// Chart-of-accounts direction control (see chart.go): a debit leg on
+	// a liability/equity/revenue account, or a credit leg on an
+	// asset/expense account, is rejected. Like the other account risk
+	// controls it runs after the idempotency replay check: replaying a
+	// key that was posted before the account was registered returns the
+	// original entry instead of failing, because the replay books
+	// nothing new. Rejected posts record nothing.
+	if err := l.chartDirectionRejectedLocked(e); err != nil {
+		return JournalEntry{}, false, err
 	}
 
 	if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
@@ -624,7 +657,10 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 
 	// Journal rules (see rules.go) fire only after the principal entry
 	// clears the full Post gate order above — validation, idempotency
-	// replay, frozen, overdraft, daily-limit, period. A replay returns the
+	// replay, chart direction, frozen, overdraft, daily-limit, period.
+	// When fireRules is false (system postings such as accruals), this
+	// block is skipped entirely: the principal commits as a full
+	// journal row without evaluating any rule. A replay returns the
 	// original entry without re-firing rules; a principal that fails any
 	// gate records nothing, derived legs included. Each derived leg
 	// re-runs the account risk gates in the same order (frozen, then
@@ -633,9 +669,13 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	// fails any gate rejects the whole Post, and the commit below is
 	// atomic across the principal and its derived legs — readers never
 	// observe a principal without its rule legs.
-	derived, ruleIDs, err := l.derivedRuleLegsLocked(e)
-	if err != nil {
-		return JournalEntry{}, false, err
+	var derived []JournalEntry
+	var ruleIDs []string
+	if fireRules {
+		derived, ruleIDs, err = l.derivedRuleLegsLocked(e)
+		if err != nil {
+			return JournalEntry{}, false, err
+		}
 	}
 
 	l.maybePruneIdempotencyKeys(time.Now())
@@ -872,6 +912,11 @@ type TrialBalance struct {
 	// per-currency thresholds live in the reconciliation report and on
 	// Ledger.LowBalanceThreshold.
 	LowBalanceThresholdCents int64 `json:"low_balance_threshold_cents"`
+	// AccountType reports the account's registered chart-of-accounts
+	// type (see RegisterAccountType): asset, liability, equity,
+	// revenue, or expense. Empty when the account is unregistered —
+	// unregistered accounts skip Post's direction check.
+	AccountType AccountType `json:"account_type,omitempty"`
 }
 
 // TrialBalance returns the double-entry breakdown of the given account at
@@ -894,6 +939,7 @@ func (l *Ledger) trialBalanceLocked(a AccountID) TrialBalance {
 		Currency:                 DefaultCurrency,
 		Version:                  l.version,
 		Frozen:                   l.frozen[a],
+		AccountType:              l.chart[a],
 		OverdraftProtected:       l.noOverdraft[a],
 		DailyLimitCents:          l.dailyLimits[dailyLimitKey{account: a, currency: DefaultCurrency}],
 		LowBalanceThresholdCents: l.lowBalanceThresholds[lowBalanceKey{account: a, currency: DefaultCurrency}],

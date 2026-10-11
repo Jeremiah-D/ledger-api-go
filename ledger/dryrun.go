@@ -87,6 +87,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		debitTotals:          make(map[accountCurrency]int64, len(l.debitTotals)),
 		creditTotals:         make(map[accountCurrency]int64, len(l.creditTotals)),
 		frozen:               make(map[AccountID]bool, len(l.frozen)),
+		chart:                make(map[AccountID]AccountType, len(l.chart)),
 		noOverdraft:          make(map[AccountID]bool, len(l.noOverdraft)),
 		dailyLimits:          make(map[dailyLimitKey]int64, len(l.dailyLimits)),
 		dailyOutflow:         make(map[dailyLimitKey]int64, len(l.dailyOutflow)),
@@ -135,6 +136,9 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	}
 	for k, v := range l.frozen {
 		c.frozen[k] = v
+	}
+	for k, v := range l.chart {
+		c.chart[k] = v
 	}
 	for k, v := range l.noOverdraft {
 		c.noOverdraft[k] = v

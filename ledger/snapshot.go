@@ -198,6 +198,13 @@ type snapshotConfigLine struct {
 	// months, so periods are part of the operational config like the
 	// frozen-account list.
 	ClosedPeriods []string `json:"closed_periods,omitempty"`
+	// AccountTypes carries the chart-of-accounts registrations (see
+	// RegisterAccountType), sorted by account; absent in snapshots
+	// written before the chart existed. A restore that dropped the
+	// chart would silently lift the posting-direction control, so
+	// registrations are part of the operational config like the
+	// frozen-account list.
+	AccountTypes []AccountTypeRegistration `json:"account_types,omitempty"`
 	// LowBalanceThresholds carries the low-balance alert levels (see
 	// SetLowBalanceThreshold); absent in snapshots written before
 	// low-balance alerts existed. The alert state (breached flags) is
@@ -636,6 +643,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		JournalRuleVersion:   l.journalRuleVersion,
 		RevalAccount:         l.revalAccount,
 		RevalBaselines:       l.revaluationPositionsLocked(),
+		AccountTypes:         l.accountTypesLocked(),
 	}
 	plAccounts, retainedEarnings := l.closingAccountsLocked()
 	if retainedEarnings != "" {
@@ -1341,6 +1349,18 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, a := range cfg.OverdraftProtected {
 		l.noOverdraft[a] = true
 	}
+	// Chart-of-accounts registrations restore like the frozen list: an
+	// empty account or an invalid type fails the import instead of
+	// installing a registration that could never have been created.
+	for _, reg := range cfg.AccountTypes {
+		if reg.Account == "" {
+			return bad("chart-of-accounts registration with empty account")
+		}
+		if !validAccountType(reg.Type) {
+			return bad("chart-of-accounts registration with invalid type %q", reg.Type)
+		}
+		l.chart[reg.Account] = reg.Type
+	}
 	for c, p := range cfg.Parents {
 		l.parents[c] = p
 	}
@@ -1640,6 +1660,12 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.noOverdraft, b.noOverdraft) {
+		return false
+	}
+	// Chart-of-accounts registrations must round-trip like the other
+	// structural config: a restore that dropped them would silently
+	// lift the posting-direction control.
+	if !reflect.DeepEqual(a.chart, b.chart) {
 		return false
 	}
 	if !reflect.DeepEqual(a.parents, b.parents) {

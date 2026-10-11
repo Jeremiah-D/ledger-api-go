@@ -118,6 +118,11 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrAccountDirectionMismatch) {
+			s.metrics.ChartDirectionRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -204,6 +209,11 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountDirectionMismatch) {
+			s.metrics.ChartDirectionRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -728,6 +738,11 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountDirectionMismatch) {
+			s.metrics.ChartDirectionRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
