@@ -179,6 +179,10 @@ type Metrics struct {
 	// settlement reports: the day-end reconciliation breaks an operator
 	// works through, not posting rejections.
 	SettlementAlerts atomic.Uint64
+	// AgingAlertsTotal counts AR aging overdue alerts across served
+	// aging reports (LG-50): accounts whose 61-90 + 90+ day overdue
+	// cents exceeded the report's alert threshold.
+	AgingAlertsTotal atomic.Uint64
 	// JournalRuleSetsTotal counts PUT /rules requests received (all
 	// attempts, including rejected payloads and illegal rules).
 	JournalRuleSetsTotal atomic.Uint64
@@ -344,6 +348,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_settlement_alerts_total",
 		"Total settlement mismatch alerts across served settlement reports.",
 		m.SettlementAlerts.Load())
+	writeCounter(&sb, "ledger_aging_alerts_total",
+		"Total AR aging overdue alerts across served aging reports.",
+		m.AgingAlertsTotal.Load())
 	writeCounter(&sb, "ledger_journal_rule_sets_total",
 		"Total PUT /rules requests received, including rejected payloads and illegal rules.",
 		m.JournalRuleSetsTotal.Load())

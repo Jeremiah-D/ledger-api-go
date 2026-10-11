@@ -2172,6 +2172,63 @@ func (s *server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleAging implements GET /aging, the operator-facing AR aging view
+// (LG-50): per-(account, currency) outstanding receivables decomposed by
+// age bucket (0-30 / 31-60 / 61-90 / 90+ days), FIFO-attributed from each
+// entry's business timestamp, with opt-in overdue alerts.
+//
+// Query parameters (all optional):
+//
+//	account            exact account filter; forces the row to appear even
+//	                   when the account's balance is not positive.
+//	asof               RFC3339 business date the ages are measured against;
+//	                   default now.
+//	alert_overdue_cents  flag every reported (account, currency) whose
+//	                   61-90 + 90+ day overdue cents exceed it; each hit
+//	                   emits an aging_alert audit event and bumps
+//	                   ledger_aging_alerts_total. Zero or negative
+//	                   disables alerting.
+//
+// Like GET /settlement, an alert finding is still a successful 200: the
+// report carries the alerts, and the HTTP layer does not turn findings
+// into errors.
+func (s *server) handleAging(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	var asof time.Time
+	if raw := q.Get("asof"); raw != "" {
+		var err error
+		asof, err = time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "asof must be RFC3339, e.g. 2026-10-10T00:00:00Z"})
+			return
+		}
+	}
+
+	var threshold int64
+	if raw := q.Get("alert_overdue_cents"); raw != "" {
+		var err error
+		threshold, err = strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "alert_overdue_cents must be an integer"})
+			return
+		}
+	}
+
+	report := s.ledger.Aging(time.Now(), ledger.AgingOptions{
+		AsOf:                       asof,
+		Account:                    ledger.AccountID(q.Get("account")),
+		OverdueAlertThresholdCents: threshold,
+	})
+	s.metrics.AgingAlertsTotal.Add(uint64(len(report.Alerts)))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := report.WriteJSON(w); err != nil {
+		log.Printf("ledger-api-go: GET /aging encode error: %v", err)
+	}
+}
+
 func newRouter(l *ledger.Ledger) http.Handler {
 	return newServer(l).handler()
 }
@@ -2211,6 +2268,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
+	mux.HandleFunc("GET /aging", s.handleAging)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
 	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)
 	mux.HandleFunc("POST /holds/{id}/capture", s.handleCaptureHold)

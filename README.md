@@ -1212,6 +1212,48 @@ Malformed `day` (`YYYY-MM-DD` required), `format`, `expected`, or
 `expected`/`tolerance` are validated by the ledger when the report runs
 (`abs_cents >= 0`, `0 <= bps <= 10000`).
 
+### `GET /aging`
+
+The AR aging view (LG-50): the collections question a payments operator
+asks — for each account that owes us money, how old is the outstanding
+balance, in which currency, and who is sitting on overdue receivables.
+The structural complement to the settlement view: settlement aggregates
+one day's *movement*, aging decomposes the outstanding *stock* by age.
+
+- **Unsettled = current balance**: the report attributes each
+  `(account, currency)` balance to age buckets — `0-30`, `31-60`,
+  `61-90`, `90+` days — measured from each entry's business timestamp
+  (`CreatedAt`) to the report's as-of time, so backdated entries age by
+  their business date. Only positive balances appear (negative-balance
+  accounts are not receivables); `?account=` forces one account's row to
+  appear regardless.
+- **FIFO attribution**: the outstanding balance is attributed to the
+  oldest entries first, and payments retire the oldest lots before newer
+  ones — a 90-day-old invoice paid last week does not read as overdue.
+  Bucket sums always add up to the current balance. Over-applied credit
+  parks at the payment's own age and is consumed by later debits.
+  Entries marked `PendingReview` are excluded: they are booked but not
+  effective, so including them would break the bucket/balance invariant.
+- **Overdue alerts**: overdue is the `61-90` + `90+` buckets.
+  `?alert_overdue_cents=1000` flags every reported `(account, currency)`
+  whose overdue cents exceed it — one `aging_alert` structured audit
+  event per breaching account and one row in the report's `alerts` list;
+  `ledger_aging_alerts_total` counts the hits. The threshold is per-call,
+  not stored config (like settlement tolerances), and re-fires on every
+  scan while in breach — aging is a point-in-time scan, not a crossing
+  event. Zero or negative disables alerting. Like `/settlement`, alerts
+  are always `200`.
+
+```bash
+# Who is overdue, as of a business date, alerting past 1000 cents
+curl -s 'localhost:8080/aging?asof=2026-10-10T00:00:00Z&alert_overdue_cents=1000'
+# One account's full decomposition
+curl -s 'localhost:8080/aging?account=cust-123'
+```
+
+Malformed `asof` (RFC3339 required) or `alert_overdue_cents` (integer
+required) are `400`.
+
 ### Disaster-recovery snapshots (`ledger/snapshot.go`)
 
 The ledger can be exported to a JSONL disaster-recovery snapshot and
@@ -1508,6 +1550,9 @@ curl -s localhost:8080/metrics
 - `ledger_settlement_alerts_total` — settlement mismatch alerts across
   served settlement reports: the day-end breaks an operator works
   through, not posting rejections.
+- `ledger_aging_alerts_total` — AR aging overdue alerts across served
+  `GET /aging` reports: accounts whose 61-90 + 90+ day overdue cents
+  exceeded the report's alert threshold.
 
 ## Running
 
