@@ -83,6 +83,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		balances:             make(map[accountCurrency]int64, len(l.balances)),
 		entries:              make(map[string]JournalEntry, len(l.entries)),
 		byKey:                make(map[string]JournalEntry, len(l.byKey)),
+		byRef:                make(map[string]string, len(l.byRef)),
 		byAccount:            make(map[AccountID][]string, len(l.byAccount)),
 		debitTotals:          make(map[accountCurrency]int64, len(l.debitTotals)),
 		creditTotals:         make(map[accountCurrency]int64, len(l.creditTotals)),
@@ -124,6 +125,9 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	}
 	for k, v := range l.byKey {
 		c.byKey[k] = v
+	}
+	for k, v := range l.byRef {
+		c.byRef[k] = v
 	}
 	for k, v := range l.byAccount {
 		c.byAccount[k] = append([]string(nil), v...)

@@ -109,6 +109,14 @@ type Transfer struct {
 	// same-currency principal whose credit leg is the payer.
 	Memo      string    `json:"memo,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+	// ExternalRef is the caller's external business reference for the
+	// transfer (see JournalEntry.ExternalRef): it is stamped on the
+	// principal journal entry (the fee leg carries none). On
+	// cross-currency transfers it rides the source-currency leg (the
+	// /fx leg, ID "<transfer ID>/fx"), mirroring the memo. At most 64
+	// UTF-8 characters (see ErrExternalRefTooLong); a reference that
+	// is already journaled is rejected with ErrDuplicateExternalRef.
+	ExternalRef string `json:"external_ref,omitempty"`
 }
 
 // TransferReceipt reports what PostTransfer committed.
@@ -460,6 +468,12 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	if err := checkMemoLength(t.Memo); err != nil {
 		return TransferReceipt{}, err
 	}
+	// The external reference is field validation, like the memo:
+	// longer than maxExternalRefRunes UTF-8 characters is rejected
+	// before anything is recorded, on both paths.
+	if err := checkExternalRefLength(t.ExternalRef); err != nil {
+		return TransferReceipt{}, err
+	}
 	if toCurrency != currency {
 		return l.postTransferFXLocked(t, toCurrency, time.Now())
 	}
@@ -491,6 +505,16 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	if feeEntryID != "" {
 		if _, exists := l.entries[feeEntryID]; exists {
 			return TransferReceipt{}, ErrTransferIDConflict
+		}
+	}
+	// External-reference uniqueness, like in Post: after the
+	// idempotency replay check (a replay returns the original receipt
+	// without consulting the reference index) and the ID-conflict
+	// checks, before anything books. The reference rides the
+	// principal entry on this path.
+	if t.ExternalRef != "" {
+		if owner, taken := l.byRef[t.ExternalRef]; taken {
+			return TransferReceipt{}, fmt.Errorf("%w: reference %q already journaled on entry %q", ErrDuplicateExternalRef, t.ExternalRef, owner)
 		}
 	}
 
@@ -540,6 +564,7 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		Currency:       t.Currency,
 		IdempotencyKey: t.IdempotencyKey,
 		Memo:           t.Memo,
+		ExternalRef:    t.ExternalRef,
 		CreatedAt:      t.CreatedAt,
 	}
 	if principal.CreatedAt.IsZero() {
@@ -621,6 +646,9 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	}
 	if t.Memo != "" {
 		transferDetails["memo"] = t.Memo
+	}
+	if t.ExternalRef != "" {
+		transferDetails["external_ref"] = t.ExternalRef
 	}
 	l.emitAudit(AuditEvent{
 		Op:            "transfer",
@@ -742,6 +770,15 @@ func (l *Ledger) commitEntryLocked(e JournalEntry) {
 	l.entries[e.ID] = e
 	if e.IdempotencyKey != "" {
 		l.byKey[e.IdempotencyKey] = e
+	}
+	// The external-reference index is maintained on the same commit
+	// path as the idempotency index: every journal row that carries a
+	// non-empty reference registers it here. Callers run the duplicate
+	// check before committing, so a row here never collides — except in
+	// restore folds (see snapshot.go and incremental.go), which rebuild
+	// the index from the journaled rows instead.
+	if e.ExternalRef != "" {
+		l.byRef[e.ExternalRef] = e.ID
 	}
 	l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
 	l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)

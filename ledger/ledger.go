@@ -56,6 +56,20 @@ type JournalEntry struct {
 	// rejected with a 400 before anything is recorded. Transfers carry
 	// the memo on the principal entry (see Transfer.Memo).
 	Memo string `json:"memo,omitempty"`
+	// ExternalRef is the caller's external business reference for the
+	// entry (a payment provider's transaction ID, an external order
+	// number, a reconciliation reference). Unlike the memo it is a
+	// uniqueness domain: within one ledger no two journal rows may
+	// carry the same non-empty external reference, so downstream
+	// systems can correlate journal rows with external records
+	// without ambiguity. At most 64 UTF-8 characters (see
+	// ErrExternalRefTooLong); a posting that would duplicate an
+	// already-journaled reference is rejected with
+	// ErrDuplicateExternalRef. The audit-chain hash covers it, like
+	// the memo, and GET /entries?ref= filters on it. Independent of
+	// the idempotency-key namespace: an idempotent replay returns the
+	// original entry without consulting the reference index.
+	ExternalRef string `json:"external_ref,omitempty"`
 	// PendingReview marks a journal row frozen by the large-transfer
 	// dual-control review (see review.go): the row is booked but not
 	// effective — balances, debit/credit totals, the ledger version,
@@ -82,6 +96,15 @@ var (
 	ErrInvalidCursor      = errors.New("ledger: pagination cursor is invalid")
 	ErrInvalidLimit       = errors.New("ledger: limit must be between 1 and 1000")
 	ErrMemoTooLong        = errors.New("ledger: memo must be at most 255 UTF-8 characters")
+	// ErrExternalRefTooLong is returned when a journal entry's external
+	// business reference exceeds maxExternalRefRunes UTF-8 characters.
+	ErrExternalRefTooLong = errors.New("ledger: external_ref must be at most 64 UTF-8 characters")
+	// ErrDuplicateExternalRef is returned when a posting carries an
+	// external business reference that is already journaled on another
+	// entry. The reference namespace is per ledger and independent of
+	// the idempotency-key namespace; an idempotent replay of the
+	// original entry does not consult it.
+	ErrDuplicateExternalRef = errors.New("ledger: external_ref already used by another journal entry")
 )
 
 // maxMemoRunes caps a journal entry's memo at 255 UTF-8 characters. Long
@@ -95,6 +118,23 @@ const maxMemoRunes = 255
 func checkMemoLength(memo string) error {
 	if utf8.RuneCountInString(memo) > maxMemoRunes {
 		return ErrMemoTooLong
+	}
+	return nil
+}
+
+// maxExternalRefRunes caps a journal entry's external business reference
+// at 64 UTF-8 characters. Long enough for a payment provider's
+// transaction ID or an external order number, short enough to keep the
+// reference index compact.
+const maxExternalRefRunes = 64
+
+// checkExternalRefLength rejects external references longer than
+// maxExternalRefRunes UTF-8 characters. Callers: validateJournalEntry
+// (Post and PostBatch entries), PostTransfer (transfer-level reference),
+// and Capture (capture-level reference).
+func checkExternalRefLength(ref string) error {
+	if utf8.RuneCountInString(ref) > maxExternalRefRunes {
+		return ErrExternalRefTooLong
 	}
 	return nil
 }
@@ -143,6 +183,7 @@ type Ledger struct {
 	balances     map[accountCurrency]int64
 	entries      map[string]JournalEntry   // by entry ID
 	byKey        map[string]JournalEntry   // by idempotency key
+	byRef        map[string]string         // by external_ref: non-empty reference -> entry ID
 	byAccount    map[AccountID][]string    // entry IDs per account, in Post order
 	debitTotals  map[accountCurrency]int64 // total cents ever debited per (account, currency)
 	creditTotals map[accountCurrency]int64 // total cents ever credited per (account, currency)
@@ -439,6 +480,7 @@ func New(opts ...Option) *Ledger {
 		balances:             make(map[accountCurrency]int64),
 		entries:              make(map[string]JournalEntry),
 		byKey:                make(map[string]JournalEntry),
+		byRef:                make(map[string]string),
 		byAccount:            make(map[AccountID][]string),
 		debitTotals:          make(map[accountCurrency]int64),
 		creditTotals:         make(map[accountCurrency]int64),
@@ -519,6 +561,12 @@ func validateJournalEntry(e *JournalEntry) error {
 	// longer than maxMemoRunes UTF-8 characters is rejected before
 	// anything is recorded.
 	if err := checkMemoLength(e.Memo); err != nil {
+		return err
+	}
+	// The external reference is field validation like the memo: a
+	// reference longer than maxExternalRefRunes UTF-8 characters is
+	// rejected before anything is recorded.
+	if err := checkExternalRefLength(e.ExternalRef); err != nil {
 		return err
 	}
 	// Currency is field validation, like the legs and the amount: an
@@ -612,6 +660,18 @@ func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry
 	if e.IdempotencyKey != "" {
 		if orig, ok := l.byKey[e.IdempotencyKey]; ok {
 			return orig, true, nil
+		}
+	}
+
+	// External-reference uniqueness is a journal-level constraint, not
+	// bookkeeping validation: it runs after the idempotency replay
+	// check — a replay of the original entry's own key returns the
+	// original instead of tripping on its own reference. It is
+	// independent of the idempotency-key namespace: the same key string
+	// may appear as a key on one entry and as a reference on another.
+	if e.ExternalRef != "" {
+		if owner, taken := l.byRef[e.ExternalRef]; taken {
+			return JournalEntry{}, false, fmt.Errorf("%w: reference %q already journaled on entry %q", ErrDuplicateExternalRef, e.ExternalRef, owner)
 		}
 	}
 
@@ -714,6 +774,9 @@ func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry
 	}
 	if e.Memo != "" {
 		postDetails["memo"] = e.Memo
+	}
+	if e.ExternalRef != "" {
+		postDetails["external_ref"] = e.ExternalRef
 	}
 	if len(ruleIDs) > 0 {
 		postDetails["rules_applied"] = ruleIDs
@@ -1052,18 +1115,22 @@ func (l *Ledger) VerifyAccountingEquation() error {
 // entry named by a cursor can never move. A cursor naming an entry outside
 // the requested window is rejected with ErrInvalidCursor.
 func (l *Ledger) ListEntries(since, until time.Time, cursor string, limit int) (page []JournalEntry, nextCursor string, err error) {
-	return l.ListEntriesFiltered(since, until, cursor, limit, "")
+	return l.ListEntriesFiltered(since, until, cursor, limit, "", "")
 }
 
-// ListEntriesFiltered is ListEntries with an additional memo keyword
-// filter (see JournalEntry.Memo): when memo is non-empty, only entries
-// whose memo contains it as a substring are returned. The keyword filter
-// composes with the time window and the cursor pagination — a cursor from
-// a filtered page resumes the same filtered sequence, because the cursor
-// names an entry by ID and the filter is re-applied before pagination.
-// The match is a case-sensitive substring search: memo notes are
-// identifiers (order IDs, invoice references), where case matters.
-func (l *Ledger) ListEntriesFiltered(since, until time.Time, cursor string, limit int, memo string) (page []JournalEntry, nextCursor string, err error) {
+// ListEntriesFiltered is ListEntries with additional memo keyword and
+// external-reference filters (see JournalEntry.Memo and
+// JournalEntry.ExternalRef): when memo is non-empty, only entries whose
+// memo contains it as a substring are returned; when ref is non-empty,
+// only entries whose external reference equals it exactly are returned.
+// The filters compose with each other, with the time window, and with
+// the cursor pagination — a cursor from a filtered page resumes the same
+// filtered sequence, because the cursor names an entry by ID and the
+// filters are re-applied before pagination. The memo match is a
+// case-sensitive substring search (memo notes are identifiers where case
+// matters); the ref match is an exact equality, because references are a
+// uniqueness domain.
+func (l *Ledger) ListEntriesFiltered(since, until time.Time, cursor string, limit int, memo, ref string) (page []JournalEntry, nextCursor string, err error) {
 	if limit < 1 || limit > maxPageSize {
 		return nil, "", ErrInvalidLimit
 	}
@@ -1082,6 +1149,9 @@ func (l *Ledger) ListEntriesFiltered(since, until time.Time, cursor string, limi
 			continue
 		}
 		if memo != "" && !strings.Contains(e.Memo, memo) {
+			continue
+		}
+		if ref != "" && e.ExternalRef != ref {
 			continue
 		}
 		filtered = append(filtered, e)

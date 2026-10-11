@@ -395,7 +395,7 @@ func reviewsEqual(a, b *TransferReview) bool {
 		ta.ToCurrency != tb.ToCurrency || ta.FXAccount != tb.FXAccount ||
 		ta.FeeCents != tb.FeeCents || ta.FeeAccount != tb.FeeAccount ||
 		ta.SkipFee != tb.SkipFee || ta.IdempotencyKey != tb.IdempotencyKey ||
-		ta.Memo != tb.Memo || ta.CreatedAt.UnixNano() != tb.CreatedAt.UnixNano() {
+		ta.Memo != tb.Memo || ta.ExternalRef != tb.ExternalRef || ta.CreatedAt.UnixNano() != tb.CreatedAt.UnixNano() {
 		return false
 	}
 	for i := range a.Entries {
@@ -672,6 +672,7 @@ func journalEntriesEqual(a, b JournalEntry) bool {
 		a.IdempotencyKey == b.IdempotencyKey &&
 		a.BatchID == b.BatchID &&
 		a.Memo == b.Memo &&
+		a.ExternalRef == b.ExternalRef &&
 		a.PendingReview == b.PendingReview &&
 		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano()
 }
@@ -988,6 +989,13 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 		l.entries[e.ID] = e
 		l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
 		l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
+		// The external-reference index is rebuilt the same way
+		// commitEntryLocked maintains it: the journaled rows are the
+		// source of truth, so the index is derived from them rather
+		// than exported separately.
+		if e.ExternalRef != "" {
+			l.byRef[e.ExternalRef] = e.ID
+		}
 		debitKey := accountCurrency{account: e.DebitAccount, currency: e.Currency}
 		creditKey := accountCurrency{account: e.CreditAccount, currency: e.Currency}
 		l.balances[debitKey] += e.AmountCents
@@ -1076,6 +1084,12 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 			l.entries[e.ID] = e
 			l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
 			l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
+			// Review-frozen rows claim their references at freeze
+			// time (see commitReviewEntryLocked), so the restore
+			// rebuilds them here too.
+			if e.ExternalRef != "" {
+				l.byRef[e.ExternalRef] = e.ID
+			}
 		}
 		l.reviews[id] = r
 	}

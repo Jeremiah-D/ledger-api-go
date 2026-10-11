@@ -507,6 +507,15 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 			return TransferReceipt{}, ErrTransferIDConflict
 		}
 	}
+	// External-reference uniqueness, like in PostTransfer: after the
+	// idempotency replay check and the ID-conflict checks, before
+	// anything books. The reference rides the /fx leg (the memo-carrying
+	// leg) on this path, not the principal.
+	if t.ExternalRef != "" {
+		if owner, taken := l.byRef[t.ExternalRef]; taken {
+			return TransferReceipt{}, fmt.Errorf("%w: reference %q already journaled on entry %q", ErrDuplicateExternalRef, t.ExternalRef, owner)
+		}
+	}
 
 	// Frozen and overdraft checks cover every account a leg touches. The
 	// payer's risk is entirely in the source currency: overdraft and the
@@ -557,6 +566,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 			AmountCents:   t.AmountCents,
 			Currency:      t.Currency,
 			Memo:          t.Memo,
+			ExternalRef:   t.ExternalRef,
 			CreatedAt:     t.CreatedAt,
 		},
 	}
@@ -644,6 +654,9 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	}
 	if t.Memo != "" {
 		fxDetails["memo"] = t.Memo
+	}
+	if t.ExternalRef != "" {
+		fxDetails["external_ref"] = t.ExternalRef
 	}
 	l.emitAudit(AuditEvent{
 		Op:            "transfer",

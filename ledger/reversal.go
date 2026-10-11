@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -90,6 +91,30 @@ func reversalMemoFor(entryID string) string {
 	return "reversal_of:" + entryID
 }
 
+// reversalRefPrefix is the external-reference prefix stamped on every
+// reversal entry that inherits one (see reversalExternalRefFor).
+const reversalRefPrefix = "reversal_of:"
+
+// reversalExternalRefFor derives the external reference of the reversal
+// of an entry: the "reversal_of:" prefix plus the original entry's
+// reference, so the reversal stays correlatable with the corrected
+// posting. An entry without a reference yields no inherited reference.
+// The concatenated value must still fit maxExternalRefRunes UTF-8
+// characters: an overlong inherited reference rejects the reversal with
+// ErrExternalRefTooLong (the design truncates nothing — silently
+// shortening a correlation identifier would corrupt downstream
+// reconciliation).
+func reversalExternalRefFor(origRef string) (string, error) {
+	if origRef == "" {
+		return "", nil
+	}
+	inherited := reversalRefPrefix + origRef
+	if err := checkExternalRefLength(inherited); err != nil {
+		return "", err
+	}
+	return inherited, nil
+}
+
 // reversalIDFor returns the deterministic journal entry ID of the
 // reversal of entryID.
 func reversalIDFor(entryID string) string {
@@ -167,6 +192,10 @@ func (l *Ledger) ReverseEntry(entryID string, idempotencyKey string) (reversal J
 	}
 
 	now := time.Now()
+	inheritedRef, err := reversalExternalRefFor(orig.ExternalRef)
+	if err != nil {
+		return JournalEntry{}, false, err
+	}
 	reversal = JournalEntry{
 		ID:             reversalID,
 		DebitAccount:   orig.CreditAccount,
@@ -175,10 +204,21 @@ func (l *Ledger) ReverseEntry(entryID string, idempotencyKey string) (reversal J
 		Currency:       orig.Currency,
 		IdempotencyKey: idempotencyKey,
 		Memo:           reversalMemoFor(entryID),
+		ExternalRef:    inheritedRef,
 		CreatedAt:      now,
 	}
 	if err := validateJournalEntry(&reversal); err != nil {
 		return JournalEntry{}, false, err
+	}
+	// External-reference uniqueness, like in Post: the inherited
+	// reference is deterministic ("reversal_of:<orig ref>"), so a
+	// collision can only come from a hand-posted row — but the journal
+	// stays append-only, so it is still rejected rather than
+	// overwritten.
+	if inheritedRef != "" {
+		if owner, taken := l.byRef[inheritedRef]; taken {
+			return JournalEntry{}, false, fmt.Errorf("%w: reference %q already journaled on entry %q", ErrDuplicateExternalRef, inheritedRef, owner)
+		}
 	}
 
 	// The risk gates run in Post order on the swapped legs: the reversal

@@ -37,6 +37,7 @@ type createEntryRequest struct {
 	Currency       string           `json:"currency"`
 	IdempotencyKey string           `json:"idempotency_key"`
 	Memo           string           `json:"memo"`
+	ExternalRef    string           `json:"external_ref"`
 }
 
 func newID() string {
@@ -103,6 +104,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		Currency:       req.Currency,
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
+		ExternalRef:    req.ExternalRef,
 		CreatedAt:      time.Now(),
 	}
 
@@ -194,6 +196,7 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		Currency:       req.Currency,
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
+		ExternalRef:    req.ExternalRef,
 		CreatedAt:      time.Now(),
 	}
 
@@ -249,6 +252,7 @@ type createTransferRequest struct {
 	SkipFee        bool             `json:"skip_fee"`
 	IdempotencyKey string           `json:"idempotency_key"`
 	Memo           string           `json:"memo"`
+	ExternalRef    string           `json:"external_ref"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
@@ -325,6 +329,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		SkipFee:        req.SkipFee,
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
+		ExternalRef:    req.ExternalRef,
 		CreatedAt:      time.Now(),
 	}
 	if req.ToCurrency != "" {
@@ -587,6 +592,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		SkipFee:        req.SkipFee,
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
+		ExternalRef:    req.ExternalRef,
 		CreatedAt:      time.Now(),
 	}
 
@@ -649,6 +655,7 @@ type batchEntryRequest struct {
 	Currency       string           `json:"currency"`
 	IdempotencyKey string           `json:"idempotency_key"`
 	Memo           string           `json:"memo"`
+	ExternalRef    string           `json:"external_ref"`
 }
 
 type createBatchRequest struct {
@@ -719,6 +726,7 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			Currency:       re.Currency,
 			IdempotencyKey: re.IdempotencyKey,
 			Memo:           re.Memo,
+			ExternalRef:    re.ExternalRef,
 			CreatedAt:      time.Now(),
 		})
 	}
@@ -1372,6 +1380,7 @@ type captureHoldRequest struct {
 	ToAccount      ledger.AccountID `json:"to_account"`
 	AmountCents    int64            `json:"amount_cents"`
 	IdempotencyKey string           `json:"idempotency_key"`
+	ExternalRef    string           `json:"external_ref"`
 }
 
 // handleCaptureHold implements POST /holds/{id}/capture, the settlement
@@ -1412,6 +1421,7 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 		To:             req.ToAccount,
 		AmountCents:    req.AmountCents,
 		IdempotencyKey: req.IdempotencyKey,
+		ExternalRef:    req.ExternalRef,
 		CreatedAt:      time.Now(),
 	})
 	if err != nil {
@@ -2640,8 +2650,9 @@ func (s *server) handleListAccountEntries(w http.ResponseWriter, r *http.Request
 // {"entries":[...], "next_cursor":"..."}; an empty next_cursor marks the last
 // page. Malformed timestamps, cursors, or limits return 400. An optional
 // ?memo= keyword filters to entries whose memo note contains it as a
-// case-sensitive substring; the filter composes with the time window and
-// cursor pagination (see ListEntriesFiltered).
+// case-sensitive substring; an optional ?ref= filters to the single entry
+// whose external_ref equals it exactly. Both filters compose with the time
+// window and cursor pagination (see ListEntriesFiltered).
 func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	since, until, limit, err := parseEntryListQuery(r.URL.Query())
 	if err != nil {
@@ -2649,7 +2660,7 @@ func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, next, err := s.ledger.ListEntriesFiltered(since, until, r.URL.Query().Get("cursor"), limit, r.URL.Query().Get("memo"))
+	page, next, err := s.ledger.ListEntriesFiltered(since, until, r.URL.Query().Get("cursor"), limit, r.URL.Query().Get("memo"), r.URL.Query().Get("ref"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

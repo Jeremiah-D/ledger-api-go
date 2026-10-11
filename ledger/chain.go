@@ -30,7 +30,10 @@ type chainLink struct {
 // "ab"+"c"); integers are fixed-width big-endian; CreatedAt uses UnixNano
 // so the encoding is independent of time.Location. The memo is covered
 // too: rewriting a journaled business note breaks the chain exactly like
-// rewriting an amount (see LG-38). The pending-review marker is covered
+// rewriting an amount (see LG-38). The external reference is covered
+// like the memo (see LG-57): rewriting a journaled correlation
+// identifier breaks the chain exactly like rewriting an amount. The
+// pending-review marker is covered
 // as a single fixed byte: flipping a frozen row to effective (or vice
 // versa) outside the approve path breaks the chain exactly like rewriting
 // an amount (see LG-42). All inputs come from the standard library — no
@@ -56,6 +59,7 @@ func hashChainLink(prevHash [32]byte, e JournalEntry) [32]byte {
 	writeString(e.Currency)
 	writeString(e.IdempotencyKey)
 	writeString(e.Memo)
+	writeString(e.ExternalRef)
 	if e.PendingReview {
 		h.Write([]byte{1})
 	} else {

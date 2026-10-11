@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"time"
 )
@@ -179,6 +180,28 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 			return BatchReceipt{}, ErrBatchDuplicateIdempotencyKey
 		}
 		newKeys[e.IdempotencyKey] = true
+	}
+
+	// 3b. External-reference uniqueness, atomically for the whole
+	// batch: a non-empty reference on a new entry must not repeat
+	// inside the batch, and must not collide with a reference already
+	// journaled. Replayed entries carry their original entry's
+	// reference (already indexed), so they skip both checks. One bad
+	// reference rejects the whole batch before the first journal row
+	// lands.
+	seenRefs := make(map[string]bool)
+	for i := range entries {
+		if replayed[i] || entries[i].ExternalRef == "" {
+			continue
+		}
+		ref := entries[i].ExternalRef
+		if seenRefs[ref] {
+			return BatchReceipt{}, ErrDuplicateExternalRef
+		}
+		seenRefs[ref] = true
+		if owner, taken := l.byRef[ref]; taken {
+			return BatchReceipt{}, fmt.Errorf("%w: reference %q already journaled on entry %q", ErrDuplicateExternalRef, ref, owner)
+		}
 	}
 
 	// 4. Entry-ID conflicts: a new entry must not reuse a journaled ID.

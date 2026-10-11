@@ -139,7 +139,13 @@ type Capture struct {
 	To             AccountID `json:"to_account"`
 	AmountCents    int64     `json:"amount_cents"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	// ExternalRef is the caller's external business reference for the
+	// capture (see JournalEntry.ExternalRef): it is stamped on the
+	// settlement journal entry. At most 64 UTF-8 characters (see
+	// ErrExternalRefTooLong); a reference already journaled is rejected
+	// with ErrDuplicateExternalRef.
+	ExternalRef string    `json:"external_ref,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // CaptureReceipt reports what Capture committed.
@@ -476,6 +482,12 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	if c.AmountCents <= 0 {
 		return CaptureReceipt{}, ErrCaptureNonPositiveAmount
 	}
+	// The external reference is field validation, like the amount: a
+	// reference longer than maxExternalRefRunes UTF-8 characters is
+	// rejected before anything is recorded.
+	if err := checkExternalRefLength(c.ExternalRef); err != nil {
+		return CaptureReceipt{}, err
+	}
 
 	if c.IdempotencyKey != "" {
 		if r, ok := l.captureKeys[c.IdempotencyKey]; ok {
@@ -504,6 +516,14 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	if _, exists := l.entries[c.ID]; exists {
 		return CaptureReceipt{}, ErrCaptureIDConflict
 	}
+	// External-reference uniqueness, like in Post: after the
+	// idempotency replay check (a replay returns the original receipt
+	// without consulting the reference index), before anything books.
+	if c.ExternalRef != "" {
+		if owner, taken := l.byRef[c.ExternalRef]; taken {
+			return CaptureReceipt{}, fmt.Errorf("%w: reference %q already journaled on entry %q", ErrDuplicateExternalRef, c.ExternalRef, owner)
+		}
+	}
 
 	if l.frozenLocked(h.Account) || l.frozenLocked(c.To) {
 		return CaptureReceipt{}, ErrAccountFrozen
@@ -515,6 +535,7 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		CreditAccount: h.Account,
 		AmountCents:   c.AmountCents,
 		Currency:      h.Currency,
+		ExternalRef:   c.ExternalRef,
 		CreatedAt:     c.CreatedAt,
 	}
 	if entry.CreatedAt.IsZero() {

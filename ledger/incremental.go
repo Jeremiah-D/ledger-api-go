@@ -640,6 +640,12 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	// in chain order.
 	for i, e := range staged {
 		l.entries[e.ID] = e
+		// The external-reference index is rebuilt from the journaled
+		// rows, the same way the snapshot restore does: staged rows
+		// are the source of truth.
+		if e.ExternalRef != "" {
+			l.byRef[e.ExternalRef] = e.ID
+		}
 		l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
 		l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
 		debitKey := accountCurrency{account: e.DebitAccount, currency: e.Currency}
@@ -669,6 +675,12 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	}
 	for _, e := range stagedReviewEntries {
 		l.entries[e.ID] = e
+		// Review-frozen rows claim their references at freeze time
+		// (see commitReviewEntryLocked), so the merge rebuilds them
+		// here too.
+		if e.ExternalRef != "" {
+			l.byRef[e.ExternalRef] = e.ID
+		}
 		l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
 		l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
 	}

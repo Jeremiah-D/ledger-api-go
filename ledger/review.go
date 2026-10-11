@@ -345,6 +345,15 @@ func (l *Ledger) commitReviewEntryLocked(e JournalEntry) {
 	if e.IdempotencyKey != "" {
 		l.byKey[e.IdempotencyKey] = e
 	}
+	// The external-reference index follows the same rule as the
+	// idempotency index: the reference is claimed when the transfer
+	// freezes (PostTransfer checks it before the review gate), so a
+	// second transfer with the same reference cannot sneak in while
+	// the review is pending. Approval settles the already-indexed
+	// rows without re-registering.
+	if e.ExternalRef != "" {
+		l.byRef[e.ExternalRef] = e.ID
+	}
 	l.byAccount[e.DebitAccount] = append(l.byAccount[e.DebitAccount], e.ID)
 	l.byAccount[e.CreditAccount] = append(l.byAccount[e.CreditAccount], e.ID)
 }

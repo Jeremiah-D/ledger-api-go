@@ -248,7 +248,7 @@ func TestReverseEntryMemoSearchable(t *testing.T) {
 	if _, _, err := l.ReverseEntry("e1", ""); err != nil {
 		t.Fatalf("ReverseEntry: %v", err)
 	}
-	page, _, err := l.ListEntriesFiltered(time.Time{}, time.Now().Add(time.Hour), "", 10, "reversal_of:e1")
+	page, _, err := l.ListEntriesFiltered(time.Time{}, time.Now().Add(time.Hour), "", 10, "reversal_of:e1", "")
 	if err != nil {
 		t.Fatalf("ListEntriesFiltered: %v", err)
 	}

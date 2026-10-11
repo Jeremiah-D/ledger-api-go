@@ -52,6 +52,16 @@ curl -s -X POST localhost:8080/entries \
   ID, an invoice reference, a reconciliation tag). It is journaled with
   the entry, covered by the audit-chain hash, queryable via
   `GET /entries?memo=`, and echoed by dry-run legs. Overlong memos → `400`.
+- `external_ref`: optional external business reference, at most 64 UTF-8
+  characters (a payment provider's transaction ID, an external order
+  number). Unlike the memo it is a **uniqueness domain**: no two journal
+  rows in the ledger may carry the same non-empty reference, so downstream
+  systems can correlate journal rows with external records unambiguously.
+  It is journaled with the entry, covered by the audit-chain hash,
+  queryable via `GET /entries?ref=` (exact match), and rejected with `400`
+  when overlong or duplicated. Independent of the idempotency-key
+  namespace: an idempotent replay returns the original entry without
+  consulting the reference index.
 
 ### `POST /entries/batch`
 
@@ -130,6 +140,10 @@ curl -s -X POST localhost:8080/transfers \
 - `memo` (optional, ≤ 255 UTF-8 characters) is carried onto the principal
   journal entry (on cross-currency transfers, onto the `<id>/fx`
   source-currency leg); the fee leg carries no memo.
+- `external_ref` (optional, ≤ 64 UTF-8 characters) follows the same leg
+  as the memo — the principal entry, or the `<id>/fx` leg on
+  cross-currency transfers; the fee leg carries none. A reference already
+  journaled on another entry rejects the transfer with `400`.
 
 #### Transfer fees
 
@@ -377,7 +391,12 @@ trigger journal rules or enter dual-control review. Reversing a transfer
 reverses one journal entry at a time: reverse the principal entry and its
 `<transfer ID>/fee` leg individually, each by its journal entry ID. A
 pending-review entry cannot be reversed (`409` — approve or reject the
-review instead). Reversals are searchable via `GET /entries?memo=reversal_of:`
+review instead). The reversal entry's memo is `reversal_of:<entry ID>`,
+and a reversed entry that carried an `external_ref` passes it on as
+`external_ref:"reversal_of:<original ref>"` (no reference when the
+original had none; if the prefixed value would exceed 64 UTF-8
+characters the reversal is rejected with `400` — references are never
+truncated). Reversals are searchable via `GET /entries?memo=reversal_of:`
 and counted by `ledger_reversals_total`.
 
 ### What-if dry-run (`POST /entries/dry-run`, `POST /transfers/dry-run`, `POST /sweeps/dry-run`)
@@ -805,7 +824,10 @@ Lifecycle: `active → captured | released | expired`. Captures are
 single-shot (one capture consumes the hold); release is idempotent. Hold
 and capture idempotency keys live in their own per-operation namespaces,
 independent of `POST /entries` and `POST /transfers` keys, and honor the
-same `LEDGER_IDEMPOTENCY_TTL`.
+same `LEDGER_IDEMPOTENCY_TTL`. A capture may carry `external_ref`
+(optional, ≤ 64 UTF-8 characters), which is stamped on the settlement
+journal entry; a reference already journaled on another entry rejects
+the capture with `400`.
 
 ```bash
 curl -s -X POST localhost:8080/holds \
@@ -1137,6 +1159,9 @@ curl -s 'localhost:8080/entries?since=2026-10-01T00:00:00Z&limit=100'
   time window and cursor pagination (a cursor from a filtered page resumes
   the same filtered sequence), so reconciliation tooling can page through
   every entry tagged with an order ID or invoice reference.
+- `ref`: optional exact-match filter — only the entry whose `external_ref`
+  equals it exactly is returned. It composes with the time window, the
+  `memo` filter, and cursor pagination.
 - Malformed timestamps, cursors, or limits → `400` with an `{"error": ...}` body.
 
 ### `GET /entries/verify`

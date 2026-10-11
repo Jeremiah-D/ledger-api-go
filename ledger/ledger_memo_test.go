@@ -55,7 +55,7 @@ func TestMemoListEntriesFilter(t *testing.T) {
 	mustPost("e4", "ORDER-123 refund")
 
 	// Keyword filter matches the substring, case-sensitively.
-	page, _, err := l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 100, "order-123")
+	page, _, err := l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 100, "order-123", "")
 	if err != nil {
 		t.Fatalf("ListEntriesFiltered: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestMemoListEntriesFilter(t *testing.T) {
 		t.Fatalf("memo filter = %v, want [e1]", idsOf(page))
 	}
 	// "paid" matches two entries.
-	page, _, err = l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 100, "paid")
+	page, _, err = l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 100, "paid", "")
 	if err != nil {
 		t.Fatalf("ListEntriesFiltered: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestMemoListEntriesFilter(t *testing.T) {
 		t.Fatalf("memo filter 'paid' = %v, want 2 entries", idsOf(page))
 	}
 	// Empty memo means no filter: all four entries.
-	page, _, err = l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 100, "")
+	page, _, err = l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 100, "", "")
 	if err != nil {
 		t.Fatalf("ListEntriesFiltered: %v", err)
 	}
@@ -80,11 +80,11 @@ func TestMemoListEntriesFilter(t *testing.T) {
 	}
 	// The filter composes with cursor pagination: page through a
 	// two-result filter one entry at a time.
-	page, next, err := l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 1, "paid")
+	page, next, err := l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 1, "paid", "")
 	if err != nil || next == "" || len(page) != 1 {
 		t.Fatalf("first filtered page = %v next=%q err=%v, want 1 entry + cursor", idsOf(page), next, err)
 	}
-	page, next, err = l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), next, 1, "paid")
+	page, next, err = l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), next, 1, "paid", "")
 	if err != nil || len(page) != 1 || next != "" {
 		t.Fatalf("second filtered page = %v next=%q err=%v, want last entry", idsOf(page), next, err)
 	}
@@ -97,7 +97,7 @@ func TestMemoListEntriesFilter(t *testing.T) {
 		}
 	}
 	mustPostLate()
-	page, _, err = l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 100, "paid")
+	page, _, err = l.ListEntriesFiltered(epoch, epoch.Add(time.Hour), "", 100, "paid", "")
 	if err != nil {
 		t.Fatalf("ListEntriesFiltered: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestReconcileKeepsMemoRetrievable(t *testing.T) {
 		t.Fatalf("reconcile: %s", report.AccountingError)
 	}
 	// The memo survives the end-of-day scan and stays queryable.
-	page, _, err := l.ListEntriesFiltered(time.Time{}, time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), "", 100, "order-555")
+	page, _, err := l.ListEntriesFiltered(time.Time{}, time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), "", 100, "order-555", "")
 	if err != nil {
 		t.Fatalf("ListEntriesFiltered: %v", err)
 	}

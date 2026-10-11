@@ -163,7 +163,7 @@ func TestClosePeriodWithClosing(t *testing.T) {
 	}
 
 	// Memo query finds the closing entries (LG-38 integration).
-	page, _, err := l.ListEntriesFiltered(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), "", 100, "closing:2026-09")
+	page, _, err := l.ListEntriesFiltered(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), "", 100, "closing:2026-09", "")
 	if err != nil {
 		t.Fatalf("ListEntriesFiltered: %v", err)
 	}
