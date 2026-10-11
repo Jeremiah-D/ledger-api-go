@@ -228,6 +228,13 @@ type snapshotConfigLine struct {
 	// restored ledger carries the same rule-set generation as the source.
 	JournalRules       []JournalRule `json:"journal_rules,omitempty"`
 	JournalRuleVersion uint64        `json:"journal_rule_version,omitempty"`
+	// ClosingPLAccounts and ClosingRetainedEarnings carry the opt-in
+	// period-closing account mapping (see SetClosingAccounts); absent in
+	// snapshots written before period-closing entries existed. A restore
+	// that dropped the mapping would leave closing unconfigured, so the
+	// mapping round-trips like the other structural config.
+	ClosingPLAccounts      []AccountID `json:"closing_pl_accounts,omitempty"`
+	ClosingRetainedEarnings AccountID  `json:"closing_retained_earnings,omitempty"`
 }
 
 // flatFeeRateBps reports the fee rate for snapshots read by legacy
@@ -618,6 +625,11 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		SettlementChannels:   l.settlementChannelsLocked(),
 		JournalRules:         l.journalRulesLocked(),
 		JournalRuleVersion:   l.journalRuleVersion,
+	}
+	plAccounts, retainedEarnings := l.closingAccountsLocked()
+	if retainedEarnings != "" {
+		cfg.ClosingPLAccounts = plAccounts
+		cfg.ClosingRetainedEarnings = retainedEarnings
 	}
 	if l.reviewExpiry > 0 {
 		cfg.ReviewExpiry = l.reviewExpiry.String()
@@ -1371,6 +1383,16 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, id := range cfg.ClosedPeriods {
 		l.closedPeriods[id] = true
 	}
+	// The period-closing account mapping restores like the other
+	// structural config: a restore that dropped it would silently
+	// disable period-closing entries. Snapshots written before closing
+	// support carry neither field, which restores as "not configured".
+	if cfg.ClosingRetainedEarnings != "" {
+		for _, a := range cfg.ClosingPLAccounts {
+			l.closingPL[a] = true
+		}
+		l.closingRetained = cfg.ClosingRetainedEarnings
+	}
 	// Review thresholds restore like the other risk controls: a restore
 	// that dropped them would silently stop reviewing large transfers.
 	for _, rt := range cfg.ReviewThresholds {
@@ -1564,6 +1586,13 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.journalRules, b.journalRules) {
+		return false
+	}
+	// The period-closing account mapping must round-trip too.
+	if a.closingRetained != b.closingRetained {
+		return false
+	}
+	if !reflect.DeepEqual(a.closingPL, b.closingPL) {
 		return false
 	}
 	if a.fxAccount != b.fxAccount {

@@ -281,6 +281,21 @@ type Ledger struct {
 	// Structural config like frozen — it survives snapshots and is
 	// listed in Reconcile.
 	closedPeriods  map[string]bool
+	// closingPL and closingRetained configure the opt-in period-closing
+	// mapping (see closing.go): the P&L accounts zeroed at period close
+	// and the retained-earnings account that receives them. An empty
+	// closingRetained disables closing. Structural config like frozen —
+	// it survives snapshots.
+	closingPL       map[AccountID]bool
+	closingRetained AccountID
+	// healthViolations counts balance-health violations found by the
+	// background watchdog (see health_watch.go): the number of
+	// "balance_health_violation" audit events emitted. In-memory only —
+	// it does not round-trip through snapshots. healthCursor is the
+	// atomic rotation cursor of the equation spot check: observability
+	// state, not books.
+	healthViolations uint64
+	healthCursor     atomic.Uint64
 	// balanceHook is the opt-in balance-change notification callback
 	// (see balance_hook.go): every committed Post/Transfer/Capture/
 	// Sweep/Merge dispatches one BalanceChange per touched (account,
@@ -417,6 +432,7 @@ func New(opts ...Option) *Ledger {
 		fxRates:              make(map[fxPair]ExchangeRate),
 		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
 		closedPeriods:        make(map[string]bool),
+		closingPL:            make(map[AccountID]bool),
 		journalRules:         make(map[string]JournalRule),
 		pruneInterval:        defaultKeyPruneInterval,
 	}

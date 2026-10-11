@@ -190,6 +190,21 @@ type Metrics struct {
 	// audit-log counters, so it stays meaningful even though the legs
 	// are committed inside the ledger package.
 	JournalRuleLegsTotal atomic.Uint64
+	// PeriodClosesTotal counts POST /periods/{id}/close requests
+	// received (all attempts, including rejected ones and plain closes
+	// without closing entries).
+	PeriodClosesTotal atomic.Uint64
+	// ClosingEntriesTotal counts period-closing journal entries
+	// committed by POST /periods/{id}/close?closing=true (see
+	// ledger.ClosePeriodWithClosing).
+	ClosingEntriesTotal atomic.Uint64
+	// BalanceHealthViolations counts balance-health violations found by
+	// the background health watchdog (see ledger.StartHealthWatch). It
+	// is synced from the ledger on every GET /metrics scrape, like the
+	// low-balance counter, so it stays meaningful even though the
+	// violations are detected inside the ledger package. Any nonzero
+	// value is an integrity incident — alert on it.
+	BalanceHealthViolations atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -296,6 +311,15 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_period_rejections_total",
 		"Total journal-writing requests rejected because the entry's timestamp fell in a closed accounting period: POST /entries, POST /entries/batch, POST /transfers, POST /sweeps, POST /merges, and POST /holds/{id}/capture.",
 		m.PeriodRejections.Load())
+	writeCounter(&sb, "ledger_period_closes_total",
+		"Total POST /periods/{id}/close requests received, including rejected ones and plain closes without closing entries.",
+		m.PeriodClosesTotal.Load())
+	writeCounter(&sb, "ledger_closing_entries_total",
+		"Total period-closing journal entries committed by POST /periods/{id}/close?closing=true.",
+		m.ClosingEntriesTotal.Load())
+	writeCounter(&sb, "ledger_balance_health_violations_total",
+		"Total balance-health violations found by the background health watchdog (advisory integrity signal; any nonzero value is an incident).",
+		m.BalanceHealthViolations.Load())
 	writeCounter(&sb, "ledger_dry_runs_total",
 		"Total what-if dry-run requests received (POST /entries/dry-run, POST /transfers/dry-run, POST /sweeps/dry-run), including would-be rejections.",
 		m.DryRunRequests.Load())

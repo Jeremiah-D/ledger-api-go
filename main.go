@@ -1740,6 +1740,13 @@ func (s *server) handleListJournalRules(w http.ResponseWriter, r *http.Request) 
 // (ErrPeriodClosed) by every journal-writing operation, so a closed
 // month's books cannot change — the compliance boundary for backdated
 // postings. Closing is idempotent; a malformed period ID fails 400.
+//
+// With ?closing=true the close also books the period's closing entries
+// (see ledger.ClosePeriodWithClosing): configured P&L accounts are
+// zeroed into the retained-earnings account, dated at the next month's
+// first instant. Without closing accounts configured the request fails
+// 400; a gate failure (frozen account, overdraft, daily limit, next
+// month closed) fails 422/403 and leaves the period open.
 func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -1748,6 +1755,45 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
+		return
+	}
+	s.metrics.PeriodClosesTotal.Add(1)
+	if r.URL.Query().Get("closing") == "true" {
+		receipt, err := s.ledger.ClosePeriodWithClosing(id)
+		if err != nil {
+			switch {
+			case errors.Is(err, ledger.ErrClosingNotConfigured),
+				errors.Is(err, ledger.ErrInvalidPeriodID),
+				errors.Is(err, ledger.ErrClosingRetainedInPLAccounts),
+				errors.Is(err, ledger.ErrClosingEmptyAccount):
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrClosingIDConflict):
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrAccountFrozen):
+				s.metrics.FrozenRejections.Add(1)
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrAccountOverdraft):
+				s.metrics.OverdraftRejections.Add(1)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrDailyLimitExceeded):
+				s.metrics.DailyLimitRejections.Add(1)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrPeriodClosed):
+				s.metrics.PeriodRejections.Add(1)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			default:
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			}
+			return
+		}
+		s.metrics.ClosingEntriesTotal.Add(uint64(len(receipt.Entries)))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"period":         receipt.Period,
+			"closed":         receipt.Closed,
+			"closing":        true,
+			"already_closed": receipt.AlreadyClosed,
+			"entries":        receipt.Entries,
+		})
 		return
 	}
 	if err := s.ledger.ClosePeriod(id); err != nil {
@@ -1776,6 +1822,74 @@ func (s *server) handleReopenPeriod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"period": id, "closed": false})
+}
+
+// closingAccountsRequest is the body of PUT /closing-accounts: the opt-in
+// P&L set and retained-earnings account for period-closing entries (see
+// ledger.SetClosingAccounts). An empty retained_earnings with no
+// pl_accounts clears the configuration.
+type closingAccountsRequest struct {
+	PLAccounts       []string `json:"pl_accounts"`
+	RetainedEarnings string   `json:"retained_earnings"`
+}
+
+// handleSetClosingAccounts implements PUT /closing-accounts: declares
+// which accounts are zeroed into retained earnings when a period closes
+// with ?closing=true. Structural config: no version bump, survives
+// snapshots, recorded in the audit chain.
+func (s *server) handleSetClosingAccounts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req closingAccountsRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	pl := make([]ledger.AccountID, 0, len(req.PLAccounts))
+	for _, a := range req.PLAccounts {
+		pl = append(pl, ledger.AccountID(a))
+	}
+	if err := s.ledger.SetClosingAccounts(pl, ledger.AccountID(req.RetainedEarnings)); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	plOut, retained := s.ledger.ClosingAccounts()
+	names := make([]string, 0, len(plOut))
+	for _, a := range plOut {
+		names = append(names, string(a))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pl_accounts": names, "retained_earnings": string(retained)})
+}
+
+// handleGetClosingAccounts implements GET /closing-accounts: returns the
+// configured period-closing account mapping.
+func (s *server) handleGetClosingAccounts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	pl, retained := s.ledger.ClosingAccounts()
+	names := make([]string, 0, len(pl))
+	for _, a := range pl {
+		names = append(names, string(a))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pl_accounts": names, "retained_earnings": string(retained)})
 }
 
 // reconcileRequest is the optional POST /reconcile body. base_currency
@@ -2108,6 +2222,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /rules", s.handleListJournalRules)
 	mux.HandleFunc("POST /periods/{id}/close", s.handleClosePeriod)
 	mux.HandleFunc("POST /periods/{id}/reopen", s.handleReopenPeriod)
+	mux.HandleFunc("PUT /closing-accounts", s.handleSetClosingAccounts)
+	mux.HandleFunc("GET /closing-accounts", s.handleGetClosingAccounts)
 	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)

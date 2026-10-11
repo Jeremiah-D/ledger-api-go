@@ -448,6 +448,45 @@ The reconcile report lists the locked periods (`closed_periods`), and
 period locks survive disaster-recovery snapshots like the frozen-account
 list — a restore never silently reopens a closed month.
 
+#### Closing entries (`POST /periods/{id}/close?closing=true`)
+
+The standard period-end close: with `?closing=true`, closing the period
+first books closing entries that zero the period's profit-and-loss
+accounts into a retained-earnings account, then locks the month. The P&L
+set and the retained-earnings account are opt-in structural config (no
+account-type classification is built in):
+
+```bash
+curl -s -X PUT localhost:8080/closing-accounts \
+  -d '{"pl_accounts":["revenue","expenses"],"retained_earnings":"retained"}'
+curl -s -X POST 'localhost:8080/periods/2026-09/close?closing=true'
+# {"period":"2026-09","closed":true,"closing":true,"entries":[...]}
+```
+
+Each (P&L account, currency) with a non-zero balance books one entry —
+debit-normal balances (expenses) post `{debit: retained, credit:
+account}`, credit-normal balances (revenue) post `{debit: account,
+credit: retained}` — dated at the next month's first instant
+(`2026-10-01T00:00:00Z`), so the locked month's books stay final and the
+new month opens with zeroed P&L accounts. Entry IDs are deterministic
+(`2026-09/closing/revenue/USD`) and each carries the memo
+`closing:2026-09`, so closes are idempotent and closing entries are
+queryable via `GET /entries?memo=closing:2026-09`.
+
+Closing entries are ordinary journal entries: they append audit-chain
+links, bump the version, and are covered by `VerifyAccountingEquation`
+and the reconcile report like any other posting. Two deliberate
+differences from `POST`: they do not fire the opt-in journal rules
+engine (derived business legs must not attach to a mechanical close),
+and they are never routed into dual-control review. Every entry clears
+the normal gate order (frozen → overdraft → daily limit → next-month
+period gate); the first failing gate aborts the whole close and the
+period **stays open** — never a silent half-close. Closing without
+configured accounts fails `400` (`ErrClosingNotConfigured`); re-closing
+an already-closed period is a no-op. The mapping survives
+disaster-recovery snapshots, and the close is recorded in the audit
+chain (`period_close` with closing details).
+
 ### Overdraft protection
 
 Per-account guard against negative balances (fintech risk control —
@@ -1436,6 +1475,15 @@ curl -s localhost:8080/metrics
 - `ledger_low_balance_breaches_total` — low-balance alert events emitted
   (advisory; the alert never rejects a posting). Synced from the ledger on
   every scrape, like the audit-log counters.
+- `ledger_period_closes_total` — every `POST /periods/{id}/close` request
+  received, including rejected ones and plain closes without closing
+  entries.
+- `ledger_closing_entries_total` — period-closing journal entries
+  committed by `POST /periods/{id}/close?closing=true`.
+- `ledger_balance_health_violations_total` — balance-health violations
+  found by the background health watchdog (advisory integrity signal).
+  Synced from the ledger on every scrape. Any nonzero value is an
+  incident — alert on it.
 - `ledger_holds_total` — every `POST /holds` request received.
 - `ledger_hold_idempotency_hits_total` — holds that replayed an existing
   idempotency key (returned the original hold, reserved nothing).
