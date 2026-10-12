@@ -747,35 +747,43 @@ curl -s -X POST localhost:8080/entries \
 # 422 {"error":"ledger: posting would exceed the account's daily outflow limit"}
 ```
 
-### Low-balance alert watermark
+### Balance threshold watches
 
-Per-account, per-currency opt-in alert level for fintech operations (low
-funding-source balances, merchant float monitoring). Configure with the
-`LEDGER_LOW_BALANCE_THRESHOLDS` environment variable or the
-`ledger.WithLowBalanceThreshold` / `SetLowBalanceThreshold` API. When a
-committed posting takes an account's balance below its threshold, the
-ledger records one structured audit event (`low_balance_breach`, carrying
-`account`, `currency`, `threshold_cents`, `balance_cents`, `version`) and
-bumps `ledger_low_balance_breaches_total`.
+Per-account, per-currency opt-in alert band for fintech operations (low
+funding-source balances, merchant float monitoring, treasury overflow
+detection): a low level, a high level, or both. Configure with the
+`LEDGER_BALANCE_WATCHES` environment variable
+(`"<account>:<currency>:<lowCents>:<highCents>,..."`, either level may be
+empty), the legacy `LEDGER_LOW_BALANCE_THRESHOLDS` (low side only), or
+the `ledger.WithBalanceWatch` / `SetBalanceWatch` API. When a committed
+posting takes an account's balance below the low level (or above the
+high level), the ledger records one structured audit event
+(`balance_threshold_breached`, carrying `account`, `currency`,
+`direction` (`"low"`/`"high"`), `threshold_cents`, `balance_cents`,
+`version`) and bumps `ledger_balance_watch_breaches_total`.
 
 The alert is advisory, never a risk-control rejection: postings are never
-blocked for crossing a threshold. Evaluation runs strictly after the
-atomic commit zone and reads balances through the read-only balance path,
-so it can never fail or alter a posting. One event fires per breach:
-further postings while the balance stays below the level are silent, and
-recovering to at or above the level re-arms the alert. Replays and
-rejected postings never fire. Setting or clearing a threshold is
-structural — no version bump — it survives disaster-recovery snapshots
-(the breach state is re-derived from the restored balances, so a restore
-never backfires stale alerts), each trial balance carries a
-`low_balance_threshold_cents` field (default currency), and the reconcile
-report lists every configured threshold (`low_balance_thresholds`).
+blocked for crossing a level. Evaluation runs strictly after the atomic
+commit zone and reads balances through the read-only balance path, so it
+can neither fail nor alter a posting. Edge-triggered, one event per
+breach: further postings while the balance stays outside the band are
+silent, and recovering inside the band re-arms the alert. Replays and
+rejected postings (frozen, overdraft, validation, ...) never fire —
+rejections book nothing, so they never evaluate. Setting or clearing a
+watch is structural — no version bump, and a config change never
+backfills stale alerts — it survives disaster-recovery snapshots (the
+breach state is re-derived from the restored balances, and pre-LG-61
+`low_balance_thresholds` snapshot entries import as low-only watches),
+each trial balance carries `low_balance_threshold_cents` /
+`high_balance_threshold_cents` (default currency), the reconcile report
+lists every watch (`balance_watches`), and watch CRUD itself is audited
+(`balance_watch_set` / `balance_watch_cleared`).
 
 ```bash
-LEDGER_LOW_BALANCE_THRESHOLDS="cust-123:USD:50000" ./ledger-api-go
+LEDGER_BALANCE_WATCHES="cust-123:USD:50000:,treasury:USD::10000000" ./ledger-api-go
 # post cust-123's USD balance below $500.00, then:
-curl -s localhost:8080/metrics | grep low_balance
-# ledger_low_balance_breaches_total 1
+curl -s localhost:8080/metrics | grep balance_watch
+# ledger_balance_watch_breaches_total 1
 ```
 
 ### Balance-change notification hooks

@@ -2654,7 +2654,7 @@ func (s *server) handler() http.Handler {
 				outboxWritten += written
 				outboxDropped += dropped
 			}
-			breaches += l.LowBalanceBreachCount()
+			breaches += l.BalanceWatchBreachCount()
 			ruleLegs += l.RuleLegsCommitted()
 			freezeReleases += l.FrozenAutoReleases()
 			healthViolations += l.HealthViolationCount()
@@ -2663,9 +2663,9 @@ func (s *server) handler() http.Handler {
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
 		s.metrics.OutboxEventsTotal.Store(outboxWritten)
 		s.metrics.OutboxDroppedTotal.Store(outboxDropped)
-		// The low-balance breach counter lives in the ledger too (the
+		// The balance-watch breach counter lives in the ledger too (the
 		// alert fires inside Post/Transfer/..., not in a handler).
-		s.metrics.LowBalanceBreaches.Store(breaches)
+		s.metrics.BalanceWatchBreaches.Store(breaches)
 		// The rules-engine leg counter likewise lives in the ledger: the
 		// legs commit inside Post, not in a handler.
 		s.metrics.JournalRuleLegsTotal.Store(ruleLegs)
@@ -2948,10 +2948,11 @@ func main() {
 	// low-balance alert levels (see ledger.ParseLowBalanceThresholds for
 	// the syntax, e.g. "cust-123:USD:50000,cust-456:EUR:-10000"). The
 	// first posting that takes an account's balance below its level emits
-	// one low_balance_breach audit event; the alert is advisory and never
-	// rejects a posting. Unset means no alert levels. An invalid value
-	// fails the startup fast (log.Fatal): a misconfigured alert level
-	// must never silently run unenforced.
+	// one balance_threshold_breached audit event (direction "low"); the
+	// alert is advisory and never rejects a posting. Unset means no alert
+	// levels. An invalid value fails the startup fast (log.Fatal): a
+	// misconfigured alert level must never silently run unenforced.
+	// (Legacy form of LEDGER_BALANCE_WATCHES below: low side only.)
 	if raw := os.Getenv("LEDGER_LOW_BALANCE_THRESHOLDS"); raw != "" {
 		thresholds, err := ledger.ParseLowBalanceThresholds(raw)
 		if err != nil {
@@ -2961,6 +2962,31 @@ func main() {
 			opts = append(opts, ledger.WithLowBalanceThreshold(lt.Account, lt.Currency, lt.ThresholdCents))
 		}
 		log.Printf("ledger-api-go: low-balance thresholds = %d configured", len(thresholds))
+	}
+
+	// LEDGER_BALANCE_WATCHES configures per-account per-currency balance
+	// threshold watches with a low and/or a high level (see
+	// ledger.ParseBalanceWatches for the syntax, e.g.
+	// "cust-123:USD:50000:,ops:EUR::-10000,treasury:USD:100000:5000000":
+	// an empty side leaves it unwatched). The first committed posting
+	// that takes a balance outside its band emits one
+	// balance_threshold_breached audit event with the direction; the
+	// alert is advisory and never rejects a posting. Unset means no
+	// watches. An invalid value fails the startup fast (log.Fatal), like
+	// every other risk control. When both variables configure the same
+	// (account, currency), this one wins (it is applied last).
+	if raw := os.Getenv("LEDGER_BALANCE_WATCHES"); raw != "" {
+		watches, err := ledger.ParseBalanceWatches(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		for _, w := range watches {
+			opts = append(opts, ledger.WithBalanceWatch(w.Account, w.Currency, ledger.BalanceWatchConfig{
+				LowCents:  w.LowCents,
+				HighCents: w.HighCents,
+			}))
+		}
+		log.Printf("ledger-api-go: balance watches = %d configured", len(watches))
 	}
 
 	// LEDGER_REVIEW_THRESHOLD configures the ledger-wide large-transfer

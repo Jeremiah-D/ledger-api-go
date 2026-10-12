@@ -184,13 +184,13 @@ type Metrics struct {
 	// response body). Any nonzero value is an integrity incident —
 	// alert on it.
 	AuditVerifyBreaks atomic.Uint64
-	// LowBalanceBreaches counts low-balance alert events emitted by the
-	// ledger (see ledger.SetLowBalanceThreshold). It is synced from the
+	// BalanceWatchBreaches counts balance-threshold alert events emitted
+	// by the ledger (see ledger.SetBalanceWatch). It is synced from the
 	// ledger on every GET /metrics scrape, like the audit-log counters,
 	// so it stays meaningful even though the events are produced inside
 	// the ledger package. The alert is advisory — it never rejects a
 	// posting — so this counter measures alert volume, not rejections.
-	LowBalanceBreaches atomic.Uint64
+	BalanceWatchBreaches atomic.Uint64
 	// TenantsTotal reports how many tenant ledgers are provisioned in
 	// the process (see ledger.TenantStore), synced on every GET /metrics
 	// scrape. A single-tenant deployment reports 1 (the default tenant).
@@ -352,9 +352,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_audit_verify_breaks_total",
 		"Total audit-log hash-chain verifications that found a broken chain.",
 		m.AuditVerifyBreaks.Load())
-	writeCounter(&sb, "ledger_low_balance_breaches_total",
-		"Total low-balance alert events emitted (advisory; never a rejection).",
-		m.LowBalanceBreaches.Load())
+	writeCounter(&sb, "ledger_balance_watch_breaches_total",
+		"Total balance-threshold alert events emitted (advisory; never a rejection).",
+		m.BalanceWatchBreaches.Load())
 	writeCounter(&sb, "ledger_tenants_total",
 		"Number of provisioned tenant ledgers in the process (1 for a single-tenant deployment).",
 		m.TenantsTotal.Load())

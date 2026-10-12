@@ -634,7 +634,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	}
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
-	l.evaluateLowBalanceLocked(touchedAccounts(entries), t.ID, "PostTransfer")
+	l.evaluateBalanceWatchesLocked(touchedAccounts(entries), t.ID, "PostTransfer")
 	fxDetails := map[string]any{
 		"amount_cents":    t.AmountCents,
 		"currency":        t.Currency,

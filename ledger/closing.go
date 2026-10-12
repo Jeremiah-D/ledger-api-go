@@ -344,7 +344,7 @@ func (l *Ledger) ClosePeriodWithClosing(id string) (ClosingReceipt, error) {
 
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
-	l.evaluateLowBalanceLocked(hookTouched, id, "ClosePeriodWithClosing")
+	l.evaluateBalanceWatchesLocked(hookTouched, id, "ClosePeriodWithClosing")
 
 	entryIDs := make([]string, 0, len(entries))
 	accounts := []AccountID{retained}

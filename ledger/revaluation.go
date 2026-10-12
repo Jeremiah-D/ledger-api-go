@@ -501,7 +501,7 @@ func (l *Ledger) RevalueBalances(asOf time.Time, baseCurrency string) (Revaluati
 		}
 		// Low-balance alert evaluation: strictly after the commit zone,
 		// read-only (see low_balance.go). Advisory only.
-		l.evaluateLowBalanceLocked(allTouched, fmt.Sprintf("revaluation@%d", asOfUnix), "RevalueBalances")
+		l.evaluateBalanceWatchesLocked(allTouched, fmt.Sprintf("revaluation@%d", asOfUnix), "RevalueBalances")
 		l.emitAudit(AuditEvent{
 			Op:            "revaluation",
 			Actor:         "RevalueBalances",

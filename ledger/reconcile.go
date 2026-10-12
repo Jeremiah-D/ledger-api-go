@@ -129,11 +129,11 @@ type ReconciliationReport struct {
 	// this to know which accounts are capped on daily outflow and at
 	// what level.
 	DailyLimits []DailyLimit `json:"daily_limits"`
-	// LowBalanceThresholds lists every configured low-balance alert
-	// level (see SetLowBalanceThreshold), sorted by (account,
-	// currency). Operations tooling reads this to know which accounts
-	// alert on low balances and at what level.
-	LowBalanceThresholds []LowBalanceThreshold `json:"low_balance_thresholds"`
+	// BalanceWatches lists every configured balance threshold watch
+	// (see SetBalanceWatch), sorted by (account, currency). Operations
+	// tooling reads this to know which accounts alert on balance
+	// levels and at what band.
+	BalanceWatches []BalanceWatch `json:"balance_watches"`
 	// AccountTypeTotals aggregates the chart-of-accounts categories
 	// (see RegisterAccountType), sorted by (type, currency): the
 	// per-category books across every registered account. Risk and
@@ -358,7 +358,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FrozenAccountAutoUnfreeze:  l.frozenUntilCopyLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
-		LowBalanceThresholds:       l.lowBalanceThresholdsLocked(),
+		BalanceWatches:             l.balanceWatchesLocked(),
 		AccountTypeTotals:          l.accountTypeTotalsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
 		FXRates:                    l.fxRatesLocked(),

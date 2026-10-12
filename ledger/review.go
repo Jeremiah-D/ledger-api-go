@@ -655,7 +655,7 @@ func (l *Ledger) ApproveTransferReview(transferID, reviewer string) (TransferRec
 	}
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
-	l.evaluateLowBalanceLocked(touchedAccounts(r.Entries), r.TransferID, "ApproveTransferReview")
+	l.evaluateBalanceWatchesLocked(touchedAccounts(r.Entries), r.TransferID, "ApproveTransferReview")
 	l.emitAudit(AuditEvent{
 		Op:            "transfer_review_approved",
 		Actor:         "ApproveTransferReview",

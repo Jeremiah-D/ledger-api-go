@@ -641,7 +641,7 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	}
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
-	l.evaluateLowBalanceLocked(touchedAccounts(entries), t.ID, "PostTransfer")
+	l.evaluateBalanceWatchesLocked(touchedAccounts(entries), t.ID, "PostTransfer")
 	transferDetails := map[string]any{
 		"amount_cents":   t.AmountCents,
 		"currency":       t.Currency,

@@ -205,11 +205,16 @@ type snapshotConfigLine struct {
 	// registrations are part of the operational config like the
 	// frozen-account list.
 	AccountTypes []AccountTypeRegistration `json:"account_types,omitempty"`
-	// LowBalanceThresholds carries the low-balance alert levels (see
-	// SetLowBalanceThreshold); absent in snapshots written before
-	// low-balance alerts existed. The alert state (breached flags) is
-	// re-derived from the restored balances on import — a restore must
-	// not backfire stale alerts.
+	// BalanceWatches carries the balance threshold watches (see
+	// SetBalanceWatch); absent in snapshots written before balance
+	// watches existed. The alert state (breach flags) is re-derived from
+	// the restored balances on import — a restore must not backfire
+	// stale alerts.
+	BalanceWatches []BalanceWatch `json:"balance_watches,omitempty"`
+	// LowBalanceThresholds is the pre-LG-61 form of BalanceWatches
+	// (see SetLowBalanceThreshold); it is still honored on import so
+	// older snapshots restore their low-side alerts, but exports never
+	// write it anymore.
 	LowBalanceThresholds []LowBalanceThreshold `json:"low_balance_thresholds,omitempty"`
 	// ReviewThresholds carries the per-account review thresholds (see
 	// SetReviewThreshold); absent in snapshots written before LG-42.
@@ -649,7 +654,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FXSnapshotVersion:    l.fxSnapshotVersion,
 		FXRateTableSnapshots: l.fxRateTableSnapshotsLocked(),
 		ClosedPeriods:        l.closedPeriodsLocked(),
-		LowBalanceThresholds: l.lowBalanceThresholdsLocked(),
+		BalanceWatches:         l.balanceWatchesLocked(),
 		ReviewThresholds:     l.reviewThresholdsLocked(),
 		ReviewThresholdCents: l.reviewThreshold,
 		SettlementChannels:   l.settlementChannelsLocked(),
@@ -1449,10 +1454,31 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		l.journalRules[r.ID] = r
 	}
 	l.journalRuleVersion = cfg.JournalRuleVersion
-	// Low-balance alert levels are validated like daily limits: an
+	// Balance threshold watches are validated like daily limits: an
 	// empty account or a bad currency fails the import instead of
-	// silently dropping an alert level. Negative thresholds are legal
-	// (a balance level, not an outflow).
+	// silently dropping an alert band. Negative levels are legal (a
+	// balance level, not an outflow); low must be below high when both
+	// are set. Snapshots written before LG-61 carry the legacy
+	// low_balance_thresholds list instead: those import as low-only
+	// watches, so old snapshots keep their alerts.
+	for _, w := range cfg.BalanceWatches {
+		if w.Account == "" {
+			return bad("balance watch with empty account")
+		}
+		cur, err := normalizeCurrency(w.Currency)
+		if err != nil {
+			return bad("bad balance watch currency %q: %v", w.Currency, err)
+		}
+		if err := checkBalanceWatchConfig(BalanceWatchConfig{LowCents: w.LowCents, HighCents: w.HighCents}); err != nil {
+			return bad("bad balance watch for %s/%s: %v", w.Account, cur, err)
+		}
+		l.balanceWatches[balanceWatchKey{account: w.Account, currency: cur}] = BalanceWatch{
+			Account:   w.Account,
+			Currency:  cur,
+			LowCents:  w.LowCents,
+			HighCents: w.HighCents,
+		}
+	}
 	for _, lt := range cfg.LowBalanceThresholds {
 		if lt.Account == "" {
 			return bad("low-balance threshold with empty account")
@@ -1461,7 +1487,16 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		if err != nil {
 			return bad("bad low-balance threshold currency %q: %v", lt.Currency, err)
 		}
-		l.lowBalanceThresholds[lowBalanceKey{account: lt.Account, currency: cur}] = lt.ThresholdCents
+		key := balanceWatchKey{account: lt.Account, currency: cur}
+		if _, ok := l.balanceWatches[key]; ok {
+			continue // the new-form watch wins on conflict
+		}
+		l.balanceWatches[key] = BalanceWatch{
+			Account:   lt.Account,
+			Currency:  cur,
+			LowCents:  int64ptr(lt.ThresholdCents),
+			HighCents: nil,
+		}
 	}
 	// The transfer fee policy: prefer the tiered schedule when present;
 	// otherwise rebuild the flat single-tier policy from the legacy
@@ -1547,12 +1582,11 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			revaluedAt:     rp.RevaluedAt,
 		}
 	}
-	// Re-derive the low-balance breach state from the restored
-	// balances: an account already below its threshold counts as
-	// breached, so the first posting after the restore does not backfire
-	// a stale alert. Silent — a restore emits no events and bumps no
-	// counters.
-	l.recomputeLowBalanceBreachesLocked()
+	// Re-derive the balance-watch breach state from the restored
+	// balances: an account already outside its band counts as breached,
+	// so the first posting after the restore does not backfire a stale
+	// alert. Silent — a restore emits no events and bumps no counters.
+	l.recomputeBalanceWatchBreachesLocked()
 	return nil
 }
 
@@ -1747,12 +1781,12 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	if !reflect.DeepEqual(a.dailyLimits, b.dailyLimits) {
 		return false
 	}
-	// Low-balance alert levels must round-trip; the breached flags are
+	// Balance threshold watches must round-trip; the breach flags are
 	// deliberately excluded, like the per-day outflow counters: a
 	// restore re-derives breach state from the restored balances (see
-	// recomputeLowBalanceBreachesLocked), and the live alert state may
+	// recomputeBalanceWatchBreachesLocked), and the live alert state may
 	// have legitimately moved on since the export.
-	if !reflect.DeepEqual(a.lowBalanceThresholds, b.lowBalanceThresholds) {
+	if !reflect.DeepEqual(a.balanceWatches, b.balanceWatches) {
 		return false
 	}
 	if !reflect.DeepEqual(a.feeTiers, b.feeTiers) || a.feeRevenueAccount != b.feeRevenueAccount {

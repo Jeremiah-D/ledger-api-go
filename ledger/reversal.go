@@ -256,7 +256,7 @@ func (l *Ledger) ReverseEntry(entryID string, idempotencyKey string) (reversal J
 	l.addDailyOutflowLocked(reversal.CreditAccount, reversal.Currency, reversal.AmountCents, reversal.CreatedAt)
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
-	l.evaluateLowBalanceLocked(hookTouched, reversalID, "ReverseEntry")
+	l.evaluateBalanceWatchesLocked(hookTouched, reversalID, "ReverseEntry")
 	l.emitAudit(AuditEvent{
 		Op:            "reverse",
 		Actor:         "ReverseEntry",

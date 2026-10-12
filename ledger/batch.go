@@ -327,7 +327,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 	}
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
-	l.evaluateLowBalanceLocked(touchedAccounts(entries), b.ID, "PostBatch")
+	l.evaluateBalanceWatchesLocked(touchedAccounts(entries), b.ID, "PostBatch")
 	l.emitAudit(AuditEvent{
 		Op:            "post_batch",
 		Actor:         "PostBatch",

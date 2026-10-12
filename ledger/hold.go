@@ -582,7 +582,7 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	}
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
-	l.evaluateLowBalanceLocked(touchedAccounts([]JournalEntry{entry}), c.HoldID, "Capture")
+	l.evaluateBalanceWatchesLocked(touchedAccounts([]JournalEntry{entry}), c.HoldID, "Capture")
 	l.emitAudit(AuditEvent{
 		Op:            "hold_capture",
 		Actor:         "Capture",

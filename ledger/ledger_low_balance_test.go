@@ -108,16 +108,19 @@ func TestLowBalanceBreachFiresOncePerBreach(t *testing.T) {
 	}
 	var breaches []AuditEvent
 	for _, ev := range events {
-		if ev.Op == "low_balance_breach" {
+		if ev.Op == "balance_threshold_breached" {
 			breaches = append(breaches, ev)
 		}
 	}
 	if len(breaches) != 2 {
-		t.Fatalf("low_balance_breach events = %d, want 2", len(breaches))
+		t.Fatalf("balance_threshold_breached events = %d, want 2", len(breaches))
 	}
 	b := breaches[0]
 	if b.Actor != "Post" || b.TraceID != "e1" {
 		t.Errorf("breach event = actor %q trace %q, want Post/e1", b.Actor, b.TraceID)
+	}
+	if b.Details["direction"] != "low" {
+		t.Errorf("breach direction = %v, want low", b.Details["direction"])
 	}
 	if b.Details["account"] != "cust-1" || b.Details["currency"] != "USD" {
 		t.Errorf("breach details account/currency = %v/%v, want cust-1/USD", b.Details["account"], b.Details["currency"])
@@ -251,15 +254,15 @@ func TestLowBalanceReconcileListsThresholds(t *testing.T) {
 		t.Fatalf("SetLowBalanceThreshold: %v", err)
 	}
 	report := l.Reconcile(time.Now())
-	if len(report.LowBalanceThresholds) != 2 {
-		t.Fatalf("low_balance_thresholds = %d, want 2", len(report.LowBalanceThresholds))
+	if len(report.BalanceWatches) != 2 {
+		t.Fatalf("balance_watches = %d, want 2", len(report.BalanceWatches))
 	}
 	// Sorted by (account, currency).
-	if report.LowBalanceThresholds[0].Account != "cust-a" || report.LowBalanceThresholds[0].ThresholdCents != 500 {
-		t.Errorf("thresholds[0] = %+v, want cust-a/USD/500", report.LowBalanceThresholds[0])
+	if report.BalanceWatches[0].Account != "cust-a" || *report.BalanceWatches[0].LowCents != 500 {
+		t.Errorf("watches[0] = %+v, want cust-a/USD low=500", report.BalanceWatches[0])
 	}
-	if report.LowBalanceThresholds[1].Account != "cust-b" || report.LowBalanceThresholds[1].ThresholdCents != -100 {
-		t.Errorf("thresholds[1] = %+v, want cust-b/EUR/-100", report.LowBalanceThresholds[1])
+	if report.BalanceWatches[1].Account != "cust-b" || *report.BalanceWatches[1].LowCents != -100 {
+		t.Errorf("watches[1] = %+v, want cust-b/EUR low=-100", report.BalanceWatches[1])
 	}
 }
 

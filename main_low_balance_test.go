@@ -11,7 +11,7 @@ import (
 )
 
 // TestMetricsLowBalanceBreaches drives a breach through the HTTP API and
-// checks that GET /metrics exposes the synced ledger_low_balance_breaches_total
+// checks that GET /metrics exposes the synced ledger_balance_watch_breaches_total
 // counter (the alert fires inside the ledger, not in a handler, so the
 // counter is synced on every scrape like the audit-log counters).
 func TestMetricsLowBalanceBreaches(t *testing.T) {
@@ -36,7 +36,7 @@ func TestMetricsLowBalanceBreaches(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "ledger_low_balance_breaches_total 1\n") {
-		t.Fatalf("metrics missing ledger_low_balance_breaches_total 1:\n%s", body)
+	if !strings.Contains(string(body), "ledger_balance_watch_breaches_total 1\n") {
+		t.Fatalf("metrics missing ledger_balance_watch_breaches_total 1:\n%s", body)
 	}
 }

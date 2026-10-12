@@ -2,99 +2,130 @@ package ledger
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 )
 
-// Low-balance alert watermark (LG-37).
+// Low-balance alert watermark (LG-37), now a facade over the unified
+// balance-watch engine (LG-61, see balance_watch.go).
 //
-// A low-balance threshold is an opt-in, per-account, per-currency alert
-// level: when a committed posting takes an account's balance below its
-// threshold, the ledger records one structured audit event
-// ("low_balance_breach") and bumps the breach counter. The alert is
-// advisory, never a risk-control rejection — postings are never blocked
-// for crossing a threshold — so the evaluation runs strictly after the
-// atomic commit zone (commitEntryLocked has returned, balances already
-// updated) and can never fail or alter a posting.
-//
-// Alert semantics:
-//   - One event per breach: the first posting that takes the balance
-//     below the threshold fires; further postings while the balance
-//     stays below are silent. When a posting brings the balance back to
-//     at or above the threshold, the alert re-arms, so the next fall
-//     below fires again.
-//   - The evaluation reads balances through the same view BalanceIn
-//     reports — read-only, never mutating accounting state, and never
-//     inside the write atomic zone.
-//   - Thresholds are structural config, like frozen accounts and daily
-//     outflow limits: setting or clearing one does not bump the ledger
-//     version, survives disaster-recovery snapshots, and is listed by
-//     Reconcile. Any int64 threshold is legal (negative thresholds are
-//     meaningful for accounts that can go negative).
-//   - Idempotent replays book nothing and never evaluate: a replayed
-//     key cannot fire a breach.
-
-// lowBalanceKey identifies one configured threshold: an account's alert
-// level in one currency.
-type lowBalanceKey struct {
-	account  AccountID
-	currency string
-}
+// The original LG-37 API only knew a low threshold; it is preserved here
+// so existing callers keep working, but it reads and writes the same
+// watch store SetBalanceWatch uses — there is exactly one threshold
+// system. A low threshold set through this facade is the low side of the
+// account's watch; any high side configured through SetBalanceWatch is
+// left untouched. Breach alerts surface as "balance_threshold_breached"
+// audit events with direction "low".
 
 // LowBalanceThreshold is one configured low-balance alert level, used by
-// the reconciliation report and the disaster-recovery snapshot.
+// the legacy threshold parser and by disaster-recovery snapshots written
+// before LG-61 (imports map it to the low side of a balance watch).
 type LowBalanceThreshold struct {
 	Account        AccountID `json:"account"`
 	Currency       string    `json:"currency"`
 	ThresholdCents int64     `json:"threshold_cents"`
 }
 
-// SetLowBalanceThreshold configures (or replaces) the low-balance alert
-// level for one account in one currency: the first committed posting
-// that takes the account's balance below thresholdCents emits one
-// low_balance_breach audit event. Setting a threshold is structural, like
-// SetDailyLimit or Freeze: it does not bump the ledger version (no
-// balances change). Replacing a threshold while the balance is already
-// below the new level does not fire: the alert only fires on a committed
-// posting that crosses the level, so a config change never backfills.
+// SetLowBalanceThreshold configures (or replaces) the low side of the
+// balance threshold watch for one account in one currency: the first
+// committed posting that takes the account's balance below
+// thresholdCents emits one balance_threshold_breached audit event
+// (direction "low"). A high side already configured on the watch is
+// preserved. Setting a threshold is structural, like SetDailyLimit or
+// Freeze: it does not bump the ledger version (no balances change).
+// Replacing the low level while the balance is already below it does not
+// fire: the alert only fires on a committed posting that crosses the
+// level, so a config change never backfills.
 func (l *Ledger) SetLowBalanceThreshold(a AccountID, currency string, thresholdCents int64) error {
+	if a == "" {
+		return ErrEmptyWatchAccount
+	}
 	currency, err := normalizeCurrency(currency)
 	if err != nil {
 		return err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lowBalanceThresholds[lowBalanceKey{account: a, currency: currency}] = thresholdCents
+	key := balanceWatchKey{account: a, currency: currency}
+	existing := l.balanceWatches[key]
+	cfg := BalanceWatchConfig{LowCents: int64ptr(thresholdCents), HighCents: existing.HighCents}
+	if err := checkBalanceWatchConfig(cfg); err != nil {
+		return err
+	}
+	l.setBalanceWatchLocked(a, currency, cfg)
 	return nil
 }
 
-// ClearLowBalanceThreshold removes the low-balance alert level for one
-// account in one currency, and clears its breach state. Clearing a
-// threshold that was never set is a no-op. Like SetLowBalanceThreshold,
-// it is structural and does not bump the ledger version.
+// ClearLowBalanceThreshold removes the low side of the balance threshold
+// watch for one account in one currency, and clears its low breach
+// state. A configured high side survives; when the low side was the only
+// side, the watch is removed entirely. Clearing a threshold that was
+// never set is a no-op. Like SetLowBalanceThreshold, it is structural
+// and does not bump the ledger version.
 func (l *Ledger) ClearLowBalanceThreshold(a AccountID, currency string) {
 	if currency == "" {
 		currency = DefaultCurrency
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := lowBalanceKey{account: a, currency: currency}
-	delete(l.lowBalanceThresholds, key)
-	delete(l.lowBalanceBreached, key)
+	key := balanceWatchKey{account: a, currency: currency}
+	w, ok := l.balanceWatches[key]
+	if !ok || w.LowCents == nil {
+		return
+	}
+	if w.HighCents == nil {
+		// The low side was the only side: remove the watch entirely.
+		// (Inlined rather than calling ClearBalanceWatch: the write
+		// lock is already held.)
+		delete(l.balanceWatches, key)
+		delete(l.balanceWatchBreached, key)
+		l.emitAudit(AuditEvent{
+			Op:       "balance_watch_cleared",
+			Actor:    "ClearLowBalanceThreshold",
+			Accounts: []AccountID{a},
+			Details: map[string]any{
+				"account":  string(a),
+				"currency": currency,
+			},
+		})
+		return
+	}
+	w.LowCents = nil
+	l.balanceWatches[key] = w
+	if st, breached := l.balanceWatchBreached[key]; breached {
+		st.low = false
+		if st.high {
+			l.balanceWatchBreached[key] = st
+		} else {
+			delete(l.balanceWatchBreached, key)
+		}
+	}
+	l.emitAudit(AuditEvent{
+		Op:       "balance_watch_set",
+		Actor:    "ClearLowBalanceThreshold",
+		Accounts: []AccountID{a},
+		Details: map[string]any{
+			"account":    string(a),
+			"currency":   currency,
+			"high_cents": *w.HighCents,
+		},
+	})
 }
 
-// LowBalanceThreshold reports the configured low-balance alert level for
-// one account in one currency, and whether a threshold is configured at
-// all.
+// LowBalanceThreshold reports the configured low side of the balance
+// threshold watch for one account in one currency, and whether a low
+// level is configured at all.
 func (l *Ledger) LowBalanceThreshold(a AccountID, currency string) (int64, bool) {
 	if currency == "" {
 		currency = DefaultCurrency
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	threshold, ok := l.lowBalanceThresholds[lowBalanceKey{account: a, currency: currency}]
-	return threshold, ok
+	w, ok := l.balanceWatches[balanceWatchKey{account: a, currency: currency}]
+	if !ok || w.LowCents == nil {
+		return 0, false
+	}
+	return *w.LowCents, true
 }
 
 // WithLowBalanceThreshold configures a low-balance alert level at
@@ -108,7 +139,12 @@ func WithLowBalanceThreshold(a AccountID, currency string, thresholdCents int64)
 		panic(fmt.Sprintf("ledger: invalid low-balance threshold currency %q: %v", currency, err))
 	}
 	return func(l *Ledger) {
-		l.lowBalanceThresholds[lowBalanceKey{account: a, currency: currency}] = thresholdCents
+		l.balanceWatches[balanceWatchKey{account: a, currency: currency}] = BalanceWatch{
+			Account:   a,
+			Currency:  currency,
+			LowCents:  int64ptr(thresholdCents),
+			HighCents: l.balanceWatches[balanceWatchKey{account: a, currency: currency}].HighCents,
+		}
 	}
 }
 
@@ -154,114 +190,9 @@ func ParseLowBalanceThresholds(raw string) ([]LowBalanceThreshold, error) {
 	return out, nil
 }
 
-// LowBalanceBreachCount reports how many low-balance breach alerts the
-// ledger has emitted since it started. The counter resets on restart —
-// alert history lives in the structured audit log (op
-// "low_balance_breach"), which is the durable record.
+// LowBalanceBreachCount is the LG-37 name for the breach counter; it is
+// kept as an alias of BalanceWatchBreachCount so existing callers keep
+// working. New code should prefer BalanceWatchBreachCount.
 func (l *Ledger) LowBalanceBreachCount() uint64 {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.lowBalanceBreaches
-}
-
-// touchedAccounts collects the (account, currency) pairs a committed
-// entry set touched, for post-commit low-balance evaluation. It dedupes
-// nothing; evaluateLowBalanceLocked dedupes before evaluating.
-func touchedAccounts(entries []JournalEntry) []accountCurrency {
-	out := make([]accountCurrency, 0, 2*len(entries))
-	for _, e := range entries {
-		out = append(out,
-			accountCurrency{account: e.DebitAccount, currency: e.Currency},
-			accountCurrency{account: e.CreditAccount, currency: e.Currency})
-	}
-	return out
-}
-
-// evaluateLowBalanceLocked evaluates low-balance thresholds for the given
-// (account, currency) pairs after a commit. Callers must hold l.mu (the
-// write lock, from a committing entrypoint) — the evaluation runs after
-// the atomic commit zone (commitEntryLocked has returned), reads balances
-// the same way BalanceIn does (read-only, never mutating accounting
-// state), and is advisory only: it can neither fail nor alter the
-// posting. The audit event and counter are the only effects.
-//
-// actor is the entrypoint name for the audit event ("Post",
-// "PostTransfer", ...), and traceID correlates the event with the
-// operation (entry ID, transfer/sweep/merge/batch ID, or hold ID).
-func (l *Ledger) evaluateLowBalanceLocked(touched []accountCurrency, traceID, actor string) {
-	seen := make(map[accountCurrency]bool, len(touched))
-	for _, k := range touched {
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
-		threshold, ok := l.lowBalanceThresholds[lowBalanceKey{account: k.account, currency: k.currency}]
-		if !ok {
-			continue
-		}
-		balance := l.balances[k]
-		breachKey := lowBalanceKey{account: k.account, currency: k.currency}
-		if balance < threshold {
-			// One event per breach: while the balance stays below the
-			// threshold, further postings are silent.
-			if l.lowBalanceBreached[breachKey] {
-				continue
-			}
-			l.lowBalanceBreached[breachKey] = true
-			l.lowBalanceBreaches++
-			l.emitAudit(AuditEvent{
-				Op:            "low_balance_breach",
-				Actor:         actor,
-				TraceID:       traceID,
-				VersionBefore: l.version,
-				VersionAfter:  l.version,
-				Accounts:      []AccountID{k.account},
-				Details: map[string]any{
-					"account":         string(k.account),
-					"currency":        k.currency,
-					"threshold_cents": threshold,
-					"balance_cents":   balance,
-					"version":         l.version,
-				},
-			})
-			continue
-		}
-		// Recovered to at or above the threshold: re-arm, silently, so
-		// the next fall below alerts again.
-		delete(l.lowBalanceBreached, breachKey)
-	}
-}
-
-// lowBalanceThresholdsLocked returns every configured low-balance alert
-// level, sorted by (account, currency), for the reconciliation report and
-// the snapshot. Callers must hold l.mu.
-func (l *Ledger) lowBalanceThresholdsLocked() []LowBalanceThreshold {
-	out := make([]LowBalanceThreshold, 0, len(l.lowBalanceThresholds))
-	for k, threshold := range l.lowBalanceThresholds {
-		out = append(out, LowBalanceThreshold{Account: k.account, Currency: k.currency, ThresholdCents: threshold})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Account != out[j].Account {
-			return out[i].Account < out[j].Account
-		}
-		return out[i].Currency < out[j].Currency
-	})
-	return out
-}
-
-// recomputeLowBalanceBreachesLocked re-derives the breach state from the
-// restored balances after a snapshot import: an (account, currency) whose
-// restored balance is already below its threshold counts as breached, so
-// the first posting after the restore does not backfire a stale alert.
-// It emits no events and touches no counters — a restore is not an
-// operation. Callers must hold the write lock.
-func (l *Ledger) recomputeLowBalanceBreachesLocked() {
-	for k, threshold := range l.lowBalanceThresholds {
-		breachKey := lowBalanceKey{account: k.account, currency: k.currency}
-		if l.balances[accountCurrency{account: k.account, currency: k.currency}] < threshold {
-			l.lowBalanceBreached[breachKey] = true
-		} else {
-			delete(l.lowBalanceBreached, breachKey)
-		}
-	}
+	return l.BalanceWatchBreachCount()
 }

@@ -104,8 +104,8 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		mergeKeys:            make(map[string]string, len(l.mergeKeys)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
 		closedPeriods:        make(map[string]bool, len(l.closedPeriods)),
-		lowBalanceThresholds: make(map[lowBalanceKey]int64, len(l.lowBalanceThresholds)),
-		lowBalanceBreached:   make(map[lowBalanceKey]bool, len(l.lowBalanceBreached)),
+		balanceWatches:       make(map[balanceWatchKey]BalanceWatch, len(l.balanceWatches)),
+		balanceWatchBreached: make(map[balanceWatchKey]watchBreachState, len(l.balanceWatchBreached)),
 		chain:                append([]chainLink(nil), l.chain...),
 		version:              l.version,
 		idempotencyTTL:       l.idempotencyTTL,
@@ -192,13 +192,22 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	for k, v := range l.closedPeriods {
 		c.closedPeriods[k] = v
 	}
-	for k, v := range l.lowBalanceThresholds {
-		c.lowBalanceThresholds[k] = v
+	for k, v := range l.balanceWatches {
+		// Deep-copy the level pointers: the twin must not alias the
+		// live ledger's watch configs.
+		w := BalanceWatch{Account: v.Account, Currency: v.Currency}
+		if v.LowCents != nil {
+			w.LowCents = int64ptr(*v.LowCents)
+		}
+		if v.HighCents != nil {
+			w.HighCents = int64ptr(*v.HighCents)
+		}
+		c.balanceWatches[k] = w
 	}
-	for k, v := range l.lowBalanceBreached {
-		c.lowBalanceBreached[k] = v
+	for k, v := range l.balanceWatchBreached {
+		c.balanceWatchBreached[k] = v
 	}
-	c.lowBalanceBreaches = l.lowBalanceBreaches
+	c.balanceWatchBreachCount = l.balanceWatchBreachCount
 	return c
 }
 
