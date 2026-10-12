@@ -294,6 +294,25 @@ type Ledger struct {
 	// populated.
 	fxSnapshotVersion uint64
 	fxRateSnapshots   map[uint64]FXRateTableSnapshot
+	// rateOverrides is the registry of manual FX rate overrides (see
+	// fx_override.go), keyed by directional pair: a pending override
+	// awaits a second operator's approval (maker-checker); an approved
+	// one is active until its ExpiresAt and prices the pair's FX
+	// conversions instead of the market rate. Overrides are
+	// operational state like transfer reviews — they do not round-trip
+	// through snapshots. rateOverrideTTL is the default override
+	// lifetime applied when SetRateOverride is called with a
+	// non-positive ttl; rateOverrideMaxDeviationBps caps
+	// |override-market|/market in basis points, enforced at proposal
+	// and re-checked at approval.
+	rateOverrides               map[fxPair]*RateOverride
+	rateOverrideTTL             time.Duration
+	rateOverrideMaxDeviationBps int64
+	// fxOverrideConversions counts cross-currency transfers converted
+	// at an approved manual override price (fx_rate_overridden audit
+	// events). In-memory only — it does not round-trip through
+	// snapshots.
+	fxOverrideConversions uint64
 	// transferKeys maps a transfer's idempotency key to the IDs of the
 	// journal entries it posted, in commit order (principal, then the fee
 	// leg when one was booked), so a replayed transfer returns its full
@@ -572,6 +591,12 @@ func New(opts ...Option) *Ledger {
 		scheduleFiring:       make(map[string]bool),
 		fxRates:              make(map[fxPair]ExchangeRate),
 		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
+		rateOverrides:        make(map[fxPair]*RateOverride),
+		// LG-69 defaults: one-hour override lifetime, 10% deviation
+		// cap. Both are construction-time config (see
+		// WithRateOverrideTTL / WithRateOverrideMaxDeviationBps).
+		rateOverrideTTL:             defaultRateOverrideTTL,
+		rateOverrideMaxDeviationBps: defaultRateOverrideMaxDeviationBps,
 		closedPeriods:        make(map[string]bool),
 		closingPL:            make(map[AccountID]bool),
 		journalRules:         make(map[string]JournalRule),

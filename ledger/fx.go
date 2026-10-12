@@ -434,8 +434,22 @@ type FXConversion struct {
 	RateExpiresAt    time.Time `json:"rate_expires_at,omitempty"`
 	// RateSnapshotVersion pins the conversion to one versioned copy of
 	// the rate table (see fx_snapshot.go); 0 is never emitted for a
-	// real conversion (a conversion implies a populated table).
+	// real conversion (a conversion implies a populated table). It
+	// refers to the market rate table; an overridden conversion's
+	// full provenance (proposer, approver, reason, both rates) lands
+	// on the fx_rate_overridden audit event instead.
 	RateSnapshotVersion uint64 `json:"rate_snapshot_version"`
+	// OverrideApplied reports whether the conversion priced at an
+	// approved manual rate override (see fx_override.go) instead of
+	// the market rate. When true, RateNum/RateDen, EffectiveVersion,
+	// and RateExpiresAt describe the override; MarketRateNum/
+	// MarketRateDen carry the market rate in effect at post time, and
+	// OverrideApprovedBy names the checker who approved it — the
+	// payee-side settlement is never silently re-priced.
+	OverrideApplied    bool   `json:"override_applied,omitempty"`
+	MarketRateNum      int64  `json:"market_rate_num,omitempty"`
+	MarketRateDen      int64  `json:"market_rate_den,omitempty"`
+	OverrideApprovedBy string `json:"override_approved_by,omitempty"`
 }
 
 // postTransferFXLocked records a cross-currency transfer: t.Currency is
@@ -480,6 +494,23 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	if !rate.ExpiresAt.IsZero() && !now.Before(rate.ExpiresAt) {
 		return TransferReceipt{}, ErrFXRateExpired
 	}
+	// Manual rate override (LG-69): an approved, unexpired override for
+	// the pair prices the conversion instead of the market rate. The
+	// override cleared maker-checker (proposed by one operator,
+	// approved by a second) and its deviation from the market rate was
+	// within the configured cap at both proposal and approval; its
+	// active window is the approval's TTL, and expiry is lazy by
+	// predicate (see fx_override.go), exactly like rate expiry above.
+	pair := fxPair{from: t.Currency, to: toCurrency}
+	effNum, effDen := rate.Num, rate.Den
+	effVersion := rate.EffectiveVersion
+	effExpiresAt := rate.ExpiresAt
+	override, overridden := l.activeRateOverrideLocked(pair, now)
+	if overridden {
+		effNum, effDen = override.Num, override.Den
+		effVersion = override.EffectiveVersion
+		effExpiresAt = override.ExpiresAt
+	}
 	fxAccount := t.FXAccount
 	if fxAccount == "" {
 		fxAccount = l.fxAccount
@@ -490,7 +521,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	if fxAccount == t.From || fxAccount == t.To {
 		return TransferReceipt{}, ErrInvalidFXAccount
 	}
-	converted, ok := fxConvertCents(t.AmountCents, rate.Num, rate.Den)
+	converted, ok := fxConvertCents(t.AmountCents, effNum, effDen)
 	if !ok {
 		return TransferReceipt{}, ErrAmountOverflow
 	}
@@ -598,17 +629,41 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		FromCurrency:     t.Currency,
 		ToCurrency:       toCurrency,
 		SourceCents:      t.AmountCents,
-		RateNum:          rate.Num,
-		RateDen:          rate.Den,
+		RateNum:          effNum,
+		RateDen:          effDen,
 		ConvertedCents:   converted,
-		EffectiveVersion: rate.EffectiveVersion,
-		RateExpiresAt:    rate.ExpiresAt,
+		EffectiveVersion: effVersion,
+		RateExpiresAt:    effExpiresAt,
 		// LG-45: pin the conversion to the current snapshot version —
 		// the receipt stays reproducible after the rate changes.
 		RateSnapshotVersion: l.fxSnapshotVersion,
 	}
+	if overridden {
+		fxConv.OverrideApplied = true
+		fxConv.MarketRateNum = rate.Num
+		fxConv.MarketRateDen = rate.Den
+		fxConv.OverrideApprovedBy = override.Approver
+	}
 	if receipt, reviewed, err := l.maybeReviewTransferLocked(t, entries, feeCents, tierIndex, rateBps, fxConv, totalOutflow, now); reviewed || err != nil {
+		// The override priced the frozen legs too: record the
+		// re-pricing before returning the review receipt.
+		if overridden {
+			l.fxOverrideConversions++
+			l.emitRateOverriddenAuditLocked(t, toCurrency, override, rate, converted)
+		}
 		return receipt, err
+	}
+
+	// Every conversion priced at an approved override is individually
+	// auditable: the event binds the transfer to the override's
+	// provenance (proposer, approver, reason, both rates, the measured
+	// deviation). Nothing after the review gate can fail, so emitting
+	// here covers the direct path exactly once — the review-frozen path
+	// emitted its event above. The counter feeds
+	// ledger_fx_rate_overridden_total.
+	if overridden {
+		l.fxOverrideConversions++
+		l.emitRateOverriddenAuditLocked(t, toCurrency, override, rate, converted)
 	}
 
 	// Atomic commit: journal rows, idempotency index, balances, totals,
@@ -616,8 +671,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// lock, after all checks passed.
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
-	versionBefore := l.version
-	// Pre-commit balance snapshot for the opt-in balance-change hook
+	versionBefore := l.version	// Pre-commit balance snapshot for the opt-in balance-change hook
 	// (see balance_hook.go): nil when no hook is registered.
 	hookTouched := touchedAccounts(entries)
 	hookOld := l.balanceSnapshotLocked(hookTouched)
@@ -655,6 +709,12 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		// the converted amount); this event binds them to the rate.
 		"rate_effective_version": rate.EffectiveVersion,
 		"fee_cents":              feeCents,
+	}
+	if overridden {
+		fxDetails["override_applied"] = true
+		fxDetails["override_rate"] = fmt.Sprintf("%d/%d", effNum, effDen)
+		fxDetails["market_rate"] = fmt.Sprintf("%d/%d", rate.Num, rate.Den)
+		fxDetails["override_approved_by"] = override.Approver
 	}
 	if t.Memo != "" {
 		fxDetails["memo"] = t.Memo

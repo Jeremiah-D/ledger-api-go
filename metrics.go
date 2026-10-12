@@ -284,6 +284,11 @@ type Metrics struct {
 	// cross-currency transfers for the pair are now rejected with
 	// ErrFXRateExpired until the operator installs a fresh rate.
 	FXRateExpiredTotal atomic.Uint64
+	// FXRateOverriddenTotal counts cross-currency transfers converted
+	// at an approved manual rate override (see ledger.SetRateOverride):
+	// fx_rate_overridden audit events. It is synced from the ledger on
+	// every GET /metrics scrape, like the rate-watch counters.
+	FXRateOverriddenTotal atomic.Uint64
 	// BalanceHistorySnapshots counts balance-history snapshot ticks
 	// completed by the background recorder (see
 	// LEDGER_BALANCE_HISTORY_DIR): one per tick that wrote rows, not per
@@ -437,6 +442,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_fx_rate_expired_total",
 		"Total fx_rate_expired alerts edge-triggered by the background FX-rate watch (rates whose expiry has passed; transfers for the pair are rejected until a fresh rate is installed).",
 		m.FXRateExpiredTotal.Load())
+	writeCounter(&sb, "ledger_fx_rate_overridden_total",
+		"Total cross-currency transfers converted at an approved manual rate override instead of the market rate (fx_rate_overridden audit events).",
+		m.FXRateOverriddenTotal.Load())
 	writeCounter(&sb, "ledger_balance_history_snapshots_total",
 		"Total balance-history snapshot ticks completed by the background recorder (one per tick, not per row).",
 		m.BalanceHistorySnapshots.Load())

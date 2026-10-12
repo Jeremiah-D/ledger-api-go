@@ -1047,6 +1047,28 @@ drops its mark. Unset or invalid interval disables the watcher; unset
 or invalid threshold disables stale warnings only — expiry alerts stay
 active.
 
+**Manual FX rate overrides (dual control).** When the feed is wrong — a
+stale quote, a market dislocation — an operator can propose a manual
+override price for one directional pair via `SetRateOverride(from, to,
+rate, ttl, reason, proposer)` (exact `*big.Rat` price; the reason is
+required). Maker-checker applies, following the transfer-review
+convention: the override takes effect only after a *second* operator
+approves it (`ApproveRateOverride`), and the proposer can never approve
+their own. Two guardrails bound the blast radius: the override may not
+deviate from the live market rate by more than the configured
+basis-points cap (default 10%, `WithRateOverrideMaxDeviationBps`,
+checked at proposal and re-checked at approval — a market that moved in
+between blocks the approval), and every override auto-expires
+(per-call TTL, default one hour via `WithRateOverrideTTL`;
+`ExpireRateOverrides` sweeps lapsed overrides). While active, the pair's
+FX transfers convert at the override price; each conversion emits an
+`fx_rate_overridden` audit event binding the transfer to the override's
+provenance (proposer, approver, reason, both rates, the measured
+deviation), the receipt discloses `override_applied` plus the market
+rate and approver, and `ledger_fx_rate_overridden_total` counts them.
+Overrides are operational state like transfer reviews — they do not
+round-trip through snapshots; after a restore, operators re-propose.
+
 #### FX revaluation (`POST /revaluations`)
 
 Period-end remeasurement: every non-base-currency balance is revalued at
@@ -2207,6 +2229,10 @@ curl -s localhost:8080/metrics
   edge-triggered by the background FX-rate watch (rates whose expiry
   has passed; transfers for the pair are rejected until a fresh rate is
   installed). Synced from the ledger on every scrape.
+- `ledger_fx_rate_overridden_total` — cross-currency transfers converted
+  at an approved manual rate override instead of the market rate
+  (`fx_rate_overridden` audit events). Synced from the ledger on every
+  scrape.
 - `ledger_balance_history_snapshots_total` — balance-history snapshot
   ticks completed by the background recorder (see
   `LEDGER_BALANCE_HISTORY_DIR` below). One per tick, not per row — it

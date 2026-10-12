@@ -2917,7 +2917,7 @@ func (s *server) handler() http.Handler {
 		// reports exactly what it always did.
 		var auditWritten, auditDropped, outboxWritten, outboxDropped uint64
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
-		var fxStaleAlerts, fxExpiredAlerts uint64
+		var fxStaleAlerts, fxExpiredAlerts, fxOverridden uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -2933,6 +2933,7 @@ func (s *server) handler() http.Handler {
 			healthViolations += l.HealthViolationCount()
 			fxStaleAlerts += l.FXRateStaleAlertCount()
 			fxExpiredAlerts += l.FXRateExpiredAlertCount()
+			fxOverridden += l.FXRateOverrideConversionCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -2957,6 +2958,10 @@ func (s *server) handler() http.Handler {
 		// ledger package, not in a handler.
 		s.metrics.FXRateStaleTotal.Store(fxStaleAlerts)
 		s.metrics.FXRateExpiredTotal.Store(fxExpiredAlerts)
+		// The manual-override conversion counter likewise lives in the
+		// ledger: conversions price inside the FX write path, not in a
+		// handler.
+		s.metrics.FXRateOverriddenTotal.Store(fxOverridden)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the
