@@ -268,6 +268,12 @@ type snapshotConfigLine struct {
 	// timed freeze into a manual one, so deadlines round-trip like the
 	// frozen-account list itself.
 	FrozenAutoUnfreeze []FrozenAutoUnfreeze `json:"frozen_auto_unfreeze,omitempty"`
+	// ClosedAccounts carries the terminal account-lifecycle records
+	// (see CloseAccount in close.go), sorted by account; absent in
+	// snapshots written before account closure existed. A restore that
+	// dropped them would silently reopen closed accounts to new
+	// postings, so closures round-trip like the frozen-account list.
+	ClosedAccounts []AccountClosure `json:"closed_accounts,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -670,6 +676,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		RevalBaselines:       l.revaluationPositionsLocked(),
 		AccountTypes:         l.accountTypesLocked(),
 		AccountTags:          l.accountTagsLocked(),
+		ClosedAccounts:       l.closedCopyLocked(),
 	}
 	plAccounts, retainedEarnings := l.closingAccountsLocked()
 	if retainedEarnings != "" {
@@ -1415,6 +1422,17 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// Apply: every row above checked out.
 	for _, a := range cfg.Frozen {
 		l.frozen[a] = true
+	}
+	// Account closures restore like the frozen list: an empty account
+	// fails the import instead of installing a closure that could never
+	// have been created. The closure record is restored verbatim,
+	// including the original ClosedAt — a restore must not move an
+	// account's terminal timestamp.
+	for _, c := range cfg.ClosedAccounts {
+		if c.Account == "" {
+			return bad("account closure with empty account")
+		}
+		l.closed[c.Account] = c
 	}
 	// Timed-freeze deadlines restore like the frozen list: an empty
 	// account fails the import instead of installing a deadline that

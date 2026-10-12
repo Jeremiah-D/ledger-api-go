@@ -115,6 +115,13 @@ type ReconciliationReport struct {
 	TrialBalances        []TrialBalance            `json:"trial_balances"`
 	Discrepancies        []TrialBalanceDiscrepancy `json:"discrepancies"`
 	FrozenAccounts       []AccountID               `json:"frozen_accounts"`
+	// ClosedAccounts lists the accounts in their terminal lifecycle
+	// state (see CloseAccount), sorted: no journal entry may book
+	// through any of them anymore, so the report's figures for those
+	// accounts are final. Balances, totals, and the audit chain still
+	// cover them — closing stops new activity, it never rewrites
+	// history.
+	ClosedAccounts []AccountID `json:"closed_accounts"`
 	// FrozenAccountAutoUnfreeze annotates every timed-frozen account
 	// with its scheduled automatic-unfreeze time (see FreezeUntil in
 	// freeze.go); manually frozen accounts are absent from the map.
@@ -362,6 +369,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		TrialBalances:              make([]TrialBalance, 0, len(l.balances)),
 		Discrepancies:              make([]TrialBalanceDiscrepancy, 0),
 		FrozenAccounts:             l.frozenAccountsLocked(),
+		ClosedAccounts:             l.closedAccountsLocked(),
 		FrozenAccountAutoUnfreeze:  l.frozenUntilCopyLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),

@@ -460,6 +460,9 @@ func (l *Ledger) derivedRuleLegsLocked(e JournalEntry) (derived []JournalEntry, 
 	// Frozen: every account a derived leg touches, mirroring
 	// PostTransfer's check on payer, payee, and fee account.
 	for _, d := range derived {
+		if l.closedLocked(d.DebitAccount) || l.closedLocked(d.CreditAccount) {
+			return nil, nil, ErrAccountClosed
+		}
 		if l.frozenLocked(d.DebitAccount) || l.frozenLocked(d.CreditAccount) {
 			return nil, nil, ErrAccountFrozen
 		}

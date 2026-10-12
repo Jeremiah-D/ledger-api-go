@@ -448,6 +448,8 @@ func (l *Ledger) RevalueBalances(asOf time.Time, baseCurrency string) (Revaluati
 		// enters dual-control review (see the package comment).
 		var gateErr error
 		switch {
+		case l.closedLocked(entry.DebitAccount) || l.closedLocked(entry.CreditAccount):
+			gateErr = ErrAccountClosed
 		case l.frozenLocked(entry.DebitAccount) || l.frozenLocked(entry.CreditAccount):
 			gateErr = ErrAccountFrozen
 		case l.overdraftRejectedLocked(entry):

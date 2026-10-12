@@ -229,6 +229,9 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		if err := l.chartDirectionRejectedLocked(*e); err != nil {
 			return BatchReceipt{}, err
 		}
+		if l.closedLocked(e.DebitAccount) || l.closedLocked(e.CreditAccount) {
+			return BatchReceipt{}, ErrAccountClosed
+		}
 		if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 			return BatchReceipt{}, ErrAccountFrozen
 		}

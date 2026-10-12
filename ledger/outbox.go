@@ -89,6 +89,7 @@ const (
 	OutboxHoldExpired     = "hold_expired"
 	OutboxAccountFrozen   = "account_frozen"
 	OutboxAccountUnfrozen = "account_unfrozen"
+	OutboxAccountClosed   = "account_closed"
 	OutboxReviewApproved  = "review_approved"
 	OutboxReviewRejected  = "review_rejected"
 	OutboxReviewExpired   = "review_expired"

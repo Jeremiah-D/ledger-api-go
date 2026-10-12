@@ -311,6 +311,9 @@ func (l *Ledger) ClosePeriodWithClosing(id string) (ClosingReceipt, error) {
 		if _, exists := l.entries[e.ID]; exists {
 			return ClosingReceipt{}, fmt.Errorf("%w: %s", ErrClosingIDConflict, e.ID)
 		}
+		if l.closedLocked(e.DebitAccount) || l.closedLocked(e.CreditAccount) {
+			return ClosingReceipt{}, ErrAccountClosed
+		}
 		if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 			return ClosingReceipt{}, ErrAccountFrozen
 		}

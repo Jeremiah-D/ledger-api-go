@@ -196,6 +196,13 @@ type Ledger struct {
 	// here; a manual Freeze stores the zero time by deleting any
 	// deadline, so a manual freeze never auto-releases.
 	frozenUntil map[AccountID]time.Time
+	// closed maps an account to its terminal lifecycle record (see
+	// close.go): a closed account rejects every write path that would
+	// book a new journal entry through it with ErrAccountClosed.
+	// Closing is irreversible, unlike the reversible freeze above, and
+	// the records are structural config — they do not bump the journal
+	// version and they survive snapshots.
+	closed map[AccountID]AccountClosure
 	// frozenAutoReleases counts automatic unfreezes (see FreezeUntil):
 	// every lazy write-path release and every background-sweeper (or
 	// explicit ExpireFrozenAccounts) release bumps it. Operational
@@ -525,6 +532,7 @@ func New(opts ...Option) *Ledger {
 		creditTotals:         make(map[accountCurrency]int64),
 		frozen:               make(map[AccountID]bool),
 		frozenUntil:          make(map[AccountID]time.Time),
+		closed:               make(map[AccountID]AccountClosure),
 		chart:                make(map[AccountID]AccountType),
 		tags:                 make(map[AccountID]map[string]string),
 		noOverdraft:          make(map[AccountID]bool),
@@ -733,6 +741,16 @@ func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry
 	// frozen gate below, so this Post sees the account unfrozen.
 	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
 
+	// A closed account (see close.go) is a terminal lifecycle state and
+	// the strongest of the account stops: it runs before the frozen
+	// gate below, and rejected posts record nothing, bump nothing, and
+	// leave the ledger version untouched. Like the frozen check it runs
+	// after the idempotency replay check: a replay books nothing new, so
+	// it must not fail on an account that closed after the original
+	// posting.
+	if l.closedLocked(e.DebitAccount) || l.closedLocked(e.CreditAccount) {
+		return JournalEntry{}, false, ErrAccountClosed
+	}
 	if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountFrozen
 	}
@@ -1016,6 +1034,12 @@ type TrialBalance struct {
 	// risk-control freeze (see Freeze). A frozen account keeps its
 	// balances and history; only new postings through it are rejected.
 	Frozen bool `json:"frozen"`
+	// Closed reports whether the account is closed (see CloseAccount):
+	// the terminal lifecycle state. A closed account keeps its
+	// balances and history forever, but no new journal entry may book
+	// through it — every write path rejects with ErrAccountClosed.
+	// Closing is irreversible, unlike the frozen stop above.
+	Closed bool `json:"closed"`
 	// OverdraftProtected reports whether the account is guarded against
 	// overdrafts (see EnableOverdraftProtection): Postings that would
 	// take the balance below zero are rejected with ErrAccountOverdraft.
@@ -1073,6 +1097,7 @@ func (l *Ledger) trialBalanceLocked(a AccountID) TrialBalance {
 		Currency:                 DefaultCurrency,
 		Version:                  l.version,
 		Frozen:                   l.frozen[a],
+		Closed:                   l.closedLocked(a),
 		AccountType:              l.chart[a],
 		OverdraftProtected:       l.noOverdraft[a],
 		DailyLimitCents:          l.dailyLimits[dailyLimitKey{account: a, currency: DefaultCurrency}],

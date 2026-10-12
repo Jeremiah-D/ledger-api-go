@@ -185,6 +185,14 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 		}
 	}
 
+	if l.closedLocked(s.To) {
+		return SweepReceipt{}, ErrAccountClosed
+	}
+	for _, from := range s.From {
+		if l.closedLocked(from) {
+			return SweepReceipt{}, ErrAccountClosed
+		}
+	}
 	if l.frozenLocked(s.To) {
 		return SweepReceipt{}, ErrAccountFrozen
 	}

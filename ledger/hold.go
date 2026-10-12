@@ -217,6 +217,9 @@ func (l *Ledger) Hold(h Hold) (held Hold, duplicate bool, err error) {
 	// after the original hold. Expired timed freezes release lazily
 	// before the frozen gate, like in Post (see FreezeUntil).
 	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
+	if l.closedLocked(h.Account) {
+		return Hold{}, false, ErrAccountClosed
+	}
 	if l.frozenLocked(h.Account) {
 		return Hold{}, false, ErrAccountFrozen
 	}
@@ -527,6 +530,9 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		}
 	}
 
+	if l.closedLocked(h.Account) || l.closedLocked(c.To) {
+		return CaptureReceipt{}, ErrAccountClosed
+	}
 	if l.frozenLocked(h.Account) || l.frozenLocked(c.To) {
 		return CaptureReceipt{}, ErrAccountFrozen
 	}

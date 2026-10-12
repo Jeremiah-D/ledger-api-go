@@ -228,6 +228,9 @@ func (l *Ledger) ReverseEntry(entryID string, idempotencyKey string) (reversal J
 	// freezes release lazily before the frozen gate, like in Post (see
 	// FreezeUntil).
 	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
+	if l.closedLocked(reversal.DebitAccount) || l.closedLocked(reversal.CreditAccount) {
+		return JournalEntry{}, false, ErrAccountClosed
+	}
 	if l.frozenLocked(reversal.DebitAccount) || l.frozenLocked(reversal.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountFrozen
 	}

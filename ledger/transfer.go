@@ -523,6 +523,10 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	// rejecting transfers.
 	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
 
+	if l.closedLocked(t.From) || l.closedLocked(t.To) ||
+		(feeAccount != "" && l.closedLocked(feeAccount)) {
+		return TransferReceipt{}, ErrAccountClosed
+	}
 	if l.frozenLocked(t.From) || l.frozenLocked(t.To) ||
 		(feeAccount != "" && l.frozenLocked(feeAccount)) {
 		return TransferReceipt{}, ErrAccountFrozen

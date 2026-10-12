@@ -521,6 +521,10 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// payer's risk is entirely in the source currency: overdraft and the
 	// daily limit both guard the total outflow (amount + fee) against the
 	// source-currency balance, never against the converted amount.
+	if l.closedLocked(t.From) || l.closedLocked(t.To) || l.closedLocked(fxAccount) ||
+		(feeAccount != "" && l.closedLocked(feeAccount)) {
+		return TransferReceipt{}, ErrAccountClosed
+	}
 	if l.frozenLocked(t.From) || l.frozenLocked(t.To) || l.frozenLocked(fxAccount) ||
 		(feeAccount != "" && l.frozenLocked(feeAccount)) {
 		return TransferReceipt{}, ErrAccountFrozen

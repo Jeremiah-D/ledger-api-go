@@ -486,6 +486,44 @@ timed freezes with their deadline (`frozen_account_auto_unfreeze_at`),
 and each trial balance carries a `frozen` flag, so the day-end job shows
 which accounts were stopped.
 
+### `POST /accounts/{id}/close` — account lifecycle close
+
+The terminal lifecycle state of an account (Go: `ledger.CloseAccount`,
+`ledger.IsClosed`). Where the freeze above is a *reversible* risk-control
+stop, closing is **irreversible**: there is no unclose. A closed account
+rejects every write path that would book a new journal entry through it —
+`POST /entries`, batches, transfers (principal *and* fee legs), FX
+transfers, reversals, sweeps, merges, holds and hold captures, closing
+entries, revaluation entries, and journal-rule derived legs — with
+`403` (`ledger.ErrAccountClosed`, counted separately as
+`ledger_closed_rejections_total`). Reads are unaffected by design:
+balance, snapshot, trial-balance, per-account entries, chain verification,
+and reconcile keep working, so risk and reconciliation tooling can keep
+watching a closed account forever.
+
+```bash
+curl -s -X POST localhost:8080/accounts/cash/close
+# {"account":"cash","closed":true,"already_closed":false,"closed_at":"2026-10-12T05:56:05Z","cascade":false}
+```
+
+Closing is idempotent: re-closing returns the original closure record
+(`already_closed: true`) instead of an error, mirroring the idempotency
+replay contract — an operator retry after a crash never creates a second
+record. The idempotency-key replay check also runs *before* the closed
+gate, so a key posted before the closure still replays to its original
+entry (the replay books nothing new). Closing never bumps the ledger
+version (balances are unchanged) and never touches the journal or the
+audit chain; it is recorded as an `account_close` structured audit event
+plus one `account_closed` outbox event per closed account, and closures
+round-trip through snapshots (a disaster-recovery restore must not
+silently reopen closed accounts). The trial balance carries a `closed`
+flag and the reconcile report lists `closed_accounts`.
+
+With `{"cascade": true}`, the close propagates to the whole sub-account
+subtree (`POST /accounts/{id}/parent` hierarchy) in the same call — the
+merchant-offboarding path; each member gets its own closure record with
+the same `closed_at`.
+
 ### Period close (`POST /periods/{id}/close` / `POST /periods/{id}/reopen`)
 
 Accounting-period lock for month-end close (fintech compliance). A period
@@ -1211,7 +1249,7 @@ curl -s localhost:8080/accounts/cash/trial-balance
 #  "version":3,"frozen":false}
 ```
 
-The response also carries `frozen`, `overdraft_protected`,
+The response also carries `frozen`, `closed`, `overdraft_protected`,
 `daily_limit_cents`, and `low_balance_threshold_cents` for the default
 currency (`0` means the corresponding control is not configured there;
 per-currency levels live in the reconcile report).
@@ -1984,6 +2022,12 @@ curl -s localhost:8080/metrics
   requests served.
 - `ledger_ofx_exports_total` — `GET /accounts/{id}/ofx` OFX statement
   exports served.
+- `ledger_account_closes_total` — `POST /accounts/{id}/close` requests
+  that closed an account (idempotent replays are not counted: they close
+  nothing new).
+- `ledger_closed_rejections_total` — the same set of write requests as
+  `ledger_frozen_rejections_total`, rejected with `403` because an
+  account involved was closed.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
 - `ledger_reconcile_export_runs_total` — `POST /reconcile/export`

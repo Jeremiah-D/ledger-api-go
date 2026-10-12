@@ -587,6 +587,9 @@ func (l *Ledger) ApproveTransferReview(transferID, reviewer string) (TransferRec
 	// hold's legs. The idempotency replay check does not apply here —
 	// approval is its own idempotent operation, handled above.
 	for _, e := range r.Entries {
+		if l.closedLocked(e.DebitAccount) || l.closedLocked(e.CreditAccount) {
+			return TransferReceipt{}, ErrAccountClosed
+		}
 		if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 			return TransferReceipt{}, ErrAccountFrozen
 		}

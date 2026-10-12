@@ -55,6 +55,16 @@ type Metrics struct {
 	// POST /transfers, POST /sweeps, POST /merges, and hold requests
 	// rejected with 403 because an account involved was frozen.
 	FrozenRejections atomic.Uint64
+	// ClosedRejections counts the same set of requests rejected with 403
+	// because an account involved was closed (see ledger.CloseAccount):
+	// the terminal lifecycle state rejects like the frozen stop, but is
+	// counted separately so operators can tell lifecycle closes apart
+	// from risk-control freezes.
+	ClosedRejections atomic.Uint64
+	// AccountClosesTotal counts POST /accounts/{id}/close requests that
+	// closed an account (idempotent replays are not counted: they close
+	// nothing new).
+	AccountClosesTotal atomic.Uint64
 	// FreezeAutoReleasesTotal counts automatic account unfreezes: timed
 	// freezes (see ledger.FreezeUntil) whose deadline passed, released
 	// by the write-path lazy check, the background freeze sweeper, or an
@@ -301,6 +311,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_frozen_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, and hold requests rejected because an account was frozen.",
 		m.FrozenRejections.Load())
+	writeCounter(&sb, "ledger_closed_rejections_total",
+		"Total POST /entries, POST /entries/batch, POST /transfers, and hold requests rejected because an account was closed.",
+		m.ClosedRejections.Load())
+	writeCounter(&sb, "ledger_account_closes_total",
+		"Total POST /accounts/{id}/close requests that closed an account.", m.AccountClosesTotal.Load())
 	writeCounter(&sb, "ledger_holds_total",
 		"Total POST /holds requests received.", m.HoldsTotal.Load())
 	writeCounter(&sb, "ledger_hold_idempotency_hits_total",

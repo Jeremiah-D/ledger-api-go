@@ -123,6 +123,10 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 
 	posted, duplicate, err := s.ledgerFor(r).Post(entry)
 	if err != nil {
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -218,6 +222,10 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		// The same status the real POST /entries would return, so a
 		// client can swap the /dry-run suffix for the real endpoint and
 		// keep its error handling unchanged.
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -351,6 +359,10 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 
 	receipt, err := s.ledgerFor(r).PostTransfer(transfer)
 	if err != nil {
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -459,6 +471,10 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 		if errors.Is(err, ledger.ErrReviewNotPending) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
+		}
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -612,6 +628,10 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 	result, err := s.ledgerFor(r).DryRunTransfer(transfer)
 	if err != nil {
 		// The same status the real POST /transfers would return.
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -752,6 +772,10 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 
 	receipt, err := s.ledgerFor(r).PostBatch(batch)
 	if err != nil {
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -839,6 +863,10 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      time.Now(),
 	})
 	if err != nil {
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -895,6 +923,10 @@ func (s *server) handleDryRunSweep(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		// The same status the real POST /sweeps would return.
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -962,6 +994,10 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      time.Now(),
 	})
 	if err != nil {
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -1033,6 +1069,10 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAlreadyReversed) || errors.Is(err, ledger.ErrReversalOfPendingReview) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
+		}
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1364,6 +1404,10 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      time.Now(),
 	})
 	if err != nil {
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -1441,6 +1485,10 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrHoldNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 			return
+		}
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -2070,6 +2118,53 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
+// handleCloseAccount implements POST /accounts/{id}/close: the
+// terminal account lifecycle state (see ledger.CloseAccount). A closed
+// account rejects every new POST /entries, POST /transfers, hold,
+// sweep, merge, reversal, batch, and closing entry through it with 403,
+// while balance, snapshot, trial-balance, entries, chain verification,
+// and the end-of-day reconcile keep working. Closing is irreversible —
+// there is no unclose — and idempotent: re-closing returns the original
+// closure record (with "already_closed": true) instead of failing.
+//
+// The optional {"cascade": true} body closes the account's whole
+// sub-account subtree (see ledger.SetParent) in the same call, the
+// merchant-offboarding path.
+func (s *server) handleCloseAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	var req struct {
+		Cascade bool `json:"cascade"`
+	}
+	if r.ContentLength != 0 {
+		if !s.decodeJSONBody(w, r, &req) {
+			return
+		}
+	}
+	closure, alreadyClosed, err := s.ledgerFor(r).CloseAccount(ledger.AccountID(id), req.Cascade)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if !alreadyClosed {
+		s.metrics.AccountClosesTotal.Add(1)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":        id,
+		"closed":         true,
+		"already_closed": alreadyClosed,
+		"closed_at":      closure.ClosedAt.UTC().Format(time.RFC3339),
+		"cascade":        req.Cascade,
+	})
+}
+
 // setJournalRuleRequest is the body of PUT /rules/{id}: the rule fields.
 // The rule ID comes from the path.
 type setJournalRuleRequest struct {
@@ -2215,6 +2310,9 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			case errors.Is(err, ledger.ErrClosingIDConflict):
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrAccountClosed):
+				s.metrics.ClosedRejections.Add(1)
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			case errors.Is(err, ledger.ErrAccountFrozen):
 				s.metrics.FrozenRejections.Add(1)
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -2740,6 +2838,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
+	mux.HandleFunc("POST /accounts/{id}/close", s.handleCloseAccount)
 	mux.HandleFunc("PUT /rules/{id}", s.handleSetJournalRule)
 	mux.HandleFunc("DELETE /rules/{id}", s.handleDeleteJournalRule)
 	mux.HandleFunc("GET /rules", s.handleListJournalRules)

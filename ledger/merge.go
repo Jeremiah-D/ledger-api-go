@@ -199,6 +199,9 @@ func (l *Ledger) PostMerge(m Merge) (MergeReceipt, error) {
 		}
 	}
 
+	if l.closedLocked(m.From) || l.closedLocked(m.To) {
+		return MergeReceipt{}, ErrAccountClosed
+	}
 	if l.frozenLocked(m.From) || l.frozenLocked(m.To) {
 		return MergeReceipt{}, ErrAccountFrozen
 	}
