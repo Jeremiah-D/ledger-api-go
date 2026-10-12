@@ -71,6 +71,13 @@ type AuditEvent struct {
 	// entry's content, or any deletion/reorder in the log, breaks
 	// the recomputation — see VerifyAuditLog.
 	Hash string `json:"hash"`
+	// Sig carries the per-line HMAC-SHA256 signature when the log runs
+	// with signing keys (LG-65, see audit_sign.go): the MAC covers the
+	// line's canonical bytes with the sig field itself absent. Nil on
+	// unsigned lines — old and unsigned lines parse unchanged, and the
+	// hash chain (which seals over the canonical form without Sig) is
+	// unaffected either way.
+	Sig *AuditSig `json:"sig,omitempty"`
 }
 
 // DefaultAuditMaxBytes is the default per-file size cap for audit files:
@@ -101,6 +108,11 @@ type AuditLogOption func(*auditLogConfig)
 type auditLogConfig struct {
 	maxBytes  int64
 	queueSize int
+	// signingKeys enables per-line HMAC-SHA256 signatures (LG-65). Empty
+	// means the log runs unsigned — degraded mode, with an
+	// audit_signing_disabled alert recorded in the trail itself.
+	signingKeys  []AuditSigningKey
+	signingGrace time.Duration
 }
 
 // WithAuditLogMaxBytes caps a single audit file at n bytes; the writer
@@ -124,9 +136,31 @@ func WithAuditLogQueueSize(n int) AuditLogOption {
 	}
 }
 
+// WithAuditLogSigning enables per-line HMAC-SHA256 signatures on the
+// audit log (LG-65, see audit_sign.go): every sealed event the writer
+// flushes carries {"kid","mac"}, the MAC covering the line's canonical
+// bytes. keys is the rotation set — the first non-retired key signs new
+// lines, retired keys still verify inside grace (see
+// ParseAuditSigningKeys and VerifyAuditSignatures). A non-positive grace
+// keeps DefaultAuditSigningGrace. An empty keys slice keeps the log
+// unsigned.
+func WithAuditLogSigning(keys []AuditSigningKey, grace time.Duration) AuditLogOption {
+	return func(c *auditLogConfig) {
+		c.signingKeys = keys
+		c.signingGrace = grace
+	}
+}
+
 // AuditLog appends AuditEvents as JSONL to a configured directory, one
 // line per event, from a background goroutine. Ledger operations enqueue
 // with Log (non-blocking); the writer owns all file state.
+//
+// Line signatures (LG-65): with WithAuditLogSigning the writer attaches
+// a per-line HMAC-SHA256 (the sig field) covering the line's canonical
+// bytes, keyed by the operator's signing keys with rotation support.
+// Without keys the log runs unsigned and records an
+// audit_signing_disabled alert in the trail itself, so a later offline
+// verification can tell "never signed" from "signature stripped".
 //
 // Hash chain (LG-32): every event is sealed at enqueue time with the
 // hex SHA-256 of the previously sealed event (PrevHash) and its own
@@ -169,6 +203,9 @@ type AuditLog struct {
 	// marker applies.
 	chainMu   sync.Mutex
 	chainHead string
+	// signer seals each flushed line with HMAC-SHA256 (LG-65). Nil
+	// means the log runs unsigned (degraded mode).
+	signer *auditSigner
 }
 
 // NewAuditLog creates the audit directory (if needed) and starts the
@@ -182,11 +219,24 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("ledger: audit log: %w", err)
 	}
+	var signer *auditSigner
+	if len(cfg.signingKeys) > 0 {
+		grace := cfg.signingGrace
+		if grace <= 0 {
+			grace = DefaultAuditSigningGrace
+		}
+		s, err := newAuditSigner(cfg.signingKeys, grace)
+		if err != nil {
+			return nil, err
+		}
+		signer = s
+	}
 	a := &AuditLog{
 		dir:      dir,
 		maxBytes: cfg.maxBytes,
 		queue:    make(chan AuditEvent, cfg.queueSize),
 		done:     make(chan struct{}),
+		signer:   signer,
 	}
 	// Recover the hash-chain head from the newest sealed entry on
 	// disk (bounded scan), so a restart continues the chain instead
@@ -194,8 +244,27 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 	a.chainHead = recoverAuditChainHead(dir)
 	a.wg.Add(1)
 	go a.run()
+	if signer == nil {
+		// Degraded unsigned mode: record the fact in the trail itself.
+		// An offline verification can then tell "never signed" (this
+		// alert is present, lines carry no sig) from "signatures
+		// stripped" (no alert, lines missing sig). The alert is a normal
+		// chained event, so the hash chain stays contiguous.
+		a.Log(AuditEvent{
+			Op:      "audit_signing_disabled",
+			Actor:   "NewAuditLog",
+			TraceID: "audit-signing",
+			Details: map[string]any{
+				"reason": "no signing keys configured; audit lines are written without HMAC",
+			},
+		})
+	}
 	return a, nil
 }
+
+// Signed reports whether the log attaches per-line HMAC signatures
+// (LG-65): false means degraded unsigned mode.
+func (a *AuditLog) Signed() bool { return a.signer != nil }
 
 // Log enqueues an event for asynchronous writing. It never blocks: when
 // the queue is full, or the log is closed, the event is dropped, counted,
@@ -347,6 +416,18 @@ func (a *AuditLog) run() {
 		if err != nil {
 			a.dropped.Add(1)
 			return
+		}
+		if a.signer != nil {
+			// LG-65: seal the canonical line bytes (sig field absent)
+			// under the primary signing key, then re-marshal with the
+			// signature attached. The verifier strips sig and
+			// re-marshals to the identical bytes.
+			sig := a.signer.sign(line)
+			ev.Sig = &sig
+			if line, err = json.Marshal(ev); err != nil {
+				a.dropped.Add(1)
+				return
+			}
 		}
 		line = append(line, '\n')
 		if n, err := f.Write(line); err != nil {

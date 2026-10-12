@@ -241,8 +241,18 @@ func TestDryRunEmitsNoAuditEvents(t *testing.T) {
 		t.Fatalf("close audit log: %v", err)
 	}
 	written, _, _ := l.AuditStats()
-	if written != 0 {
-		t.Fatalf("audit events written by dry runs = %d, want 0", written)
+	// Dry runs emit nothing; the only line in the trail is the
+	// audit_signing_disabled alert the unsigned log records at
+	// construction.
+	if written != 1 {
+		t.Fatalf("audit events written by dry runs = %d, want 1 (only the signing-disabled alert)", written)
+	}
+	events, corrupt, err := ReadAuditLog(dir, time.Now().UTC().Format("2006-01-02"))
+	if err != nil {
+		t.Fatalf("ReadAuditLog: %v", err)
+	}
+	if corrupt != 0 || len(events) != 1 || events[0].Op != "audit_signing_disabled" {
+		t.Fatalf("trail = %+v corrupt=%d, want only the signing-disabled alert", events, corrupt)
 	}
 }
 

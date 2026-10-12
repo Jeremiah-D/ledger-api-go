@@ -45,8 +45,10 @@ func TestAuditVerifyEndpoint(t *testing.T) {
 	if body["ok"] != true {
 		t.Errorf("ok = %v, want true (body: %v)", body["ok"], body)
 	}
-	if body["checked_entries"] != float64(1) {
-		t.Errorf("checked_entries = %v, want 1", body["checked_entries"])
+	// Two entries: the audit_signing_disabled alert the unsigned log
+	// records at construction (the chain's genesis entry), then the post.
+	if body["checked_entries"] != float64(2) {
+		t.Errorf("checked_entries = %v, want 2", body["checked_entries"])
 	}
 	if body["first_break"] != nil {
 		t.Errorf("first_break = %v, want null", body["first_break"])
@@ -69,8 +71,10 @@ func TestAuditVerifyEndpointDetectsBreak(t *testing.T) {
 	srv, dir := auditVerifyServer(t)
 	defer srv.Close()
 
-	// Tamper with the sealed entry on disk: rewrite its amount while
+	// Tamper with the sealed post entry on disk: rewrite its amount while
 	// keeping the stored seal, so verification reports a hash_mismatch.
+	// Line 1 is the audit_signing_disabled alert (unsigned mode); the
+	// post is line 2, and only it is rewritten.
 	matches, _ := filepath.Glob(filepath.Join(dir, "audit-*.jsonl"))
 	if len(matches) == 0 {
 		t.Fatal("no audit file")
@@ -79,13 +83,17 @@ func TestAuditVerifyEndpointDetectsBreak(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d, want 2 (alert + post)", len(lines))
+	}
 	var m map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &m); err != nil {
+	if err := json.Unmarshal([]byte(lines[1]), &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	m["details"].(map[string]any)["amount_cents"] = float64(777)
 	tampered, _ := json.Marshal(m)
-	if err := os.WriteFile(matches[0], append(tampered, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(matches[0], []byte(lines[0]+"\n"+string(tampered)+"\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -100,8 +108,8 @@ func TestAuditVerifyEndpointDetectsBreak(t *testing.T) {
 	if !ok || brk == nil {
 		t.Fatalf("first_break missing: %v", body["first_break"])
 	}
-	if brk["line"] != float64(1) || brk["reason"] != "hash_mismatch" {
-		t.Errorf("first_break = %v, want line=1 reason=hash_mismatch", brk)
+	if brk["line"] != float64(2) || brk["reason"] != "hash_mismatch" {
+		t.Errorf("first_break = %v, want line=2 reason=hash_mismatch", brk)
 	}
 	if _, ok := brk["expected_prev"]; !ok {
 		t.Errorf("first_break missing expected_prev: %v", brk)

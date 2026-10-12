@@ -68,7 +68,7 @@ func TestAuditLogEndToEnd(t *testing.T) {
 	if _, err := io.Copy(&sb, resp.Body); err != nil {
 		t.Fatalf("read /metrics: %v", err)
 	}
-	for _, want := range []string{"ledger_audit_events_total 3", "ledger_audit_dropped_total 0"} {
+	for _, want := range []string{"ledger_audit_events_total 4", "ledger_audit_dropped_total 0"} {
 		if !strings.Contains(sb.String(), want) {
 			t.Errorf("/metrics missing %q", want)
 		}

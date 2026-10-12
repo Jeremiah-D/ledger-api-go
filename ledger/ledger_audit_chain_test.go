@@ -81,8 +81,31 @@ func writeLines(t *testing.T, path string, lines []string) {
 	}
 }
 
+// chainTestSigningKeys returns a fixed single-key rotation set for the
+// chain tests (see mustChainAuditLog).
+func chainTestSigningKeys(t *testing.T) []AuditSigningKey {
+	t.Helper()
+	keys, err := ParseAuditSigningKeys("k1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+	if err != nil {
+		t.Fatalf("ParseAuditSigningKeys: %v", err)
+	}
+	return keys
+}
+
+// mustChainAuditLog builds the audit log for the chain tests. The
+// fixture events pin their timestamps to 2026-10-09, so a wall-clock
+// audit_signing_disabled alert (unsigned mode) would land in a different
+// day-file and break the tests' day-bucketing assumptions — hence signed
+// mode, which emits no alert. Signing does not participate in the chain
+// seal (sealAuditEvent ignores Sig), so chain coverage is unaffected, and
+// the suite additionally proves the chain and the signatures coexist.
+func mustChainAuditLog(t *testing.T) *AuditLog {
+	t.Helper()
+	return mustAuditLog(t, WithAuditLogSigning(chainTestSigningKeys(t), DefaultAuditSigningGrace))
+}
+
 func TestAuditChainSealLinksEntries(t *testing.T) {
-	al := mustAuditLog(t)
+	al := mustChainAuditLog(t)
 	logTestEvents(t, al, 3)
 	if err := al.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -132,7 +155,7 @@ func TestAuditChainSealLinksEntries(t *testing.T) {
 }
 
 func TestAuditChainVerifyDetectsTamperedContent(t *testing.T) {
-	al := mustAuditLog(t)
+	al := mustChainAuditLog(t)
 	logTestEvents(t, al, 5)
 	if err := al.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -183,7 +206,7 @@ func TestAuditChainVerifyDetectsTamperedContent(t *testing.T) {
 }
 
 func TestAuditChainVerifyDetectsDeletedEntry(t *testing.T) {
-	al := mustAuditLog(t)
+	al := mustChainAuditLog(t)
 	logTestEvents(t, al, 5)
 	if err := al.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -234,7 +257,7 @@ func TestAuditChainVerifyDetectsDeletedEntry(t *testing.T) {
 func TestAuditChainSurvivesRotation(t *testing.T) {
 	// Tiny size cap: every couple of events forces a size rotation, and
 	// Close waits for the background gzips to land.
-	al := mustAuditLog(t, WithAuditLogMaxBytes(500))
+	al := mustAuditLog(t, WithAuditLogMaxBytes(500), WithAuditLogSigning(chainTestSigningKeys(t), DefaultAuditSigningGrace))
 	logTestEvents(t, al, 10)
 	if err := al.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -263,7 +286,7 @@ func TestAuditChainSurvivesRotation(t *testing.T) {
 }
 
 func TestAuditChainSkipsCorruptLines(t *testing.T) {
-	al := mustAuditLog(t)
+	al := mustChainAuditLog(t)
 	logTestEvents(t, al, 3)
 	if err := al.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -299,7 +322,7 @@ func TestAuditChainSkipsCorruptLines(t *testing.T) {
 func TestAuditChainRestartRecoversHead(t *testing.T) {
 	dir := t.TempDir()
 
-	al1, err := NewAuditLog(dir)
+	al1, err := NewAuditLog(dir, WithAuditLogSigning(chainTestSigningKeys(t), DefaultAuditSigningGrace))
 	if err != nil {
 		t.Fatalf("NewAuditLog: %v", err)
 	}
@@ -310,7 +333,7 @@ func TestAuditChainRestartRecoversHead(t *testing.T) {
 
 	// A new process on the same directory must continue the chain from
 	// the previous run's tail instead of restarting at genesis.
-	al2, err := NewAuditLog(dir)
+	al2, err := NewAuditLog(dir, WithAuditLogSigning(chainTestSigningKeys(t), DefaultAuditSigningGrace))
 	if err != nil {
 		t.Fatalf("NewAuditLog (restart): %v", err)
 	}
@@ -339,7 +362,7 @@ func TestAuditChainRestartRecoversHeadAcrossGzip(t *testing.T) {
 
 	// Force the first run's file to be gzipped via a size rotation, so
 	// the restart must recover the head from an archive.
-	al1, err := NewAuditLog(dir, WithAuditLogMaxBytes(500))
+	al1, err := NewAuditLog(dir, WithAuditLogMaxBytes(500), WithAuditLogSigning(chainTestSigningKeys(t), DefaultAuditSigningGrace))
 	if err != nil {
 		t.Fatalf("NewAuditLog: %v", err)
 	}
@@ -352,7 +375,7 @@ func TestAuditChainRestartRecoversHeadAcrossGzip(t *testing.T) {
 		t.Fatal("want a gzipped archive from the first run")
 	}
 
-	al2, err := NewAuditLog(dir)
+	al2, err := NewAuditLog(dir, WithAuditLogSigning(chainTestSigningKeys(t), DefaultAuditSigningGrace))
 	if err != nil {
 		t.Fatalf("NewAuditLog (restart): %v", err)
 	}
@@ -374,7 +397,7 @@ func TestAuditChainRestartRecoversHeadAcrossGzip(t *testing.T) {
 }
 
 func TestAuditChainConcurrentSeal(t *testing.T) {
-	al := mustAuditLog(t)
+	al := mustChainAuditLog(t)
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
 		wg.Add(1)

@@ -1846,6 +1846,36 @@ so a `.jsonl` and its `.gz` twin always carry identical events.
 gzipped, in order) and skips malformed lines — a damaged audit file never
 fails the read; corrupt lines are counted and reported.
 
+**Per-line HMAC signatures (LG-65).** The hash chain proves ordering and
+continuity; per-line HMAC-SHA256 proves each line was written by someone
+holding the operator key (standard library only). Set
+`LEDGER_AUDIT_SIGNING_KEYS` to enable:
+
+```
+LEDGER_AUDIT_SIGNING_KEYS="k1:001122…ff,k2:aabb…cc@2026-10-01T00:00:00Z"
+```
+
+— comma-separated `id:hexkey` entries with an optional `@<retiredAt
+RFC3339>` suffix for rotated-out keys. The first non-retired key signs
+new lines; every sealed line carries `{"kid":"k1","mac":"…"}`, the MAC
+covering the line's canonical bytes (the key id is domain-separated into
+the MAC input, so a signature cannot be transplanted by swapping the kid
+header). A retired key still verifies lines written inside
+`LEDGER_AUDIT_SIGNING_GRACE` after its retirement (a Go duration string,
+default 24h). An invalid value fails startup fast — a misconfigured
+signing key never silently runs.
+
+`ledger.VerifyAuditSignatures(dir, keys, grace)` is the offline
+verification tool: it replays every audit file (all days, oldest first,
+plain and `.gz`) with no ledger instance running, and reports
+`{ok, files_checked, lines_checked, signed_lines, unsigned_lines,
+bad_lines}` — every bad line pinpointed by file, line number, trace id,
+and reason (`corrupt` / `unknown_key` / `key_retired` /
+`bad_signature`). Unsigned lines are counted, not failed: without
+`LEDGER_AUDIT_SIGNING_KEYS` the log runs in degraded unsigned mode and
+records an `audit_signing_disabled` alert as its first trail entry, so a
+later verification can tell "never signed" from "signatures stripped".
+
 ### Domain event outbox (`ledger/outbox.go`) — `GET /events`
 
 The audit log answers "who did what, when". The outbox answers "what

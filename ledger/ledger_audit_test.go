@@ -84,9 +84,10 @@ func TestAuditLogRecordsOps(t *testing.T) {
 		byOp[ev.Op] = append(byOp[ev.Op], ev)
 	}
 	// e1, e2, tr1, sw1, h1 hold, h1 release, h2 hold, expire, freeze,
-	// unfreeze, reconcile = 11 events.
-	if len(events) != 11 {
-		t.Fatalf("got %d events, want 11", len(events))
+	// unfreeze, reconcile = 11 events, plus the audit_signing_disabled
+	// alert the unsigned log records at construction = 12.
+	if len(events) != 12 {
+		t.Fatalf("got %d events, want 12", len(events))
 	}
 
 	// Post events carry the entry trace and a version bracket of one.
@@ -183,8 +184,8 @@ func TestAuditLogReadsDoNotEmit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAuditLog: %v", err)
 	}
-	if len(events) != 1 || events[0].Op != "post" {
-		t.Fatalf("events = %v, want exactly the one post", events)
+	if len(events) != 2 || events[0].Op != "audit_signing_disabled" || events[1].Op != "post" {
+		t.Fatalf("events = %v, want the signing-disabled alert then exactly the one post", events)
 	}
 }
 
@@ -229,8 +230,8 @@ func TestAuditLogRotationAndGzip(t *testing.T) {
 	if corrupt != 0 {
 		t.Fatalf("corrupt = %d, want 0", corrupt)
 	}
-	if len(events) != 60 {
-		t.Fatalf("events = %d, want 60 across rotated files", len(events))
+	if len(events) != 61 {
+		t.Fatalf("events = %d, want 61 across rotated files (60 ops + the signing-disabled alert)", len(events))
 	}
 }
 
@@ -316,14 +317,14 @@ func TestAuditLogConcurrentPosts(t *testing.T) {
 	if dropped != 0 {
 		t.Fatalf("dropped = %d, want 0", dropped)
 	}
-	if written != 200 {
-		t.Fatalf("written = %d, want 200", written)
+	if written != 201 {
+		t.Fatalf("written = %d, want 201 (200 posts + the signing-disabled alert)", written)
 	}
 	events, corrupt, err := ReadAuditLog(al.Dir(), time.Now().UTC().Format("2006-01-02"))
 	if err != nil {
 		t.Fatalf("ReadAuditLog: %v", err)
 	}
-	if corrupt != 0 || len(events) != 200 {
-		t.Fatalf("events = %d, corrupt = %d; want 200/0", len(events), corrupt)
+	if corrupt != 0 || len(events) != 201 {
+		t.Fatalf("events = %d, corrupt = %d; want 201/0 (200 posts + the signing-disabled alert)", len(events), corrupt)
 	}
 }

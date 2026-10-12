@@ -3315,8 +3315,28 @@ func main() {
 	// per-file size cap. Unset means disabled. LEDGER_AUDIT_MAX_BYTES
 	// caps a single audit file (default 100 MiB). The log is closed
 	// (flushed) on shutdown after the background workers stop.
+	//
+	// LEDGER_AUDIT_SIGNING_KEYS enables per-line HMAC-SHA256 signatures
+	// (see ledger/audit_sign.go): "id1:hexkey,id2:hexkey@<retiredAt
+	// RFC3339>". The first non-retired key signs new lines; retired keys
+	// still verify inside LEDGER_AUDIT_SIGNING_GRACE (a Go duration
+	// string, default 24h). Unset means the log runs unsigned and records
+	// an audit_signing_disabled alert in the trail itself. An invalid
+	// value fails startup fast: a misconfigured signing key must never
+	// silently run.
 	if dir := os.Getenv("LEDGER_AUDIT_DIR"); dir != "" {
-		al, err := ledger.NewAuditLog(dir, ledger.WithAuditLogMaxBytes(auditMaxBytes()))
+		auditOpts := []ledger.AuditLogOption{ledger.WithAuditLogMaxBytes(auditMaxBytes())}
+		if raw := os.Getenv("LEDGER_AUDIT_SIGNING_KEYS"); raw != "" {
+			keys, err := ledger.ParseAuditSigningKeys(raw)
+			if err != nil {
+				log.Fatalf("ledger-api-go: %v", err)
+			}
+			auditOpts = append(auditOpts, ledger.WithAuditLogSigning(keys, auditSigningGrace()))
+			log.Printf("ledger-api-go: audit log HMAC signing enabled (%d key(s))", len(keys))
+		} else {
+			log.Printf("ledger-api-go: audit log HMAC signing disabled: lines are unsigned; an audit_signing_disabled alert is recorded in the trail")
+		}
+		al, err := ledger.NewAuditLog(dir, auditOpts...)
 		if err != nil {
 			log.Fatalf("ledger-api-go: audit log: %v", err)
 		}
@@ -3493,6 +3513,24 @@ func auditMaxBytes() int64 {
 		return ledger.DefaultAuditMaxBytes
 	}
 	return n
+}
+
+// auditSigningGrace reads LEDGER_AUDIT_SIGNING_GRACE (a Go duration
+// string, e.g. "24h") for the audit-log signature verification grace
+// window after a signing key retires (see ledger/audit_sign.go). Unset
+// means the default; invalid or negative values fall back to the default
+// with a log line.
+func auditSigningGrace() time.Duration {
+	raw := os.Getenv("LEDGER_AUDIT_SIGNING_GRACE")
+	if raw == "" {
+		return ledger.DefaultAuditSigningGrace
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_AUDIT_SIGNING_GRACE %q, using %v", raw, ledger.DefaultAuditSigningGrace)
+		return ledger.DefaultAuditSigningGrace
+	}
+	return d
 }
 
 // scheduleSweepInterval reads LEDGER_SCHEDULE_SWEEP_INTERVAL (a Go
