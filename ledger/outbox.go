@@ -100,6 +100,10 @@ type OutboxEvent struct {
 	Seq         uint64         `json:"seq"`
 	Type        string         `json:"type"`
 	At          time.Time      `json:"at"`
+	// Tenant names the tenant namespace the event belongs to (see
+	// tenant.go). Empty for the default tenant — events from a
+	// single-tenant deployment look exactly as before.
+	Tenant      string         `json:"tenant,omitempty"`
 	Account     AccountID      `json:"account,omitempty"`
 	EntryID     string         `json:"entry_id,omitempty"`
 	AmountCents int64          `json:"amount_cents,omitempty"`
@@ -449,12 +453,18 @@ func WithOutbox(o *Outbox) Option {
 // lock: emission inside the commit critical section is the crash-safety
 // contract (the event is fsync'd before the operation returns success).
 // The timestamp is taken here so the recorded time matches the commit.
+// The ledger's tenant is stamped onto the event, so the process-wide
+// outbox stream stays attributable per tenant (see tenant.go); the
+// default tenant's events carry no tenant field, exactly as before.
 func (l *Ledger) emitOutboxLocked(ev OutboxEvent) {
 	if l.outbox == nil {
 		return
 	}
 	if ev.At.IsZero() {
 		ev.At = time.Now().UTC()
+	}
+	if l.tenantID != DefaultTenantID {
+		ev.Tenant = string(l.tenantID)
 	}
 	l.outbox.Emit(ev)
 }

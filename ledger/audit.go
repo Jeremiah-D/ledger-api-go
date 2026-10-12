@@ -48,6 +48,11 @@ type AuditEvent struct {
 	Op            string         `json:"op"`
 	Actor         string         `json:"actor"`
 	TraceID       string         `json:"trace_id"`
+	// Tenant names the tenant namespace the event belongs to (see
+	// tenant.go). Empty for the default tenant — events from a
+	// single-tenant deployment look exactly as before. The seal covers
+	// it like every other field.
+	Tenant        string         `json:"tenant,omitempty"`
 	VersionBefore uint64         `json:"version_before"`
 	VersionAfter  uint64         `json:"version_after"`
 	EntryIDs      []string       `json:"entry_ids,omitempty"`

@@ -33,6 +33,7 @@ type auditCanonical struct {
 	Op            string         `json:"op"`
 	Actor         string         `json:"actor"`
 	TraceID       string         `json:"trace_id"`
+	Tenant        string         `json:"tenant,omitempty"`
 	VersionBefore uint64         `json:"version_before"`
 	VersionAfter  uint64         `json:"version_after"`
 	EntryIDs      []string       `json:"entry_ids,omitempty"`
@@ -55,6 +56,7 @@ func sealAuditEvent(ev AuditEvent) string {
 		Op:            ev.Op,
 		Actor:         ev.Actor,
 		TraceID:       ev.TraceID,
+		Tenant:        ev.Tenant,
 		VersionBefore: ev.VersionBefore,
 		VersionAfter:  ev.VersionAfter,
 		EntryIDs:      ev.EntryIDs,

@@ -191,6 +191,10 @@ type Metrics struct {
 	// the ledger package. The alert is advisory — it never rejects a
 	// posting — so this counter measures alert volume, not rejections.
 	LowBalanceBreaches atomic.Uint64
+	// TenantsTotal reports how many tenant ledgers are provisioned in
+	// the process (see ledger.TenantStore), synced on every GET /metrics
+	// scrape. A single-tenant deployment reports 1 (the default tenant).
+	TenantsTotal atomic.Uint64
 	// ReviewPendingTotal counts POST /transfers requests that entered
 	// dual-control pending review (see ledger.PostTransfer): first-time
 	// freezes only, not idempotent replays of the review receipt.
@@ -351,6 +355,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_low_balance_breaches_total",
 		"Total low-balance alert events emitted (advisory; never a rejection).",
 		m.LowBalanceBreaches.Load())
+	writeCounter(&sb, "ledger_tenants_total",
+		"Number of provisioned tenant ledgers in the process (1 for a single-tenant deployment).",
+		m.TenantsTotal.Load())
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())

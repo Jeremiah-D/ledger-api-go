@@ -26,6 +26,15 @@ import (
 
 type server struct {
 	ledger       *ledger.Ledger
+	// tenants is the multi-tenant registry (see ledger.TenantStore):
+	// the default ledger above is adopted as the default tenant, and
+	// every request that names a tenant (via the /tenants/{id} path
+	// prefix or the x-tenant header) resolves to that tenant's own
+	// isolated ledger through ledgerFor. Background workers (hold,
+	// review, schedule, freeze sweepers, snapshot backups, the
+	// balance-history recorder) keep operating on the default tenant's
+	// ledger: per-tenant background schedules are out of scope.
+	tenants      *ledger.TenantStore
 	metrics      *Metrics
 	maxBodyBytes int64
 	// balanceHistoryDir is the directory the balance-history recorder
@@ -112,7 +121,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      time.Now(),
 	}
 
-	posted, duplicate, err := s.ledger.Post(entry)
+	posted, duplicate, err := s.ledgerFor(r).Post(entry)
 	if err != nil {
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -204,7 +213,7 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      time.Now(),
 	}
 
-	result, err := s.ledger.DryRunPost(entry)
+	result, err := s.ledgerFor(r).DryRunPost(entry)
 	if err != nil {
 		// The same status the real POST /entries would return, so a
 		// client can swap the /dry-run suffix for the real endpoint and
@@ -340,7 +349,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		s.metrics.FXTransfersTotal.Add(1)
 	}
 
-	receipt, err := s.ledger.PostTransfer(transfer)
+	receipt, err := s.ledgerFor(r).PostTransfer(transfer)
 	if err != nil {
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -441,7 +450,7 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
-	receipt, err := s.ledger.ApproveTransferReview(id, req.Reviewer)
+	receipt, err := s.ledgerFor(r).ApproveTransferReview(id, req.Reviewer)
 	if err != nil {
 		if errors.Is(err, ledger.ErrReviewNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -506,7 +515,7 @@ func (s *server) handleRejectTransferReview(w http.ResponseWriter, r *http.Reque
 	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
-	review, changed, err := s.ledger.RejectTransferReview(id, req.Reviewer, req.Reason)
+	review, changed, err := s.ledgerFor(r).RejectTransferReview(id, req.Reviewer, req.Reason)
 	if err != nil {
 		if errors.Is(err, ledger.ErrReviewNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -536,7 +545,7 @@ func (s *server) handleExpireReviews(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	expired := s.ledger.ExpireReviews()
+	expired := s.ledgerFor(r).ExpireReviews()
 	s.metrics.ReviewRejectedTotal.Add(uint64(expired))
 	writeJSON(w, http.StatusOK, map[string]any{"expired": expired})
 }
@@ -600,7 +609,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      time.Now(),
 	}
 
-	result, err := s.ledger.DryRunTransfer(transfer)
+	result, err := s.ledgerFor(r).DryRunTransfer(transfer)
 	if err != nil {
 		// The same status the real POST /transfers would return.
 		if errors.Is(err, ledger.ErrAccountFrozen) {
@@ -741,7 +750,7 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      time.Now(),
 	}
 
-	receipt, err := s.ledger.PostBatch(batch)
+	receipt, err := s.ledgerFor(r).PostBatch(batch)
 	if err != nil {
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -822,7 +831,7 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		id = newID()
 	}
-	receipt, err := s.ledger.PostSweep(ledger.Sweep{
+	receipt, err := s.ledgerFor(r).PostSweep(ledger.Sweep{
 		ID:             id,
 		From:           req.FromAccounts,
 		To:             req.ToAccount,
@@ -877,7 +886,7 @@ func (s *server) handleDryRunSweep(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		id = newID()
 	}
-	result, err := s.ledger.DryRunSweep(ledger.Sweep{
+	result, err := s.ledgerFor(r).DryRunSweep(ledger.Sweep{
 		ID:             id,
 		From:           req.FromAccounts,
 		To:             req.ToAccount,
@@ -945,7 +954,7 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		id = newID()
 	}
-	receipt, err := s.ledger.PostMerge(ledger.Merge{
+	receipt, err := s.ledgerFor(r).PostMerge(ledger.Merge{
 		ID:             id,
 		From:           req.FromAccount,
 		To:             req.ToAccount,
@@ -1015,7 +1024,7 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entryID := r.PathValue("id")
-	reversal, duplicate, err := s.ledger.ReverseEntry(entryID, req.IdempotencyKey)
+	reversal, duplicate, err := s.ledgerFor(r).ReverseEntry(entryID, req.IdempotencyKey)
 	if err != nil {
 		if errors.Is(err, ledger.ErrEntryNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -1103,7 +1112,7 @@ func (s *server) handleCreateRevaluation(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	report, err := s.ledger.RevalueBalances(asOf, req.BaseCurrency)
+	report, err := s.ledgerFor(r).RevalueBalances(asOf, req.BaseCurrency)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1185,7 +1194,7 @@ func (s *server) handleCreateTransferSchedule(w http.ResponseWriter, r *http.Req
 	if id == "" {
 		id = newID()
 	}
-	sched, duplicate, err := s.ledger.CreateTransferSchedule(ledger.TransferSchedule{
+	sched, duplicate, err := s.ledgerFor(r).CreateTransferSchedule(ledger.TransferSchedule{
 		ID:             id,
 		From:           req.FromAccount,
 		To:             req.ToAccount,
@@ -1219,7 +1228,7 @@ func (s *server) handleGetTransferSchedule(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	sched, err := s.ledger.GetTransferSchedule(r.PathValue("id"))
+	sched, err := s.ledgerFor(r).GetTransferSchedule(r.PathValue("id"))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
@@ -1244,7 +1253,7 @@ func (s *server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	id := r.PathValue("id")
-	runs, err := s.ledger.ListScheduleRuns(id, limit)
+	runs, err := s.ledgerFor(r).ListScheduleRuns(id, limit)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
@@ -1264,11 +1273,11 @@ func (s *server) scheduleTransition(w http.ResponseWriter, r *http.Request, acti
 	var err error
 	switch action {
 	case "pause":
-		sched, err = s.ledger.PauseTransferSchedule(id)
+		sched, err = s.ledgerFor(r).PauseTransferSchedule(id)
 	case "resume":
-		sched, err = s.ledger.ResumeTransferSchedule(id)
+		sched, err = s.ledgerFor(r).ResumeTransferSchedule(id)
 	case "cancel":
-		sched, err = s.ledger.CancelTransferSchedule(id)
+		sched, err = s.ledgerFor(r).CancelTransferSchedule(id)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown action"})
 		return
@@ -1345,7 +1354,7 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		id = newID()
 	}
-	held, duplicate, err := s.ledger.Hold(ledger.Hold{
+	held, duplicate, err := s.ledgerFor(r).Hold(ledger.Hold{
 		ID:             id,
 		Account:        req.Account,
 		AmountCents:    req.AmountCents,
@@ -1419,7 +1428,7 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 	if captureID == "" {
 		captureID = newID()
 	}
-	receipt, err := s.ledger.Capture(ledger.Capture{
+	receipt, err := s.ledgerFor(r).Capture(ledger.Capture{
 		ID:             captureID,
 		HoldID:         id,
 		To:             req.ToAccount,
@@ -1483,7 +1492,7 @@ func (s *server) handleReleaseHold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.metrics.ReleasesTotal.Add(1)
-	h, err := s.ledger.Release(id)
+	h, err := s.ledgerFor(r).Release(id)
 	if err != nil {
 		if errors.Is(err, ledger.ErrHoldNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -1507,7 +1516,7 @@ func (s *server) handleExpireHolds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.metrics.HoldSweeps.Add(1)
-	writeJSON(w, http.StatusOK, map[string]any{"expired": s.ledger.ExpireHolds()})
+	writeJSON(w, http.StatusOK, map[string]any{"expired": s.ledgerFor(r).ExpireHolds()})
 }
 
 // handleBalance implements GET /accounts/{id}/balance.
@@ -1527,9 +1536,9 @@ func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"account":         id,
-		"balance_cents":   s.ledger.Balance(ledger.AccountID(id)),
-		"available_cents": s.ledger.Available(ledger.AccountID(id)),
-		"frozen":          s.ledger.IsFrozen(ledger.AccountID(id)),
+		"balance_cents":   s.ledgerFor(r).Balance(ledger.AccountID(id)),
+		"available_cents": s.ledgerFor(r).Available(ledger.AccountID(id)),
+		"frozen":          s.ledgerFor(r).IsFrozen(ledger.AccountID(id)),
 	})
 }
 
@@ -1543,12 +1552,12 @@ func (s *server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	balance, version := s.ledger.Snapshot(ledger.AccountID(id))
+	balance, version := s.ledgerFor(r).Snapshot(ledger.AccountID(id))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"account":       id,
 		"balance_cents": balance,
 		"version":       version,
-		"frozen":        s.ledger.IsFrozen(ledger.AccountID(id)),
+		"frozen":        s.ledgerFor(r).IsFrozen(ledger.AccountID(id)),
 	})
 }
 
@@ -1578,7 +1587,7 @@ func (s *server) handleBalanceAt(w http.ResponseWriter, r *http.Request) {
 	if currency == "" {
 		currency = ledger.DefaultCurrency
 	}
-	balance, err := s.ledger.BalanceAt(ledger.AccountID(id), currency, version)
+	balance, err := s.ledgerFor(r).BalanceAt(ledger.AccountID(id), currency, version)
 	if err != nil {
 		if errors.Is(err, ledger.ErrVersionInFuture) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1661,7 +1670,7 @@ func (s *server) handleTrialBalance(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.ledger.TrialBalance(ledger.AccountID(id)))
+	writeJSON(w, http.StatusOK, s.ledgerFor(r).TrialBalance(ledger.AccountID(id)))
 }
 
 // setParentRequest is the body of POST /accounts/{id}/parent. An empty
@@ -1705,7 +1714,7 @@ func (s *server) handleSetParent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.ledger.SetParent(ledger.AccountID(id), req.Parent); err != nil {
+	if err := s.ledgerFor(r).SetParent(ledger.AccountID(id), req.Parent); err != nil {
 		if errors.Is(err, ledger.ErrParentCycle) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
@@ -1713,7 +1722,7 @@ func (s *server) handleSetParent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	parent, _ := s.ledger.Parent(ledger.AccountID(id))
+	parent, _ := s.ledgerFor(r).Parent(ledger.AccountID(id))
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "parent": string(parent)})
 }
 
@@ -1728,7 +1737,7 @@ func (s *server) handleRollup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.ledger.Rollup(ledger.AccountID(id)))
+	writeJSON(w, http.StatusOK, s.ledgerFor(r).Rollup(ledger.AccountID(id)))
 }
 
 // handleVerifyEntries implements GET /entries/verify. It recomputes the
@@ -1741,16 +1750,16 @@ func (s *server) handleRollup(w http.ResponseWriter, r *http.Request) {
 // error, so verification failure returns 500 {"ok":false,"error":"..."}.
 func (s *server) handleVerifyEntries(w http.ResponseWriter, r *http.Request) {
 	s.metrics.VerifyRequests.Add(1)
-	if err := s.ledger.VerifyChain(); err != nil {
+	if err := s.ledgerFor(r).VerifyChain(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	head, links := s.ledger.ChainHead()
+	head, links := s.ledgerFor(r).ChainHead()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"links":  links,
 		"head":   head,
-		"anchor": s.ledger.AnchorStatus(),
+		"anchor": s.ledgerFor(r).AnchorStatus(),
 	})
 }
 
@@ -1761,7 +1770,7 @@ func (s *server) handleVerifyEntries(w http.ResponseWriter, r *http.Request) {
 // server cannot anchor — a deployment misconfiguration, so 500, not 404:
 // there is nothing for the caller to fix in the request.
 func (s *server) handleAnchorCheckpoint(w http.ResponseWriter, r *http.Request) {
-	cp, err := s.ledger.Anchor()
+	cp, err := s.ledgerFor(r).Anchor()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1788,7 +1797,7 @@ func (s *server) handleAnchorCheckpoint(w http.ResponseWriter, r *http.Request) 
 // not a break. Without LEDGER_AUDIT_DIR there is nothing to verify, so
 // the endpoint 404s fail-closed.
 func (s *server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
-	dir, ok := s.ledger.AuditDir()
+	dir, ok := s.ledgerFor(r).AuditDir()
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "audit log disabled"})
 		return
@@ -1825,7 +1834,7 @@ func (s *server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 // Without LEDGER_OUTBOX_DIR the endpoint 404s fail-closed: there is no
 // stream to query, and the 404 says so explicitly.
 func (s *server) handleOutboxEvents(w http.ResponseWriter, r *http.Request) {
-	dir, ok := s.ledger.OutboxDir()
+	dir, ok := s.ledgerFor(r).OutboxDir()
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "domain event outbox disabled (LEDGER_OUTBOX_DIR unset)"})
 		return
@@ -1906,12 +1915,12 @@ func (s *server) handleFreezeAccount(w http.ResponseWriter, r *http.Request) {
 	if req.Until != nil {
 		until = *req.Until
 	}
-	if err := s.ledger.FreezeUntil(ledger.AccountID(id), until); err != nil {
+	if err := s.ledgerFor(r).FreezeUntil(ledger.AccountID(id), until); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	resp := map[string]any{"account": id, "frozen": true}
-	if deadline, ok := s.ledger.FreezeAutoUnfreezeAt(ledger.AccountID(id)); ok {
+	if deadline, ok := s.ledgerFor(r).FreezeAutoUnfreezeAt(ledger.AccountID(id)); ok {
 		resp["auto_unfreeze_at"] = deadline.UTC().Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -1930,7 +1939,7 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	s.ledger.Unfreeze(ledger.AccountID(id))
+	s.ledgerFor(r).Unfreeze(ledger.AccountID(id))
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
@@ -1994,14 +2003,14 @@ func (s *server) handleSetJournalRule(w http.ResponseWriter, r *http.Request) {
 		MaxAmountCents:     req.MaxAmountCents,
 		Legs:               req.Legs,
 	}
-	if err := s.ledger.SetJournalRule(rule); err != nil {
+	if err := s.ledgerFor(r).SetJournalRule(rule); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	stored, _ := s.ledger.GetJournalRule(id)
+	stored, _ := s.ledgerFor(r).GetJournalRule(id)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"rule":         stored,
-		"rule_version": s.ledger.JournalRuleVersion(),
+		"rule_version": s.ledgerFor(r).JournalRuleVersion(),
 	})
 }
 
@@ -2023,10 +2032,10 @@ func (s *server) handleDeleteJournalRule(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rule id required"})
 		return
 	}
-	deleted := s.ledger.DeleteJournalRule(id)
+	deleted := s.ledgerFor(r).DeleteJournalRule(id)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"deleted":      deleted,
-		"rule_version": s.ledger.JournalRuleVersion(),
+		"rule_version": s.ledgerFor(r).JournalRuleVersion(),
 	})
 }
 
@@ -2039,8 +2048,8 @@ func (s *server) handleListJournalRules(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"rules":        s.ledger.JournalRules(),
-		"rule_version": s.ledger.JournalRuleVersion(),
+		"rules":        s.ledgerFor(r).JournalRules(),
+		"rule_version": s.ledgerFor(r).JournalRuleVersion(),
 	})
 }
 
@@ -2069,7 +2078,7 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 	}
 	s.metrics.PeriodClosesTotal.Add(1)
 	if r.URL.Query().Get("closing") == "true" {
-		receipt, err := s.ledger.ClosePeriodWithClosing(id)
+		receipt, err := s.ledgerFor(r).ClosePeriodWithClosing(id)
 		if err != nil {
 			switch {
 			case errors.Is(err, ledger.ErrClosingNotConfigured),
@@ -2106,7 +2115,7 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := s.ledger.ClosePeriod(id); err != nil {
+	if err := s.ledgerFor(r).ClosePeriod(id); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2127,7 +2136,7 @@ func (s *server) handleReopenPeriod(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
 		return
 	}
-	if err := s.ledger.ReopenPeriod(id); err != nil {
+	if err := s.ledgerFor(r).ReopenPeriod(id); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2175,11 +2184,11 @@ func (s *server) handleSetClosingAccounts(w http.ResponseWriter, r *http.Request
 	for _, a := range req.PLAccounts {
 		pl = append(pl, ledger.AccountID(a))
 	}
-	if err := s.ledger.SetClosingAccounts(pl, ledger.AccountID(req.RetainedEarnings)); err != nil {
+	if err := s.ledgerFor(r).SetClosingAccounts(pl, ledger.AccountID(req.RetainedEarnings)); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	plOut, retained := s.ledger.ClosingAccounts()
+	plOut, retained := s.ledgerFor(r).ClosingAccounts()
 	names := make([]string, 0, len(plOut))
 	for _, a := range plOut {
 		names = append(names, string(a))
@@ -2194,7 +2203,7 @@ func (s *server) handleGetClosingAccounts(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	pl, retained := s.ledger.ClosingAccounts()
+	pl, retained := s.ledgerFor(r).ClosingAccounts()
 	names := make([]string, 0, len(pl))
 	for _, a := range pl {
 		names = append(names, string(a))
@@ -2279,7 +2288,7 @@ func (s *server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	report, err := s.ledger.ReconcileWithOptions(time.Now(), opts)
+	report, err := s.ledgerFor(r).ReconcileWithOptions(time.Now(), opts)
 	if err != nil {
 		if errors.Is(err, ledger.ErrInvalidCurrency) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -2323,7 +2332,7 @@ func (s *server) handleReconcileExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exp, err := s.ledger.ExportSignedReconcile(time.Now(), opts)
+	exp, err := s.ledgerFor(r).ExportSignedReconcile(time.Now(), opts)
 	if err != nil {
 		if errors.Is(err, ledger.ErrAnchorKeyNotConfigured) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -2444,7 +2453,7 @@ func (s *server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 		opts.Tolerances[key] = tol
 	}
 
-	report, err := s.ledger.Settlement(time.Now(), opts)
+	report, err := s.ledgerFor(r).Settlement(time.Now(), opts)
 	if err != nil {
 		if errors.Is(err, ledger.ErrInvalidSettlementDay) ||
 			errors.Is(err, ledger.ErrInvalidCurrency) ||
@@ -2525,7 +2534,7 @@ func (s *server) handleAging(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	report := s.ledger.Aging(time.Now(), ledger.AgingOptions{
+	report := s.ledgerFor(r).Aging(time.Now(), ledger.AgingOptions{
 		AsOf:                       asof,
 		Account:                    ledger.AccountID(q.Get("account")),
 		OverdueAlertThresholdCents: threshold,
@@ -2545,9 +2554,26 @@ func newRouter(l *ledger.Ledger) http.Handler {
 
 // newServer builds the server the same way newRouter does but also hands
 // the caller the *server, so main can attach background workers (the hold
-// sweeper) to its metrics. Tests keep using newRouter.
-func newServer(l *ledger.Ledger) *server {
-	return &server{ledger: l, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
+// sweeper) to its metrics. Tests keep using newRouter. The ledger is
+// adopted as the store's default tenant, and any extra options are
+// captured so lazily-provisioned tenant ledgers are built with the same
+// configuration the default ledger started with.
+func newServer(l *ledger.Ledger, opts ...ledger.Option) *server {
+	store := ledger.NewTenantStore(opts...)
+	store.Adopt(ledger.DefaultTenantID, l)
+	return &server{ledger: l, tenants: store, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
+}
+
+// ledgerFor resolves the request to its tenant's ledger: the
+// /tenants/{id} path prefix (set by the tenant middleware) wins over the
+// x-tenant header; a request naming no tenant gets the default tenant's
+// ledger, which keeps single-tenant deployments working exactly as
+// before.
+func (s *server) ledgerFor(r *http.Request) *ledger.Ledger {
+	if id, ok := tenantFromContext(r.Context()); ok {
+		return s.tenants.For(id)
+	}
+	return s.ledger
 }
 
 func (s *server) handler() http.Handler {
@@ -2607,37 +2633,114 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
 	mux.HandleFunc("GET /balance-history", s.handleBalanceHistory)
+	// GET /tenants lists every provisioned tenant ID (the default tenant
+	// is "" — see ledger.DefaultTenantID). It is registered on the inner
+	// mux so the tenant middleware below never treats it as a tenant
+	// path: "/tenants" carries no "/tenants/" prefix.
+	mux.HandleFunc("GET /tenants", s.handleListTenants)
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
-		// The audit log lives in the ledger package; sync its counters
-		// into the HTTP metrics on every scrape so the exposition stays
-		// meaningful without the ledger knowing about HTTP.
-		if written, dropped, ok := s.ledger.AuditStats(); ok {
-			s.metrics.AuditEventsTotal.Store(written)
-			s.metrics.AuditDroppedTotal.Store(dropped)
+		// Ledger-sourced counters are aggregated across every
+		// provisioned tenant: /metrics is a process-level scrape, and a
+		// single-tenant deployment (whose only tenant is the default)
+		// reports exactly what it always did.
+		var auditWritten, auditDropped, outboxWritten, outboxDropped uint64
+		var breaches, ruleLegs, freezeReleases, healthViolations uint64
+		for _, l := range s.tenants.Ledgers() {
+			if written, dropped, ok := l.AuditStats(); ok {
+				auditWritten += written
+				auditDropped += dropped
+			}
+			if written, dropped, ok := l.OutboxStats(); ok {
+				outboxWritten += written
+				outboxDropped += dropped
+			}
+			breaches += l.LowBalanceBreachCount()
+			ruleLegs += l.RuleLegsCommitted()
+			freezeReleases += l.FrozenAutoReleases()
+			healthViolations += l.HealthViolationCount()
 		}
-		// The outbox lives in the ledger package too: the events are
-		// emitted inside commits, not in handlers.
-		if written, dropped, ok := s.ledger.OutboxStats(); ok {
-			s.metrics.OutboxEventsTotal.Store(written)
-			s.metrics.OutboxDroppedTotal.Store(dropped)
-		}
+		s.metrics.AuditEventsTotal.Store(auditWritten)
+		s.metrics.AuditDroppedTotal.Store(auditDropped)
+		s.metrics.OutboxEventsTotal.Store(outboxWritten)
+		s.metrics.OutboxDroppedTotal.Store(outboxDropped)
 		// The low-balance breach counter lives in the ledger too (the
 		// alert fires inside Post/Transfer/..., not in a handler).
-		s.metrics.LowBalanceBreaches.Store(s.ledger.LowBalanceBreachCount())
+		s.metrics.LowBalanceBreaches.Store(breaches)
 		// The rules-engine leg counter likewise lives in the ledger: the
 		// legs commit inside Post, not in a handler.
-		s.metrics.JournalRuleLegsTotal.Store(s.ledger.RuleLegsCommitted())
+		s.metrics.JournalRuleLegsTotal.Store(ruleLegs)
 		// The freeze auto-release counter lives in the ledger too:
 		// releases happen inside the write path and the background
 		// sweeper, not in a handler.
-		s.metrics.FreezeAutoReleasesTotal.Store(s.ledger.FrozenAutoReleases())
+		s.metrics.FreezeAutoReleasesTotal.Store(freezeReleases)
 		// The balance-health violation counter lives in the ledger too:
 		// violations are detected by the background watchdog inside the
 		// ledger package, not in a handler.
-		s.metrics.BalanceHealthViolations.Store(s.ledger.HealthViolationCount())
+		s.metrics.BalanceHealthViolations.Store(healthViolations)
+		// The tenant count is process-level, like the counters above.
+		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		s.metrics.handleMetrics(w, r)
 	})
-	return mux
+	return s.tenantMiddleware(mux)
+}
+
+// tenantCtxKey carries the resolved tenant ID through the request
+// context from the tenant middleware to ledgerFor.
+type tenantCtxKey struct{}
+
+// tenantFromContext returns the tenant ID the middleware resolved for
+// the request, or false when the request named no tenant (default
+// tenant).
+func tenantFromContext(ctx context.Context) (ledger.TenantID, bool) {
+	id, ok := ctx.Value(tenantCtxKey{}).(ledger.TenantID)
+	return id, ok
+}
+
+// tenantMiddleware resolves multi-tenant routing before the inner mux
+// sees the request. A path of the form /tenants/{id}/... selects the
+// tenant and the remainder of the path is dispatched to the ordinary
+// routes (so /tenants/acme/entries behaves exactly like /entries, but
+// against acme's isolated ledger). Otherwise the x-tenant header selects
+// the tenant. A request that names no tenant is dispatched unchanged to
+// the default tenant. An invalid tenant ID is rejected with 400 before
+// any ledger is touched; unknown (never-before-seen) IDs are provisioned
+// lazily by the tenant store on first use.
+func (s *server) tenantMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var tenantID string
+		if rest, ok := strings.CutPrefix(r.URL.Path, "/tenants/"); ok {
+			seg, remainder, _ := strings.Cut(rest, "/")
+			if err := ledger.ValidateTenantID(seg); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			tenantID = seg
+			r = r.Clone(r.Context())
+			r.URL.Path = "/" + remainder
+		} else if h := r.Header.Get("X-Tenant"); h != "" {
+			if err := ledger.ValidateTenantID(h); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			tenantID = h
+		}
+		if tenantID != "" {
+			ctx := context.WithValue(r.Context(), tenantCtxKey{}, ledger.TenantID(tenantID))
+			r = r.WithContext(ctx)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleListTenants answers GET /tenants with every provisioned tenant
+// ID, sorted. The default tenant reports as "".
+func (s *server) handleListTenants(w http.ResponseWriter, r *http.Request) {
+	ids := s.tenants.IDs()
+	strs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		strs = append(strs, string(id))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tenants": strs})
 }
 
 // defaultMaxBodyBytes caps a single POST /entries body. Entry payloads are
@@ -2720,7 +2823,7 @@ func (s *server) handleListAccountEntries(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	page, next, err := s.ledger.ListAccountEntries(ledger.AccountID(id), since, until, r.URL.Query().Get("cursor"), limit)
+	page, next, err := s.ledgerFor(r).ListAccountEntries(ledger.AccountID(id), since, until, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -2752,7 +2855,7 @@ func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, next, err := s.ledger.ListEntriesFiltered(since, until, r.URL.Query().Get("cursor"), limit, r.URL.Query().Get("memo"), r.URL.Query().Get("ref"))
+	page, next, err := s.ledgerFor(r).ListEntriesFiltered(since, until, r.URL.Query().Get("cursor"), limit, r.URL.Query().Get("memo"), r.URL.Query().Get("ref"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -3003,7 +3106,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv := newServer(ledger.New(opts...))
+	srv := newServer(ledger.New(opts...), opts...)
 
 	// Optional background hold-expiry sweeper: periodically marks lapsed
 	// holds expired so operators don't need to poll POST /holds/expire.

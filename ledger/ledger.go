@@ -231,6 +231,12 @@ type Ledger struct {
 	// config, like dailyLimits.
 	lowBalanceThresholds map[lowBalanceKey]int64
 	lowBalanceBreached   map[lowBalanceKey]bool
+	// tenantID is the tenant namespace this ledger belongs to (see
+	// tenant.go): the empty string is the default tenant. It is stamped
+	// onto every audit-log and outbox event the ledger emits, so the
+	// process-wide compliance streams stay attributable per tenant.
+	// Set by TenantStore.Adopt/For; never by hand.
+	tenantID TenantID
 	// settlementChannels maps an account to its settlement channel (the
 	// payment rail the merchant settles through, e.g. "alipay"), the
 	// channel dimension of the settlement view (see settlement.go).
@@ -453,13 +459,19 @@ func WithAuditLog(al *AuditLog) Option {
 // a no-op when disabled. Callers must hold l.mu (either lock suffices) —
 // the enqueue never blocks, so emitting under the write lock cannot stall
 // the operation. The timestamp is taken here so the recorded time matches
-// the commit, not the (asynchronous) flush.
+// the commit, not the (asynchronous) flush. The ledger's tenant is stamped
+// onto the event, so the process-wide compliance stream stays attributable
+// per tenant (see tenant.go); the default tenant's events carry no tenant
+// field, exactly as before.
 func (l *Ledger) emitAudit(ev AuditEvent) {
 	if l.audit == nil {
 		return
 	}
 	if ev.Timestamp.IsZero() {
 		ev.Timestamp = time.Now().UTC()
+	}
+	if l.tenantID != DefaultTenantID {
+		ev.Tenant = string(l.tenantID)
 	}
 	l.audit.Log(ev)
 }

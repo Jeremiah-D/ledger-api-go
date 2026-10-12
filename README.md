@@ -1624,6 +1624,44 @@ state with no new journal rows.
 A full `ImportSnapshot` explicitly refuses a meta carrying `base_version`,
 so the two snapshot kinds can never be confused.
 
+### Multi-tenant isolation (`ledger/tenant.go`)
+
+One process can serve many isolated tenants (merchants, business units):
+every tenant gets its own ledger — accounts, journal entries, idempotency
+keys, the audit hash chain, freezes, limits, holds, and all other state
+are namespaced by construction, so a reference that exists only in
+another tenant (an account ID, an entry ID, an idempotency key) simply
+does not exist in this tenant's ledger. Cross-tenant references behave
+as not-found, never as a leak.
+
+HTTP routing selects the tenant two ways (the path prefix wins when both
+are given); a request that names no tenant hits the default tenant,
+which keeps single-tenant deployments working exactly as before:
+
+```bash
+# path prefix …
+curl -s -X POST localhost:8080/tenants/acme/entries -d '{"debit_account":"cash",...}'
+# … or header
+curl -s -H 'X-Tenant: acme' localhost:8080/accounts/cash/balance
+# list provisioned tenants (the default tenant reports as "")
+curl -s localhost:8080/tenants
+# {"tenants":["","acme","globex"]}
+```
+
+Tenants are provisioned lazily on first use, built with the same options
+the default ledger started with (TTLs, fee policies, review thresholds).
+The structured audit log and the domain-event outbox stay process-wide
+compliance streams — every event they carry is stamped with its `tenant`
+(the default tenant's events carry no tenant field, exactly as before).
+Snapshots round-trip per tenant (`TenantStore.Snapshot` /
+`TenantStore.Restore`, independent per tenant), `POST /reconcile` reports
+per tenant, and `GET /metrics` aggregates ledger counters across tenants
+plus `ledger_tenants_total`. Background workers (sweepers, snapshot
+backups) keep operating on the default tenant.
+
+Tenant IDs are 1–64 chars of `[A-Za-z0-9._-]`; anything else is a 400
+before any ledger is touched.
+
 ### Structured audit log (`ledger/audit.go`)
 
 Every mutating operation (`POST`, `POST /transfers`, `POST /sweeps`,
