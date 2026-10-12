@@ -440,6 +440,12 @@ type Ledger struct {
 	// restore that dropped it would re-book full carrying values as
 	// gains.
 	revalBaselines map[revalKey]revalBaseline
+	// ofxImports is the OFX statement-import registry (see ofx_import.go):
+	// document SHA-256 (hex) -> import report, for duplicate-import
+	// idempotency. Structural state like the idempotency indexes — it
+	// survives snapshots, because a restore that dropped it would
+	// re-import the same statement as new.
+	ofxImports map[string]*OFXImportReport
 	chain          []chainLink   // audit chain, one link per successful Post, in order
 	version        uint64        // bumped by every successful Post
 	idempotencyTTL time.Duration // 0 = never expire idempotency keys
@@ -564,6 +570,7 @@ func New(opts ...Option) *Ledger {
 		closingPL:            make(map[AccountID]bool),
 		journalRules:         make(map[string]JournalRule),
 		revalBaselines:       make(map[revalKey]revalBaseline),
+		ofxImports:           make(map[string]*OFXImportReport),
 		pruneInterval:        defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {

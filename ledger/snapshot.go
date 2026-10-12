@@ -274,6 +274,13 @@ type snapshotConfigLine struct {
 	// dropped them would silently reopen closed accounts to new
 	// postings, so closures round-trip like the frozen-account list.
 	ClosedAccounts []AccountClosure `json:"closed_accounts,omitempty"`
+	// OFXImportRegistry carries the OFX statement-import registry (see
+	// ImportOFX in ofx_import.go): document SHA-256 -> import report,
+	// sorted by SHA-256; absent in snapshots written before OFX import
+	// existed. A restore that dropped it would re-import an already
+	// imported statement as new, so the registry round-trips like the
+	// idempotency indexes.
+	OFXImportRegistry []OFXImportRecord `json:"ofx_import_registry,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -677,6 +684,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		AccountTypes:         l.accountTypesLocked(),
 		AccountTags:          l.accountTagsLocked(),
 		ClosedAccounts:       l.closedCopyLocked(),
+		OFXImportRegistry:    l.ofxImportsLocked(),
 	}
 	plAccounts, retainedEarnings := l.closingAccountsLocked()
 	if retainedEarnings != "" {
@@ -1344,6 +1352,24 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	if cfg.ReviewThresholdCents < 0 {
 		return bad("negative global review threshold %d", cfg.ReviewThresholdCents)
 	}
+	// OFX import registry (LG-66): every record must carry its document
+	// SHA-256, and the report inside must agree with it — the registry
+	// is the duplicate-import idempotency, and a restore must not
+	// silently re-key it. Reports are validated structurally only: the
+	// SHA-256 is the identity, and the report is opaque history.
+	seenOFXShas := make(map[string]bool, len(cfg.OFXImportRegistry))
+	for _, rec := range cfg.OFXImportRegistry {
+		if rec.DocumentSHA256 == "" {
+			return bad("ofx import record with empty document_sha256")
+		}
+		if seenOFXShas[rec.DocumentSHA256] {
+			return bad("duplicate ofx import record for sha %q", rec.DocumentSHA256)
+		}
+		seenOFXShas[rec.DocumentSHA256] = true
+		if rec.Report.DocumentSHA256 != rec.DocumentSHA256 {
+			return bad("ofx import record sha mismatch for %q", rec.DocumentSHA256)
+		}
+	}
 	var reviewExpiry time.Duration
 	if cfg.ReviewExpiry != "" {
 		var err error
@@ -1627,6 +1653,15 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			revaluedAt:     rp.RevaluedAt,
 		}
 	}
+	// The OFX import registry restores like the idempotency indexes: a
+	// restore that dropped it would re-import an already imported
+	// statement as new. Snapshots written before OFX import existed
+	// carry no records, which restores as an empty registry.
+	l.ofxImports = make(map[string]*OFXImportReport, len(cfg.OFXImportRegistry))
+	for _, rec := range cfg.OFXImportRegistry {
+		rep := rec.Report
+		l.ofxImports[rec.DocumentSHA256] = &rep
+	}
 	// Re-derive the balance-watch breach state from the restored
 	// balances: an account already outside its band counts as breached,
 	// so the first posting after the restore does not backfire a stale
@@ -1877,6 +1912,12 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// FX snapshot history must round-trip too (LG-45): same version
 	// counter, same per-version tables.
 	if !fxSnapshotsEqualLocked(a, b) {
+		return false
+	}
+	// The OFX import registry must round-trip (LG-66): it is the
+	// duplicate-import idempotency, and a restore that dropped it would
+	// re-import an already imported statement as new.
+	if !reflect.DeepEqual(a.ofxImports, b.ofxImports) {
 		return false
 	}
 	if a.idempotencyTTL != b.idempotencyTTL {

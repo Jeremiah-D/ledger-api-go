@@ -1705,6 +1705,44 @@ func (s *server) handleOFXExport(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// ofxImportRequest is the POST /ofx/import body: the ledger account the
+// statement belongs to and the raw OFX document.
+type ofxImportRequest struct {
+	Account ledger.AccountID `json:"account"`
+	OFX     string           `json:"ofx"`
+}
+
+// handleOFXImport implements POST /ofx/import: it parses an OFX 2.x bank
+// statement and returns a pre-posting (draft) import report (see
+// ledger.ImportOFX). Nothing is posted, no version is bumped: the
+// response tells the operator what the statement claims and what the
+// ledger already has. Re-importing the same document returns the
+// original report with duplicate=true. A missing account, an empty
+// document, a malformed document, or a statement naming a different
+// account is a 400. There is no special auth, like the /ofx export
+// endpoint.
+func (s *server) handleOFXImport(w http.ResponseWriter, r *http.Request) {
+	s.metrics.OFXImports.Add(1)
+	var req ofxImportRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.Account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account is required"})
+		return
+	}
+	if strings.TrimSpace(req.OFX) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ofx document is required"})
+		return
+	}
+	report, err := s.ledgerFor(r).ImportOFX(req.Account, []byte(req.OFX), ledger.OFXImportOptions{})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // handleBalanceHistory implements GET /balance-history: the balance time
 // series the background recorder samples (see ledger/balance_history.go),
 // for reconciliation dashboards and fintech reporting. Query parameters:
@@ -2857,6 +2895,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/ofx", s.handleOFXExport)
+	mux.HandleFunc("POST /ofx/import", s.handleOFXImport)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
 	mux.HandleFunc("PUT /accounts/{id}/tags", s.handleSetAccountTags)
