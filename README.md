@@ -1153,6 +1153,47 @@ curl -s 'localhost:8080/accounts/cash/entries?limit=100'
 - Unknown accounts return `{"entries":[],"next_cursor":""}`, not 404 — the
   journal is append-only, so absence means "nothing yet".
 
+### `GET /accounts/{id}/ofx` — OFX 2.x bank statement export
+
+A bank statement for one account, generated from the journal in OFX 2.x
+form (Go: `ledger.ExportOFX`) — the exchange format accounting packages
+and bank uploaders import. Query parameters: `currency` (optional; default
+exports every currency the account holds as separate `STMTTRNRS` segments
+— currencies never mix inside a segment, matching the per-currency books),
+`since` / `until` (optional RFC 3339 bounds, half-open `[since, until)`),
+`after_entry_id` (optional resume checkpoint).
+
+```bash
+curl -s 'localhost:8080/accounts/cash/ofx?currency=USD' -o cash.ofx
+```
+
+Semantics, stated so importers can trust them:
+
+- One `STMTTRN` per effective journal row where the account is either leg.
+  `FITID` is the journal entry ID — stable across exports, so importers
+  can dedupe on it. `DTPOSTED` is the entry's `CreatedAt` in UTC.
+- `TRNTYPE` and the `TRNAMT` sign are **account-centric**: the account as
+  the debit leg means money was added to it (`CREDIT`, positive amount);
+  the account as the credit leg means money left it (`DEBIT`, negative
+  amount). Debit always increases the account's balance in this ledger's
+  bookkeeping, so `CREDIT` always adds.
+- `MEMO` carries the journal memo, `REFNUM` the entry's external
+  reference, both XML-escaped.
+- `LEDGERBAL` is the account's true ledger state at `DTEND`: the balance
+  folded from every effective journal row with `CreatedAt < until` —
+  not just the exported page. Pending-review rows never touched balances
+  and are excluded from the statement and the fold.
+- The document is the OFX hybrid form: the classic SGML-style header
+  block (`OFXHEADER:100` … `VERSION:211`) followed by the OFX 2.x XML
+  body, which is what most importers parse.
+
+Resume: the response carries the last exported entry's ID in the
+`X-Ledger-OFX-Checkpoint` header. Pass it back as `after_entry_id` to
+continue exactly where the previous page stopped — no duplicates, no
+skips. An unknown checkpoint fails `400` rather than silently
+re-exporting from the start (which would duplicate rows downstream).
+`GET /metrics` counts exports as `ledger_ofx_exports_total`.
+
 ### `GET /accounts/{id}/trial-balance`
 
 The account's double-entry breakdown at the current ledger version:
@@ -1941,6 +1982,8 @@ curl -s localhost:8080/metrics
   served. Snapshot reads are not counted.
 - `ledger_balance_at_queries_total` — `GET /accounts/{id}/balance-at`
   requests served.
+- `ledger_ofx_exports_total` — `GET /accounts/{id}/ofx` OFX statement
+  exports served.
 - `ledger_verify_requests_total` — `GET /entries/verify` requests served.
 - `ledger_reconcile_runs_total` — `POST /reconcile` requests served.
 - `ledger_reconcile_export_runs_total` — `POST /reconcile/export`

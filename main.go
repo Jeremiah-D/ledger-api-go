@@ -1604,6 +1604,59 @@ func (s *server) handleBalanceAt(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleOFXExport implements GET /accounts/{id}/ofx:
+// an OFX 2.x bank statement for the account, generated from the journal
+// (see ledger.ExportOFX). Query parameters: currency (optional, default
+// all currencies as separate statement segments), since/until (optional
+// RFC 3339 bounds, half-open [since, until)), after_entry_id (optional
+// resume checkpoint from a previous response's X-Ledger-OFX-Checkpoint
+// header). The body is the OFX document; the checkpoint of the last
+// exported entry rides the response header so clients can page long
+// statements without duplicating or skipping rows.
+func (s *server) handleOFXExport(w http.ResponseWriter, r *http.Request) {
+	s.metrics.OFXExports.Add(1)
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	q := r.URL.Query()
+	var since, until time.Time
+	if raw := q.Get("since"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "since must be RFC 3339"})
+			return
+		}
+		since = t
+	}
+	if raw := q.Get("until"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "until must be RFC 3339"})
+			return
+		}
+		until = t
+	}
+	doc, checkpoint, err := s.ledgerFor(r).ExportOFX(ledger.OFXExportOptions{
+		Account:      ledger.AccountID(id),
+		Currency:     q.Get("currency"),
+		Since:        since,
+		Until:        until,
+		AfterEntryID: q.Get("after_entry_id"),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ofx; charset=utf-8")
+	if checkpoint != "" {
+		w.Header().Set("X-Ledger-OFX-Checkpoint", checkpoint)
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleBalanceHistory implements GET /balance-history: the balance time
 // series the background recorder samples (see ledger/balance_history.go),
 // for reconciliation dashboards and fintech reporting. Query parameters:
@@ -2704,6 +2757,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
+	mux.HandleFunc("GET /accounts/{id}/ofx", s.handleOFXExport)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
 	mux.HandleFunc("PUT /accounts/{id}/tags", s.handleSetAccountTags)

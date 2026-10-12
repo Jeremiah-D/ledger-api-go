@@ -24,6 +24,8 @@ type Metrics struct {
 	BalanceQueries atomic.Uint64
 	// BalanceAtQueries counts GET /accounts/{id}/balance-at requests served.
 	BalanceAtQueries atomic.Uint64
+	// OFXExports counts GET /accounts/{id}/ofx requests served.
+	OFXExports atomic.Uint64
 	// VerifyRequests counts GET /entries/verify requests served.
 	VerifyRequests atomic.Uint64
 	// AnchorsTotal counts POST /entries/anchor requests that signed a
@@ -275,6 +277,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /accounts/{id}/balance requests served.", m.BalanceQueries.Load())
 	writeCounter(&sb, "ledger_balance_at_queries_total",
 		"Total GET /accounts/{id}/balance-at requests served.", m.BalanceAtQueries.Load())
+	writeCounter(&sb, "ledger_ofx_exports_total",
+		"Total GET /accounts/{id}/ofx OFX statement exports served.", m.OFXExports.Load())
 	writeCounter(&sb, "ledger_verify_requests_total",
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
 	writeCounter(&sb, "ledger_anchors_total",
