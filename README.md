@@ -1032,6 +1032,21 @@ returns the original receipt after expiry. Expiry survives snapshots, is
 visible via `FXRate()`, and expired-rate rejections are counted in
 `ledger_currency_rejections_total`.
 
+**FX rate expiry watch.** The transfer gate rejects expired rates, but
+nothing told the operator a rate was *about* to expire — the first signal
+was a rejected transfer. The background watch (`LEDGER_FX_RATE_WATCH_INTERVAL`,
+e.g. `5m`; see [Environment](#running)) scans the rate table on a ticker,
+read-only, and edge-triggers two audit events: `fx_rate_stale` when a
+rate enters the opt-in warning window (`LEDGER_FX_RATE_WARNING_THRESHOLD`,
+e.g. `72h`), and `fx_rate_expired` once it crosses expiry — each counted
+in `ledger_fx_rate_stale_total` / `ledger_fx_rate_expired_total`. A rate
+that stays stale across ticks is reported once on entering the window
+and once more on crossing expiry (dedup identity: expiry + effective
+version, so renewing a rate re-arms both warnings); removing a pair
+drops its mark. Unset or invalid interval disables the watcher; unset
+or invalid threshold disables stale warnings only — expiry alerts stay
+active.
+
 #### FX revaluation (`POST /revaluations`)
 
 Period-end remeasurement: every non-base-currency balance is revalued at
@@ -2185,6 +2200,13 @@ curl -s localhost:8080/metrics
   found by the background health watchdog (advisory integrity signal).
   Synced from the ledger on every scrape. Any nonzero value is an
   incident — alert on it.
+- `ledger_fx_rate_stale_total` — `fx_rate_stale` alerts edge-triggered
+  by the background FX-rate watch (rates that entered the opt-in warning
+  window). Synced from the ledger on every scrape.
+- `ledger_fx_rate_expired_total` — `fx_rate_expired` alerts
+  edge-triggered by the background FX-rate watch (rates whose expiry
+  has passed; transfers for the pair are rejected until a fresh rate is
+  installed). Synced from the ledger on every scrape.
 - `ledger_balance_history_snapshots_total` — balance-history snapshot
   ticks completed by the background recorder (see
   `LEDGER_BALANCE_HISTORY_DIR` below). One per tick, not per row — it
@@ -2283,6 +2305,18 @@ Environment:
   gates held, after bugs, bad restores, or config drift. The first tick
   fires after one full interval; SIGINT/SIGTERM stops the worker with
   the server. Unset or invalid means disabled.
+- `LEDGER_FX_RATE_WATCH_INTERVAL` — enables the background FX-rate
+  expiry watch, e.g. `LEDGER_FX_RATE_WATCH_INTERVAL=5m`. Each tick scans
+  the rate table, read-only, and edge-triggers `fx_rate_stale` when a
+  rate enters the warning window and `fx_rate_expired` once it crosses
+  expiry, counted in `ledger_fx_rate_stale_total` /
+  `ledger_fx_rate_expired_total`. The first tick fires after one full
+  interval; SIGINT/SIGTERM stops the worker with the server. Unset or
+  invalid means disabled.
+- `LEDGER_FX_RATE_WARNING_THRESHOLD` — the opt-in stale-warning window
+  for the FX-rate watch, e.g. `LEDGER_FX_RATE_WARNING_THRESHOLD=72h`.
+  Unset or invalid disables stale warnings only — expiry alerts stay
+  active.
 - `LEDGER_SNAPSHOT_BACKUP_DIR` — enables the periodic snapshot backup
   worker (LG-39): the server exports disaster-recovery snapshots to this
   directory on `LEDGER_SNAPSHOT_BACKUP_INTERVAL` (e.g. `1h`). Every

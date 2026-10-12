@@ -274,6 +274,16 @@ type Metrics struct {
 	// violations are detected inside the ledger package. Any nonzero
 	// value is an integrity incident — alert on it.
 	BalanceHealthViolations atomic.Uint64
+	// FXRateStaleTotal counts fx_rate_stale alerts edge-triggered by the
+	// background FX-rate watch (see ledger.StartFXRateWatch): rates that
+	// entered the opt-in warning window. It is synced from the ledger on
+	// every GET /metrics scrape, like the health-violation counter.
+	FXRateStaleTotal atomic.Uint64
+	// FXRateExpiredTotal counts fx_rate_expired alerts edge-triggered by
+	// the background FX-rate watch: rates whose expiry has passed, so
+	// cross-currency transfers for the pair are now rejected with
+	// ErrFXRateExpired until the operator installs a fresh rate.
+	FXRateExpiredTotal atomic.Uint64
 	// BalanceHistorySnapshots counts balance-history snapshot ticks
 	// completed by the background recorder (see
 	// LEDGER_BALANCE_HISTORY_DIR): one per tick that wrote rows, not per
@@ -421,6 +431,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_balance_health_violations_total",
 		"Total balance-health violations found by the background health watchdog (advisory integrity signal; any nonzero value is an incident).",
 		m.BalanceHealthViolations.Load())
+	writeCounter(&sb, "ledger_fx_rate_stale_total",
+		"Total fx_rate_stale alerts edge-triggered by the background FX-rate watch (rates that entered the opt-in warning window).",
+		m.FXRateStaleTotal.Load())
+	writeCounter(&sb, "ledger_fx_rate_expired_total",
+		"Total fx_rate_expired alerts edge-triggered by the background FX-rate watch (rates whose expiry has passed; transfers for the pair are rejected until a fresh rate is installed).",
+		m.FXRateExpiredTotal.Load())
 	writeCounter(&sb, "ledger_balance_history_snapshots_total",
 		"Total balance-history snapshot ticks completed by the background recorder (one per tick, not per row).",
 		m.BalanceHistorySnapshots.Load())

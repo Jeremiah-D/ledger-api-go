@@ -2917,6 +2917,7 @@ func (s *server) handler() http.Handler {
 		// reports exactly what it always did.
 		var auditWritten, auditDropped, outboxWritten, outboxDropped uint64
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
+		var fxStaleAlerts, fxExpiredAlerts uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -2930,6 +2931,8 @@ func (s *server) handler() http.Handler {
 			ruleLegs += l.RuleLegsCommitted()
 			freezeReleases += l.FrozenAutoReleases()
 			healthViolations += l.HealthViolationCount()
+			fxStaleAlerts += l.FXRateStaleAlertCount()
+			fxExpiredAlerts += l.FXRateExpiredAlertCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -2949,6 +2952,11 @@ func (s *server) handler() http.Handler {
 		// violations are detected by the background watchdog inside the
 		// ledger package, not in a handler.
 		s.metrics.BalanceHealthViolations.Store(healthViolations)
+		// The FX-rate watch alert counters likewise live in the ledger:
+		// alerts are edge-triggered by the background watcher inside the
+		// ledger package, not in a handler.
+		s.metrics.FXRateStaleTotal.Store(fxStaleAlerts)
+		s.metrics.FXRateExpiredTotal.Store(fxExpiredAlerts)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the
@@ -3503,6 +3511,23 @@ func main() {
 		defer hw.Stop()
 	}
 
+	// Optional background FX-rate expiry watch: periodically scans the
+	// rate table (LG-27/LG-34) and edge-triggers fx_rate_stale /
+	// fx_rate_expired audit events plus ledger_fx_rate_stale_total /
+	// ledger_fx_rate_expired_total, so operators learn a rate is about
+	// to (or has) expire before transfers start failing with
+	// ErrFXRateExpired. It shares the server context, so SIGINT/SIGTERM
+	// stops it. Unset or invalid interval means disabled; unset or
+	// invalid warning threshold disables stale warnings only (expiry
+	// alerts stay active).
+	if interval, threshold, ok := fxRateWatchConfig(); ok {
+		fw := ledger.StartFXRateWatch(ctx, srv.ledger, interval, threshold, func(as []ledger.FXRateAlert) {
+			log.Printf("ledger-api-go: fx rate watch: %d alert(s)", len(as))
+		})
+		log.Printf("ledger-api-go: fx rate watch started (interval %v, warning threshold %v)", interval, threshold)
+		defer fw.Stop()
+	}
+
 	// Optional periodic snapshot backup worker: exports full/incremental
 	// disaster-recovery snapshots to a directory on a ticker, with
 	// retention. It shares the server context, so SIGINT/SIGTERM stops
@@ -3679,6 +3704,35 @@ func healthWatchInterval() (time.Duration, bool) {
 		return 0, false
 	}
 	return d, true
+}
+
+// fxRateWatchConfig reads LEDGER_FX_RATE_WATCH_INTERVAL (a Go duration
+// string, e.g. "5m") and LEDGER_FX_RATE_WARNING_THRESHOLD (a Go duration
+// string, e.g. "72h") for the background FX-rate expiry watch (see
+// ledger.StartFXRateWatch). Unset or invalid interval means the watcher
+// is disabled. The warning threshold is opt-in: unset or invalid falls
+// back to zero with a log line, which disables stale warnings while
+// expiry alerts stay active.
+func fxRateWatchConfig() (interval, warningThreshold time.Duration, ok bool) {
+	raw := os.Getenv("LEDGER_FX_RATE_WATCH_INTERVAL")
+	if raw == "" {
+		return 0, 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_FX_RATE_WATCH_INTERVAL %q, fx rate watch disabled", raw)
+		return 0, 0, false
+	}
+	thresholdRaw := os.Getenv("LEDGER_FX_RATE_WARNING_THRESHOLD")
+	if thresholdRaw != "" {
+		t, err := time.ParseDuration(thresholdRaw)
+		if err != nil || t <= 0 {
+			log.Printf("ledger-api-go: ignoring invalid LEDGER_FX_RATE_WARNING_THRESHOLD %q, stale warnings disabled", thresholdRaw)
+		} else {
+			warningThreshold = t
+		}
+	}
+	return d, warningThreshold, true
 }
 
 // reviewSweepInterval reads LEDGER_REVIEW_SWEEP_INTERVAL (a Go duration

@@ -397,6 +397,12 @@ type Ledger struct {
 	// state, not books.
 	healthViolations uint64
 	healthCursor     atomic.Uint64
+	// fxRateStaleAlerts / fxRateExpiredAlerts count the edge-triggered
+	// "fx_rate_stale" / "fx_rate_expired" audit events from the
+	// background FX-rate watch (see fx_watch.go). In-memory only — they
+	// do not round-trip through snapshots.
+	fxRateStaleAlerts   uint64
+	fxRateExpiredAlerts uint64
 	// balanceHook is the opt-in balance-change notification callback
 	// (see balance_hook.go): every committed Post/Transfer/Capture/
 	// Sweep/Merge dispatches one BalanceChange per touched (account,
