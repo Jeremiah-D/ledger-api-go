@@ -41,6 +41,10 @@ type server struct {
 	// writes to (LEDGER_BALANCE_HISTORY_DIR). Empty means unconfigured,
 	// and GET /balance-history answers 404 fail-closed.
 	balanceHistoryDir string
+	// auditSink forwards outbox domain events to an external webhook
+	// (LEDGER_AUDIT_SINK_URL). Nil when disabled; GET /metrics mirrors
+	// its counters when present.
+	auditSink *ledger.AuditSink
 }
 
 type createEntryRequest struct {
@@ -2947,6 +2951,14 @@ func (s *server) handler() http.Handler {
 		s.metrics.BalanceHealthViolations.Store(healthViolations)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
+		// The audit-sink counters live in the sink itself (it is the
+		// only producer); /metrics mirrors them when the sink runs.
+		if s.auditSink != nil {
+			sent, failed, dead := s.auditSink.Stats()
+			s.metrics.AuditSinkSentTotal.Store(sent)
+			s.metrics.AuditSinkFailedAttemptsTotal.Store(failed)
+			s.metrics.AuditSinkDeadLettersTotal.Store(dead)
+		}
 		s.metrics.handleMetrics(w, r)
 	})
 	return s.tenantMiddleware(mux)
@@ -3527,6 +3539,31 @@ func main() {
 		srv.balanceHistoryDir = cfg.Dir
 		log.Printf("ledger-api-go: balance history worker started (dir %s, interval %v)", cfg.Dir, cfg.Interval)
 		defer rec.Stop()
+	}
+
+	// Optional audit-sink webhook forwarder: streams outbox domain events
+	// to an external endpoint as HMAC-signed JSON webhooks (see
+	// ledger.StartAuditSink). LEDGER_AUDIT_SINK_URL enables it;
+	// LEDGER_AUDIT_SINK_SECRET is required alongside — a URL without a
+	// secret fails fast, because unsigned webhooks can be forged. An
+	// unset URL means disabled. Like the other background workers it
+	// stays on the default tenant's ledger: per-tenant forwarding is out
+	// of scope.
+	if sinkURL := os.Getenv("LEDGER_AUDIT_SINK_URL"); sinkURL != "" {
+		sinkSecret := os.Getenv("LEDGER_AUDIT_SINK_SECRET")
+		if sinkSecret == "" {
+			log.Fatalf("ledger-api-go: LEDGER_AUDIT_SINK_URL is set but LEDGER_AUDIT_SINK_SECRET is empty: refusing to forward unsigned webhooks")
+		}
+		sink, err := ledger.StartAuditSink(ctx, srv.ledger, ledger.SinkConfig{
+			URL:    sinkURL,
+			Secret: []byte(sinkSecret),
+		})
+		if err != nil {
+			log.Fatalf("ledger-api-go: audit sink: %v", err)
+		}
+		srv.auditSink = sink
+		log.Printf("ledger-api-go: audit sink started (url %s)", sinkURL)
+		defer sink.Stop()
 	}
 
 	timeout := shutdownTimeout()

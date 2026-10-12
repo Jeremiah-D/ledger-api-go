@@ -73,6 +73,18 @@ type Metrics struct {
 	// by the write-path lazy check, the background freeze sweeper, or an
 	// explicit ledger.ExpireFrozenAccounts call.
 	FreezeAutoReleasesTotal atomic.Uint64
+	// AuditSinkSentTotal counts outbox domain events the audit-sink
+	// webhook forwarder delivered (HTTP 2xx). Mirrored from the sink on
+	// GET /metrics; zero when the sink is disabled.
+	AuditSinkSentTotal atomic.Uint64
+	// AuditSinkFailedAttemptsTotal counts failed audit-sink delivery
+	// attempts (network errors and non-2xx responses), including the
+	// final attempts of dead-lettered events.
+	AuditSinkFailedAttemptsTotal atomic.Uint64
+	// AuditSinkDeadLettersTotal counts events the audit sink gave up on
+	// after exhausting its retries: each was recorded as an
+	// audit_sink_dead_letter audit event and the cursor moved past it.
+	AuditSinkDeadLettersTotal atomic.Uint64
 	// OverdraftRejections counts POST /entries, POST /entries/batch,
 	// POST /transfers, POST /merges, and capture requests rejected with
 	// 422 because they would have overdrawn an overdraft-protected
@@ -450,6 +462,15 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_freeze_auto_releases_total",
 		"Total automatic account unfreezes: timed freezes whose deadline passed, released by the write-path lazy check, the background freeze sweeper, or an explicit ExpireFrozenAccounts call.",
 		m.FreezeAutoReleasesTotal.Load())
+	writeCounter(&sb, "ledger_audit_sink_sent_total",
+		"Total outbox domain events the audit-sink webhook forwarder delivered (HTTP 2xx).",
+		m.AuditSinkSentTotal.Load())
+	writeCounter(&sb, "ledger_audit_sink_failed_attempts_total",
+		"Total failed audit-sink webhook delivery attempts (network errors and non-2xx responses), including the final attempts of dead-lettered events.",
+		m.AuditSinkFailedAttemptsTotal.Load())
+	writeCounter(&sb, "ledger_audit_sink_dead_letter_total",
+		"Total events the audit sink gave up on after exhausting retries (each recorded as an audit_sink_dead_letter audit event).",
+		m.AuditSinkDeadLettersTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

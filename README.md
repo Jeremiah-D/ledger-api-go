@@ -1232,6 +1232,50 @@ skips. An unknown checkpoint fails `400` rather than silently
 re-exporting from the start (which would duplicate rows downstream).
 `GET /metrics` counts exports as `ledger_ofx_exports_total`.
 
+### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
+
+The inverse of the export above: it parses an OFX 2.x bank statement
+(SGML or XML body style, with or without the SGML header block) and
+returns a **pre-posting report** — every statement line as a
+`DraftEntry` the operator reviews, matched against the account's
+journaled rows. Go: `ledger.ParseOFX` / `ledger.ImportOFX`.
+
+```bash
+curl -s -X POST localhost:8080/ofx/import \
+  -H 'Content-Type: application/json' \
+  -d '{"account":"cash","ofx":"<OFX>...</OFX>"}'
+# 200 {"document_sha256":"…","account":"cash",
+#      "items":[{"transaction":{...,"direction":"in","amount_cents":15000,...},
+#                "draft":{"id":"ofx/stmt-1","debit_account":"cash","amount_cents":15000,...},
+#                "status":"matched","matched_entry_id":"e1"}, ...],
+#      "matched":1,"mismatched":0,"unmatched":2,"duplicate":false}
+```
+
+Semantics, stated so operators can trust them:
+
+- **Nothing is posted.** The import writes no journal rows, enters no
+  hash chain, and bumps no version — booking external money movement is
+  an operator decision; the report only says what the statement claims
+  and what the ledger already has.
+- Direction mirrors the export: `CREDIT` (positive) means the account
+  was the debit leg — money in (`"direction":"in"`); `DEBIT` (negative)
+  means it was the credit leg — money out. Amounts parse as exact
+  decimals to cents, no floats; `DTPOSTED` accepts `YYYYMMDDHHMMSS` and
+  `YYYYMMDD`.
+- **Matching** — a journaled row is a candidate for a statement line
+  when it is effective (pending-review rows are excluded, like the
+  exporter), carries the same currency, has equal `|amount|`, and its
+  `CreatedAt` falls within ±24h of `DTPOSTED`. Exactly one candidate is
+  `matched`; several is `mismatched`; none is `unmatched`.
+- **Idempotency** — the ledger keeps every import report keyed by the
+  document's SHA-256. Re-importing the same document returns the
+  original report with `duplicate:true`; a re-uploaded statement never
+  double-counts. The registry survives disaster-recovery snapshots.
+- A statement naming a different account than the import target, a
+  malformed document, a missing account, or an empty document is a
+  `400`. There is no special auth, like the export endpoint.
+  `GET /metrics` counts imports as `ledger_ofx_imports_total`.
+
 ### `GET /accounts/{id}/trial-balance`
 
 The account's double-entry breakdown at the current ledger version:
@@ -1948,6 +1992,53 @@ exclusive), `type` (comma-separated event types), `account`, `limit`
 resumes after it, empty on the last page). Invalid cursors/limits are
 `400`.
 
+#### Audit-sink webhook forwarder (`ledger/audit_sink.go`)
+
+An opt-in forwarder that streams the outbox's domain events to an
+external endpoint as signed JSON webhooks — for SIEM ingestion,
+compliance mirrors, or cross-region replication. Disabled by default;
+set `LEDGER_AUDIT_SINK_URL` (and the required `LEDGER_AUDIT_SINK_SECRET`,
+see [Environment](#running)) to enable. Like the other background
+workers it stays on the default tenant's ledger.
+
+```bash
+LEDGER_OUTBOX_DIR=/var/lib/ledger/outbox \
+LEDGER_AUDIT_SINK_URL=https://siem.example.com/ledger-hook \
+LEDGER_AUDIT_SINK_SECRET='<shared secret>' \
+  ./ledger-api-go
+```
+
+Delivery contract, stated honestly:
+
+- Every event POSTs as JSON with `Content-Type: application/json`,
+  `X-Ledger-Signature: sha256=<hex>` (`HMAC-SHA256(secret, body)`),
+  `X-Ledger-Event-Type`, and `X-Ledger-Event-Seq`. A `2xx` advances
+  the cursor.
+- The sink never touches the posting path: it tails the outbox files
+  on its own goroutine, so a slow or dead webhook delays the cursor,
+  never a `POST`.
+- **At-least-once**: a crash between delivery and the cursor write
+  replays the event after restart — downstream must dedupe on
+  `(type, seq)`. The cursor persists atomically after each event
+  (`<outboxdir>/audit-sink.cursor` by default).
+- **First start begins at the current outbox head — history is not
+  replayed.** The sink forwards new domain facts; it is not a backfill
+  tool.
+- **Gaps are possible by design**: an event that exhausts its 10
+  retries (1s backoff doubling to 60s) is dead-lettered — recorded as
+  an `audit_sink_dead_letter` audit event (with seq, type, attempts,
+  last status), counted, and skipped; the cursor moves past it. Alert
+  on `ledger_audit_sink_dead_letter_total`.
+- A URL without a secret fails startup fast: unsigned webhooks can be
+  forged, so the sink refuses to run unsigned. No outbox attached, an
+  unavailable outbox directory, or a corrupt cursor file likewise fails
+  startup fast rather than silently losing the stream.
+
+`GET /metrics` exposes `ledger_audit_sink_sent_total`,
+`ledger_audit_sink_failed_attempts_total` (network errors and non-2xx
+responses, including dead letters' final attempts), and
+`ledger_audit_sink_dead_letter_total`.
+
 ### `GET /audit/verify`
 
 Replays the audit log's hash chain over every audit file — all days,
@@ -2052,6 +2143,16 @@ curl -s localhost:8080/metrics
   requests served.
 - `ledger_ofx_exports_total` — `GET /accounts/{id}/ofx` OFX statement
   exports served.
+- `ledger_ofx_imports_total` — `POST /ofx/import` OFX statement
+  pre-posting imports served, including duplicates and rejected
+  payloads.
+- `ledger_audit_sink_sent_total` — outbox domain events the audit-sink
+  webhook forwarder delivered (HTTP 2xx).
+- `ledger_audit_sink_failed_attempts_total` — failed audit-sink webhook
+  delivery attempts (network errors and non-2xx responses).
+- `ledger_audit_sink_dead_letter_total` — events the audit sink gave up
+  on after exhausting retries (each recorded as an
+  `audit_sink_dead_letter` audit event).
 - `ledger_account_closes_total` — `POST /accounts/{id}/close` requests
   that closed an account (idempotent replays are not counted: they close
   nothing new).
@@ -2288,6 +2389,14 @@ Environment:
   one file per UTC day, fsync'd per event. Unset means disabled. The
   directory is created if needed; an unwritable directory fails startup
   fast. The outbox is closed on graceful shutdown.
+- `LEDGER_AUDIT_SINK_URL` — enables the audit-sink webhook forwarder
+  (see above): outbox domain events POST as HMAC-signed JSON to this
+  absolute http(s) URL. Unset means disabled.
+- `LEDGER_AUDIT_SINK_SECRET` — the shared HMAC-SHA256 secret signing
+  every webhook delivery (`X-Ledger-Signature: sha256=<hex>`).
+  Required when `LEDGER_AUDIT_SINK_URL` is set: a URL without a secret
+  fails startup fast, because unsigned webhooks can be forged. Never
+  logged.
 
 ## Benchmarks
 
