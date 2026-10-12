@@ -1207,6 +1207,40 @@ curl -s localhost:8080/accounts/merchant/rollup
   together, mirroring the accounting equation). Unknown accounts roll up
   to just themselves with zero balances.
 
+### Account tags and the tag-dimension rollup (`PUT /accounts/{id}/tags`, `GET /rollup?tag=k:v`)
+
+Tags are small `(key, value)` classification labels on accounts — a
+merchant's business line (`line=retail`), a regulatory segment
+(`segment=cross_border`), a cost center (`cost_center=ops`) — for
+report-driven rollups that cut **across** the hierarchy tree instead of
+following it. Tagging is structural, like the parent link: it does not
+bump the ledger version, and tag sets round-trip through the
+disaster-recovery snapshot. Tag changes are recorded in the structured
+audit chain (`account_tags_set`, clears marked `tags_cleared=true`).
+
+```bash
+curl -s -X PUT localhost:8080/accounts/retail-1/tags \
+  -H 'Content-Type: application/json' -d '{"tags":{"line":"retail"}}'
+# 200 {"account":"retail-1","tags":{"line":"retail"}}
+
+curl -s "localhost:8080/rollup?tag=line:retail"
+# {"tag_key":"line","tag_value":"retail","accounts":["retail-1","retail-2"],
+#  "by_currency":[{"currency":"USD","balance_cents":3000}],"version":5}
+```
+
+- Keys and values are 1–64 characters of `[A-Za-z0-9._-]`; anything
+  else → `400`. `PUT` replaces the account's whole tag set atomically;
+  an empty map clears it.
+- `GET /rollup?tag=k:v` aggregates every account carrying that exact
+  pair, per currency. A pair matching nothing returns an empty account
+  list with zero balances (never a 404 — an operator's report shows an
+  empty table). A missing or malformed `tag` parameter → `400`.
+- Tags carry no hierarchy inheritance: only the tagged accounts
+  contribute, so the classification is explicit and auditable.
+- The trial balance of a tagged account carries its `tags`, and the
+  `POST /reconcile` report lists every tagged account (`account_tags`),
+  so downstream reporting can group the same rows by tag dimension.
+
 ### `GET /entries`
 
 Time-windowed, cursor-paginated export of the journal, sorted by
@@ -2171,6 +2205,9 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── ledger_bench_test.go   # BenchmarkPost: throughput + p99 latency (numbers → README)
 │   ├── ledger_test.go         # validation, idempotency, concurrency tests
 │   ├── hierarchy.go           # sub-account parent links (cycle-guarded) + per-currency balance rollup
+│   ├── tags.go                # account tags (classification labels) + tag-dimension balance rollup
+│   ├── ledger_tags_test.go    # tag validation/set/clear/copy isolation, tag rollup, snapshot round-trip, audit trail
+│   ├── main_tags_test.go      # PUT /accounts/{id}/tags + GET /rollup?tag=k:v endpoints
 │   ├── ledger_hierarchy_test.go# parent assignment, cycle rejection, rollup aggregation, concurrency
 │   ├── ledger_idempotency_ttl_test.go# TTL eviction, lazy prune, interval guard
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics

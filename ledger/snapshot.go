@@ -205,6 +205,12 @@ type snapshotConfigLine struct {
 	// registrations are part of the operational config like the
 	// frozen-account list.
 	AccountTypes []AccountTypeRegistration `json:"account_types,omitempty"`
+	// AccountTags carries the account tag sets (see SetAccountTags),
+	// sorted by account; absent in snapshots written before account
+	// tags existed. A restore that dropped them would silently
+	// reclassify every tagged account, so tags are part of the
+	// operational config like the chart-of-accounts registrations.
+	AccountTags []AccountTag `json:"account_tags,omitempty"`
 	// BalanceWatches carries the balance threshold watches (see
 	// SetBalanceWatch); absent in snapshots written before balance
 	// watches existed. The alert state (breach flags) is re-derived from
@@ -663,6 +669,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		RevalAccount:         l.revalAccount,
 		RevalBaselines:       l.revaluationPositionsLocked(),
 		AccountTypes:         l.accountTypesLocked(),
+		AccountTags:          l.accountTagsLocked(),
 	}
 	plAccounts, retainedEarnings := l.closingAccountsLocked()
 	if retainedEarnings != "" {
@@ -1436,6 +1443,26 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		l.chart[reg.Account] = reg.Type
 	}
+	// Account tags restore like the chart-of-accounts registrations: an
+	// empty account or a malformed key/value fails the import instead of
+	// installing tags that could never have been created. The nil-map
+	// case (an account with an empty tag set) is skipped — an empty
+	// set clears, so it has no representation in the map index.
+	for _, row := range cfg.AccountTags {
+		if row.Account == "" {
+			return bad("account tags with empty account")
+		}
+		if row.Tags == nil {
+			row.Tags = map[string]string{}
+		}
+		if err := checkAccountTags(row.Tags); err != nil {
+			return bad("account tags for %s: %v", row.Account, err)
+		}
+		if len(row.Tags) == 0 {
+			continue
+		}
+		l.tags[row.Account] = row.Tags
+	}
 	for c, p := range cfg.Parents {
 		l.parents[c] = p
 	}
@@ -1773,6 +1800,12 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// structural config: a restore that dropped them would silently
 	// lift the posting-direction control.
 	if !reflect.DeepEqual(a.chart, b.chart) {
+		return false
+	}
+	// Account tags must round-trip like the chart registrations: a
+	// restore that dropped them would silently reclassify every tagged
+	// account.
+	if !reflect.DeepEqual(a.tags, b.tags) {
 		return false
 	}
 	if !reflect.DeepEqual(a.parents, b.parents) {

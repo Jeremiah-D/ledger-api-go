@@ -208,6 +208,13 @@ type ReconciliationReport struct {
 	// accumulates the gains/losses, and each row here shows the carrying
 	// value behind them.
 	RevaluationImpact []RevaluationPosition `json:"revaluation_impact"`
+	// AccountTags lists every account carrying a tag set (see
+	// SetAccountTags), sorted by account: the classification labels
+	// downstream reporting groups the per-account trial balances by.
+	// Operations tooling reads this for tag-dimension reporting — a
+	// rollup by business line or segment over the trial balances in this
+	// same report. Empty when no account is tagged.
+	AccountTags []AccountTag `json:"account_tags,omitempty"`
 }
 
 // ReconcileOptions tunes Reconcile. BaseCurrency opts into the
@@ -370,6 +377,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		ReviewThresholds:           l.reviewThresholdsLocked(),
 		RevaluationAccount:         l.revalAccount,
 		RevaluationImpact:          l.revaluationPositionsLocked(),
+		AccountTags:                l.accountTagsLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit

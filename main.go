@@ -1740,6 +1740,80 @@ func (s *server) handleRollup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.ledgerFor(r).Rollup(ledger.AccountID(id)))
 }
 
+type setAccountTagsRequest struct {
+	Tags map[string]string `json:"tags"`
+}
+
+// handleSetAccountTags implements PUT /accounts/{id}/tags: replaces the
+// account's tag set (see ledger.SetAccountTags), the classification
+// labels used by the tag-dimension rollup (GET /rollup?tag=k:v). The body
+// is {"tags":{"k":"v",...}}; an empty or missing map clears the account's
+// tags. Tagging is structural and does not bump the ledger version. An
+// invalid key/value (outside [A-Za-z0-9._-] or over 64 characters) is
+// 400.
+func (s *server) handleSetAccountTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req setAccountTagsRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	l := s.ledgerFor(r)
+	if err := l.SetAccountTags(ledger.AccountID(id), req.Tags); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	tags, _ := l.AccountTagsOf(ledger.AccountID(id))
+	writeJSON(w, http.StatusOK, map[string]any{"account": id, "tags": tags})
+}
+
+// handleTagRollup implements GET /rollup?tag=k:v: the balance rollup of
+// every account carrying the (key, value) tag pair, per currency (see
+// ledger.TagRollupByTag) — the tag dimension across the whole ledger,
+// without requiring a hierarchy link between the accounts. A pair that
+// matches no account returns an empty account list with zero balances.
+// The parameter is "k:v": a missing or malformed tag parameter, or a key
+// or value outside the tag charset, is 400.
+func (s *server) handleTagRollup(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("tag")
+	key, value, found := strings.Cut(raw, ":")
+	if !found {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tag query must be \"k:v\""})
+		return
+	}
+	if err := ledger.CheckTagSegment(key); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tag key: " + err.Error()})
+		return
+	}
+	if err := ledger.CheckTagSegment(value); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tag value: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.ledgerFor(r).TagRollupByTag(key, value))
+}
+
 // handleVerifyEntries implements GET /entries/verify. It recomputes the
 // ledger's tamper-evident audit chain and reports whether it is intact:
 // 200 {"ok":true,"links":N,"head":"<hex>","anchor":{...}} on success. The
@@ -2632,6 +2706,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
+	mux.HandleFunc("PUT /accounts/{id}/tags", s.handleSetAccountTags)
+	mux.HandleFunc("GET /rollup", s.handleTagRollup)
 	mux.HandleFunc("GET /balance-history", s.handleBalanceHistory)
 	// GET /tenants lists every provisioned tenant ID (the default tenant
 	// is "" — see ledger.DefaultTenantID). It is registered on the inner

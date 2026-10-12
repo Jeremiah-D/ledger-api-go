@@ -209,6 +209,12 @@ type Ledger struct {
 	// like frozen and noOverdraft: registering or clearing a type does
 	// not bump the journal version and survives snapshots.
 	chart map[AccountID]AccountType
+	// tags maps an account to its tag set (see tags.go): (key, value)
+	// classification labels for tag-dimension reporting. Structural
+	// config, like chart: setting or clearing tags does not bump the
+	// journal version and survives snapshots. Only accounts with a
+	// non-empty tag set appear here.
+	tags map[AccountID]map[string]string
 	// noOverdraft marks accounts guarded against overdrafts: a Post that
 	// would take a protected credit (payer) account below zero is rejected
 	// with ErrAccountOverdraft (see overdraft.go). Opt-in per account.
@@ -520,6 +526,7 @@ func New(opts ...Option) *Ledger {
 		frozen:               make(map[AccountID]bool),
 		frozenUntil:          make(map[AccountID]time.Time),
 		chart:                make(map[AccountID]AccountType),
+		tags:                 make(map[AccountID]map[string]string),
 		noOverdraft:          make(map[AccountID]bool),
 		dailyLimits:          make(map[dailyLimitKey]int64),
 		dailyOutflow:         make(map[dailyLimitKey]int64),
@@ -1040,6 +1047,10 @@ type TrialBalance struct {
 	// revenue, or expense. Empty when the account is unregistered —
 	// unregistered accounts skip Post's direction check.
 	AccountType AccountType `json:"account_type,omitempty"`
+	// Tags reports the account's tag set (see SetAccountTags): the
+	// classification labels used by the tag-dimension rollup. Empty
+	// when the account carries no tags.
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // TrialBalance returns the double-entry breakdown of the given account at
@@ -1067,6 +1078,13 @@ func (l *Ledger) trialBalanceLocked(a AccountID) TrialBalance {
 		DailyLimitCents:          l.dailyLimits[dailyLimitKey{account: a, currency: DefaultCurrency}],
 		LowBalanceThresholdCents: l.balanceWatchLowCentsLocked(a, DefaultCurrency),
 		HighBalanceThresholdCents: l.balanceWatchHighCentsLocked(a, DefaultCurrency),
+	}
+	if t, ok := l.tags[a]; ok {
+		cp := make(map[string]string, len(t))
+		for k, v := range t {
+			cp[k] = v
+		}
+		tb.Tags = cp
 	}
 	seen := make(map[string]bool)
 	for k := range l.balances {
