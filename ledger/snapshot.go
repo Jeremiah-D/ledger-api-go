@@ -168,6 +168,13 @@ type snapshotConfigLine struct {
 	FeeRateBps         int64                   `json:"fee_rate_bps"`
 	FeeTiers           []FeeTier               `json:"fee_tiers,omitempty"`
 	FeeRevenueAccount  AccountID               `json:"fee_revenue_account"`
+	// MaxTransferChunkCents carries the opt-in per-transfer chunk cap
+	// for PostTransferSplit (see WithMaxTransferChunkCents); absent
+	// (zero) in snapshots written before chunking existed or when
+	// chunking is disabled. SplitFeePerChunk carries the per-chunk fee
+	// mode (see WithSplitFeePerChunk).
+	MaxTransferChunkCents int64 `json:"max_transfer_chunk_cents,omitempty"`
+	SplitFeePerChunk      bool  `json:"split_fee_per_chunk,omitempty"`
 	IdempotencyTTL     string                  `json:"idempotency_ttl"`
 	// DailyLimits carries the daily outflow limits (see SetDailyLimit);
 	// absent in snapshots written before daily limits existed. The
@@ -666,6 +673,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FeeRateBps:           flatFeeRateBps(l.feeTiers),
 		FeeTiers:             l.feeTiers,
 		FeeRevenueAccount:    l.feeRevenueAccount,
+		MaxTransferChunkCents: l.maxTransferChunkCents,
+		SplitFeePerChunk:      l.splitFeePerChunk,
 		IdempotencyTTL:       l.idempotencyTTL.String(),
 		DailyLimits:          l.dailyLimitsLocked(),
 		FXRates:              l.fxRatesLocked(),
@@ -1349,6 +1358,12 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("negative review threshold for account %q", rt.Account)
 		}
 	}
+	// Split-transfer chunking config (LG-75): a negative chunk cap is a
+	// corrupt snapshot — fail the import rather than silently running
+	// with a different cap.
+	if cfg.MaxTransferChunkCents < 0 {
+		return bad("negative max_transfer_chunk_cents %d", cfg.MaxTransferChunkCents)
+	}
 	if cfg.ReviewThresholdCents < 0 {
 		return bad("negative global review threshold %d", cfg.ReviewThresholdCents)
 	}
@@ -1579,6 +1594,9 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		l.feeTiers = []FeeTier{{MinAmountCents: 0, RateBps: cfg.FeeRateBps}}
 	}
 	l.feeRevenueAccount = cfg.FeeRevenueAccount
+	// Split-transfer chunking config (LG-75), validated above.
+	l.maxTransferChunkCents = cfg.MaxTransferChunkCents
+	l.splitFeePerChunk = cfg.SplitFeePerChunk
 	if ttlSet {
 		l.idempotencyTTL = ttl
 	}
@@ -1876,6 +1894,10 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.feeTiers, b.feeTiers) || a.feeRevenueAccount != b.feeRevenueAccount {
+		return false
+	}
+	// Split-transfer chunking config must round-trip (LG-75).
+	if a.maxTransferChunkCents != b.maxTransferChunkCents || a.splitFeePerChunk != b.splitFeePerChunk {
 		return false
 	}
 	// Journal rules must round-trip: the same rule set and the same

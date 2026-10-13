@@ -834,6 +834,47 @@ curl -s -X POST localhost:8080/entries \
 # 422 {"error":"ledger: posting would exceed the account's daily outflow limit"}
 ```
 
+### Large-transfer auto-split (Go API: `PostTransferSplit`)
+
+When a transfer exceeds a per-transfer cap — a downstream rail's
+single-transaction limit, for example — `PostTransferSplit` splits it
+into multiple chunk postings that commit atomically (fintech
+payout batching). The chunk size is the tighter of the opt-in cap
+(`ledger.WithMaxTransferChunkCents`, or the `LEDGER_MAX_TRANSFER_CHUNK`
+environment variable in cents) and the payer's daily outflow limit in
+the transfer's currency: a transfer of $2,500 with a $1,000 cap books
+three chunks of $1,000 / $1,000 / $500 as `<id>/chunk-0..2`. Any leg
+failure — validation, ID conflict, frozen/closed account, overdraft,
+daily-limit, closed period — rolls the whole split back with zero
+records; readers never observe a half-posted split.
+
+Each chunk is checked against the day's cumulative outflow budget in
+commit order, so the daily limit stays a hard cap that chunking can
+never circumvent. The payer's overdraft check runs against the total
+outflow (amount + fee), since the split settles at once. Fees follow
+the transfer-fee convention by default — computed once on the whole
+amount, one `<id>/fee` leg — or per chunk with
+`ledger.WithSplitFeePerChunk` (`<id>/chunk-<i>/fee` legs; an explicit
+`FeeCents` is always charged once). Chunk entries carry idempotency
+keys derived per (transfer, chunk) (`<key>/chunk-<i>`), and replaying
+the transfer's key returns the whole receipt (`Duplicate: true`).
+Splitting never bypasses dual-control review: a transfer meeting the
+payer's review threshold is rejected with
+`ErrSplitTransferNeedsReview` and belongs in `PostTransfer`'s review
+flow. Cross-currency splits convert each chunk at the transfer's one
+rate (floored per chunk; the receipt discloses the summed conversion)
+with every leg keeping its single currency. The chunking config
+round-trips through disaster-recovery snapshots.
+
+```go
+l := ledger.New(ledger.WithMaxTransferChunkCents(100000)) // $1,000 cap
+receipt, err := l.PostTransferSplit(ledger.Transfer{
+    ID: "pay-2026-001", From: "ops", To: "vendor", AmountCents: 250000,
+    IdempotencyKey: "pay-2026-001",
+})
+// receipt.Chunks: [{chunk_index:0, chunk_count:3, amount_cents:100000, …}, …]
+```
+
 ### Balance threshold watches
 
 Per-account, per-currency opt-in alert band for fintech operations (low

@@ -286,6 +286,19 @@ type Ledger struct {
 	// an empty revenue account) disable the policy.
 	feeTiers          []FeeTier
 	feeRevenueAccount AccountID
+	// maxTransferChunkCents is the opt-in single-transfer cap for
+	// PostTransferSplit (see WithMaxTransferChunkCents in
+	// transfer_split.go): a transfer whose amount exceeds it is split
+	// into chunks of at most this size, committed atomically. Zero
+	// disables chunking. Structural config, like feeTiers — it survives
+	// snapshots.
+	maxTransferChunkCents int64
+	// splitFeePerChunk makes PostTransferSplit resolve the transfer fee
+	// policy per chunk instead of once per transfer (see
+	// WithSplitFeePerChunk in transfer_split.go). An explicit FeeCents
+	// is always charged once per transfer. Structural config — it
+	// survives snapshots.
+	splitFeePerChunk bool
 	// fxRates is the directional FX rate table (see fx.go): converting
 	// fromCurrency to toCurrency multiplies by Num/Den and floors to
 	// whole cents. fxAccount is the ledger-wide FX clearing account, the

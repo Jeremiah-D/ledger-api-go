@@ -300,14 +300,29 @@ func (l *Ledger) resolveFeeLocked(t Transfer) (feeCents int64, feeAccount Accoun
 	if t.SkipFee || len(l.feeTiers) == 0 || l.feeRevenueAccount == "" {
 		return 0, "", -1, 0, nil
 	}
-	tierIndex, rateBps = l.feeTierFor(t.AmountCents)
-	if fee := policyFeeCents(t.AmountCents, rateBps); fee > 0 {
+	fee, tierIndex, rateBps := l.policyFeeForLocked(t.AmountCents)
+	if fee > 0 {
 		return fee, l.feeRevenueAccount, tierIndex, rateBps, nil
 	}
 	// A computed fee of zero (a free dust tier, or a tiny amount under a
 	// low rate) posts no leg, but the tier that produced it is still
 	// disclosed on the receipt.
 	return 0, "", tierIndex, rateBps, nil
+}
+
+// policyFeeForLocked computes the ledger's default fee-policy charge for
+// one amount: floor(amount * tierRate / 10000) to feeRevenueAccount, where
+// the tier is the last one whose minimum does not exceed the amount. It
+// returns the fee (0 when the policy is disabled or the tier is free),
+// the tier index and rate (-1 and 0 when the policy is disabled), so
+// callers can disclose the tier even when no leg is booked. Callers must
+// hold l.mu.
+func (l *Ledger) policyFeeForLocked(amount int64) (feeCents int64, tierIndex int, rateBps int64) {
+	if len(l.feeTiers) == 0 || l.feeRevenueAccount == "" {
+		return 0, -1, 0
+	}
+	tierIndex, rateBps = l.feeTierFor(amount)
+	return policyFeeCents(amount, rateBps), tierIndex, rateBps
 }
 
 // ParseFeeSchedule parses the LEDGER_TRANSFER_FEE environment variable
@@ -390,6 +405,65 @@ func parseTieredFeeSchedule(spec, account string, fail func(string, ...any) ([]F
 	return tiers, AccountID(account), nil
 }
 
+// validateTransferFields checks a transfer's fields and normalizes the
+// currency codes, returning the normalized copy and the settlement
+// currency. It runs no risk checks and records nothing; PostTransfer and
+// PostTransferSplit share it so both reject the same malformed transfers
+// the same way, in the same order.
+func validateTransferFields(t Transfer) (Transfer, string, error) {
+	if t.ID == "" {
+		return t, "", ErrEmptyTransferID
+	}
+	if t.From == "" {
+		return t, "", ErrEmptyFromAccount
+	}
+	if t.To == "" {
+		return t, "", ErrEmptyToAccount
+	}
+	if t.From == t.To {
+		return t, "", ErrTransferSameAccount
+	}
+	if t.AmountCents <= 0 {
+		return t, "", ErrTransferNonPositiveAmount
+	}
+	// Currency is field validation, like the accounts and the amount: an
+	// empty code normalizes to the default currency, anything else must
+	// be a 3-letter uppercase ISO 4217 code. Normalization happens
+	// before the idempotency replay check, mirroring Post, so replays
+	// compare canonical codes.
+	currency, err := normalizeCurrency(t.Currency)
+	if err != nil {
+		return t, "", err
+	}
+	t.Currency = currency
+
+	// ToCurrency empty means "settle in the transfer's own currency";
+	// anything else must be a valid code naming a different currency,
+	// taking the cross-currency path (see fx.go).
+	toCurrency := currency
+	if t.ToCurrency != "" {
+		toCurrency, err = normalizeCurrency(t.ToCurrency)
+		if err != nil {
+			return t, "", err
+		}
+		t.ToCurrency = toCurrency
+	}
+	// The memo is field validation, like the legs and the amount: a note
+	// longer than maxMemoRunes UTF-8 characters is rejected before
+	// anything is recorded. Validated once here, before the same/FX
+	// currency branch, so both paths enforce it.
+	if err := checkMemoLength(t.Memo); err != nil {
+		return t, "", err
+	}
+	// The external reference is field validation, like the memo:
+	// longer than maxExternalRefRunes UTF-8 characters is rejected
+	// before anything is recorded, on both paths.
+	if err := checkExternalRefLength(t.ExternalRef); err != nil {
+		return t, "", err
+	}
+	return t, toCurrency, nil
+}
+
 // PostTransfer records an atomic transfer from one account to another,
 // with an optional fee leg charged to the payer on top of the amount.
 //
@@ -420,61 +494,24 @@ func parseTieredFeeSchedule(spec, account string, fail func(string, ...any) ([]F
 // used by either API replays the original entry instead of booking again.
 // A transfer that posted a fee leg replays the full receipt (principal +
 // fee entries). A zero CreatedAt is filled with the current time.
+
 func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.postTransferLocked(t)
+}
 
-	if t.ID == "" {
-		return TransferReceipt{}, ErrEmptyTransferID
-	}
-	if t.From == "" {
-		return TransferReceipt{}, ErrEmptyFromAccount
-	}
-	if t.To == "" {
-		return TransferReceipt{}, ErrEmptyToAccount
-	}
-	if t.From == t.To {
-		return TransferReceipt{}, ErrTransferSameAccount
-	}
-	if t.AmountCents <= 0 {
-		return TransferReceipt{}, ErrTransferNonPositiveAmount
-	}
-	// Currency is field validation, like the accounts and the amount: an
-	// empty code normalizes to the default currency, anything else must
-	// be a 3-letter uppercase ISO 4217 code. Normalization happens
-	// before the idempotency replay check, mirroring Post, so replays
-	// compare canonical codes.
-	currency, err := normalizeCurrency(t.Currency)
-	if err != nil {
+// postTransferLocked is the lock-held core of PostTransfer; see its doc
+// comment for the full contract. PostTransferSplit delegates to it when
+// a transfer needs no splitting, so a non-split transfer posts exactly
+// as PostTransfer would.
+func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
+	var err error
+	var toCurrency string
+	if t, toCurrency, err = validateTransferFields(t); err != nil {
 		return TransferReceipt{}, err
 	}
-	t.Currency = currency
-
-	// ToCurrency empty means "settle in the transfer's own currency";
-	// anything else must be a valid code naming a different currency,
-	// taking the cross-currency path (see fx.go).
-	toCurrency := currency
-	if t.ToCurrency != "" {
-		toCurrency, err = normalizeCurrency(t.ToCurrency)
-		if err != nil {
-			return TransferReceipt{}, err
-		}
-		t.ToCurrency = toCurrency
-	}
-	// The memo is field validation, like the legs and the amount: a note
-	// longer than maxMemoRunes UTF-8 characters is rejected before
-	// anything is recorded. Validated once here, before the same/FX
-	// currency branch, so both paths enforce it.
-	if err := checkMemoLength(t.Memo); err != nil {
-		return TransferReceipt{}, err
-	}
-	// The external reference is field validation, like the memo:
-	// longer than maxExternalRefRunes UTF-8 characters is rejected
-	// before anything is recorded, on both paths.
-	if err := checkExternalRefLength(t.ExternalRef); err != nil {
-		return TransferReceipt{}, err
-	}
-	if toCurrency != currency {
+	if toCurrency != t.Currency {
 		return l.postTransferFXLocked(t, toCurrency, time.Now())
 	}
 
@@ -500,6 +537,13 @@ func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
 		feeEntryID = t.ID + "/fee"
 	}
 	if _, exists := l.entries[t.ID]; exists {
+		return TransferReceipt{}, ErrTransferIDConflict
+	}
+	// A split transfer reserves the "<id>/chunk-0" namespace for its
+	// chunk entries (see PostTransferSplit): a plain transfer reusing a
+	// split transfer's ID would create two transfers sharing one
+	// identity.
+	if _, exists := l.entries[t.ID+"/chunk-0"]; exists {
 		return TransferReceipt{}, ErrTransferIDConflict
 	}
 	if feeEntryID != "" {
@@ -716,31 +760,20 @@ func (l *Ledger) replayTransferLocked(t Transfer) (TransferReceipt, bool) {
 			reviewStatus = l.reviewStatusLocked(entries[0].ID)
 		}
 		feeCents := feeCentsOf(entries)
-		// Re-disclose the tier the original transfer was charged under:
-		// the fee policy is construction-time immutable, so the tier
-		// re-derives exactly from the source-currency amount when the
-		// fee leg went to the policy's revenue account. (An explicit fee
-		// routed to the same account for an identical amount is
-		// indistinguishable — and the disclosed rate still matches the
-		// fee math.)
-		tierIndex, rateBps := -1, int64(0)
+		// Re-disclose the tier the original transfer was charged under
+		// (see rediscloseFeeTierLocked): the fee base is the
+		// source-currency amount — the FX leg's amount for FX transfers,
+		// the principal's amount otherwise. (An explicit fee routed to
+		// the same account for an identical amount is indistinguishable
+		// — and the disclosed rate still matches the fee math.)
 		feeBase := entries[0].AmountCents
 		for _, e := range entries {
 			if strings.HasSuffix(e.ID, "/fx") {
-				feeBase = e.AmountCents // FX transfers: fee computed on the source amount
+				feeBase = e.AmountCents
 				break
 			}
 		}
-		if len(l.feeTiers) > 0 && l.feeRevenueAccount != "" {
-			for _, e := range entries {
-				if strings.HasSuffix(e.ID, "/fee") && e.DebitAccount == l.feeRevenueAccount {
-					if idx, rate := l.feeTierFor(feeBase); policyFeeCents(feeBase, rate) == feeCents {
-						tierIndex, rateBps = idx, rate
-					}
-					break
-				}
-			}
-		}
+		tierIndex, rateBps := l.rediscloseFeeTierLocked(entries, feeBase)
 		// Replays deliberately omit the FX disclosure (see
 		// TransferReceipt.FX): the rate table may have changed since the
 		// original posting.

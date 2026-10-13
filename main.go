@@ -3383,6 +3383,21 @@ func main() {
 		log.Printf("ledger-api-go: transfer fee schedule = %v to %q", tiers, account)
 	}
 
+	// LEDGER_MAX_TRANSFER_CHUNK sets the opt-in per-transfer chunk cap in
+	// cents for split transfers (see ledger.WithMaxTransferChunkCents):
+	// a transfer above the cap is split into atomic chunks of at most
+	// this size (PostTransferSplit). Unset means no chunking. An invalid
+	// value fails the startup fast (log.Fatal): a misconfigured cap must
+	// never silently disable splitting.
+	if raw := os.Getenv("LEDGER_MAX_TRANSFER_CHUNK"); raw != "" {
+		n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err != nil || n < 0 {
+			log.Fatalf("ledger-api-go: invalid LEDGER_MAX_TRANSFER_CHUNK %q: want a non-negative integer (cents)", raw)
+		}
+		opts = append(opts, ledger.WithMaxTransferChunkCents(n))
+		log.Printf("ledger-api-go: max transfer chunk = %d cents", n)
+	}
+
 	// LEDGER_DAILY_OUTFLOW_LIMITS configures per-account per-currency daily
 	// outflow limits (see ledger.ParseDailyLimits for the syntax, e.g.
 	// "cust-123:USD:100000,cust-456:EUR:50000"). Postings that would take
