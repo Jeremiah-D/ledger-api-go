@@ -1713,6 +1713,55 @@ func (s *server) handleOFXExport(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handleStatement implements GET /accounts/{id}/statement: a JSON
+// account statement for the half-open window [from, to) (see
+// ledger.GenerateStatement). Query parameters: from / to (optional
+// RFC 3339 timestamps; omitted from defaults to the first day of the
+// current UTC month at 00:00, omitted to defaults to now). A malformed
+// timestamp or an inverted window (from after to) is a 400, fail-fast.
+// The response carries account, period{from,to}, opening_balances[],
+// closing_balances[] (per currency), entries[] (effective journal rows
+// in (CreatedAt, ID) order — pending-review rows are journaled but not
+// effective, so the statement excludes them like the OFX export does),
+// fee_summary[] (per-currency transfer-fee rollup), event_summary
+// (freeze transitions, dual-control reviews, overdraft-protection
+// state), generated_at, and the ledger version read at. There is no
+// special auth, like the /ofx export and the other read-only account
+// endpoints. The statement is a pure query: it bumps no version and
+// leaves no trace.
+func (s *server) handleStatement(w http.ResponseWriter, r *http.Request) {
+	s.metrics.StatementQueries.Add(1)
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	q := r.URL.Query()
+	var from, to time.Time
+	if raw := q.Get("from"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from must be RFC 3339"})
+			return
+		}
+		from = t
+	}
+	if raw := q.Get("to"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to must be RFC 3339"})
+			return
+		}
+		to = t
+	}
+	stmt, err := s.ledgerFor(r).GenerateStatement(ledger.AccountID(id), from, to)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, stmt)
+}
+
 // ofxImportRequest is the POST /ofx/import body: the ledger account the
 // statement belongs to and the raw OFX document.
 type ofxImportRequest struct {
@@ -2953,6 +3002,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/ofx", s.handleOFXExport)
+	mux.HandleFunc("GET /accounts/{id}/statement", s.handleStatement)
 	mux.HandleFunc("POST /ofx/import", s.handleOFXImport)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)

@@ -103,6 +103,12 @@ func (l *Ledger) freezeLocked(a AccountID, until time.Time) {
 		Type:    OutboxAccountFrozen,
 		Account: a,
 	})
+	l.recordFreezeEventLocked(AccountFreezeEvent{
+		Account:        a,
+		Kind:           FreezeEventFrozen,
+		At:             time.Now().UTC(),
+		AutoUnfreezeAt: until,
+	})
 }
 
 // Unfreeze lifts a freeze previously applied with Freeze. Unfreezing an
@@ -126,6 +132,11 @@ func (l *Ledger) Unfreeze(a AccountID) {
 	l.emitOutboxLocked(OutboxEvent{
 		Type:    OutboxAccountUnfrozen,
 		Account: a,
+	})
+	l.recordFreezeEventLocked(AccountFreezeEvent{
+		Account: a,
+		Kind:    FreezeEventUnfrozen,
+		At:      time.Now().UTC(),
 	})
 }
 
@@ -218,6 +229,12 @@ func (l *Ledger) releaseExpiredFreezesLocked(now time.Time, trigger string) int 
 		l.emitOutboxLocked(OutboxEvent{
 			Type:    OutboxAccountUnfrozen,
 			Account: a,
+		})
+		l.recordFreezeEventLocked(AccountFreezeEvent{
+			Account: a,
+			Kind:    FreezeEventAutoReleased,
+			At:      now.UTC(),
+			Trigger: trigger,
 		})
 	}
 	if released > 0 {

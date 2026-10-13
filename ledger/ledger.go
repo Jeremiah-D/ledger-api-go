@@ -196,6 +196,13 @@ type Ledger struct {
 	// here; a manual Freeze stores the zero time by deleting any
 	// deadline, so a manual freeze never auto-releases.
 	frozenUntil map[AccountID]time.Time
+	// freezeEvents is the in-memory history of account freeze-state
+	// transitions (see AccountFreezeEvent in statement.go), appended by
+	// the freeze paths under the write lock and read by GenerateStatement
+	// under the read lock. Operational index, not books: it does not
+	// round-trip through snapshots (like the FrozenAutoReleases counter
+	// below); the structured audit log stays the durable record.
+	freezeEvents []AccountFreezeEvent
 	// closed maps an account to its terminal lifecycle record (see
 	// close.go): a closed account rejects every write path that would
 	// book a new journal entry through it with ErrAccountClosed.

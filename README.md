@@ -1313,6 +1313,62 @@ Semantics, stated so operators can trust them:
   `400`. There is no special auth, like the export endpoint.
   `GET /metrics` counts imports as `ledger_ofx_imports_total`.
 
+### `GET /accounts/{id}/statement` — JSON account statement
+
+A bank-style account statement for one account over the half-open
+window `[from, to)` (Go: `ledger.GenerateStatement`): opening and
+closing balances per currency, the period's journal rows in
+`(CreatedAt, ID)` order, a per-currency rollup of the transfer fee legs
+the account paid or received, and a structured event summary. Query
+parameters: `from` / `to` (optional RFC 3339 timestamps; omitted `from`
+defaults to the first day of the current UTC month at 00:00, omitted
+`to` defaults to now). A malformed timestamp or an inverted window
+(`from` after `to`) is a `400`, fail-fast. Unknown accounts return a
+valid empty statement, not 404.
+
+```bash
+curl -s 'localhost:8080/accounts/cash/statement?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z'
+# {"account":"cash","period":{"from":"...","to":"..."},
+#  "opening_balances":[{"currency":"USD","balance_cents":0}],
+#  "closing_balances":[{"currency":"USD","balance_cents":300}],
+#  "entries":[...],"fee_summary":[],
+#  "event_summary":{"freeze_events":[],"transfer_reviews":[],
+#   "review_counts":{},"overdraft_protected":false,"currently_frozen":false},
+#  "generated_at":"...","version":3}
+```
+
+Semantics, stated so consumers can trust them:
+
+- **Balances** — opening and closing balances fold the effective
+  journal prefix with `CreatedAt` before `from` / `to` (the time-domain
+  twin of `balance-at`'s version-prefix fold), per currency. Currencies
+  are never summed together.
+- **Entries** — effective journal rows touching the account in
+  `[from, to)`, sorted by `(CreatedAt, ID)`. Pending-review rows are
+  journaled but not effective (they never touched balances), so the
+  statement excludes them, like the OFX export does; opening balance
+  plus the period rows' net always equals closing balance.
+- **Fee summary** — the period's transfer fee legs (journal rows with
+  ID `<transfer ID>/fee`) that touched the account, rolled up per
+  currency: `paid_cents` (the account as the fee leg's credit leg),
+  `received_cents` (the account as the fee account), and `entry_count`.
+- **Event summary** — drawn from the ledger's structured in-memory
+  sources, never fabricated: `freeze_events` (the account's
+  freeze/unfreeze/auto-release transitions in the window, in
+  chronological order), `transfer_reviews` (dual-control reviews
+  involving the account created in the window, with per-status
+  `review_counts`), `overdraft_protected` and `currently_frozen`
+  (current risk-control state). Overdraft rejections themselves are
+  not listed: rejected posts record nothing by design, so there is no
+  structured source to draw them from.
+- **Read-only** — the statement is a pure query under the read lock:
+  it bumps no version, books nothing, appends no audit-chain link, and
+  triggers no rules or hooks. `version` is the ledger version read at,
+  so consumers can detect whether anything changed between two reads.
+  There is no special auth, like the other read-only account
+  endpoints. `GET /metrics` counts requests as
+  `ledger_statement_queries_total`.
+
 ### `GET /accounts/{id}/trial-balance`
 
 The account's double-entry breakdown at the current ledger version:
@@ -2213,6 +2269,8 @@ curl -s localhost:8080/metrics
 - `ledger_ofx_imports_total` — `POST /ofx/import` OFX statement
   pre-posting imports served, including duplicates and rejected
   payloads.
+- `ledger_statement_queries_total` — `GET /accounts/{id}/statement`
+  JSON account statement requests served.
 - `ledger_audit_sink_sent_total` — outbox domain events the audit-sink
   webhook forwarder delivered (HTTP 2xx).
 - `ledger_audit_sink_failed_attempts_total` — failed audit-sink webhook
