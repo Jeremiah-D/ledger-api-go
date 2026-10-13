@@ -392,6 +392,18 @@ type Ledger struct {
 	scheduleKeys   map[string]string
 	scheduleRuns   map[string][]ScheduleRun
 	scheduleFiring map[string]bool
+	// reportSchedules is the registry of recurring report subscriptions
+	// (see report_schedule.go), keyed by schedule ID, with its own
+	// idempotency-key namespace (reportScheduleKeys), bounded run
+	// history (reportScheduleRuns, evicted past maxReportRuns), and
+	// per-schedule firing flags (reportScheduleFiring) so concurrent
+	// SweepReportsDue calls serialize per schedule. Report schedules
+	// are process-lifetime operational state and do not survive
+	// snapshots — unlike transfer schedules.
+	reportSchedules      map[string]*ReportSchedule
+	reportScheduleKeys   map[string]string
+	reportScheduleRuns   map[string][]ReportRun
+	reportScheduleFiring map[string]bool
 	// audit is the structured compliance audit log (see audit.go). Nil
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
@@ -596,6 +608,10 @@ func New(opts ...Option) *Ledger {
 		scheduleKeys:         make(map[string]string),
 		scheduleRuns:         make(map[string][]ScheduleRun),
 		scheduleFiring:       make(map[string]bool),
+		reportSchedules:      make(map[string]*ReportSchedule),
+		reportScheduleKeys:   make(map[string]string),
+		reportScheduleRuns:   make(map[string][]ReportRun),
+		reportScheduleFiring: make(map[string]bool),
 		fxRates:              make(map[fxPair]ExchangeRate),
 		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
 		rateOverrides:        make(map[fxPair]*RateOverride),

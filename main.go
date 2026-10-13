@@ -3592,6 +3592,25 @@ func main() {
 		defer sweeper.Stop()
 	}
 
+	// Optional background report sweeper: generates due report
+	// subscriptions (see ledger.ReportSchedule) so operators don't need
+	// to poll a sweep endpoint. It shares the server context, so
+	// SIGINT/SIGTERM stops it. Delivery failures are recorded on the
+	// run and retried on the next sweep; the callback exists for
+	// observability symmetry with the other sweepers. Unset or invalid
+	// means disabled.
+	if interval, ok := reportSweepInterval(); ok {
+		sweeper := ledger.StartReportSweeper(ctx, srv.ledger, interval, func(generated, failed int) {
+			// Log only productive ticks: a report sweeper is usually
+			// quiet, and a per-tick line would be noise.
+			if generated+failed > 0 {
+				log.Printf("ledger-api-go: report sweep: generated=%d failed=%d", generated, failed)
+			}
+		})
+		log.Printf("ledger-api-go: report sweep worker started (interval %v)", interval)
+		defer sweeper.Stop()
+	}
+
 	// Optional background freeze-expiry sweeper: releases timed account
 	// freezes whose auto-unfreeze deadline has passed (see
 	// ledger.FreezeUntil), so operators don't need write traffic to lift
@@ -3762,6 +3781,24 @@ func scheduleSweepInterval() (time.Duration, bool) {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		log.Printf("ledger-api-go: ignoring invalid LEDGER_SCHEDULE_SWEEP_INTERVAL %q, schedule sweep worker disabled", raw)
+		return 0, false
+	}
+	return d, true
+}
+
+// reportSweepInterval reads LEDGER_REPORT_SWEEP_INTERVAL (a Go
+// duration string, e.g. "1h") for the background report-schedule
+// worker. Unset or invalid values mean the worker is disabled; a
+// non-positive duration is invalid and falls back to disabled with a log
+// line.
+func reportSweepInterval() (time.Duration, bool) {
+	raw := os.Getenv("LEDGER_REPORT_SWEEP_INTERVAL")
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_REPORT_SWEEP_INTERVAL %q, report sweep worker disabled", raw)
 		return 0, false
 	}
 	return d, true

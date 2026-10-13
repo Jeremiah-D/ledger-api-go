@@ -277,6 +277,42 @@ Fired runs increment `ledger_scheduled_transfers_total`. Schedules are
 structural state: they survive disaster-recovery snapshots (run history
 does not).
 
+### Scheduled reports (`Ledger.CreateReportSchedule`)
+
+Recurring report subscriptions — compliance packs, client statements,
+treasury snapshots. `Ledger.CreateReportSchedule` registers a
+subscription (`id`, `kind: "reconcile"|"statement"`, kind-specific
+`params`, `interval` as a Go duration string such as `"24h"`,
+`next_run_at` RFC3339, optional `ends_at`, and a delivery `sink`); the
+background sweeper (`LEDGER_REPORT_SWEEP_INTERVAL`, e.g. `"1h"`) fires
+every due subscription via `Ledger.SweepReportsDue` (also callable
+directly). Each run generates its report **read-only** — no version
+bump, no journal entries, no audit-chain links — and delivers it:
+
+- `sink: {url, secret}` — one signed HTTPS POST per sweep,
+  `HMAC-SHA256(secret, body)` as `X-Ledger-Signature: sha256=<hex>`
+  (the exact `audit sink` convention, so the same receiver
+  infrastructure works), plus `X-Ledger-Event-Type: report_generated`,
+  `X-Ledger-Report-Schedule`, and `X-Ledger-Report-Run` headers. The
+  secret is mandatory with a URL: unsigned webhooks can be forged, so
+  creation fails fast without one. One attempt per sweep; a failed
+  delivery records the run as failed and the next sweep retries it with
+  `NextRunAt` unchanged (at-least-once delivery).
+- `sink: {dir}` — the report JSON is written atomically to
+  `<dir>/<schedule-id>-<run-seq>.json` (temp file + rename); retries
+  overwrite the same path, so dir delivery is idempotent.
+
+Kind params: `reconcile` takes an optional `base_currency` (every
+currency row folded into it, LG-31); `statement` takes `account`
+(required) and an optional `[from, to)` RFC3339 window (defaults to the
+current UTC month, LG-71). Missed runs are skipped (counted as
+`skipped_runs`) rather than caught up, runs are recorded
+(`report_generated` / `report_run_failed` audit events), and schedules
+support pause/resume/cancel with the same lifecycle states as transfer
+schedules. Run history is bounded to the newest 100 runs per schedule.
+Report subscriptions are process-lifetime operational state: they do not
+survive disaster-recovery snapshots (recreate them after a restore).
+
 ### `POST /sweeps`
 
 Treasury sweep: atomically moves the positive per-currency balances of the
@@ -2406,6 +2442,14 @@ Environment:
   full interval; SIGINT/SIGTERM stops the worker with the server. Unset
   or invalid means disabled — plans stay registered but never fire until
   the worker is enabled.
+- `LEDGER_REPORT_SWEEP_INTERVAL` — enables the background report-schedule
+  worker, e.g. `LEDGER_REPORT_SWEEP_INTERVAL=1h`. While enabled, the
+  server generates due report subscriptions on the interval (the same
+  `SweepReportsDue` scan: read-only generation, failed deliveries
+  retried next tick, missed runs skipped). The first tick fires after one
+  full interval; SIGINT/SIGTERM stops the worker with the server. Unset
+  or invalid means disabled — subscriptions stay registered but never
+  generate until the worker is enabled.
 - `LEDGER_HEALTH_WATCH_INTERVAL` — enables the background balance-health
   watchdog, e.g. `LEDGER_HEALTH_WATCH_INTERVAL=5m`. Each tick re-checks
   the invariants the write path promises — negative balances on
