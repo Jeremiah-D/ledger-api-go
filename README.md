@@ -1096,6 +1096,24 @@ drops its mark. Unset or invalid interval disables the watcher; unset
 or invalid threshold disables stale warnings only — expiry alerts stay
 active.
 
+**Market FX rate provider adapter.** The rate table above is the static
+leg; the watch can also poll a caller-implemented `FXRateProvider`
+(`FetchRates(ctx) ([]MarketRate, error)`) on its interval and install
+the quotes through the `SetFXRateRat` write path — the interface is
+defined by the library and implemented by the caller (a market-data
+feed client, a treasury pricing service), mirroring realtime-event-bus's
+`BridgeTransport`. Opt in with `WithFXRateProvider`; nil (the default)
+keeps the static-table behavior byte-for-byte. Per tick: each quote is
+validated like `SetFXRateRat`; a pair under an active manual override
+keeps the human price (the feed never writes it); an unchanged static
+quote skips the write (no snapshot churn); a moved price is installed
+and audited as `fx_rate_moved` (from/to, old and new rate, provider,
+TTL). A fetch error is audited as `fx_rate_provider_failed` — never
+silent — and never kills the worker; the next tick runs as scheduled.
+`ledger_fx_rate_refreshes_total` / `ledger_fx_rate_moved_total` /
+`ledger_fx_rate_provider_failed_total` count installs, moves, and
+fetch failures.
+
 **Manual FX rate overrides (dual control).** When the feed is wrong — a
 stale quote, a market dislocation — an operator can propose a manual
 override price for one directional pair via `SetRateOverride(from, to,
@@ -2370,6 +2388,15 @@ curl -s localhost:8080/metrics
   at an approved manual rate override instead of the market rate
   (`fx_rate_overridden` audit events). Synced from the ledger on every
   scrape.
+- `ledger_fx_rate_refreshes_total` — market FX rate quotes installed by
+  the opt-in provider adapter (`WithFXRateProvider`) through the
+  `SetFXRateRat` write path. Synced from the ledger on every scrape.
+- `ledger_fx_rate_moved_total` — provider refreshes that changed a
+  pair's price (`fx_rate_moved` audit events). Synced from the ledger on
+  every scrape.
+- `ledger_fx_rate_provider_failed_total` — market FX rate provider fetch
+  failures (`fx_rate_provider_failed` audit events); the watch worker
+  continues on the next tick. Synced from the ledger on every scrape.
 - `ledger_balance_history_snapshots_total` — balance-history snapshot
   ticks completed by the background recorder (see
   `LEDGER_BALANCE_HISTORY_DIR` below). One per tick, not per row — it

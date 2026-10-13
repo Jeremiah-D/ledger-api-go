@@ -296,6 +296,20 @@ type Metrics struct {
 	// fx_rate_overridden audit events. It is synced from the ledger on
 	// every GET /metrics scrape, like the rate-watch counters.
 	FXRateOverriddenTotal atomic.Uint64
+	// FXRateRefreshesTotal counts market FX rate quotes installed by the
+	// opt-in provider adapter (see ledger.WithFXRateProvider): provider
+	// refreshes through the SetFXRateRat write path. It is synced from
+	// the ledger on every GET /metrics scrape, like the rate-watch
+	// counters.
+	FXRateRefreshesTotal atomic.Uint64
+	// FXRateMovedTotal counts provider refreshes that changed a pair's
+	// price: fx_rate_moved audit events. It is synced from the ledger on
+	// every GET /metrics scrape, like the rate-watch counters.
+	FXRateMovedTotal atomic.Uint64
+	// FXRateProviderFailedTotal counts provider fetch failures:
+	// fx_rate_provider_failed audit events. It is synced from the ledger
+	// on every GET /metrics scrape, like the rate-watch counters.
+	FXRateProviderFailedTotal atomic.Uint64
 	// BalanceHistorySnapshots counts balance-history snapshot ticks
 	// completed by the background recorder (see
 	// LEDGER_BALANCE_HISTORY_DIR): one per tick that wrote rows, not per
@@ -454,6 +468,15 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_fx_rate_overridden_total",
 		"Total cross-currency transfers converted at an approved manual rate override instead of the market rate (fx_rate_overridden audit events).",
 		m.FXRateOverriddenTotal.Load())
+	writeCounter(&sb, "ledger_fx_rate_refreshes_total",
+		"Total market FX rate quotes installed by the opt-in provider adapter (WithFXRateProvider) through the SetFXRateRat write path.",
+		m.FXRateRefreshesTotal.Load())
+	writeCounter(&sb, "ledger_fx_rate_moved_total",
+		"Total provider refreshes that changed a pair's price (fx_rate_moved audit events).",
+		m.FXRateMovedTotal.Load())
+	writeCounter(&sb, "ledger_fx_rate_provider_failed_total",
+		"Total market FX rate provider fetch failures (fx_rate_provider_failed audit events); the watch worker continues on the next tick.",
+		m.FXRateProviderFailedTotal.Load())
 	writeCounter(&sb, "ledger_balance_history_snapshots_total",
 		"Total balance-history snapshot ticks completed by the background recorder (one per tick, not per row).",
 		m.BalanceHistorySnapshots.Load())

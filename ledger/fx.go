@@ -220,15 +220,27 @@ func (l *Ledger) SetFXRateRat(from, to string, rate *big.Rat, ttl time.Duration)
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.setFXRateRatLocked(f, t, num.Int64(), den.Int64(), ttl, time.Now())
+	return nil
+}
+
+// setFXRateRatLocked is the locked write half of SetFXRateRat: it
+// installs the (already validated) rate, snapshots the table (LG-45),
+// and audits fx_rate_change. now is the quote time the TTL is measured
+// from. Callers must hold the write lock. The provider refresh path
+// (see fx_provider.go) writes through this same body, so
+// provider-installed rates are indistinguishable from
+// operator-installed ones downstream.
+func (l *Ledger) setFXRateRatLocked(f, t string, num, den int64, ttl time.Duration, now time.Time) {
 	er := ExchangeRate{
 		FromCurrency:     f,
 		ToCurrency:       t,
-		Num:              num.Int64(),
-		Den:              den.Int64(),
+		Num:              num,
+		Den:              den,
 		EffectiveVersion: l.version,
 	}
 	if ttl > 0 {
-		er.ExpiresAt = time.Now().Add(ttl)
+		er.ExpiresAt = now.Add(ttl)
 	}
 	l.fxRates[fxPair{from: f, to: t}] = er
 	// LG-45: snapshot the new table like SetFXRate does.
@@ -237,7 +249,6 @@ func (l *Ledger) SetFXRateRat(from, to string, rate *big.Rat, ttl time.Duration)
 		change += fmt.Sprintf(" ttl=%s", ttl)
 	}
 	l.snapshotFXRateTableLocked(change)
-	return nil
 }
 
 // ParseFXRateDecimal parses a decimal rate string ("1.10", "7.2015",

@@ -441,6 +441,19 @@ type Ledger struct {
 	// do not round-trip through snapshots.
 	fxRateStaleAlerts   uint64
 	fxRateExpiredAlerts uint64
+	// fxRateProvider is the opt-in market FX rate adapter (see
+	// fx_provider.go, LG-74): the FX-rate watch polls it on its
+	// interval and installs quotes through the SetFXRateRat write
+	// path. Nil — the default — disables provider refreshes and the
+	// watcher keeps its static-table behavior unchanged.
+	// fxRateRefreshes / fxRateMoves / fxRateProviderFails count
+	// provider quote installs, price moves (fx_rate_moved), and fetch
+	// failures (fx_rate_provider_failed). In-memory only — they do not
+	// round-trip through snapshots.
+	fxRateProvider      FXRateProvider
+	fxRateRefreshes     uint64
+	fxRateMoves         uint64
+	fxRateProviderFails uint64
 	// balanceHook is the opt-in balance-change notification callback
 	// (see balance_hook.go): every committed Post/Transfer/Capture/
 	// Sweep/Merge dispatches one BalanceChange per touched (account,

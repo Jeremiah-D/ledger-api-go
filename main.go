@@ -3072,6 +3072,7 @@ func (s *server) handler() http.Handler {
 		var auditWritten, auditDropped, outboxWritten, outboxDropped uint64
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
 		var fxStaleAlerts, fxExpiredAlerts, fxOverridden uint64
+		var fxRefreshes, fxMoves, fxProviderFails uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -3088,6 +3089,9 @@ func (s *server) handler() http.Handler {
 			fxStaleAlerts += l.FXRateStaleAlertCount()
 			fxExpiredAlerts += l.FXRateExpiredAlertCount()
 			fxOverridden += l.FXRateOverrideConversionCount()
+			fxRefreshes += l.FXRateRefreshCount()
+			fxMoves += l.FXRateMovedCount()
+			fxProviderFails += l.FXRateProviderFailCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -3116,6 +3120,12 @@ func (s *server) handler() http.Handler {
 		// ledger: conversions price inside the FX write path, not in a
 		// handler.
 		s.metrics.FXRateOverriddenTotal.Store(fxOverridden)
+		// The market-provider refresh counters likewise live in the
+		// ledger: refreshes install inside the watcher's tick, not in a
+		// handler.
+		s.metrics.FXRateRefreshesTotal.Store(fxRefreshes)
+		s.metrics.FXRateMovedTotal.Store(fxMoves)
+		s.metrics.FXRateProviderFailedTotal.Store(fxProviderFails)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the

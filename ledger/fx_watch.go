@@ -174,6 +174,13 @@ type FXRateWatch struct {
 	warningThreshold time.Duration
 	onAlert          func([]FXRateAlert)
 
+	// provider is the opt-in market FX rate adapter (see fx_provider.go,
+	// LG-74): read from the ledger at start. Nil disables provider
+	// refreshes and the tick is exactly the static-table behavior. ctx
+	// is the run context passed to the provider's FetchRates.
+	provider FXRateProvider
+	ctx      context.Context
+
 	done     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
@@ -198,6 +205,11 @@ type FXRateWatch struct {
 // through without branching. The first tick fires after one full
 // interval, not immediately, so a freshly started process settles before
 // it scans.
+//
+// When the ledger was built with WithFXRateProvider (see fx_provider.go,
+// LG-74), every tick first refreshes the rate table from the provider
+// before the expiry scan runs. A nil provider leaves the tick exactly
+// the static-table behavior.
 func StartFXRateWatch(ctx context.Context, l *Ledger, interval, warningThreshold time.Duration, onAlert func([]FXRateAlert)) *FXRateWatch {
 	if interval <= 0 {
 		return nil
@@ -207,6 +219,8 @@ func StartFXRateWatch(ctx context.Context, l *Ledger, interval, warningThreshold
 		interval:         interval,
 		warningThreshold: warningThreshold,
 		onAlert:          onAlert,
+		provider:         l.fxRateProvider,
+		ctx:              ctx,
 		done:             make(chan struct{}),
 		seen:             make(map[fxPair]fxWatchMark),
 	}
@@ -232,9 +246,19 @@ func (w *FXRateWatch) run(ctx context.Context) {
 }
 
 // tick runs one watch scan, edge-triggers the new alerts, and prunes
-// dedup marks for pairs no longer in the table.
+// dedup marks for pairs no longer in the table. When the ledger has an
+// opt-in FX rate provider (see fx_provider.go, LG-74), the tick first
+// refreshes the table from it: provider quotes land through the
+// SetFXRateRat write path before the expiry scan reads the table.
 func (w *FXRateWatch) tick() {
 	now := time.Now()
+	if w.provider != nil {
+		ctx := w.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		w.l.refreshFXRatesFromProvider(ctx, now)
+	}
 	alerts := w.l.ScanFXRateAlerts(now, w.warningThreshold)
 
 	pairs := make(map[fxPair]bool, len(alerts))
