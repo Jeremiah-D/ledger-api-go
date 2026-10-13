@@ -470,7 +470,11 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
-	receipt, err := s.ledgerFor(r).ApproveTransferReview(id, req.Reviewer)
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	receipt, err := s.ledgerFor(r).ApproveTransferReviewCtx(actx, id, req.Reviewer)
 	if err != nil {
 		if errors.Is(err, ledger.ErrReviewNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -539,7 +543,11 @@ func (s *server) handleRejectTransferReview(w http.ResponseWriter, r *http.Reque
 	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
-	review, changed, err := s.ledgerFor(r).RejectTransferReview(id, req.Reviewer, req.Reason)
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	review, changed, err := s.ledgerFor(r).RejectTransferReviewCtx(actx, id, req.Reviewer, req.Reason)
 	if err != nil {
 		if errors.Is(err, ledger.ErrReviewNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -2215,6 +2223,27 @@ type freezeAccountRequest struct {
 // The optional {"until": "<RFC3339>"} body schedules the freeze to lift
 // automatically at that time (a timed freeze); without it the freeze is
 // manual. A non-future timestamp is rejected with 400.
+// actorCtx builds the per-request audit-attribution context (LG-73)
+// from the x-ledger-actor header: the operator identity the audit event
+// records for freeze/approve/reject/close operator actions, defaulting
+// to "system" when the header is absent. An overlong value or one
+// containing control characters is rejected with a 400 — the actor lands
+// in the hash-chained audit trail, so it must stay a sane single line.
+func (s *server) actorCtx(w http.ResponseWriter, r *http.Request) (context.Context, bool) {
+	actor := ledger.NormalizeAuditActor(r.Header.Get("x-ledger-actor"))
+	if len(actor) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "x-ledger-actor too long (max 128)"})
+		return nil, false
+	}
+	for i := 0; i < len(actor); i++ {
+		if c := actor[i]; c < 0x20 || c == 0x7f {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "x-ledger-actor must not contain control characters"})
+			return nil, false
+		}
+	}
+	return ledger.ContextWithActor(r.Context(), actor), true
+}
+
 func (s *server) handleFreezeAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -2235,7 +2264,11 @@ func (s *server) handleFreezeAccount(w http.ResponseWriter, r *http.Request) {
 	if req.Until != nil {
 		until = *req.Until
 	}
-	if err := s.ledgerFor(r).FreezeUntil(ledger.AccountID(id), until); err != nil {
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	if err := s.ledgerFor(r).FreezeUntilCtx(actx, ledger.AccountID(id), until); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2259,7 +2292,11 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	s.ledgerFor(r).Unfreeze(ledger.AccountID(id))
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	s.ledgerFor(r).UnfreezeCtx(actx, ledger.AccountID(id))
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
@@ -2293,7 +2330,11 @@ func (s *server) handleCloseAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	closure, alreadyClosed, err := s.ledgerFor(r).CloseAccount(ledger.AccountID(id), req.Cascade)
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	closure, alreadyClosed, err := s.ledgerFor(r).CloseAccountCtx(actx, ledger.AccountID(id), req.Cascade)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -2485,7 +2526,11 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := s.ledgerFor(r).ClosePeriod(id); err != nil {
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	if err := s.ledgerFor(r).ClosePeriodCtx(actx, id); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2506,7 +2551,11 @@ func (s *server) handleReopenPeriod(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
 		return
 	}
-	if err := s.ledgerFor(r).ReopenPeriod(id); err != nil {
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	if err := s.ledgerFor(r).ReopenPeriodCtx(actx, id); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

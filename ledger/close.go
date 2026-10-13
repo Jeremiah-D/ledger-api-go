@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"time"
@@ -57,6 +58,13 @@ type AccountClosure struct {
 // event per closed account, so downstream consumers can react (e.g.
 // retire the account from onboarding UIs).
 func (l *Ledger) CloseAccount(a AccountID, cascade bool) (closure AccountClosure, alreadyClosed bool, err error) {
+	return l.CloseAccountCtx(context.Background(), a, cascade)
+}
+
+// CloseAccountCtx is CloseAccount with per-call audit actor attribution
+// (LG-73): the account_close audit event records the operator carried by
+// ctx when set, and the entrypoint name otherwise.
+func (l *Ledger) CloseAccountCtx(ctx context.Context, a AccountID, cascade bool) (closure AccountClosure, alreadyClosed bool, err error) {
 	if a == "" {
 		return AccountClosure{}, false, ErrEmptyAccountID
 	}
@@ -83,7 +91,7 @@ func (l *Ledger) CloseAccount(a AccountID, cascade bool) (closure AccountClosure
 		"closed_at": now.Format(time.RFC3339),
 		"cascade":   cascade,
 	}
-	l.emitAudit(AuditEvent{
+	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "account_close",
 		Actor:         "CloseAccount",
 		TraceID:       string(a),

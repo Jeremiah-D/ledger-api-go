@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"time"
@@ -55,13 +56,19 @@ func validatePeriodID(id string) error {
 // part of the journal entry chain (chain.go), which records journaled
 // entries only.
 func (l *Ledger) ClosePeriod(id string) error {
+	return l.ClosePeriodCtx(context.Background(), id)
+}
+
+// ClosePeriodCtx is ClosePeriod with per-call audit actor attribution
+// (LG-73).
+func (l *Ledger) ClosePeriodCtx(ctx context.Context, id string) error {
 	if err := validatePeriodID(id); err != nil {
 		return err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.closedPeriods[id] = true
-	l.emitAudit(AuditEvent{
+	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "period_close",
 		Actor:         "ClosePeriod",
 		TraceID:       id,
@@ -80,13 +87,19 @@ func (l *Ledger) ClosePeriod(id string) error {
 // version, and the reopen is recorded in the audit log's hash chain (op
 // "period_reopen").
 func (l *Ledger) ReopenPeriod(id string) error {
+	return l.ReopenPeriodCtx(context.Background(), id)
+}
+
+// ReopenPeriodCtx is ReopenPeriod with per-call audit actor attribution
+// (LG-73).
+func (l *Ledger) ReopenPeriodCtx(ctx context.Context, id string) error {
 	if err := validatePeriodID(id); err != nil {
 		return err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.closedPeriods, id)
-	l.emitAudit(AuditEvent{
+	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "period_reopen",
 		Actor:         "ReopenPeriod",
 		TraceID:       id,

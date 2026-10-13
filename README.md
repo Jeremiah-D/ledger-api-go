@@ -517,6 +517,19 @@ curl -s -X POST localhost:8080/accounts/cash/freeze \
 # {"account":"cash","frozen":true,"auto_unfreeze_at":"2026-10-12T08:00:00Z"}
 ```
 
+**Operator attribution (`x-ledger-actor`).** Every operator action —
+freeze/unfreeze, transfer-review approve/reject, account close, period
+close/reopen — records *who* invoked it in the audit event's `actor`
+field. Send the operator identity as the `x-ledger-actor` request header;
+it defaults to `"system"` when absent (overlong values or control
+characters are rejected with `400`). In-process ledger callers use the
+`Ctx` variants (`FreezeCtx`, `ApproveTransferReviewCtx`,
+`CloseAccountCtx`, …) or `ledger.ContextWithActor`; plain calls keep the
+entrypoint name as before. The actor is sealed into the audit hash chain
+like every other field, so forging or editing it breaks chain
+verification — but it is pure metadata: it never enters balance math,
+version bumps, journal entries, or snapshots.
+
 The reconcile report lists frozen accounts (`frozen_accounts`), annotates
 timed freezes with their deadline (`frozen_account_auto_unfreeze_at`),
 and each trial balance carries a `frozen` flag, so the day-end job shows

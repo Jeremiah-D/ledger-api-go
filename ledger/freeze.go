@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"time"
@@ -48,9 +49,16 @@ var ErrFreezeUntilNotFuture = errors.New("ledger: freeze auto-unfreeze time must
 // re-freezing a timed-frozen account manually converts it to a manual
 // freeze.
 func (l *Ledger) Freeze(a AccountID) {
+	l.FreezeCtx(context.Background(), a)
+}
+
+// FreezeCtx is Freeze with per-call audit actor attribution (LG-73):
+// the audit event records the operator carried by ctx when set, and the
+// entrypoint name otherwise.
+func (l *Ledger) FreezeCtx(ctx context.Context, a AccountID) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.freezeLocked(a, time.Time{})
+	l.freezeCtxLocked(ctx, a, time.Time{})
 }
 
 // FreezeUntil freezes like Freeze, but schedules the freeze to lift
@@ -67,12 +75,18 @@ func (l *Ledger) Freeze(a AccountID) {
 // FrozenAutoReleases counter. Like Freeze, it does not bump the ledger
 // version.
 func (l *Ledger) FreezeUntil(a AccountID, until time.Time) error {
+	return l.FreezeUntilCtx(context.Background(), a, until)
+}
+
+// FreezeUntilCtx is FreezeUntil with per-call audit actor attribution
+// (LG-73).
+func (l *Ledger) FreezeUntilCtx(ctx context.Context, a AccountID, until time.Time) error {
 	if !until.IsZero() && !until.After(time.Now()) {
 		return ErrFreezeUntilNotFuture
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.freezeLocked(a, until)
+	l.freezeCtxLocked(ctx, a, until)
 	return nil
 }
 
@@ -80,6 +94,12 @@ func (l *Ledger) FreezeUntil(a AccountID, until time.Time) error {
 // deletes any scheduled deadline (manual freeze); a non-zero until
 // installs it. Callers must hold the write lock.
 func (l *Ledger) freezeLocked(a AccountID, until time.Time) {
+	l.freezeCtxLocked(context.Background(), a, until)
+}
+
+// freezeCtxLocked is freezeLocked with per-call audit actor attribution
+// (LG-73). Callers must hold the write lock.
+func (l *Ledger) freezeCtxLocked(ctx context.Context, a AccountID, until time.Time) {
 	l.frozen[a] = true
 	if until.IsZero() {
 		delete(l.frozenUntil, a)
@@ -90,7 +110,7 @@ func (l *Ledger) freezeLocked(a AccountID, until time.Time) {
 	if !until.IsZero() {
 		details = map[string]any{"auto_unfreeze_at": until.UTC().Format(time.RFC3339)}
 	}
-	l.emitAudit(AuditEvent{
+	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "freeze",
 		Actor:         "Freeze",
 		TraceID:       string(a),
@@ -115,13 +135,18 @@ func (l *Ledger) freezeLocked(a AccountID, until time.Time) {
 // account that was never frozen is a no-op. Like Freeze, it does not bump
 // the ledger version.
 func (l *Ledger) Unfreeze(a AccountID) {
+	l.UnfreezeCtx(context.Background(), a)
+}
+
+// UnfreezeCtx is Unfreeze with per-call audit actor attribution (LG-73).
+func (l *Ledger) UnfreezeCtx(ctx context.Context, a AccountID) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.frozen, a)
 	// A manual unfreeze also drops any scheduled deadline: the account is
 	// no longer frozen, so the deadline is meaningless.
 	delete(l.frozenUntil, a)
-	l.emitAudit(AuditEvent{
+	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "unfreeze",
 		Actor:         "Unfreeze",
 		TraceID:       string(a),

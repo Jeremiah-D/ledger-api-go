@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -556,6 +557,15 @@ func (l *Ledger) PendingTransferReviewsAt(now time.Time) []TransferReview {
 // new. Approving a rejected or expired review fails with
 // ErrReviewNotPending. An empty reviewer is recorded as "operator".
 func (l *Ledger) ApproveTransferReview(transferID, reviewer string) (TransferReceipt, error) {
+	return l.ApproveTransferReviewCtx(context.Background(), transferID, reviewer)
+}
+
+// ApproveTransferReviewCtx is ApproveTransferReview with per-call audit
+// actor attribution (LG-73): the approval audit event records the
+// operator carried by ctx when set. The reviewer parameter remains the
+// business record of who approved (dual-control evidence); the actor is
+// the audit attribution of who invoked the call.
+func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, reviewer string) (TransferReceipt, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -574,7 +584,7 @@ func (l *Ledger) ApproveTransferReview(transferID, reviewer string) (TransferRec
 	now := time.Now()
 	if reviewExpiredLocked(r, now) {
 		l.expireReviewLocked(r, now)
-		l.emitReviewExpireAuditLocked(1)
+		l.emitReviewExpireAuditCtxLocked(ctx, 1)
 		return TransferReceipt{}, ErrReviewExpired
 	}
 	if reviewer == "" {
@@ -659,7 +669,7 @@ func (l *Ledger) ApproveTransferReview(transferID, reviewer string) (TransferRec
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
 	l.evaluateBalanceWatchesLocked(touchedAccounts(r.Entries), r.TransferID, "ApproveTransferReview")
-	l.emitAudit(AuditEvent{
+	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "transfer_review_approved",
 		Actor:         "ApproveTransferReview",
 		TraceID:       r.TransferID,
@@ -710,6 +720,12 @@ func (l *Ledger) ApproveTransferReview(transferID, reviewer string) (TransferRec
 // un-settled through review. An empty reviewer is recorded as
 // "operator".
 func (l *Ledger) RejectTransferReview(transferID, reviewer, reason string) (review *TransferReview, changed bool, err error) {
+	return l.RejectTransferReviewCtx(context.Background(), transferID, reviewer, reason)
+}
+
+// RejectTransferReviewCtx is RejectTransferReview with per-call audit
+// actor attribution (LG-73).
+func (l *Ledger) RejectTransferReviewCtx(ctx context.Context, transferID, reviewer, reason string) (review *TransferReview, changed bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -742,7 +758,7 @@ func (l *Ledger) RejectTransferReview(transferID, reviewer, reason string) (revi
 	if reason != "" {
 		details["reason"] = reason
 	}
-	l.emitAudit(AuditEvent{
+	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "transfer_review_rejected",
 		Actor:         "RejectTransferReview",
 		TraceID:       r.TransferID,
@@ -786,7 +802,13 @@ func (l *Ledger) expireReviewLocked(r *TransferReview, now time.Time) {
 // emitReviewExpireAuditLocked emits the batched auto-expiry audit event.
 // Callers must hold l.mu.
 func (l *Ledger) emitReviewExpireAuditLocked(expired int) {
-	l.emitAudit(AuditEvent{
+	l.emitReviewExpireAuditCtxLocked(context.Background(), expired)
+}
+
+// emitReviewExpireAuditCtxLocked is emitReviewExpireAuditLocked with
+// per-call audit actor attribution (LG-73). Callers must hold l.mu.
+func (l *Ledger) emitReviewExpireAuditCtxLocked(ctx context.Context, expired int) {
+	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "transfer_review_expire",
 		Actor:         "ExpireReviews",
 		TraceID:       fmt.Sprintf("review-expire@%d", l.version),
@@ -806,12 +828,26 @@ func (l *Ledger) emitReviewExpireAuditLocked(expired int) {
 // touches approved, rejected, or already-expired reviews, and it does
 // not bump the ledger version.
 func (l *Ledger) ExpireReviews() int {
-	return l.ExpireReviewsAt(time.Now())
+	return l.ExpireReviewsCtx(context.Background())
+}
+
+// ExpireReviewsCtx is ExpireReviews with per-call audit actor attribution
+// (LG-73): the expiry audit event records the operator carried by ctx
+// when set. The background review sweeper calls the plain variant, so
+// its events keep the entrypoint actor.
+func (l *Ledger) ExpireReviewsCtx(ctx context.Context) int {
+	return l.ExpireReviewsAtCtx(ctx, time.Now())
 }
 
 // ExpireReviewsAt is ExpireReviews with a caller-supplied timestamp, so
 // tests can pin expiry deterministically.
 func (l *Ledger) ExpireReviewsAt(now time.Time) int {
+	return l.ExpireReviewsAtCtx(context.Background(), now)
+}
+
+// ExpireReviewsAtCtx is ExpireReviewsAt with per-call audit actor
+// attribution (LG-73).
+func (l *Ledger) ExpireReviewsAtCtx(ctx context.Context, now time.Time) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	marked := 0
@@ -827,7 +863,7 @@ func (l *Ledger) ExpireReviewsAt(now time.Time) int {
 	// sweeper ticks on a timer, and zero-expire ticks would drown the
 	// audit trail in noise (see ExpireHoldsAt for the convention).
 	if marked > 0 {
-		l.emitReviewExpireAuditLocked(marked)
+		l.emitReviewExpireAuditCtxLocked(ctx, marked)
 		// Domain outbox: one review_expired per review — the expiry
 		// releases the reserved funds back to available, a domain fact.
 		for _, r := range expired {
