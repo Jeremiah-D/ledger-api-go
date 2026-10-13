@@ -45,6 +45,11 @@ type server struct {
 	// writes to (LEDGER_SNAPSHOT_BACKUP_DIR). Empty means unconfigured,
 	// and GET /snapshots/diff answers 404 fail-closed.
 	snapshotBackupDir string
+	// backupKeys is the parsed LEDGER_BACKUP_ENCRYPTION_KEY ring
+	// (LG-77): GET /snapshots/diff decrypts encrypted backups with
+	// it. Nil when no key is configured — plaintext files load fine,
+	// encrypted ones fail closed.
+	backupKeys map[string][32]byte
 	// auditSink forwards outbox domain events to an external webhook
 	// (LEDGER_AUDIT_SINK_URL). Nil when disabled; GET /metrics mirrors
 	// its counters when present.
@@ -1886,10 +1891,14 @@ func (s *server) handleSnapshotDiff(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `to must be a non-negative integer ledger version`})
 		return
 	}
-	diff, err := ledger.DiffSnapshotVersions(s.snapshotBackupDir, from, to)
+	diff, err := ledger.DiffSnapshotVersionsWithKeys(s.snapshotBackupDir, from, to, s.backupKeys)
 	if err != nil {
 		if errors.Is(err, ledger.ErrSnapshotVersionNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrBackupUnknownKeyID) || errors.Is(err, ledger.ErrBackupDecryptFailed) || errors.Is(err, ledger.ErrBackupEnvelopeInvalid) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load snapshots for diff"})
@@ -3776,6 +3785,9 @@ func main() {
 	// have been placed there by any means). Unset means the diff
 	// endpoint answers 404 fail-closed.
 	srv.snapshotBackupDir = os.Getenv("LEDGER_SNAPSHOT_BACKUP_DIR")
+	// The diff endpoint decrypts LG-77 encrypted backups with the same
+	// key ring the backup worker uses.
+	srv.backupKeys = backupEncryptionConfig().Keys
 
 	// Optional background balance-history recorder: samples every
 	// (account, currency) balance on the interval and appends the rows to
@@ -4041,6 +4053,16 @@ func reviewSweepInterval() (time.Duration, bool) {
 //     (default 24); invalid or non-positive falls back to the default.
 //   - LEDGER_SNAPSHOT_BACKUP_FULL_EVERY: full snapshot every Nth backup
 //     (default 6); invalid or non-positive falls back to the default.
+//   - LEDGER_BACKUP_ENCRYPTION_KEY (LG-77): opt-in AES-256-GCM at-rest
+//     encryption for backup files — 64 hex chars for a single key, or
+//     "kid:hex,kid:hex,..." for a rotation ring (first entry active).
+//     Invalid values are rejected with a log line and treated as
+//     unconfigured: the worker then writes plaintext (fail-open, with
+//     a one-time audit warning) unless
+//     LEDGER_SNAPSHOT_BACKUP_ENCRYPT_FAIL_CLOSED is set.
+//   - LEDGER_SNAPSHOT_BACKUP_ENCRYPT_FAIL_CLOSED: "1"/"true" makes
+//     backup ticks fail instead of writing plaintext when no
+//     encryption key is configured.
 func snapshotBackupConfig() (ledger.SnapshotBackupConfig, bool) {
 	dir := os.Getenv("LEDGER_SNAPSHOT_BACKUP_DIR")
 	if dir == "" {
@@ -4058,8 +4080,30 @@ func snapshotBackupConfig() (ledger.SnapshotBackupConfig, bool) {
 		KeepFull:        snapshotBackupKeep("LEDGER_SNAPSHOT_BACKUP_KEEP_FULL", ledger.DefaultSnapshotBackupKeepFull),
 		KeepIncremental: snapshotBackupKeep("LEDGER_SNAPSHOT_BACKUP_KEEP_INCR", ledger.DefaultSnapshotBackupKeepIncremental),
 		FullEvery:       snapshotBackupKeep("LEDGER_SNAPSHOT_BACKUP_FULL_EVERY", ledger.DefaultSnapshotBackupFullEvery),
+		Encryption:      backupEncryptionConfig(),
 	}
 	return cfg, true
+}
+
+// backupEncryptionConfig parses the LG-77 encryption env vars:
+// LEDGER_BACKUP_ENCRYPTION_KEY (the key or rotation ring) and
+// LEDGER_SNAPSHOT_BACKUP_ENCRYPT_FAIL_CLOSED. A malformed key is a
+// log line, not a crash: it parses as unconfigured, and the fail-open
+// / fail-closed policy decides what the worker does about it.
+func backupEncryptionConfig() ledger.BackupEncryptionConfig {
+	var cfg ledger.BackupEncryptionConfig
+	raw := os.Getenv("LEDGER_BACKUP_ENCRYPTION_KEY")
+	parsed, err := ledger.ParseBackupEncryptionKeys(raw)
+	if err != nil {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_BACKUP_ENCRYPTION_KEY: %v", err)
+	} else {
+		cfg = parsed
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LEDGER_SNAPSHOT_BACKUP_ENCRYPT_FAIL_CLOSED"))) {
+	case "1", "true", "yes":
+		cfg.FailClosed = true
+	}
+	return cfg
 }
 
 // balanceHistoryConfig reads LEDGER_BALANCE_HISTORY_DIR (the directory

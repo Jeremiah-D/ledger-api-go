@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -172,6 +173,17 @@ func parseSnapshotFilename(name string) (ref snapshotFileRef, ok bool) {
 // half-loaded; a version no backup chain can construct returns
 // ErrSnapshotVersionNotFound.
 func LoadSnapshotAtVersion(dir string, version uint64) (*Ledger, error) {
+	return LoadSnapshotAtVersionWithKeys(dir, version, nil)
+}
+
+// LoadSnapshotAtVersionWithKeys is LoadSnapshotAtVersion with a
+// decryption ring (LG-77): backup files carrying the encryption
+// envelope are opened through OpenSnapshotBackup and decrypted with
+// the key their header names; plaintext files pass through unchanged.
+// A file that cannot be authenticated (tampered, wrong key, unknown
+// key id) refuses the whole load — a restore never imports
+// half-decrypted state.
+func LoadSnapshotAtVersionWithKeys(dir string, version uint64, keys map[string][32]byte) (*Ledger, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("%w: cannot read backup dir %q: %v", ErrSnapshotVersionNotFound, dir, err)
@@ -202,19 +214,18 @@ func LoadSnapshotAtVersion(dir string, version uint64) (*Ledger, error) {
 		}
 	}
 
-	openFile := func(name string) (*os.File, error) {
-		return os.Open(filepath.Join(dir, name))
+	openPlaintext := func(name string) ([]byte, error) {
+		return OpenSnapshotBackup(filepath.Join(dir, name), keys)
 	}
 
 	// Exact full snapshot: the common case for versions the rotation
 	// actually materialized.
 	if name, ok := fulls[version]; ok {
-		f, err := openFile(name)
+		data, err := openPlaintext(name)
 		if err != nil {
-			return nil, fmt.Errorf("ledger: open snapshot %q: %w", name, err)
+			return nil, err
 		}
-		defer f.Close()
-		l, err := ImportSnapshot(f)
+		l, err := ImportSnapshot(bytes.NewReader(data))
 		if err != nil {
 			return nil, err
 		}
@@ -238,12 +249,11 @@ func LoadSnapshotAtVersion(dir string, version uint64) (*Ledger, error) {
 			ErrSnapshotVersionNotFound, version, dir)
 	}
 
-	f, err := openFile(baseName)
+	f, err := openPlaintext(baseName)
 	if err != nil {
-		return nil, fmt.Errorf("ledger: open snapshot %q: %w", baseName, err)
+		return nil, err
 	}
-	l, err := ImportSnapshot(f)
-	f.Close()
+	l, err := ImportSnapshot(bytes.NewReader(f))
 	if err != nil {
 		return nil, err
 	}
@@ -260,12 +270,11 @@ func LoadSnapshotAtVersion(dir string, version uint64) (*Ledger, error) {
 			return nil, fmt.Errorf("%w: incremental chain from version %d cannot reach version %d in %q",
 				ErrSnapshotVersionNotFound, base, version, dir)
 		}
-		f, err := openFile(nextName)
+		f, err := openPlaintext(nextName)
 		if err != nil {
-			return nil, fmt.Errorf("ledger: open snapshot %q: %w", nextName, err)
+			return nil, err
 		}
-		err = l.ImportIncrementalSnapshot(f)
-		f.Close()
+		err = l.ImportIncrementalSnapshot(bytes.NewReader(f))
 		if err != nil {
 			return nil, err
 		}
@@ -279,11 +288,19 @@ func LoadSnapshotAtVersion(dir string, version uint64) (*Ledger, error) {
 // endpoints: added means present in `to` but not `from`. The diff is
 // purely read-side — neither the live ledger nor any file is written.
 func DiffSnapshotVersions(dir string, from, to uint64) (*SnapshotDiff, error) {
-	fromL, err := LoadSnapshotAtVersion(dir, from)
+	return DiffSnapshotVersionsWithKeys(dir, from, to, nil)
+}
+
+// DiffSnapshotVersionsWithKeys is DiffSnapshotVersions with a
+// decryption ring (LG-77): it loads through
+// LoadSnapshotAtVersionWithKeys, so encrypted backups in the directory
+// decrypt transparently and tampered ones refuse the diff.
+func DiffSnapshotVersionsWithKeys(dir string, from, to uint64, keys map[string][32]byte) (*SnapshotDiff, error) {
+	fromL, err := LoadSnapshotAtVersionWithKeys(dir, from, keys)
 	if err != nil {
 		return nil, err
 	}
-	toL, err := LoadSnapshotAtVersion(dir, to)
+	toL, err := LoadSnapshotAtVersionWithKeys(dir, to, keys)
 	if err != nil {
 		return nil, err
 	}

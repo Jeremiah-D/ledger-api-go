@@ -79,6 +79,15 @@ type SnapshotBackupConfig struct {
 	// MaxRetries is how many times a failed export is retried before
 	// the tick counts as failed.
 	MaxRetries int
+	// Encryption is the opt-in at-rest encryption for backup files
+	// (LG-77): when an active key is configured, the exported snapshot
+	// (full and incremental alike) is sealed in an AES-256-GCM envelope
+	// before it is written. With no active key the worker writes
+	// plaintext and emits a one-time "snapshot_backup_unencrypted"
+	// audit warning (fail-open, documented honestly) — unless
+	// Encryption.FailClosed is set, in which case the tick fails with
+	// a "snapshot_backup_encryption_missing" audit event instead.
+	Encryption BackupEncryptionConfig
 }
 
 // withDefaults fills non-positive knobs with the package defaults.
@@ -115,6 +124,12 @@ type SnapshotBackup struct {
 	mu          sync.Mutex
 	backups     uint64
 	lastVersion uint64
+	// warnedUnencrypted / warnedMissingKey make the LG-77 fail-open
+	// warning and fail-closed refusal one-time audit events per worker
+	// lifetime: the condition is operator configuration, not a
+	// per-tick incident, so it must not spam the audit log.
+	warnedUnencrypted atomic.Bool
+	warnedMissingKey  atomic.Bool
 }
 
 // StartSnapshotBackup launches a background goroutine that exports a
@@ -220,6 +235,27 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 		return kind, false
 	}
 
+	// LG-77: seal the export when a key is configured. The envelope is
+	// content-detected on read, so encrypted and plaintext backups
+	// coexist in one directory and the .jsonl-suffixed rotation
+	// pruning keeps working.
+	encrypted := false
+	keyID := ""
+	if _, ok := sw.cfg.Encryption.ActiveKey(); ok {
+		sealed, err := EncryptSnapshotBackup(data, sw.cfg.Encryption)
+		if err != nil {
+			return kind, false
+		}
+		data = sealed
+		encrypted = true
+		keyID = sw.cfg.Encryption.ActiveKeyID
+	} else if sw.cfg.Encryption.FailClosed {
+		sw.warnEncryptionMissingLocked(kind, base)
+		return kind, false
+	} else {
+		sw.warnUnencryptedLocked(kind)
+	}
+
 	name := snapshotBackupFilename(kind, base, version, time.Now().UTC())
 	if err := writeFileAtomic(sw.cfg.Dir, name, data); err != nil {
 		return kind, false
@@ -247,15 +283,58 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 		VersionBefore: base,
 		VersionAfter:  version,
 		Details: map[string]any{
-			"kind":    kind,
-			"path":    filepath.Join(sw.cfg.Dir, name),
-			"bytes":   len(data),
-			"pruned":  pruned,
+			"kind":      kind,
+			"path":      filepath.Join(sw.cfg.Dir, name),
+			"bytes":     len(data),
+			"pruned":    pruned,
+			"encrypted": encrypted,
+			"key_id":    keyID,
 		},
 	})
 	sw.l.mu.RUnlock()
 
 	return kind, true
+}
+
+// warnUnencryptedLocked emits the one-time fail-open warning when the
+// worker writes a plaintext backup: no encryption key is configured
+// and FailClosed is off. The warning is honest about the posture —
+// plaintext at rest — so an operator who expected encryption sees it
+// in the audit trail instead of discovering it during an incident.
+func (sw *SnapshotBackup) warnUnencryptedLocked(kind string) {
+	if !sw.warnedUnencrypted.CompareAndSwap(false, true) {
+		return
+	}
+	sw.l.mu.RLock()
+	sw.l.emitAudit(AuditEvent{
+		Op:    "snapshot_backup_unencrypted",
+		Actor: "SnapshotBackup",
+		Details: map[string]any{
+			"kind":   kind,
+			"reason": "no LEDGER_BACKUP_ENCRYPTION_KEY configured; writing plaintext (fail-open)",
+		},
+	})
+	sw.l.mu.RUnlock()
+}
+
+// warnEncryptionMissingLocked emits the one-time refusal event when
+// FailClosed is set but no key is configured: the tick fails instead
+// of writing a backup the operator's policy forbids.
+func (sw *SnapshotBackup) warnEncryptionMissingLocked(kind string, base uint64) {
+	if !sw.warnedMissingKey.CompareAndSwap(false, true) {
+		return
+	}
+	sw.l.mu.RLock()
+	sw.l.emitAudit(AuditEvent{
+		Op:    "snapshot_backup_encryption_missing",
+		Actor: "SnapshotBackup",
+		Details: map[string]any{
+			"kind":         kind,
+			"base_version": base,
+			"reason":       "FailClosed set but no LEDGER_BACKUP_ENCRYPTION_KEY configured; tick refused",
+		},
+	})
+	sw.l.mu.RUnlock()
 }
 
 // snapshotBackupFilename lays out backup files so lexical order is

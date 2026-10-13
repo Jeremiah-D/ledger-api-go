@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,8 @@ func TestSnapshotBackupConfig(t *testing.T) {
 				"LEDGER_SNAPSHOT_BACKUP_KEEP_FULL",
 				"LEDGER_SNAPSHOT_BACKUP_KEEP_INCR",
 				"LEDGER_SNAPSHOT_BACKUP_FULL_EVERY",
+				"LEDGER_BACKUP_ENCRYPTION_KEY",
+				"LEDGER_SNAPSHOT_BACKUP_ENCRYPT_FAIL_CLOSED",
 			} {
 				t.Setenv(k, "")
 			}
@@ -110,7 +113,9 @@ func TestSnapshotBackupConfig(t *testing.T) {
 			if !ok {
 				return
 			}
-			if got != tc.want {
+			// DeepEqual: the config now carries a key ring (LG-77),
+			// so plain != no longer compiles.
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("snapshotBackupConfig() = %+v, want %+v", got, tc.want)
 			}
 		})

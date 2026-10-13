@@ -2612,6 +2612,22 @@ Environment:
   in `ledger_snapshot_backups_total` /
   `ledger_snapshot_backups_failed_total`. Unset dir or invalid interval
   means disabled.
+- `LEDGER_BACKUP_ENCRYPTION_KEY` — opt-in AES-256-GCM at-rest encryption
+  for snapshot backup files (full and incremental alike): 64 hex chars
+  for a single key, or `kid:hex,kid:hex,...` for a rotation ring (first
+  entry is the active encryption key, the rest are retired
+  decrypt-only keys, so old backups keep opening after a rotation).
+  Each file carries a `LEDSNAPENC1` envelope: JSON header (key id,
+  random nonce, authenticated alongside the ciphertext) + raw GCM
+  ciphertext; tampered files fail loudly and are refused on import.
+  The envelope is content-detected, so encrypted and plaintext backups
+  coexist in one directory and `GET /snapshots/diff` decrypts
+  transparently with the same key ring. With no key configured the
+  worker writes plaintext and emits a one-time
+  `snapshot_backup_unencrypted` audit warning — fail-open, documented
+  honestly — unless `LEDGER_SNAPSHOT_BACKUP_ENCRYPT_FAIL_CLOSED=1`
+  (`true`/`yes` also work), which makes the tick fail instead with a
+  `snapshot_backup_encryption_missing` audit event.
 - `LEDGER_BALANCE_HISTORY_DIR` (+ `LEDGER_BALANCE_HISTORY_INTERVAL`,
   `LEDGER_BALANCE_HISTORY_MAX_AGE_MS`) — enables the background
   balance-history recorder, e.g. `LEDGER_BALANCE_HISTORY_INTERVAL=5m`.
