@@ -310,6 +310,13 @@ type Metrics struct {
 	// fx_rate_provider_failed audit events. It is synced from the ledger
 	// on every GET /metrics scrape, like the rate-watch counters.
 	FXRateProviderFailedTotal atomic.Uint64
+	// FXRateInconsistencyTotal counts fx_rate_inconsistent alerts
+	// edge-triggered by the background FX-consistency watch (see
+	// ledger.StartFXConsistencyWatch): directed 3-cycles of the rate
+	// table whose exact product deviates from 1 by more than the
+	// opt-in basis-point threshold. It is synced from the ledger on
+	// every GET /metrics scrape, like the rate-watch counters.
+	FXRateInconsistencyTotal atomic.Uint64
 	// BalanceHistorySnapshots counts balance-history snapshot ticks
 	// completed by the background recorder (see
 	// LEDGER_BALANCE_HISTORY_DIR): one per tick that wrote rows, not per
@@ -477,6 +484,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_fx_rate_provider_failed_total",
 		"Total market FX rate provider fetch failures (fx_rate_provider_failed audit events); the watch worker continues on the next tick.",
 		m.FXRateProviderFailedTotal.Load())
+	writeCounter(&sb, "ledger_fx_rate_inconsistency_total",
+		"Total fx_rate_inconsistent alerts edge-triggered by the background FX-consistency watch (directed 3-cycles of the rate table whose exact product deviates from 1 beyond the opt-in basis-point threshold; advisory only, conversions are never blocked).",
+		m.FXRateInconsistencyTotal.Load())
 	writeCounter(&sb, "ledger_balance_history_snapshots_total",
 		"Total balance-history snapshot ticks completed by the background recorder (one per tick, not per row).",
 		m.BalanceHistorySnapshots.Load())

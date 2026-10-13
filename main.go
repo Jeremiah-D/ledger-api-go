@@ -3073,6 +3073,7 @@ func (s *server) handler() http.Handler {
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
 		var fxStaleAlerts, fxExpiredAlerts, fxOverridden uint64
 		var fxRefreshes, fxMoves, fxProviderFails uint64
+		var fxInconsistent uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -3092,6 +3093,7 @@ func (s *server) handler() http.Handler {
 			fxRefreshes += l.FXRateRefreshCount()
 			fxMoves += l.FXRateMovedCount()
 			fxProviderFails += l.FXRateProviderFailCount()
+			fxInconsistent += l.FXRateInconsistencyAlertCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -3126,6 +3128,10 @@ func (s *server) handler() http.Handler {
 		s.metrics.FXRateRefreshesTotal.Store(fxRefreshes)
 		s.metrics.FXRateMovedTotal.Store(fxMoves)
 		s.metrics.FXRateProviderFailedTotal.Store(fxProviderFails)
+		// The FX-consistency alert counter likewise lives in the
+		// ledger: inconsistencies are edge-triggered by the background
+		// consistency watcher inside the ledger package.
+		s.metrics.FXRateInconsistencyTotal.Store(fxInconsistent)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the
@@ -3731,6 +3737,24 @@ func main() {
 		defer fw.Stop()
 	}
 
+	// Optional background FX-rate triangular-consistency watch (LG-76):
+	// periodically scans the rate table for directed 3-cycles whose
+	// exact product deviates from 1 by more than the opt-in
+	// basis-point threshold, and edge-triggers fx_rate_inconsistent
+	// audit events plus ledger_fx_rate_inconsistency_total. Advisory
+	// only — conversions are never blocked. It shares the server
+	// context, so SIGINT/SIGTERM stops it. Unset or invalid interval
+	// disables the watcher; unset or invalid threshold disables the
+	// check (the threshold is opt-in: without it microscopic feed
+	// wobble would page).
+	if interval, thresholdBps, ok := fxConsistencyWatchConfig(); ok {
+		cw := ledger.StartFXConsistencyWatch(ctx, srv.ledger, interval, thresholdBps, func(as []ledger.FXRateInconsistency) {
+			log.Printf("ledger-api-go: fx consistency watch: %d alert(s)", len(as))
+		})
+		log.Printf("ledger-api-go: fx consistency watch started (interval %v, threshold %d bps)", interval, thresholdBps)
+		defer cw.Stop()
+	}
+
 	// Optional periodic snapshot backup worker: exports full/incremental
 	// disaster-recovery snapshots to a directory on a ticker, with
 	// retention. It shares the server context, so SIGINT/SIGTERM stops
@@ -3959,6 +3983,32 @@ func fxRateWatchConfig() (interval, warningThreshold time.Duration, ok bool) {
 		}
 	}
 	return d, warningThreshold, true
+}
+
+// fxConsistencyWatchConfig reads LEDGER_FX_CONSISTENCY_INTERVAL (a Go
+// duration string, e.g. "5m") for the background FX triangular-
+// consistency watcher (LG-76) and LEDGER_FX_CONSISTENCY_THRESHOLD_BPS
+// (an integer basis-point count) for its alert threshold. Unset or
+// invalid interval means the watcher is disabled; unset or invalid
+// threshold disables the check entirely — the threshold is opt-in, so
+// microscopic feed wobble never pages by default.
+func fxConsistencyWatchConfig() (interval time.Duration, thresholdBps int64, ok bool) {
+	raw := os.Getenv("LEDGER_FX_CONSISTENCY_INTERVAL")
+	if raw == "" {
+		return 0, 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_FX_CONSISTENCY_INTERVAL %q, fx consistency watch disabled", raw)
+		return 0, 0, false
+	}
+	bpsRaw := os.Getenv("LEDGER_FX_CONSISTENCY_THRESHOLD_BPS")
+	bps, err := strconv.ParseInt(bpsRaw, 10, 64)
+	if err != nil || bps <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_FX_CONSISTENCY_THRESHOLD_BPS %q, fx consistency check disabled", bpsRaw)
+		return 0, 0, false
+	}
+	return d, bps, true
 }
 
 // reviewSweepInterval reads LEDGER_REVIEW_SWEEP_INTERVAL (a Go duration

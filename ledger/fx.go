@@ -541,7 +541,11 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	if feeCents > 0 {
 		feeEntryID = t.ID + "/fee"
 	}
-	for _, id := range []string{t.ID, t.ID + "/fx", feeEntryID} {
+	// A split transfer reserves the "<id>/chunk-0" namespace for its
+	// chunk entries (see PostTransferSplit): a plain transfer reusing a
+	// split transfer's ID would create two transfers sharing one
+	// identity — the non-FX path checks this too (transfer.go).
+	for _, id := range []string{t.ID, t.ID + "/fx", t.ID + "/chunk-0", feeEntryID} {
 		if id == "" {
 			continue
 		}

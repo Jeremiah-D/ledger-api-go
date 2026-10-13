@@ -1155,6 +1155,31 @@ silent — and never kills the worker; the next tick runs as scheduled.
 `ledger_fx_rate_provider_failed_total` count installs, moves, and
 fetch failures.
 
+**FX rate triangular-consistency check.** Each transfer prices its legs
+off the rate table independently, so nothing on the write path asks
+whether the table is *self-consistent*: if USD→EUR→JPY→USD multiplies
+to something far from 1, the book has an arbitrage leak — a payer
+routing through the table can mint or burn value across currencies
+while every single leg looks legitimate. The background consistency
+watch (`LEDGER_FX_CONSISTENCY_INTERVAL`, e.g. `5m`; see
+[Environment](#running)) scans the rate table on a ticker, read-only,
+and checks every directed 3-cycle with all three legs present. The
+product is computed in exact `big.Rat` arithmetic (the table stores
+integer num/den, so no float rounding can hide or invent a deviation);
+a cycle whose |product − 1| exceeds the opt-in threshold
+(`LEDGER_FX_CONSISTENCY_THRESHOLD_BPS`, integer basis points)
+edge-triggers an `fx_rate_inconsistent` audit event (path, legs,
+exact product, exact deviation in bps) and counts in
+`ledger_fx_rate_inconsistency_total`. The check is advisory only — it
+never blocks a conversion; the inconsistency is a data-quality problem
+in the operator's rate feed, not a booking bug. Edge-triggered like the
+expiry watch: a cycle that stays inconsistent across ticks alerts once
+when it *becomes* inconsistent (dedup identity: the three legs'
+num/den values, so a leg-value change re-arms; removing a leg drops the
+mark). Unset or invalid interval disables the watcher; unset or invalid
+threshold disables the check — the threshold is opt-in, so microscopic
+feed wobble never pages by default.
+
 **Manual FX rate overrides (dual control).** When the feed is wrong — a
 stale quote, a market dislocation — an operator can propose a manual
 override price for one directional pair via `SetRateOverride(from, to,
@@ -2438,6 +2463,11 @@ curl -s localhost:8080/metrics
 - `ledger_fx_rate_provider_failed_total` — market FX rate provider fetch
   failures (`fx_rate_provider_failed` audit events); the watch worker
   continues on the next tick. Synced from the ledger on every scrape.
+- `ledger_fx_rate_inconsistency_total` — `fx_rate_inconsistent` alerts
+  edge-triggered by the background FX-consistency watch (directed
+  3-cycles of the rate table whose exact product deviates from 1 beyond
+  the opt-in basis-point threshold; advisory only, conversions are never
+  blocked). Synced from the ledger on every scrape.
 - `ledger_balance_history_snapshots_total` — balance-history snapshot
   ticks completed by the background recorder (see
   `LEDGER_BALANCE_HISTORY_DIR` below). One per tick, not per row — it
@@ -2558,6 +2588,17 @@ Environment:
   for the FX-rate watch, e.g. `LEDGER_FX_RATE_WARNING_THRESHOLD=72h`.
   Unset or invalid disables stale warnings only — expiry alerts stay
   active.
+- `LEDGER_FX_CONSISTENCY_INTERVAL` — enables the background FX
+  triangular-consistency watch, e.g. `LEDGER_FX_CONSISTENCY_INTERVAL=5m`.
+  Each tick scans the rate table, read-only, and edge-triggers
+  `fx_rate_inconsistent` for directed 3-cycles whose exact product
+  deviates from 1 by more than `LEDGER_FX_CONSISTENCY_THRESHOLD_BPS`
+  (integer basis points), counted in
+  `ledger_fx_rate_inconsistency_total`. Advisory only — conversions are
+  never blocked. The first tick fires after one full interval;
+  SIGINT/SIGTERM stops the worker with the server. Unset or invalid
+  interval disables the watcher; unset or invalid threshold disables the
+  check (the threshold is opt-in).
 - `LEDGER_SNAPSHOT_BACKUP_DIR` — enables the periodic snapshot backup
   worker (LG-39): the server exports disaster-recovery snapshots to this
   directory on `LEDGER_SNAPSHOT_BACKUP_INTERVAL` (e.g. `1h`). Every

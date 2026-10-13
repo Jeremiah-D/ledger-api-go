@@ -454,6 +454,11 @@ type Ledger struct {
 	// do not round-trip through snapshots.
 	fxRateStaleAlerts   uint64
 	fxRateExpiredAlerts uint64
+	// fxRateInconsistentAlerts counts the edge-triggered
+	// "fx_rate_inconsistent" audit events from the background
+	// FX-consistency watch (see fx_consistency.go, LG-76). In-memory
+	// only — they do not round-trip through snapshots.
+	fxRateInconsistentAlerts uint64
 	// fxRateProvider is the opt-in market FX rate adapter (see
 	// fx_provider.go, LG-74): the FX-rate watch polls it on its
 	// interval and installs quotes through the SetFXRateRat write
