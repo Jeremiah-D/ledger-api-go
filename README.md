@@ -1826,6 +1826,36 @@ state with no new journal rows.
 A full `ImportSnapshot` explicitly refuses a meta carrying `base_version`,
 so the two snapshot kinds can never be confused.
 
+#### Snapshot version diff (`ledger/snapshot_diff.go`, `GET /snapshots/diff`)
+
+Two backup versions of the same ledger can be compared without
+restoring either: `GET /snapshots/diff?from=<v1>&to=<v2>` loads both
+versions from the backup directory (`LEDGER_SNAPSHOT_BACKUP_DIR`) and
+returns the difference in three dimensions — per-(account, currency)
+**balances**, journal **entries** by ID, and **frozen** risk-control
+state (including timed-freeze deadlines) — each as added / deleted /
+changed rows:
+
+```bash
+curl -s 'localhost:8080/snapshots/diff?from=120&to=168'
+# {"from_version":120,"to_version":168,
+#  "balances":{"added":[...],"deleted":[...],"changed":[{"account":"cash","currency":"USD","from_cents":1500,"to_cents":1800,"delta_cents":300}]},
+#  "entries":{"added":[...],"deleted":[],"changed":[]},
+#  "frozen":{"added":[],"deleted":[{"account":"acct-f"}],"changed":[]}}
+```
+
+Version resolution reuses the backup files directly: a full snapshot at
+exactly the requested version is imported, otherwise the newest full
+snapshot at or below the version is loaded and incremental deltas are
+applied in continuity order until the version is reached — the same
+`ImportIncrementalSnapshot` gap/overlap rules apply, so a version no
+backup chain can construct is a `404` (`ErrSnapshotVersionNotFound`),
+never a guessed state. The diff is purely read-side: both versions are
+loaded into fresh in-memory ledgers, so nothing is written to the live
+ledger, the audit log, or the backup directory. Served diffs are
+counted in `ledger_snapshot_diffs_total`. Unconfigured backup directory
+→ `404` fail-closed; missing or non-numeric `from`/`to` → `400`.
+
 ### Multi-tenant isolation (`ledger/tenant.go`)
 
 One process can serve many isolated tenants (merchants, business units):
@@ -2256,6 +2286,8 @@ curl -s localhost:8080/metrics
   ticks (full and incremental; see `LEDGER_SNAPSHOT_BACKUP_DIR` below).
 - `ledger_snapshot_backups_failed_total` — periodic snapshot backup
   ticks that failed after retries.
+- `ledger_snapshot_diffs_total` — `GET /snapshots/diff` requests served
+  successfully (read-only version diffs between backup snapshots).
 - `ledger_settlement_runs_total` — `GET /settlement` requests served
   (all formats: `json`, `csv`, `sql`).
 - `ledger_settlement_alerts_total` — settlement mismatch alerts across

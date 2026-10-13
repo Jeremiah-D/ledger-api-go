@@ -41,6 +41,10 @@ type server struct {
 	// writes to (LEDGER_BALANCE_HISTORY_DIR). Empty means unconfigured,
 	// and GET /balance-history answers 404 fail-closed.
 	balanceHistoryDir string
+	// snapshotBackupDir is the directory the snapshot backup worker
+	// writes to (LEDGER_SNAPSHOT_BACKUP_DIR). Empty means unconfigured,
+	// and GET /snapshots/diff answers 404 fail-closed.
+	snapshotBackupDir string
 	// auditSink forwards outbox domain events to an external webhook
 	// (LEDGER_AUDIT_SINK_URL). Nil when disabled; GET /metrics mirrors
 	// its counters when present.
@@ -1801,6 +1805,56 @@ func (s *server) handleBalanceHistory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSnapshotDiff implements GET /snapshots/diff?from=&to= (LG-70):
+// the three-dimension diff (balances / entries / frozen state) between
+// two backup snapshot versions of the same ledger. Both versions must
+// resolve from the backup directory — a version no backup chain can
+// construct is a 404, and an unconfigured backup directory is a 404
+// fail-closed. The diff is read-only: it loads fresh in-memory ledgers
+// from the snapshot files and writes nothing to the live ledger, the
+// audit log, or the backup directory.
+func (s *server) handleSnapshotDiff(w http.ResponseWriter, r *http.Request) {
+	if s.snapshotBackupDir == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "snapshot backups not configured"})
+		return
+	}
+	q := r.URL.Query()
+	from, err := parseSnapshotVersionParam(q.Get("from"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `from must be a non-negative integer ledger version`})
+		return
+	}
+	to, err := parseSnapshotVersionParam(q.Get("to"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `to must be a non-negative integer ledger version`})
+		return
+	}
+	diff, err := ledger.DiffSnapshotVersions(s.snapshotBackupDir, from, to)
+	if err != nil {
+		if errors.Is(err, ledger.ErrSnapshotVersionNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load snapshots for diff"})
+		return
+	}
+	s.metrics.SnapshotDiffsTotal.Add(1)
+	writeJSON(w, http.StatusOK, diff)
+}
+
+// parseSnapshotVersionParam parses a ?from=/​?to= snapshot version: a
+// non-empty decimal integer that fits in a uint64.
+func parseSnapshotVersionParam(raw string) (uint64, error) {
+	if raw == "" {
+		return 0, errors.New("missing")
+	}
+	v, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
 // handleTrialBalance implements GET /accounts/{id}/trial-balance.
 // Returns the account's double-entry breakdown — total debits, total
 // credits, and net balance — at the current ledger version. Net balance
@@ -2905,6 +2959,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PUT /accounts/{id}/tags", s.handleSetAccountTags)
 	mux.HandleFunc("GET /rollup", s.handleTagRollup)
 	mux.HandleFunc("GET /balance-history", s.handleBalanceHistory)
+	mux.HandleFunc("GET /snapshots/diff", s.handleSnapshotDiff)
 	// GET /tenants lists every provisioned tenant ID (the default tenant
 	// is "" — see ledger.DefaultTenantID). It is registered on the inner
 	// mux so the tenant middleware below never treats it as a tenant
@@ -3549,6 +3604,11 @@ func main() {
 		log.Printf("ledger-api-go: snapshot backup worker started (dir %s, interval %v)", cfg.Dir, cfg.Interval)
 		defer bk.Stop()
 	}
+	// GET /snapshots/diff resolves snapshot versions from the backup
+	// directory directly (it needs no running worker — snapshots may
+	// have been placed there by any means). Unset means the diff
+	// endpoint answers 404 fail-closed.
+	srv.snapshotBackupDir = os.Getenv("LEDGER_SNAPSHOT_BACKUP_DIR")
 
 	// Optional background balance-history recorder: samples every
 	// (account, currency) balance on the interval and appends the rows to
