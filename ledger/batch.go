@@ -148,7 +148,21 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		}
 	}
 
-	// 2. Batch-level idempotency: a replayed key returns the whole
+	// 2. Sanctions/denylist screening (see denylist.go): every new entry's
+	// legs are screened before the batch-level idempotency check below —
+	// a hit rejects the whole batch and leaves no idempotency trace, and
+	// the attempt is audited as "denylist_rejected". Like the other
+	// entry gates, replayed entries are not known yet at this point;
+	// screening runs on the submitted legs, so a denied account cannot
+	// slip through inside a batch.
+	for i := range entries {
+		e := &entries[i]
+		if acct, entry, denied := l.denylistRejectedLocked(e.DebitAccount, e.CreditAccount); denied {
+			return BatchReceipt{}, l.deniedRejectionLocked("PostBatch", b.ID, acct, entry, []AccountID{e.DebitAccount, e.CreditAccount})
+		}
+	}
+
+	// 3. Batch-level idempotency: a replayed key returns the whole
 	// original receipt, before any entry-level work — the replay books
 	// nothing new, so it must not fail on state that changed since.
 	if b.IdempotencyKey != "" {
@@ -161,7 +175,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		}
 	}
 
-	// 3. Per-entry idempotency resolution against the shared Post key
+	// 4. Per-entry idempotency resolution against the shared Post key
 	// namespace: a key already posted resolves to the original entry,
 	// which is returned in the receipt without being booked again.
 	replayed := make([]bool, len(entries))
@@ -182,7 +196,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		newKeys[e.IdempotencyKey] = true
 	}
 
-	// 3b. External-reference uniqueness, atomically for the whole
+	// 4b. External-reference uniqueness, atomically for the whole
 	// batch: a non-empty reference on a new entry must not repeat
 	// inside the batch, and must not collide with a reference already
 	// journaled. Replayed entries carry their original entry's
@@ -204,7 +218,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		}
 	}
 
-	// 4. Entry-ID conflicts: a new entry must not reuse a journaled ID.
+	// 5. Entry-ID conflicts: a new entry must not reuse a journaled ID.
 	// (Replays carry the original entry's ID, which is journaled by
 	// definition, so they skip this check.)
 	for i := range entries {
@@ -216,7 +230,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		}
 	}
 
-	// 5. Chart direction + frozen checks on every new entry's legs
+	// 6. Chart direction + frozen checks on every new entry's legs
 	// (see chart.go). Replays book nothing new, so they are exempt —
 	// mirroring Post's replay-first order. Expired timed freezes release
 	// lazily before the frozen gates, like in Post (see FreezeUntil).
@@ -237,7 +251,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		}
 	}
 
-	// 5b. Period gate: a batch entry whose final timestamp lands in a
+	// 6b. Period gate: a batch entry whose final timestamp lands in a
 	// closed accounting period rejects the whole batch (see period.go).
 	// Replays are exempt — they book nothing new, so they must not fail
 	// on a period that closed after the original posting. CreatedAt was
@@ -251,7 +265,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		}
 	}
 
-	// 6. Overdraft simulation in batch order: each new entry's credit
+	// 7. Overdraft simulation in batch order: each new entry's credit
 	// leg is checked against the account's balance as the batch's
 	// earlier entries left it. A protected payer cannot dodge the guard
 	// by splitting one overdrawing outflow into small legs.
@@ -270,7 +284,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		sim.apply(e)
 	}
 
-	// 7. Daily-limit simulation: same sequential semantics — earlier
+	// 8. Daily-limit simulation: same sequential semantics — earlier
 	// entries in the batch consume the UTC day's budget for later ones.
 	// The formula mirrors dailyLimitRejectedLocked exactly, with the
 	// batch's own planned outflow added to the ledger's bucket.
@@ -294,7 +308,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		}
 	}
 
-	// 8. Atomic commit: every new entry's journal row, idempotency index
+	// 9. Atomic commit: every new entry's journal row, idempotency index
 	// entries, per-account index rows, balances, totals, chain links, and
 	// version bumps land together, under the one write lock, after all
 	// checks passed. Any failure above returned before the first

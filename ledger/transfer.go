@@ -511,6 +511,18 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 	if t, toCurrency, err = validateTransferFields(t); err != nil {
 		return TransferReceipt{}, err
 	}
+
+	// Sanctions/denylist screening (see denylist.go): the payer and the
+	// payee are screened before the FX branch and the idempotency replay
+	// check — a hit rejects the transfer and leaves no idempotency
+	// trace, and the attempt is audited as "denylist_rejected". The fee
+	// leg's revenue account is deliberately not screened: it is the
+	// operator's own account, and screening it would let the operator
+	// deny itself into a self-inflicted outage.
+	if acct, entry, denied := l.denylistRejectedLocked(t.From, t.To); denied {
+		return TransferReceipt{}, l.deniedRejectionLocked("PostTransfer", t.ID, acct, entry, []AccountID{t.From, t.To})
+	}
+
 	if toCurrency != t.Currency {
 		return l.postTransferFXLocked(t, toCurrency, time.Now())
 	}

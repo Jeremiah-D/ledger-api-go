@@ -447,15 +447,20 @@ func (l *Ledger) ExpireHoldsAt(now time.Time) int {
 // Capture settles up to the held amount as a real money movement and
 // consumes the hold.
 //
-// The risk checks mirror Post and run in the same order: field validation
-// first, then the idempotency replay check on the capture namespace (a
-// replay returns the original receipt with Duplicate == true and books
-// nothing new — the replay succeeds even if the hold has since been
-// frozen), then the hold lookup and state checks (unknown -> ErrHoldNotFound,
-// captured/released -> ErrHoldNotActive, expired -> ErrHoldExpired, amount
-// above the held amount -> ErrCaptureExceedsHold), then the capture-ID
-// conflict check, then the frozen check on both settlement legs, then the
-// overdraft check on the held (payer) account.
+// The risk checks mirror Post and run in the same order, except the
+// sanctions/denylist screen: field validation first, then the hold lookup
+// (the screen needs the hold's account — holds are never deleted, so a
+// genuine replay's hold is always found), then the denylist screen on both
+// settlement legs (see ErrAccountDenied: screening runs before the replay
+// check, so a denied capture leaves no idempotency trace), then the
+// idempotency replay check on the capture namespace (a replay returns the
+// original receipt with Duplicate == true and books nothing new — the
+// replay succeeds even if the hold has since been frozen), then the hold
+// state checks (unknown -> ErrHoldNotFound, captured/released ->
+// ErrHoldNotActive, expired -> ErrHoldExpired, amount above the held amount
+// -> ErrCaptureExceedsHold), then the capture-ID conflict check, then the
+// frozen check on both settlement legs, then the overdraft check on the
+// held (payer) account.
 //
 // The commit is atomic under the write lock: the settlement journal entry
 // (DebitAccount = To, CreditAccount = the hold's account, in the hold's
@@ -494,6 +499,25 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		return CaptureReceipt{}, err
 	}
 
+	// The hold is looked up before the idempotency replay check: the
+	// sanctions/denylist screen below needs the hold's account (the
+	// payer leg), and screening runs before replay by design — a denied
+	// capture leaves no idempotency trace (see ErrAccountDenied). Holds
+	// are never deleted, so a genuine replay's hold is always found and
+	// the replay check below still returns its receipt.
+	h, ok := l.holds[c.HoldID]
+	if !ok {
+		return CaptureReceipt{}, ErrHoldNotFound
+	}
+
+	// Sanctions/denylist screening (see denylist.go): the hold's account
+	// (payer) and the capture target (payee) are screened before the
+	// idempotency replay check — a hit rejects the capture and the
+	// attempt is audited as "denylist_rejected".
+	if acct, entry, denied := l.denylistRejectedLocked(h.Account, c.To); denied {
+		return CaptureReceipt{}, l.deniedRejectionLocked("Capture", c.HoldID, acct, entry, []AccountID{h.Account, c.To})
+	}
+
 	if c.IdempotencyKey != "" {
 		if r, ok := l.captureKeys[c.IdempotencyKey]; ok {
 			r.Duplicate = true
@@ -501,10 +525,6 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		}
 	}
 
-	h, ok := l.holds[c.HoldID]
-	if !ok {
-		return CaptureReceipt{}, ErrHoldNotFound
-	}
 	now := time.Now()
 	if h.Status == HoldStatusCaptured || h.Status == HoldStatusReleased {
 		return CaptureReceipt{}, ErrHoldNotActive

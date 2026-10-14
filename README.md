@@ -41,6 +41,13 @@ curl -s -X POST localhost:8080/entries \
 - Either leg of the entry names a **frozen** account → `403`
   `{"error":"ledger: account is frozen"}`. The rejection is counted in
   `ledger_frozen_rejections_total`.
+- Either leg of the entry names an account on the **sanctions/denylist**
+  (exact account ID or prefix pattern, see `POST /denylist`) → `422`
+  `{"error":"ledger: account is on the sanctions/denylist: ..."}`. Screening
+  runs before the idempotency replay check — a denied request leaves no
+  idempotency trace — and the attempt is recorded as a `denylist_rejected`
+  audit event. The rejection is counted in
+  `ledger_denylist_rejections_total`.
 - The credit (payer) account is **overdraft-protected** and the posting would
   take its balance below zero → `422`
   `{"error":"ledger: posting would overdraw a protected account"}`. The
@@ -833,6 +840,39 @@ curl -s -X POST localhost:8080/entries \
   -d '{"debit_account":"cash","credit_account":"cust-123","amount_cents":100000}'
 # 201 on the first $1000.00 of the UTC day, then:
 # 422 {"error":"ledger: posting would exceed the account's daily outflow limit"}
+```
+
+### Sanctions/denylist screening (`POST /denylist`)
+
+Opt-in sanctions/denylist: exact account IDs and prefix patterns whose
+accounts may not move money (fintech compliance — sanctions screening on
+every money movement). Manage with `POST /denylist` (`{"account": "<id>"}`
+or `{"prefix": "<prefix>"}`), `GET /denylist`, `DELETE /denylist/{value}`
+(`?prefix=true` for patterns), and `POST /denylist/import` for loading a
+sanctions feed in one atomic batch (already-listed rows are skipped, a
+malformed row aborts the whole import). The operator identity comes from
+the `x-ledger-actor` header and is recorded on the audit event and the
+entry itself, like freeze/approve/close.
+
+`POST /entries`, `POST /entries/batch`, `POST /transfers`, and
+`POST /holds/{id}/capture` screen every leg against the list. A hit is
+rejected with `422 {"error":"ledger: account is on the sanctions/denylist:
+..."}`. Screening runs before the idempotency replay check — a sanctions
+hit rejects even a replay, and the denied request leaves no idempotency
+trace — and every rejection is recorded as a `denylist_rejected` audit
+event, because the compliance trail must show the attempt, not just the
+absence of a posting. Reads (balance, snapshot, trial balance, reconcile)
+are unaffected, so compliance tooling can keep watching a denied account.
+List changes are structural (no version bump) and round-trip through
+disaster-recovery snapshots — a restore never silently lifts screening.
+Rejections are counted in `ledger_denylist_rejections_total`.
+
+```bash
+curl -s -X POST localhost:8080/denylist \
+  -H 'x-ledger-actor: ops-chen' -d '{"prefix":"ofac-sdn-"}'
+curl -s -X POST localhost:8080/entries \
+  -d '{"debit_account":"ofac-sdn-123","credit_account":"equity","amount_cents":100}'
+# 422 {"error":"ledger: account is on the sanctions/denylist: account \"ofac-sdn-123\" matched denylist entry \"ofac-sdn-*\""}
 ```
 
 ### Large-transfer auto-split (Go API: `PostTransferSplit`)

@@ -233,6 +233,15 @@ type Ledger struct {
 	// would take a protected credit (payer) account below zero is rejected
 	// with ErrAccountOverdraft (see overdraft.go). Opt-in per account.
 	noOverdraft map[AccountID]bool
+	// deniedExact and deniedPrefixes are the sanctions/denylist (see
+	// denylist.go): exact account IDs and prefix patterns whose accounts
+	// may not move money. Post, PostTransfer, and Capture screen every
+	// leg against them before the idempotency replay check, rejecting
+	// hits with ErrAccountDenied. Opt-in; empty by default. Structural
+	// config, like frozen and noOverdraft: list changes do not bump the
+	// journal version and survive disaster-recovery snapshots.
+	deniedExact    map[AccountID]DenylistEntry
+	deniedPrefixes map[string]DenylistEntry
 	// dailyLimits maps (account, currency) to the account's daily outflow
 	// limit in cents, and dailyOutflow accumulates the outflow booked per
 	// (account, currency, UTC day). A Post that would take the day's
@@ -617,6 +626,8 @@ func New(opts ...Option) *Ledger {
 		chart:                make(map[AccountID]AccountType),
 		tags:                 make(map[AccountID]map[string]string),
 		noOverdraft:          make(map[AccountID]bool),
+		deniedExact:          make(map[AccountID]DenylistEntry),
+		deniedPrefixes:       make(map[string]DenylistEntry),
 		dailyLimits:          make(map[dailyLimitKey]int64),
 		dailyOutflow:         make(map[dailyLimitKey]int64),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch),
@@ -738,6 +749,12 @@ func validateJournalEntry(e *JournalEntry) error {
 // returns the originally posted entry with duplicate == true and does not
 // book anything again. A zero CreatedAt is filled with the current time.
 //
+// A sanctions/denylist hit (see denylist.go) rejects the post with
+// ErrAccountDenied before the idempotency replay check below: screening
+// is a legal obligation that applies to replays too, so a denied request
+// leaves no idempotency trace and the attempt is audited as
+// "denylist_rejected".
+//
 // A frozen account (see freeze.go) rejects any post that would book a new
 // entry through it with ErrAccountFrozen. The frozen check runs after the
 // idempotency replay check: replaying a key that was posted before the
@@ -796,6 +813,14 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry, duplicate bool, err error) {
 	if err := validateJournalEntry(&e); err != nil {
 		return JournalEntry{}, false, err
+	}
+
+	// Sanctions/denylist screening (see denylist.go): every account the
+	// posting moves money through is screened before the idempotency
+	// replay check — a hit rejects the posting and leaves no idempotency
+	// trace, and the attempt is audited as "denylist_rejected".
+	if acct, entry, denied := l.denylistRejectedLocked(e.DebitAccount, e.CreditAccount); denied {
+		return JournalEntry{}, false, l.deniedRejectionLocked("Post", e.ID, acct, entry, []AccountID{e.DebitAccount, e.CreditAccount})
 	}
 
 	if e.IdempotencyKey != "" {

@@ -160,6 +160,11 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrAccountDenied) {
+			s.metrics.DenylistRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrPeriodClosed) {
 			s.metrics.PeriodRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -256,6 +261,11 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountDenied) {
+			s.metrics.DenylistRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -388,6 +398,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountDenied) {
+			s.metrics.DenylistRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -814,6 +829,11 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountDenied) {
+			s.metrics.DenylistRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1521,6 +1541,11 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrAccountDenied) {
+			s.metrics.DenylistRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrPeriodClosed) {
 			s.metrics.PeriodRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1994,6 +2019,131 @@ func (s *server) handleTrialBalance(w http.ResponseWriter, r *http.Request) {
 // parent clears the assignment.
 type setParentRequest struct {
 	Parent ledger.AccountID `json:"parent"`
+}
+
+// denylistAddRequest is the body of POST /denylist: exactly one of
+// account (exact account ID) or prefix (prefix pattern) must be set.
+type denylistAddRequest struct {
+	Account string `json:"account"`
+	Prefix  string `json:"prefix"`
+}
+
+// denylistImportRequest is the body of POST /denylist/import: a batch of
+// denylist rows for loading a sanctions feed at once.
+type denylistImportRequest struct {
+	Entries []denylistAddRequest `json:"entries"`
+}
+
+// handleAddDenylist implements POST /denylist: the operator-facing
+// sanctions-list stop. The body carries exactly one of {"account": "<id>"}
+// (exact account ID) or {"prefix": "<prefix>"} (prefix pattern matching
+// every account ID it starts). Adding is idempotent. The operator
+// identity comes from the x-ledger-actor header (see actorCtx) and is
+// recorded on the audit event and the entry itself.
+func (s *server) handleAddDenylist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req denylistAddRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if (req.Account == "") == (req.Prefix == "") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must set exactly one of account or prefix"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	if req.Account != "" {
+		entry := s.ledgerFor(r).AddDeniedAccountCtx(actx, ledger.AccountID(req.Account))
+		writeJSON(w, http.StatusCreated, entry)
+		return
+	}
+	entry, err := s.ledgerFor(r).AddDeniedPrefixCtx(actx, req.Prefix)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+// handleListDenylist implements GET /denylist: lists every sanctions-list
+// row, exact entries first then prefix patterns, each sorted by value.
+func (s *server) handleListDenylist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	entries := s.ledgerFor(r).Denylist()
+	if entries == nil {
+		entries = []ledger.DenylistEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
+
+// handleRemoveDenylist implements DELETE /denylist/{value}: removes one
+// sanctions-list row. The value names an exact account ID by default; with
+// ?prefix=true it names a prefix pattern. Removing a non-listed row is
+// 404. The operator identity comes from the x-ledger-actor header.
+func (s *server) handleRemoveDenylist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	value := r.PathValue("value")
+	if value == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "denylist value required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	isPrefix := r.URL.Query().Get("prefix") == "true"
+	var removed bool
+	if isPrefix {
+		removed = s.ledgerFor(r).RemoveDeniedPrefixCtx(actx, value)
+	} else {
+		removed = s.ledgerFor(r).RemoveDeniedAccountCtx(actx, ledger.AccountID(value))
+	}
+	if !removed {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "denylist entry not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"value": value, "prefix": isPrefix, "removed": true})
+}
+
+// handleImportDenylist implements POST /denylist/import: installs a batch
+// of sanctions-list rows at once — the operator shape for loading a
+// sanctions feed. The import is atomic: a malformed row aborts the whole
+// import with 400 before anything is installed. Rows already listed are
+// skipped, not duplicated. The response reports added/skipped counts.
+func (s *server) handleImportDenylist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req denylistImportRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	specs := make([]ledger.DenylistSpec, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		specs = append(specs, ledger.DenylistSpec{Account: e.Account, Prefix: e.Prefix})
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	added, skipped, err := s.ledgerFor(r).ImportDenylistCtx(actx, specs)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped})
 }
 
 // handleSetParent implements POST /accounts/{id}/parent: links an account
@@ -3104,6 +3254,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PUT /closing-accounts", s.handleSetClosingAccounts)
 	mux.HandleFunc("GET /closing-accounts", s.handleGetClosingAccounts)
 	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)
+	mux.HandleFunc("POST /denylist", s.handleAddDenylist)
+	mux.HandleFunc("GET /denylist", s.handleListDenylist)
+	mux.HandleFunc("DELETE /denylist/{value}", s.handleRemoveDenylist)
+	mux.HandleFunc("POST /denylist/import", s.handleImportDenylist)
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
 	mux.HandleFunc("POST /entries/anchor", s.handleAnchorCheckpoint)

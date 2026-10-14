@@ -190,6 +190,12 @@ type snapshotConfigLine struct {
 	// zero, which fail-opens for the remainder of that day — operators
 	// should treat a restore as a risk-control reset event.
 	DailyLimits []DailyLimit `json:"daily_limits,omitempty"`
+	// Denylist carries the sanctions/denylist rows (see AddDeniedAccount,
+	// AddDeniedPrefix); absent in snapshots written before the denylist
+	// existed. A restore that dropped the list would silently lift
+	// sanctions screening, so the list round-trips like the
+	// frozen-account list.
+	Denylist []DenylistEntry `json:"denylist,omitempty"`
 	// FXRates carries the FX rate table (see SetFXRate) and FXAccount the
 	// ledger-wide FX clearing account (see WithFXAccount); absent in
 	// snapshots written before FX support existed. Restored rates keep
@@ -688,6 +694,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		SplitFeePerChunk:      l.splitFeePerChunk,
 		IdempotencyTTL:       l.idempotencyTTL.String(),
 		DailyLimits:          l.dailyLimitsLocked(),
+		Denylist:             l.denylistLocked(),
 		FXRates:              l.fxRatesLocked(),
 		FXAccount:            l.fxAccount,
 		FXSnapshotVersion:    l.fxSnapshotVersion,
@@ -1552,6 +1559,19 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	for _, vl := range limits {
 		l.dailyLimits[vl.key] = vl.limit
+	}
+	// Sanctions/denylist rows restore like the frozen-account list: a
+	// restore that dropped them would silently lift screening. Rows are
+	// validated — an empty value fails the import.
+	for i, de := range cfg.Denylist {
+		if de.Value == "" {
+			return bad("denylist entry %d has an empty value", i)
+		}
+		if de.Prefix {
+			l.deniedPrefixes[de.Value] = de
+		} else {
+			l.deniedExact[AccountID(de.Value)] = de
+		}
 	}
 	// Settlement channel mappings: restore the channel dimension.
 	for _, sc := range cfg.SettlementChannels {

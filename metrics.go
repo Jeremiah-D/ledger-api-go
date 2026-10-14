@@ -102,6 +102,13 @@ type Metrics struct {
 	// have taken the account's cumulative outflow for the UTC day above
 	// its configured daily outflow limit.
 	DailyLimitRejections atomic.Uint64
+	// DenylistRejections counts POST /entries, POST /entries/batch,
+	// POST /transfers, and POST /holds/{id}/capture requests rejected
+	// with 422 because a leg of the posting named an account on the
+	// sanctions/denylist (see ledger.AddDeniedAccount). Screening runs
+	// before the idempotency replay check, so denied replays count here
+	// too — the compliance trail must show the attempt.
+	DenylistRejections atomic.Uint64
 	// CurrencyRejections counts POST /entries, POST /entries/batch, and
 	// POST /transfers requests rejected for currency reasons: a malformed
 	// currency code (400), a cross-currency transfer (422), or an expired
@@ -453,6 +460,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_daily_limit_rejections_total",
 		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected because they would have taken the account's daily outflow above its configured limit.",
 		m.DailyLimitRejections.Load())
+	writeCounter(&sb, "ledger_denylist_rejections_total",
+		"Total POST /entries, POST /entries/batch, POST /transfers, and POST /holds/{id}/capture requests rejected because a leg of the posting named an account on the sanctions/denylist.",
+		m.DenylistRejections.Load())
 	writeCounter(&sb, "ledger_currency_rejections_total",
 		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected for currency reasons: malformed currency code, cross-currency transfer, or expired FX rate.",
 		m.CurrencyRejections.Load())

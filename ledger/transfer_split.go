@@ -149,6 +149,15 @@ func (l *Ledger) PostTransferSplit(t Transfer) (SplitTransferReceipt, error) {
 		return SplitTransferReceipt{}, err
 	}
 
+	// Sanctions/denylist screening (see denylist.go): like PostTransfer,
+	// the payer and payee are screened before any chunk simulation or
+	// the idempotency replay check — the no-split delegate path below
+	// re-screens inside postTransferLocked, which is a harmless cheap
+	// second lookup.
+	if acct, entry, denied := l.denylistRejectedLocked(t.From, t.To); denied {
+		return SplitTransferReceipt{}, l.deniedRejectionLocked("PostTransferSplit", t.ID, acct, entry, []AccountID{t.From, t.To})
+	}
+
 	chunkSize := l.splitChunkSizeLocked(t.From, t.Currency)
 	if chunkSize <= 0 || t.AmountCents <= chunkSize {
 		// No split needed: delegate so a non-split transfer is
