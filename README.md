@@ -900,6 +900,58 @@ curl -s -X POST localhost:8080/entries \
 # 422 {"error":"ledger: posting would exceed the account's monthly spend budget"}
 ```
 
+### Cost allocation rules (Go API: `SetAllocationRule` / `AllocateCost`)
+
+Month-end cost allocation for payment fintech: a shared expense (a
+platform fee, a processing bill) booked against one expense account is
+split across cost centers in fixed proportions. Register a rule with
+`SetAllocationRule` — a source account plus targets with basis-point
+weights summing to exactly 10000 — then `AllocateCost(ruleID, amount,
+currency)` posts one double-entry leg per target (debit cost center,
+credit source) in a single atomic commit for the current UTC calendar
+month.
+
+Shares are `floor(amount * bps / 10000)` computed overflow-safe, and the
+dust remainder lands on the first target so the legs always sum to the
+full amount. An amount so small that a target's share computes to zero
+cents rejects the whole allocation (`ErrAllocationDustLeg`) — unlike
+journal-rule dust legs, an allocation must cover the whole amount, so a
+dropped leg would break the books.
+
+The legs walk the full `Post` gate order — validation, denylist,
+chart direction, closed/frozen, overdraft, daily-limit, monthly-budget,
+period gate — with intra-allocation aggregate simulation, and commit
+atomically: one failing leg rejects the whole allocation and records
+nothing. Two things deliberately do not happen: journal rules never
+fire on allocation legs (system postings must not cascade through
+operator-configured rules, like accruals), and dual-control review never
+engages (review is a `PostTransfer` gate; allocations settle
+immediately).
+
+Idempotency is deterministic: one allocation per rule per UTC month,
+keyed `alloc/<ruleID>/<YYYY-MM>`. A replay returns the original receipt
+with `duplicate: true` and books nothing new; the receipt registry is
+its own idempotency namespace expiring with the TTL, and the rules plus
+the registry round-trip through disaster-recovery snapshots. Leg IDs
+are deterministic (`alloc/<ruleID>/<YYYY-MM>/leg/<i>`) and carry a
+memo of `alloc:<ruleID>`, so allocations are discoverable through
+`GET /entries?memo=alloc:<ruleID>`.
+
+```go
+l.SetAllocationRule(ledger.AllocationRule{
+    ID:     "platform-fee",
+    Source: "fee-clearing",
+    Targets: []ledger.AllocationTarget{
+        {Account: "merchant-a", PctBps: 5000},
+        {Account: "merchant-b", PctBps: 3000},
+        {Account: "merchant-c", PctBps: 2000},
+    },
+})
+receipt, dup, err := l.AllocateCost("platform-fee", 10000, "USD")
+// 3 legs: merchant-a 5000 / merchant-b 3000 / merchant-c 2000,
+// fee-clearing credited 10000 — atomic, or nothing.
+```
+
 ### Sanctions/denylist screening (`POST /denylist`)
 
 Opt-in sanctions/denylist: exact account IDs and prefix patterns whose

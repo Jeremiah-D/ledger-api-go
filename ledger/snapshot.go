@@ -116,6 +116,15 @@ type snapshotBatch struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// snapshotAllocation is the exportable form of the unexported
+// allocRecord: one committed cost allocation (see allocation.go).
+type snapshotAllocation struct {
+	RuleID    string    `json:"rule_id"`
+	Month     string    `json:"month"`
+	EntryIDs  []string  `json:"entry_ids"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // snapshotMerge is the exportable form of the unexported mergeRecord:
 // one committed account merge (see merge.go).
 type snapshotMerge struct {
@@ -143,6 +152,7 @@ const (
 	snapshotNSSweep    = "sweep"     // key -> snapshotSweep (sweepKeys)
 	snapshotNSMergeKey = "merge_key" // key -> merge ID (mergeKeys)
 	snapshotNSBatch    = "batch"     // key -> snapshotBatch (batchKeys)
+	snapshotNSAlloc    = "allocation" // key -> snapshotAllocation (allocKeys)
 )
 
 // snapshotIdempotencyLine carries one idempotency-key registration. Only
@@ -158,6 +168,9 @@ type snapshotIdempotencyLine struct {
 	Sweep     *snapshotSweep  `json:"sweep,omitempty"`
 	MergeID   string          `json:"merge_id,omitempty"`
 	Batch     *snapshotBatch  `json:"batch,omitempty"`
+	// Allocation carries the allocation receipt row for the
+	// "allocation" namespace (see allocation.go).
+	Allocation *snapshotAllocation `json:"allocation,omitempty"`
 }
 
 // snapshotConfigLine carries operational config that a faithful restore
@@ -273,6 +286,12 @@ type snapshotConfigLine struct {
 	// restored ledger carries the same rule-set generation as the source.
 	JournalRules       []JournalRule `json:"journal_rules,omitempty"`
 	JournalRuleVersion uint64        `json:"journal_rule_version,omitempty"`
+	// AllocationRules carries the opt-in cost allocation rules (see
+	// SetAllocationRule); absent in snapshots written before cost
+	// allocation existed. AllocationRuleVersion is the rule-set
+	// mutation counter, restored like the journal rules' counter.
+	AllocationRules       []AllocationRule `json:"allocation_rules,omitempty"`
+	AllocationRuleVersion uint64           `json:"allocation_rule_version,omitempty"`
 	// ClosingPLAccounts and ClosingRetainedEarnings carry the opt-in
 	// period-closing account mapping (see SetClosingAccounts); absent in
 	// snapshots written before period-closing entries existed. A restore
@@ -669,6 +688,19 @@ func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
+	allocKeyList := make([]string, 0, len(l.allocKeys))
+	for k := range l.allocKeys {
+		allocKeyList = append(allocKeyList, k)
+	}
+	for _, k := range sortedKeys(allocKeyList) {
+		rec := l.allocKeys[k]
+		if err := enc.Encode(snapshotIdempotencyLine{
+			Record: "idempotency", Namespace: snapshotNSAlloc, Key: k,
+			Allocation: &snapshotAllocation{RuleID: rec.ruleID, Month: rec.month, EntryIDs: rec.entryIDs, CreatedAt: rec.createdAt},
+		}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -714,6 +746,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		SettlementChannels:   l.settlementChannelsLocked(),
 		JournalRules:         l.journalRulesLocked(),
 		JournalRuleVersion:   l.journalRuleVersion,
+		AllocationRules:      l.allocationRulesLocked(),
+		AllocationRuleVersion: l.allocRuleVersion,
 		RevalAccount:         l.revalAccount,
 		RevalBaselines:       l.revaluationPositionsLocked(),
 		AccountTypes:         l.accountTypesLocked(),
@@ -814,6 +848,7 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
 	batchKeys := map[string]batchRecord{}
+	allocKeys := map[string]allocRecord{}
 	schedules := map[string]TransferSchedule{}
 	reviews := map[string]*TransferReview{}
 	var cfg *snapshotConfigLine
@@ -997,6 +1032,19 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 					batchID:   il.Batch.BatchID,
 					entryIDs:  il.Batch.EntryIDs,
 					createdAt: il.Batch.CreatedAt,
+				}
+			case snapshotNSAlloc:
+				if il.Allocation == nil {
+					return fail("line %d: allocation-namespace record without allocation", lineNo)
+				}
+				if _, dup := allocKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				allocKeys[il.Key] = allocRecord{
+					ruleID:    il.Allocation.RuleID,
+					month:     il.Allocation.Month,
+					entryIDs:  il.Allocation.EntryIDs,
+					createdAt: il.Allocation.CreatedAt,
 				}
 			default:
 				return fail("line %d: unknown idempotency namespace %q", lineNo, il.Namespace)
@@ -1266,6 +1314,14 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 		}
 		l.batchKeys[k] = rec
 	}
+	for k, rec := range allocKeys {
+		for _, id := range rec.entryIDs {
+			if _, ok := l.entries[id]; !ok {
+				return fail("allocation idempotency key %q references missing entry %q", k, id)
+			}
+		}
+		l.allocKeys[k] = rec
+	}
 
 	// Operational config.
 	if err := l.applySnapshotConfigLocked(cfg); err != nil {
@@ -1487,6 +1543,26 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		validatedRules = append(validatedRules, r)
 	}
 
+	// Cost allocation rules are validated like every other config row:
+	// an illegal rule in the snapshot fails the import instead of
+	// silently installing a rule that could never have been created
+	// through SetAllocationRule.
+	validatedAllocRules := make([]AllocationRule, 0, len(cfg.AllocationRules))
+	seenAllocRuleIDs := make(map[string]bool, len(cfg.AllocationRules))
+	for _, r := range cfg.AllocationRules {
+		if err := ValidateAllocationRule(r); err != nil {
+			return bad("bad allocation rule %q: %v", r.ID, err)
+		}
+		if seenAllocRuleIDs[r.ID] {
+			return bad("duplicate allocation rule %q", r.ID)
+		}
+		seenAllocRuleIDs[r.ID] = true
+		targets := make([]AllocationTarget, len(r.Targets))
+		copy(targets, r.Targets)
+		r.Targets = targets
+		validatedAllocRules = append(validatedAllocRules, r)
+	}
+
 	// Revaluation baselines are validated like every other config row: an
 	// empty account, a bad currency, or a malformed rate fails the import
 	// instead of silently installing a baseline the next revaluation
@@ -1618,6 +1694,13 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		l.journalRules[r.ID] = r
 	}
 	l.journalRuleVersion = cfg.JournalRuleVersion
+	// Cost allocation rules restore like the other structural config:
+	// the rule set and its mutation counter round-trip together.
+	l.allocRules = make(map[string]AllocationRule, len(validatedAllocRules))
+	for _, r := range validatedAllocRules {
+		l.allocRules[r.ID] = r
+	}
+	l.allocRuleVersion = cfg.AllocationRuleVersion
 	// Balance threshold watches are validated like daily limits: an
 	// empty account or a bad currency fails the import instead of
 	// silently dropping an alert band. Negative levels are legal (a

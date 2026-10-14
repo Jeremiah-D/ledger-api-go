@@ -393,6 +393,20 @@ type Ledger struct {
 	// expiring with the TTL like every other key index (see
 	// pruneBatchKeysLocked in batch.go).
 	batchKeys map[string]batchRecord
+	// allocRules is the registry of cost-allocation rules (see
+	// allocation.go), keyed by rule ID. allocRuleVersion is the
+	// rule-set mutation counter, bumped on every set/delete so
+	// snapshots carry the generation. allocKeys maps an allocation's
+	// deterministic idempotency key ("alloc/<ruleID>/<YYYY-MM>") to its
+	// allocRecord, so replays rebuild the exact original receipt. Its
+	// own namespace, expiring with the TTL like every other key index
+	// (see pruneAllocKeysLocked in allocation.go).
+	allocRules       map[string]AllocationRule
+	allocRuleVersion uint64
+	allocKeys        map[string]allocRecord
+	// allocationsCommitted counts cost allocations ever committed (see
+	// allocation.go); idempotent replays are not counted.
+	allocationsCommitted atomic.Uint64
 	// nettingKeys maps a netting session's deterministic key
 	// ("netting:<sessionID>") to its nettingRecord, so reposts rebuild
 	// the exact original report (see netting.go). Its own namespace,
@@ -655,6 +669,8 @@ func New(opts ...Option) *Ledger {
 		captureKeys:          make(map[string]CaptureReceipt),
 		sweepKeys:            make(map[string]sweepRecord),
 		batchKeys:            make(map[string]batchRecord),
+		allocRules:           make(map[string]AllocationRule),
+		allocKeys:            make(map[string]allocRecord),
 		nettingKeys:          make(map[string]nettingRecord),
 		merges:               make(map[string]mergeRecord),
 		mergeKeys:            make(map[string]string),
@@ -1120,12 +1136,14 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// and so do merge keys (see pruneMergeKeysLocked in merge.go) and
 	// batch keys (see pruneBatchKeysLocked in batch.go). Netting session
 	// keys expire on the same schedule, in their own namespace (see
-	// pruneNettingKeysLocked in netting.go).
+	// pruneNettingKeysLocked in netting.go), and so do allocation receipt
+	// keys (see pruneAllocKeysLocked in allocation.go).
 	removed += l.pruneHoldKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
 	removed += l.pruneMergeKeysLocked(now)
 	removed += l.pruneBatchKeysLocked(now)
 	removed += l.pruneNettingKeysLocked(now)
+	removed += l.pruneAllocKeysLocked(now)
 	return removed
 }
 

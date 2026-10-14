@@ -176,6 +176,7 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
 	batchKeys := map[string]batchRecord{}
+	allocKeys := map[string]allocRecord{}
 	var cfg *snapshotConfigLine
 	lineNo := 0
 
@@ -365,6 +366,19 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 					batchID:   il.Batch.BatchID,
 					entryIDs:  il.Batch.EntryIDs,
 					createdAt: il.Batch.CreatedAt,
+				}
+			case snapshotNSAlloc:
+				if il.Allocation == nil {
+					return fail("line %d: allocation-namespace record without allocation", lineNo)
+				}
+				if _, dup := allocKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				allocKeys[il.Key] = allocRecord{
+					ruleID:    il.Allocation.RuleID,
+					month:     il.Allocation.Month,
+					entryIDs:  il.Allocation.EntryIDs,
+					createdAt: il.Allocation.CreatedAt,
 				}
 			default:
 				return fail("line %d: unknown idempotency namespace %q", lineNo, il.Namespace)
@@ -722,6 +736,11 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	for k, rec := range batchKeys {
 		if _, ok := l.batchKeys[k]; !ok {
 			l.batchKeys[k] = rec
+		}
+	}
+	for k, rec := range allocKeys {
+		if _, ok := l.allocKeys[k]; !ok {
+			l.allocKeys[k] = rec
 		}
 	}
 	// The config section carries the latest operational config and
