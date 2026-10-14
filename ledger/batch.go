@@ -286,26 +286,21 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 
 	// 8. Daily-limit simulation: same sequential semantics — earlier
 	// entries in the batch consume the UTC day's budget for later ones.
-	// The formula mirrors dailyLimitRejectedLocked exactly, with the
-	// batch's own planned outflow added to the ledger's bucket.
+	// LG-80: each limited account's budget covers its whole subtree, so
+	// the simulation checks the posting account's own limit and every
+	// strict ancestor's against the subtree sums, with the batch's
+	// planned outflow added to the ledger's buckets.
 	batchOutflow := make(map[dailyLimitKey]int64)
 	for i := range entries {
 		if replayed[i] {
 			continue
 		}
 		e := &entries[i]
-		limit, ok := l.dailyLimits[dailyLimitKey{account: e.CreditAccount, currency: e.Currency}]
-		if ok {
-			if e.AmountCents > limit {
-				return BatchReceipt{}, ErrDailyLimitExceeded
-			}
-			bucket := dailyLimitKey{account: e.CreditAccount, currency: e.Currency, day: utcDay(e.CreatedAt)}
-			total := satAddInt64(l.dailyOutflow[bucket], batchOutflow[bucket])
-			if total > limit-e.AmountCents {
-				return BatchReceipt{}, ErrDailyLimitExceeded
-			}
-			batchOutflow[bucket] = satAddInt64(batchOutflow[bucket], e.AmountCents)
+		if l.subtreeLimitsViolatedLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt, batchOutflow) {
+			return BatchReceipt{}, ErrDailyLimitExceeded
 		}
+		bucket := dailyLimitKey{account: e.CreditAccount, currency: e.Currency, day: utcDay(e.CreatedAt)}
+		batchOutflow[bucket] = satAddInt64(batchOutflow[bucket], e.AmountCents)
 	}
 
 	// 9. Atomic commit: every new entry's journal row, idempotency index

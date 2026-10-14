@@ -51,6 +51,14 @@ func utcDay(t time.Time) string {
 // (amount plus any fee leg). A limit of 0 stops all outflow; negative
 // limits are rejected with ErrInvalidDailyLimit.
 //
+// LG-80: a parent's limit constrains its whole subtree (see
+// subtreeLimitsViolatedLocked), so lowering a limit must not put
+// the subtree in immediate violation — the subtree's already-booked
+// outflow for today must fit under the new limit. A change that would
+// breach it is rejected with ErrDailyLimitExceeded (wrapped with the
+// figures), so the operator learns the current usage instead of
+// installing a limit that rejects every subsequent posting.
+//
 // Setting or clearing a limit is structural, like Freeze or SetParent: it
 // does not bump the ledger version (no balances change) and it is visible
 // to audit tooling — TrialBalance reports the default-currency limit and
@@ -65,6 +73,11 @@ func (l *Ledger) SetDailyLimit(a AccountID, currency string, limitCents int64) e
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	used := l.subtreeDailyOutflowLocked(a, currency, utcDay(time.Now()))
+	if limitCents < used {
+		return fmt.Errorf("%w: subtree of %q already used %d cents of %s today, above the new limit %d",
+			ErrDailyLimitExceeded, a, used, currency, limitCents)
+	}
 	l.dailyLimits[dailyLimitKey{account: a, currency: currency}] = limitCents
 	return nil
 }
@@ -152,11 +165,17 @@ func ParseDailyLimits(raw string) ([]DailyLimit, error) {
 }
 
 // dailyLimitRejectedLocked reports whether posting amount cents of outflow
-// for account in currency at time at would exceed the account's configured
-// daily outflow limit. Accounts without a configured limit are never
-// rejected. The accumulated outflow is keyed by the posting's own UTC
+// for account in currency at time at would exceed the daily outflow
+// budget. The accumulated outflow is keyed by the posting's own UTC
 // calendar day, so a backdated entry counts toward its own day —
 // deterministic for tests and honest for backfills.
+//
+// LG-80 (hierarchy x daily limits): every limited account's budget
+// covers its whole subtree's cumulative outflow for the day — the
+// account's own limit constrains its descendants' outflow too, and each
+// strict ancestor's limit constrains this posting as part of the
+// ancestor's subtree. Accounts without a configured limit (and without
+// limited ancestors) are never rejected.
 //
 // The comparison never adds total + amount, so it cannot overflow even
 // when amount is huge: amount > limit rejects immediately (a non-negative
@@ -164,15 +183,114 @@ func ParseDailyLimits(raw string) ([]DailyLimit, error) {
 // total > limit - amount is equivalent and both sides are non-negative.
 // Callers must hold l.mu.
 func (l *Ledger) dailyLimitRejectedLocked(account AccountID, currency string, amount int64, at time.Time) bool {
-	limit, ok := l.dailyLimits[dailyLimitKey{account: account, currency: currency}]
-	if !ok {
+	return l.subtreeLimitsViolatedLocked(account, currency, amount, at, nil)
+}
+
+// subtreeLimitsViolatedLocked reports whether posting amount cents of
+// outflow for account in currency at time at would breach the account's
+// own daily outflow limit or any strict ancestor's (LG-80). Each
+// limited account's used figure is its whole-subtree outflow (committed
+// buckets plus extra planned outflow for simulations), not the posting
+// account's own bucket. extra carries planned-but-uncommitted outflow
+// per (account, currency, day) for batch/split simulations; nil for
+// direct postings. The comparison never adds used + amount, so it cannot
+// overflow. Callers must hold l.mu.
+func (l *Ledger) subtreeLimitsViolatedLocked(account AccountID, currency string, amount int64, at time.Time, extra map[dailyLimitKey]int64) bool {
+	if len(l.dailyLimits) == 0 {
 		return false
 	}
-	if amount > limit {
-		return true
+	day := utcDay(at)
+	for a := account; a != ""; {
+		if limit, ok := l.dailyLimits[dailyLimitKey{account: a, currency: currency}]; ok {
+			if amount > limit {
+				return true
+			}
+			used := l.subtreeOutflowLocked(l.subtreeAccountsLocked(a), currency, day, extra)
+			if used > limit-amount {
+				return true
+			}
+		}
+		a = l.parents[a]
 	}
-	total := l.dailyOutflow[dailyLimitKey{account: account, currency: currency, day: utcDay(at)}]
-	return total > limit-amount
+	return false
+}
+
+// subtreeAccountsLocked returns the set of accounts in the subtree rooted
+// at a: a itself plus every descendant, via BFS over the parent map. The
+// parent map is cycle-free by construction (SetParent rejects cycles),
+// so the BFS always terminates; the seen guard is belt-and-braces.
+// Callers must hold l.mu.
+func (l *Ledger) subtreeAccountsLocked(a AccountID) map[AccountID]bool {
+	if len(l.parents) == 0 {
+		return map[AccountID]bool{a: true}
+	}
+	children := make(map[AccountID][]AccountID, len(l.parents))
+	for child, parent := range l.parents {
+		children[parent] = append(children[parent], child)
+	}
+	seen := map[AccountID]bool{a: true}
+	queue := []AccountID{a}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, c := range children[cur] {
+			if !seen[c] {
+				seen[c] = true
+				queue = append(queue, c)
+			}
+		}
+	}
+	return seen
+}
+
+// subtreeOutflowLocked sums the committed daily-outflow buckets of every
+// account in members for currency on the given UTC day. extra carries
+// planned-but-uncommitted outflow per (account, currency, day) for
+// simulations (batch/split); nil for direct postings. The sum saturates
+// at MaxInt64 — the per-bucket totals already saturate (see
+// addDailyOutflowLocked), so saturation here only matters for absurd
+// cumulative volume on unlimited subtrees. Callers must hold l.mu.
+func (l *Ledger) subtreeOutflowLocked(members map[AccountID]bool, currency, day string, extra map[dailyLimitKey]int64) int64 {
+	var total int64
+	for a := range members {
+		total = satAddInt64(total, l.dailyOutflow[dailyLimitKey{account: a, currency: currency, day: day}])
+	}
+	if extra != nil {
+		for k, v := range extra {
+			if k.currency == currency && k.day == day && members[k.account] {
+				total = satAddInt64(total, v)
+			}
+		}
+	}
+	return total
+}
+
+// subtreeDailyOutflowLocked is subtreeOutflowLocked for the subtree rooted
+// at account with no planned extra outflow. Callers must hold l.mu.
+func (l *Ledger) subtreeDailyOutflowLocked(account AccountID, currency, day string) int64 {
+	return l.subtreeOutflowLocked(l.subtreeAccountsLocked(account), currency, day, nil)
+}
+
+// subtreeLimitsAdmitLocked verifies that every ancestor of (and including)
+// a with a configured daily limit still admits its subtree's
+// already-booked outflow for today, in every limited currency. Used by
+// SetParent: linking a subtree under a parent whose limit the subtree
+// would breach is rejected. Callers must hold the write lock.
+func (l *Ledger) subtreeLimitsAdmitLocked(a AccountID) error {
+	today := utcDay(time.Now())
+	for anc := a; anc != ""; anc = l.parents[anc] {
+		for k, limit := range l.dailyLimits {
+			if k.account != anc {
+				continue
+			}
+			used := l.subtreeDailyOutflowLocked(anc, k.currency, today)
+			if used > limit {
+				return fmt.Errorf("%w: linking under %q would breach its %s daily limit %d: subtree already used %d today",
+					ErrDailyLimitExceeded, anc, k.currency, limit, used)
+			}
+		}
+	}
+	return nil
 }
 
 // addDailyOutflowLocked records amount cents of outflow for account in

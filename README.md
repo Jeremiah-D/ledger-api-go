@@ -842,6 +842,20 @@ curl -s -X POST localhost:8080/entries \
 # 422 {"error":"ledger: posting would exceed the account's daily outflow limit"}
 ```
 
+**Subtree limits (hierarchy × daily limits).** A parent's limit constrains
+its whole subtree's cumulative outflow for the UTC day — every descendant's
+outflow counts against the parent's budget, and the parent's own postings
+do too. Limits compose: a child's own limit and each ancestor's limit are
+checked independently, the tighter one wins per posting, per currency.
+`SetParent` and `SetDailyLimit` validate against today's already-booked
+subtree outflow: linking a subtree under a parent whose limit it would
+breach, or lowering a limit below the subtree's current usage, is rejected
+with `422` (the rejected link is rolled back atomically). The reconcile
+report's `subtree_limit_utilization` section lists every configured limit
+with its subtree's booked outflow, utilization fraction, and account
+count for the report day, so risk tooling can watch velocity-limit
+pressure per hierarchy.
+
 ### Sanctions/denylist screening (`POST /denylist`)
 
 Opt-in sanctions/denylist: exact account IDs and prefix patterns whose

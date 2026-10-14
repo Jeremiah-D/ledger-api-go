@@ -38,6 +38,13 @@ var (
 // assignment that would close a cycle is rejected with ErrParentCycle.
 // The check walks the ancestor chain of the proposed parent: if the child
 // appears anywhere on it, linking them would create a loop.
+//
+// LG-80: linking a subtree under a parent is additionally checked against
+// the new ancestors' daily outflow limits (see SetDailyLimit) — the
+// subtree's already-booked outflow for today must fit under every
+// ancestor's limit, otherwise the link is rejected with
+// ErrDailyLimitExceeded and the previous link is restored (the change is
+// atomic). Clearing a link only shrinks subtrees, so it needs no check.
 func (l *Ledger) SetParent(child, parent AccountID) error {
 	if child == "" {
 		return ErrEmptyAccountID
@@ -55,9 +62,22 @@ func (l *Ledger) SetParent(child, parent AccountID) error {
 				return ErrParentCycle
 			}
 		}
+	}
+	old, hadOld := l.parents[child]
+	if parent != "" {
 		l.parents[child] = parent
 	} else {
 		delete(l.parents, child)
+	}
+	if parent != "" {
+		if err := l.subtreeLimitsAdmitLocked(parent); err != nil {
+			if hadOld {
+				l.parents[child] = old
+			} else {
+				delete(l.parents, child)
+			}
+			return err
+		}
 	}
 	return nil
 }

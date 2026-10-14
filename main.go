@@ -2186,6 +2186,10 @@ func (s *server) handleSetParent(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

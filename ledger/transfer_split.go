@@ -3,7 +3,6 @@ package ledger
 import (
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -282,24 +281,21 @@ func (l *Ledger) splitFeeLocked(t Transfer, chunks []int64) (splitFee, error) {
 
 // checkSplitDailyOutflowLocked simulates the daily-limit check for a
 // sequence of payer outflows without mutating the buckets: each outflow
-// is checked against the running day total with the same overflow-safe
-// comparison as dailyLimitRejectedLocked, and the running total
-// saturates like addDailyOutflowLocked. Callers must hold l.mu.
+// is checked in order against the running day total — the ledger's
+// committed buckets plus the earlier outflows in the sequence — with the
+// same overflow-safe comparison as dailyLimitRejectedLocked, and the
+// running total saturates like addDailyOutflowLocked.
+// LG-80: each limited account's budget covers its whole subtree, so the
+// simulation checks the payer's own limit and every strict ancestor's.
+// Callers must hold l.mu.
 func (l *Ledger) checkSplitDailyOutflowLocked(account AccountID, currency string, outflows []int64, at time.Time) error {
-	limit, ok := l.dailyLimits[dailyLimitKey{account: account, currency: currency}]
-	if !ok {
-		return nil
-	}
-	total := l.dailyOutflow[dailyLimitKey{account: account, currency: currency, day: utcDay(at)}]
+	extra := make(map[dailyLimitKey]int64, len(outflows))
+	key := dailyLimitKey{account: account, currency: currency, day: utcDay(at)}
 	for _, outflow := range outflows {
-		if outflow > limit || total > limit-outflow {
+		if l.subtreeLimitsViolatedLocked(account, currency, outflow, at, extra) {
 			return ErrDailyLimitExceeded
 		}
-		if total > math.MaxInt64-outflow {
-			total = math.MaxInt64
-		} else {
-			total += outflow
-		}
+		extra[key] = satAddInt64(extra[key], outflow)
 	}
 	return nil
 }

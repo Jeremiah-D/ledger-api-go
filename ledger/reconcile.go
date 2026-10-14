@@ -136,6 +136,13 @@ type ReconciliationReport struct {
 	// this to know which accounts are capped on daily outflow and at
 	// what level.
 	DailyLimits []DailyLimit `json:"daily_limits"`
+	// SubtreeLimitUtilization lists every configured daily outflow
+	// limit with its subtree's already-booked outflow for the report's
+	// UTC day (LG-80), sorted by (account, currency). A parent's limit
+	// constrains its whole subtree's cumulative outflow, so this is the
+	// section risk tooling watches for velocity-limit pressure; for a
+	// leaf account the subtree is the account itself.
+	SubtreeLimitUtilization []SubtreeLimitUsage `json:"subtree_limit_utilization"`
 	// BalanceWatches lists every configured balance threshold watch
 	// (see SetBalanceWatch), sorted by (account, currency). Operations
 	// tooling reads this to know which accounts alert on balance
@@ -301,6 +308,66 @@ type BaseCurrencySummary struct {
 	FXIncomplete bool `json:"fx_incomplete"`
 }
 
+// SubtreeLimitUsage is one row of the reconcile report's
+// subtree_limit_utilization section (LG-80): a configured daily outflow
+// limit with its subtree's already-booked outflow for the report's UTC
+// day. For a parent account the subtree spans every descendant; for a
+// leaf account the subtree is the account itself.
+type SubtreeLimitUsage struct {
+	Account   AccountID `json:"account"`
+	Currency  string    `json:"currency"`
+	LimitCents int64    `json:"limit_cents"`
+	// SubtreeUsedCents is the subtree's booked outflow for the report's
+	// UTC day, in cents.
+	SubtreeUsedCents int64 `json:"subtree_used_cents"`
+	// Utilization is SubtreeUsedCents / LimitCents as a fraction. It is
+	// 0 when the limit is 0: a zero limit admits no outflow, so used is
+	// necessarily 0 and the ratio would be 0/0.
+	Utilization float64 `json:"utilization"`
+	// SubtreeAccounts counts the accounts in the subtree, including the
+	// account itself.
+	SubtreeAccounts int `json:"subtree_accounts"`
+	// Exceeded is true when the booked outflow is above the limit. Limit
+	// changes and parent links that would create this state are
+	// rejected (see SetDailyLimit and SetParent), so true here is a
+	// canary — always worth an operator's look.
+	Exceeded bool `json:"exceeded"`
+}
+
+// subtreeLimitUtilizationLocked builds the reconcile report's
+// subtree_limit_utilization section: every configured daily outflow
+// limit with its subtree's booked outflow for the report's UTC day and
+// the utilization fraction, sorted by (account, currency). Callers must
+// hold l.mu; the read lock suffices because nothing is mutated.
+func (l *Ledger) subtreeLimitUtilizationLocked(now time.Time) []SubtreeLimitUsage {
+	day := utcDay(now.UTC())
+	out := make([]SubtreeLimitUsage, 0, len(l.dailyLimits))
+	for k, limit := range l.dailyLimits {
+		members := l.subtreeAccountsLocked(k.account)
+		used := l.subtreeOutflowLocked(members, k.currency, day, nil)
+		var utilization float64
+		if limit > 0 {
+			utilization = float64(used) / float64(limit)
+		}
+		out = append(out, SubtreeLimitUsage{
+			Account:          k.account,
+			Currency:         k.currency,
+			LimitCents:       limit,
+			SubtreeUsedCents: used,
+			Utilization:      utilization,
+			SubtreeAccounts:  len(members),
+			Exceeded:         used > limit,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Account != out[j].Account {
+			return out[i].Account < out[j].Account
+		}
+		return out[i].Currency < out[j].Currency
+	})
+	return out
+}
+
 // Reconcile runs a full read-only scan of the ledger and returns the
 // reconciliation report. The scan holds the ledger's read lock from start
 // to finish, so the whole report describes one consistent point in time:
@@ -373,6 +440,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FrozenAccountAutoUnfreeze:  l.frozenUntilCopyLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
+		SubtreeLimitUtilization:    l.subtreeLimitUtilizationLocked(now),
 		BalanceWatches:             l.balanceWatchesLocked(),
 		AccountTypeTotals:          l.accountTypeTotalsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
