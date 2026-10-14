@@ -468,7 +468,7 @@ type FXConversion struct {
 // (toCurrency != t.Currency). Callers must hold the write lock; every
 // check runs before the first mutation, so a rejection records nothing.
 func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Time) (TransferReceipt, error) {
-	feeCents, feeAccount, tierIndex, rateBps, err := l.resolveFeeLocked(t)
+	feeCents, feeAccount, feeSplits, tierIndex, rateBps, err := l.resolveFeeLocked(t)
 	if err != nil {
 		return TransferReceipt{}, err
 	}
@@ -537,15 +537,12 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		return TransferReceipt{}, ErrAmountOverflow
 	}
 
-	feeEntryID := ""
-	if feeCents > 0 {
-		feeEntryID = t.ID + "/fee"
-	}
+	feeEntryIDs := feeLegIDs(t.ID, feeCents, feeSplits)
 	// A split transfer reserves the "<id>/chunk-0" namespace for its
 	// chunk entries (see PostTransferSplit): a plain transfer reusing a
 	// split transfer's ID would create two transfers sharing one
 	// identity — the non-FX path checks this too (transfer.go).
-	for _, id := range []string{t.ID, t.ID + "/fx", t.ID + "/chunk-0", feeEntryID} {
+	for _, id := range append([]string{t.ID, t.ID + "/fx", t.ID + "/chunk-0"}, feeEntryIDs...) {
 		if id == "" {
 			continue
 		}
@@ -567,13 +564,23 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// payer's risk is entirely in the source currency: overdraft and the
 	// daily limit both guard the total outflow (amount + fee) against the
 	// source-currency balance, never against the converted amount.
-	if l.closedLocked(t.From) || l.closedLocked(t.To) || l.closedLocked(fxAccount) ||
-		(feeAccount != "" && l.closedLocked(feeAccount)) {
+	if l.closedLocked(t.From) || l.closedLocked(t.To) || l.closedLocked(fxAccount) {
 		return TransferReceipt{}, ErrAccountClosed
 	}
-	if l.frozenLocked(t.From) || l.frozenLocked(t.To) || l.frozenLocked(fxAccount) ||
-		(feeAccount != "" && l.frozenLocked(feeAccount)) {
+	for _, fa := range feeLegAccounts(feeAccount, feeSplits) {
+		if l.closedLocked(fa) {
+			return TransferReceipt{}, ErrAccountClosed
+		}
+	}
+	if l.frozenLocked(t.From) || l.frozenLocked(t.To) || l.frozenLocked(fxAccount) {
 		return TransferReceipt{}, ErrAccountFrozen
+	}
+	// Every fee recipient walks the same frozen check the single fee
+	// account always walked, like the non-FX path (transfer.go).
+	for _, fa := range feeLegAccounts(feeAccount, feeSplits) {
+		if l.frozenLocked(fa) {
+			return TransferReceipt{}, ErrAccountFrozen
+		}
 	}
 	if l.noOverdraft[t.From] &&
 		l.balances[accountCurrency{account: t.From, currency: t.Currency}] < totalOutflow {
@@ -625,19 +632,11 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		},
 	}
 	if feeCents > 0 {
-		feeKey := ""
-		if t.IdempotencyKey != "" {
-			feeKey = t.IdempotencyKey + "/fee"
-		}
-		entries = append(entries, JournalEntry{
-			ID:             feeEntryID,
-			DebitAccount:   feeAccount,
-			CreditAccount:  t.From,
-			AmountCents:    feeCents,
-			Currency:       t.Currency,
-			IdempotencyKey: feeKey,
-			CreatedAt:      t.CreatedAt,
-		})
+		// The fee legs — one "<transfer ID>/fee" leg for a single fee
+		// account, or one "<transfer ID>/fee/<i>" leg per split
+		// recipient — book in the source currency, on top of the
+		// amount, like the non-FX path.
+		entries = append(entries, buildFeeLegEntries(t, feeCents, feeAccount, feeSplits, t.CreatedAt)...)
 	}
 
 	// The dual-control review gate (see review.go) runs last, after the
@@ -691,7 +690,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
 	l.maybePruneMonthlySpendLocked(now)
-	versionBefore := l.version	// Pre-commit balance snapshot for the opt-in balance-change hook
+	versionBefore := l.version // Pre-commit balance snapshot for the opt-in balance-change hook
 	// (see balance_hook.go): nil when no hook is registered.
 	hookTouched := touchedAccounts(entries)
 	hookOld := l.balanceSnapshotLocked(hookTouched)
@@ -730,6 +729,11 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		// the converted amount); this event binds them to the rate.
 		"rate_effective_version": rate.EffectiveVersion,
 		"fee_cents":              feeCents,
+	}
+	if len(feeSplits) > 0 {
+		// The per-recipient split breakdown enters the structured
+		// audit, like the non-FX path.
+		fxDetails["fee_splits"] = feeSplitAuditDetails(feeSplits)
 	}
 	if overridden {
 		fxDetails["override_applied"] = true
@@ -774,5 +778,6 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		FeeRateBps:   rateBps,
 		Duplicate:    false,
 		FX:           fxConv,
+		FeeSplits:    feeSplits,
 	}, nil
 }

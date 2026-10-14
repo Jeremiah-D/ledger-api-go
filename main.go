@@ -297,20 +297,21 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTransferRequest struct {
-	TransferID     string           `json:"transfer_id"`
-	FromAccount    ledger.AccountID `json:"from_account"`
-	ToAccount      ledger.AccountID `json:"to_account"`
-	AmountCents    int64            `json:"amount_cents"`
-	Currency       string           `json:"currency"`
-	ToCurrency     string           `json:"to_currency"`
-	FXAccount      ledger.AccountID `json:"fx_account"`
-	FeeCents       int64            `json:"fee_cents"`
-	FeeAccount     ledger.AccountID `json:"fee_account"`
-	SkipFee        bool             `json:"skip_fee"`
-	IdempotencyKey string           `json:"idempotency_key"`
-	Memo           string           `json:"memo"`
-	ExternalRef    string           `json:"external_ref"`
-	Attachments    []string         `json:"attachments"`
+	TransferID     string            `json:"transfer_id"`
+	FromAccount    ledger.AccountID  `json:"from_account"`
+	ToAccount      ledger.AccountID  `json:"to_account"`
+	AmountCents    int64             `json:"amount_cents"`
+	Currency       string            `json:"currency"`
+	ToCurrency     string            `json:"to_currency"`
+	FXAccount      ledger.AccountID  `json:"fx_account"`
+	FeeCents       int64             `json:"fee_cents"`
+	FeeAccount     ledger.AccountID  `json:"fee_account"`
+	FeeSplits      []ledger.FeeSplit `json:"fee_splits,omitempty"`
+	SkipFee        bool              `json:"skip_fee"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	Memo           string            `json:"memo"`
+	ExternalRef    string            `json:"external_ref"`
+	Attachments    []string          `json:"attachments"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
@@ -320,7 +321,9 @@ type createTransferRequest struct {
 // (fee_cents + fee_account, or the server-wide LEDGER_TRANSFER_FEE policy
 // unless skip_fee is set) charges the payer on top of the amount and books
 // it to the fee account as a second entry; the receipt's fee_cents reports
-// what was booked.
+// what was booked. fee_splits (instead of fee_account) divides the fee
+// across several recipients in basis points — see ledger/fee_split.go —
+// and the receipt discloses each recipient's share.
 //
 // The server generates transfer_id when the client omits it. A first-time
 // transfer returns 201 with the receipt; a duplicate idempotency key
@@ -384,6 +387,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		FXAccount:      req.FXAccount,
 		FeeCents:       req.FeeCents,
 		FeeAccount:     req.FeeAccount,
+		FeeSplits:      req.FeeSplits,
 		SkipFee:        req.SkipFee,
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
@@ -674,6 +678,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		FXAccount:      req.FXAccount,
 		FeeCents:       req.FeeCents,
 		FeeAccount:     req.FeeAccount,
+		FeeSplits:      req.FeeSplits,
 		SkipFee:        req.SkipFee,
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
@@ -1351,6 +1356,26 @@ func (s *server) handleCreateTransferSchedule(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusCreated, map[string]any{"schedule": sched, "duplicate": false})
 }
 
+// handleGetTransferFeeSplit implements GET /transfers/{id}/fee-split,
+// the operator disclosure of a transfer's fee split (see
+// ledger.TransferFeeSplit): the total fee and each recipient's booked
+// share, in recipient order. An unknown transfer ID and a transfer that
+// posted no fee split (no fee leg, or a single fee account) are both
+// 404; the no-split error carries a hint explaining when fee_splits is
+// present.
+func (s *server) handleGetTransferFeeSplit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	detail, err := s.ledgerFor(r).TransferFeeSplit(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
 // handleGetTransferSchedule implements GET /transfer-schedules/{id}.
 func (s *server) handleGetTransferSchedule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1758,7 +1783,7 @@ func (s *server) handleMerkleProof(w http.ResponseWriter, r *http.Request) {
 		// The hex canonical leaf encoding, so a verifier can recompute
 		// the leaf hash without reimplementing the field layout:
 		// sha256(0x00 || leaf) must equal the first proof step.
-		"leaf": leafHex,
+		"leaf":          leafHex,
 		"leaf_encoding": "u64be(len(account)) || account || u64be(len(currency)) || currency || i64be(balance_cents), hashed as sha256(0x00 || encoding); inner nodes sha256(0x01 || left || right); odd last node pairs with itself",
 		"siblings":      siblings,
 	})
@@ -3309,6 +3334,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /transfers/reviews/expire", s.handleExpireReviews)
 	mux.HandleFunc("POST /transfers/{id}/approve", s.handleApproveTransferReview)
 	mux.HandleFunc("POST /transfers/{id}/reject", s.handleRejectTransferReview)
+	mux.HandleFunc("GET /transfers/{id}/fee-split", s.handleGetTransferFeeSplit)
 	mux.HandleFunc("POST /transfer-schedules", s.handleCreateTransferSchedule)
 	mux.HandleFunc("GET /transfer-schedules/{id}", s.handleGetTransferSchedule)
 	mux.HandleFunc("GET /transfer-schedules/{id}/runs", s.handleListScheduleRuns)

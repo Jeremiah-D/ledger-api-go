@@ -212,6 +212,61 @@ malformed value fails the startup fast (`log.Fatal`) instead of
 silently mispricing transfers. Total fee cents booked are exposed as
 `ledger_transfer_fee_cents_total`.
 
+#### Fee splits
+
+Instead of one `fee_account`, a transfer can divide its fee across
+several recipients with `fee_splits` — the payment-fintech revenue-share
+shape (platform fee split between the marketplace and payment
+partners). Each entry names a recipient and its basis-point share; the
+shares must sum to **exactly 10000** bps. The split applies to the
+finally resolved fee — an explicit `fee_cents` or the policy's charge —
+and each recipient's share is `floor(fee * bps / 10000)` in
+overflow-safe integer arithmetic, with the dust remainder landing on the
+first recipient so the shares always sum to the fee exactly.
+
+```bash
+curl -s -X POST localhost:8080/transfers \
+  -d '{"transfer_id":"tx-2026-003","from_account":"alice","to_account":"bob","amount_cents":10000,"fee_cents":101,
+       "fee_splits":[{"account":"rev-marketplace","bps":7000},{"account":"rev-psp","bps":3000}]}'
+# 201 {"transfer_id":"tx-2026-003","entries":[{...},{...},{...}],"fee_cents":101,
+#      "fee_splits":[{"account":"rev-marketplace","bps":7000,"fee_cents":71},
+#                    {"account":"rev-psp","bps":3000,"fee_cents":30}],"duplicate":false}
+```
+
+Each recipient gets its own fee leg (`debit recipient`, `credit
+from_account`, id `<transfer_id>/fee/<i>`, memo
+`fee-split:<i>/<n>:<account>:<bps>`) booked in the transfer's currency —
+the fee stays in the source currency on cross-currency transfers. Every
+leg walks the same gates as the single fee leg: the fee total is already
+folded into the payer's total-outflow checks (amount + fee), and each
+recipient gets the frozen/closed coverage the single fee account always
+had. The split commits atomically with the principal — one failing leg
+rejects the whole transfer and records nothing.
+
+Rules: `fee_splits` replaces `fee_account` (the two are mutually
+exclusive); it needs a fee to divide, so it is incompatible with
+`skip_fee`, and a zero resolved fee with `fee_splits` set is rejected
+(`400`) instead of silently dropping the recipients. Basis points must
+be 1..10000 per recipient and sum to exactly 10000; a zero address or a
+non-positive share is rejected. Fee splits are orthogonal to cost
+allocations: allocation divides the principal, fee splits divide the
+fee. They compose with `POST /transfers` (plain and cross-currency), not
+with chunked split transfers.
+
+The receipt discloses the per-recipient breakdown in `fee_splits`, and
+idempotent replays return the same breakdown (rebuilt from the journaled
+legs, nothing re-booked). The structured audit event for the transfer
+carries the breakdown as `fee_splits` (`account`, `bps`, `fee_cents`
+per recipient). Operators can query it any time:
+
+```bash
+curl -s localhost:8080/transfers/tx-2026-003/fee-split
+# 200 {"transfer_id":"tx-2026-003","fee_cents":101,"splits":[...]}
+```
+
+A transfer that posted no fee split (no fee leg, or a single fee
+account) returns `404` with a hint, like an unknown transfer ID.
+
 #### Large-transfer dual review
 
 Opt-in maker-checker for big money movements (the fintech dual-control

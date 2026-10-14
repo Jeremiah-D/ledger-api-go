@@ -96,6 +96,18 @@ type Transfer struct {
 	// explicit positive fee is given; the fee policy supplies its own
 	// revenue account.
 	FeeAccount AccountID `json:"fee_account,omitempty"`
+	// FeeSplits divides the fee across several recipients in basis
+	// points instead of booking it to one FeeAccount (see
+	// ledger/fee_split.go): each entry names a recipient and its
+	// basis-point share, and the shares must sum to exactly 10000. It
+	// replaces FeeAccount — the two are mutually exclusive — and it
+	// needs a fee to divide, so it is incompatible with SkipFee. The
+	// split applies to the finally resolved fee: an explicit FeeCents
+	// or the fee policy's charge. FeeSplits with a zero resolved fee
+	// is rejected (see ErrFeeSplitZeroFee). Orthogonal to cost
+	// allocations (see allocation.go): allocation divides the
+	// principal, fee splits divide the fee.
+	FeeSplits []FeeSplit `json:"fee_splits,omitempty"`
 	// SkipFee suppresses the ledger's default fee policy for this
 	// transfer. An explicit FeeCents still applies.
 	SkipFee        bool   `json:"skip_fee,omitempty"`
@@ -156,6 +168,13 @@ type TransferReceipt struct {
 	// "approved" once an operator settled it. Empty for transfers that
 	// never entered review.
 	ReviewStatus string `json:"review_status,omitempty"`
+	// FeeSplits discloses the fee split when the transfer divided its
+	// fee across recipients (see ledger/fee_split.go): one row per
+	// recipient with the promised basis points and the cents actually
+	// booked. Nil when the fee went to a single fee account (or there
+	// was no fee). Idempotent replays rebuild the same breakdown from
+	// the journaled legs' memos.
+	FeeSplits []FeeSplitShare `json:"fee_splits,omitempty"`
 }
 
 // FeeTier is one band of the tiered transfer fee schedule: transfers of
@@ -283,37 +302,63 @@ func addCents(a, b int64) (int64, bool) {
 
 // resolveFeeLocked determines the fee leg for a transfer: it returns the
 // fee in cents, the account that receives it ("" when there is no fee
-// leg), and the schedule tier that applied (index -1 and rate 0 when the
-// fee came from an explicit FeeCents, SkipFee suppressed the policy, or
-// the policy is disabled). Explicit fees win over the policy; the policy
+// leg), the per-recipient split shares (nil unless FeeSplits is set —
+// the split replaces the single fee account, so exactly one of
+// feeAccount and splits is set when the fee is positive), and the
+// schedule tier that applied (index -1 and rate 0 when the fee came
+// from an explicit FeeCents, SkipFee suppressed the policy, or the
+// policy is disabled). Explicit fees win over the policy; the policy
 // applies only when no explicit fee is given and SkipFee is false.
 // Callers must hold l.mu.
-func (l *Ledger) resolveFeeLocked(t Transfer) (feeCents int64, feeAccount AccountID, tierIndex int, rateBps int64, err error) {
+func (l *Ledger) resolveFeeLocked(t Transfer) (feeCents int64, feeAccount AccountID, splits []FeeSplitShare, tierIndex int, rateBps int64, err error) {
 	if t.FeeCents < 0 {
-		return 0, "", -1, 0, ErrInvalidFee
+		return 0, "", nil, -1, 0, ErrInvalidFee
+	}
+	// Fee splits (see fee_split.go) replace the single fee account: the
+	// finally resolved fee — explicit or policy-computed — is divided
+	// across the recipients. Mutual exclusivity with FeeAccount and
+	// SkipFee is enforced by validateTransferFields; the zero-fee
+	// rejection below is the misconfiguration guard: a split of
+	// nothing would silently drop the intended revenue shares, so the
+	// transfer is rejected instead (see ErrFeeSplitZeroFee).
+	if len(t.FeeSplits) > 0 {
+		var fee int64
+		tierIndex, rateBps = -1, 0
+		switch {
+		case t.FeeCents > 0:
+			fee = t.FeeCents
+		case t.SkipFee || len(l.feeTiers) == 0 || l.feeRevenueAccount == "":
+			fee = 0
+		default:
+			fee, tierIndex, rateBps = l.policyFeeForLocked(t.AmountCents)
+		}
+		if fee <= 0 {
+			return 0, "", nil, -1, 0, ErrFeeSplitZeroFee
+		}
+		return fee, "", computeFeeSplitShares(fee, t.FeeSplits), tierIndex, rateBps, nil
 	}
 	if t.FeeCents > 0 {
 		if t.FeeAccount == "" {
-			return 0, "", -1, 0, ErrInvalidFee
+			return 0, "", nil, -1, 0, ErrInvalidFee
 		}
-		return t.FeeCents, t.FeeAccount, -1, 0, nil
+		return t.FeeCents, t.FeeAccount, nil, -1, 0, nil
 	}
 	if t.FeeAccount != "" {
 		// An explicit fee account without a positive fee is a caller bug:
 		// silently ignoring it would misroute policy-computed fees.
-		return 0, "", -1, 0, ErrInvalidFee
+		return 0, "", nil, -1, 0, ErrInvalidFee
 	}
 	if t.SkipFee || len(l.feeTiers) == 0 || l.feeRevenueAccount == "" {
-		return 0, "", -1, 0, nil
+		return 0, "", nil, -1, 0, nil
 	}
 	fee, tierIndex, rateBps := l.policyFeeForLocked(t.AmountCents)
 	if fee > 0 {
-		return fee, l.feeRevenueAccount, tierIndex, rateBps, nil
+		return fee, l.feeRevenueAccount, nil, tierIndex, rateBps, nil
 	}
 	// A computed fee of zero (a free dust tier, or a tiny amount under a
 	// low rate) posts no leg, but the tier that produced it is still
 	// disclosed on the receipt.
-	return 0, "", tierIndex, rateBps, nil
+	return 0, "", nil, tierIndex, rateBps, nil
 }
 
 // policyFeeForLocked computes the ledger's default fee-policy charge for
@@ -474,6 +519,23 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 	if err := checkAttachments(t.Attachments); err != nil {
 		return t, "", err
 	}
+	// Fee splits (see fee_split.go) are field validation, like the legs
+	// and the amount: FeeSplits replaces the single FeeAccount, so the
+	// two are mutually exclusive, and a split needs a fee to divide,
+	// so it is incompatible with SkipFee. The zero-fee rejection
+	// (ErrFeeSplitZeroFee) lives in resolveFeeLocked, the first place
+	// the resolved fee is known.
+	if len(t.FeeSplits) > 0 {
+		if t.FeeAccount != "" {
+			return t, "", ErrFeeSplitFeeAccountConflict
+		}
+		if t.SkipFee {
+			return t, "", ErrFeeSplitSkipFeeConflict
+		}
+		if err := validateFeeSplits(t.FeeSplits); err != nil {
+			return t, "", err
+		}
+	}
 	return t, toCurrency, nil
 }
 
@@ -540,7 +602,7 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 		return l.postTransferFXLocked(t, toCurrency, time.Now())
 	}
 
-	feeCents, feeAccount, tierIndex, rateBps, err := l.resolveFeeLocked(t)
+	feeCents, feeAccount, feeSplits, tierIndex, rateBps, err := l.resolveFeeLocked(t)
 	if err != nil {
 		return TransferReceipt{}, err
 	}
@@ -557,10 +619,7 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 		}
 	}
 
-	feeEntryID := ""
-	if feeCents > 0 {
-		feeEntryID = t.ID + "/fee"
-	}
+	feeEntryIDs := feeLegIDs(t.ID, feeCents, feeSplits)
 	if _, exists := l.entries[t.ID]; exists {
 		return TransferReceipt{}, ErrTransferIDConflict
 	}
@@ -571,8 +630,11 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 	if _, exists := l.entries[t.ID+"/chunk-0"]; exists {
 		return TransferReceipt{}, ErrTransferIDConflict
 	}
-	if feeEntryID != "" {
-		if _, exists := l.entries[feeEntryID]; exists {
+	// Every fee leg ID — the single "<id>/fee" or each split leg
+	// "<id>/fee/<i>" — must be free: silently overwriting a journaled
+	// row is never an option.
+	for _, id := range feeEntryIDs {
+		if _, exists := l.entries[id]; exists {
 			return TransferReceipt{}, ErrTransferIDConflict
 		}
 	}
@@ -592,13 +654,24 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 	// rejecting transfers.
 	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
 
-	if l.closedLocked(t.From) || l.closedLocked(t.To) ||
-		(feeAccount != "" && l.closedLocked(feeAccount)) {
+	if l.closedLocked(t.From) || l.closedLocked(t.To) {
 		return TransferReceipt{}, ErrAccountClosed
 	}
-	if l.frozenLocked(t.From) || l.frozenLocked(t.To) ||
-		(feeAccount != "" && l.frozenLocked(feeAccount)) {
+	for _, fa := range feeLegAccounts(feeAccount, feeSplits) {
+		if l.closedLocked(fa) {
+			return TransferReceipt{}, ErrAccountClosed
+		}
+	}
+	if l.frozenLocked(t.From) || l.frozenLocked(t.To) {
 		return TransferReceipt{}, ErrAccountFrozen
+	}
+	// Every fee recipient walks the same frozen check the single fee
+	// account always walked: a frozen recipient rejects the transfer
+	// before anything books.
+	for _, fa := range feeLegAccounts(feeAccount, feeSplits) {
+		if l.frozenLocked(fa) {
+			return TransferReceipt{}, ErrAccountFrozen
+		}
 	}
 
 	// Overdraft protection guards the payer's total outflow (amount + fee),
@@ -660,21 +733,11 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 	}
 
 	entries := []JournalEntry{principal}
-	if feeCents > 0 {
-		feeKey := ""
-		if t.IdempotencyKey != "" {
-			feeKey = t.IdempotencyKey + "/fee"
-		}
-		entries = append(entries, JournalEntry{
-			ID:             feeEntryID,
-			DebitAccount:   feeAccount,
-			CreditAccount:  t.From,
-			AmountCents:    feeCents,
-			Currency:       t.Currency,
-			IdempotencyKey: feeKey,
-			CreatedAt:      principal.CreatedAt,
-		})
-	}
+	// The fee legs — one "<transfer ID>/fee" leg for a single fee
+	// account, or one "<transfer ID>/fee/<i>" leg per split recipient
+	// (see buildFeeLegEntries): every leg debits its recipient and
+	// credits the payer, on top of the principal.
+	entries = append(entries, buildFeeLegEntries(t, feeCents, feeAccount, feeSplits, principal.CreatedAt)...)
 
 	// No-FX invariant: every leg of a transfer is booked in the
 	// transfer's single currency. Both legs above derive from t.Currency
@@ -734,6 +797,11 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 		"fee_tier_index": tierIndex,
 		"fee_rate_bps":   rateBps,
 	}
+	if len(feeSplits) > 0 {
+		// The per-recipient split breakdown enters the structured
+		// audit: account, promised basis points, and cents booked.
+		transferDetails["fee_splits"] = feeSplitAuditDetails(feeSplits)
+	}
 	if t.Memo != "" {
 		transferDetails["memo"] = t.Memo
 	}
@@ -766,6 +834,7 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 		FeeTierIndex: tierIndex,
 		FeeRateBps:   rateBps,
 		Duplicate:    false,
+		FeeSplits:    feeSplits,
 	}, nil
 }
 
@@ -796,7 +865,7 @@ func (l *Ledger) replayTransferLocked(t Transfer) (TransferReceipt, bool) {
 		if len(entries) > 0 {
 			reviewStatus = l.reviewStatusLocked(entries[0].ID)
 		}
-		feeCents := feeCentsOf(entries)
+		feeCents := feeCentsOf(entries[0].ID, entries)
 		// Re-disclose the tier the original transfer was charged under
 		// (see rediscloseFeeTierLocked): the fee base is the
 		// source-currency amount — the FX leg's amount for FX transfers,
@@ -810,11 +879,17 @@ func (l *Ledger) replayTransferLocked(t Transfer) (TransferReceipt, bool) {
 				break
 			}
 		}
-		tierIndex, rateBps := l.rediscloseFeeTierLocked(entries, feeBase)
+		tierIndex, rateBps := l.rediscloseFeeTierLocked(entries[0].ID, entries, feeBase)
+		// The fee-split breakdown rebuilds from the journaled legs'
+		// memos (see feeSplitSharesFromLegs): the replay discloses
+		// exactly what the original posted, and books nothing new.
+		// entries[0] is the principal entry, whose ID is the original
+		// transfer ID — the replay request's ID may differ.
+		feeSplits := feeSplitSharesFromLegs(entries[0].ID, entries)
 		// Replays deliberately omit the FX disclosure (see
 		// TransferReceipt.FX): the rate table may have changed since the
 		// original posting.
-		return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCents, FeeTierIndex: tierIndex, FeeRateBps: rateBps, Duplicate: true, ReviewStatus: reviewStatus}, true
+		return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCents, FeeTierIndex: tierIndex, FeeRateBps: rateBps, FeeSplits: feeSplits, Duplicate: true, ReviewStatus: reviewStatus}, true
 	}
 	if orig, ok := l.byKey[t.IdempotencyKey]; ok {
 		return TransferReceipt{
@@ -827,12 +902,15 @@ func (l *Ledger) replayTransferLocked(t Transfer) (TransferReceipt, bool) {
 }
 
 // feeCentsOf sums the fee legs of a replayed receipt: fee legs are the
-// entries whose ID ends in "/fee" by construction (see
-// postTransferFXLocked and PostTransfer).
-func feeCentsOf(entries []JournalEntry) int64 {
+// single "<transfer ID>/fee" entries and the fee-split
+// "<transfer ID>/fee/<i>" legs, by construction (see isFeeLegID and
+// postTransferFXLocked). Anchoring on the transfer ID keeps a
+// user-chosen transfer ID that merely ends in "/fee/<digits>" from
+// being misread as a fee leg.
+func feeCentsOf(transferID string, entries []JournalEntry) int64 {
 	var total int64
 	for _, e := range entries {
-		if strings.HasSuffix(e.ID, "/fee") {
+		if isFeeLegID(transferID, e.ID) {
 			total += e.AmountCents
 		}
 	}

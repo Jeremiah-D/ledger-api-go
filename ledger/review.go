@@ -489,6 +489,9 @@ func (l *Ledger) maybeReviewTransferLocked(t Transfer, entries []JournalEntry, f
 		Duplicate:    false,
 		FX:           fx,
 		ReviewStatus: ReviewStatusPending,
+		// The fee-split breakdown rebuilds from the journaled legs'
+		// memos, like an idempotent replay (see fee_split.go).
+		FeeSplits: feeSplitSharesFromLegs(t.ID, entries),
 	}, true, nil
 }
 
@@ -678,6 +681,9 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 		Duplicate:    false,
 		FX:           r.FX,
 		ReviewStatus: ReviewStatusApproved,
+		// The fee-split breakdown rebuilds from the settled legs'
+		// memos, like an idempotent replay (see fee_split.go).
+		FeeSplits: feeSplitSharesFromLegs(r.TransferID, r.Entries),
 	}
 	r.ApprovedReceipt = &receipt
 	l.reviews[transferID] = r

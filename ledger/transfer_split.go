@@ -240,9 +240,16 @@ type splitFee struct {
 // then — in per-chunk mode — resolves the policy fee per chunk.
 // Callers must hold l.mu.
 func (l *Ledger) splitFeeLocked(t Transfer, chunks []int64) (splitFee, error) {
-	wholeFee, feeAccount, tierIndex, rateBps, err := l.resolveFeeLocked(t)
+	wholeFee, feeAccount, splits, tierIndex, rateBps, err := l.resolveFeeLocked(t)
 	if err != nil {
 		return splitFee{}, err
+	}
+	if len(splits) > 0 {
+		// Fee splits compose with PostTransfer, not with chunked
+		// transfers: splitting a chunked transfer's fee per recipient
+		// would need per-chunk split legs, which the journal ID scheme
+		// does not define. Fail fast instead of misbooking.
+		return splitFee{}, ErrFeeSplitUnsupported
 	}
 	fee := splitFee{
 		account:   feeAccount,
@@ -943,6 +950,17 @@ func splitChunkRef(id string) (index int, kind string, ok bool) {
 	return i, tail, true
 }
 
+// splitBaseID recovers a split transfer's base transfer ID from one of
+// its chunk leg IDs ("<base>/chunk-<i>[kind]" -> "<base>"); a non-chunk
+// leg ID is returned unchanged. It lets fee-leg matching anchor on the
+// transfer ID instead of a fuzzy "/fee" suffix (see isFeeLegID).
+func splitBaseID(legID string) string {
+	if j := strings.Index(legID, "/chunk-"); j >= 0 {
+		return legID[:j]
+	}
+	return legID
+}
+
 // rebuildSplitReceiptLocked regroups the journal entries of a split
 // transfer (looked up by idempotency key) into per-chunk disclosure. It
 // handles both the true split shape ("<id>/chunk-<i>" entries) and the
@@ -963,7 +981,7 @@ func (l *Ledger) rebuildSplitReceiptLocked(t Transfer, ids []string) SplitTransf
 	if !split {
 		// No-split delegate shape: re-derive the fee tier disclosure
 		// like replayTransferLocked and wrap as a single chunk.
-		feeCents := feeCentsOf(entries)
+		feeCents := feeCentsOf(splitBaseID(entries[0].ID), entries)
 		feeBase := entries[0].AmountCents
 		for _, e := range entries {
 			if strings.HasSuffix(e.ID, "/fx") {
@@ -971,7 +989,7 @@ func (l *Ledger) rebuildSplitReceiptLocked(t Transfer, ids []string) SplitTransf
 				break
 			}
 		}
-		tierIndex, rateBps := l.rediscloseFeeTierLocked(entries, feeBase)
+		tierIndex, rateBps := l.rediscloseFeeTierLocked(splitBaseID(entries[0].ID), entries, feeBase)
 		r := singleChunkReceipt(TransferReceipt{
 			TransferID:   t.ID,
 			Entries:      entries,
@@ -1095,7 +1113,7 @@ func (l *Ledger) rebuildSplitReceiptLocked(t Transfer, ids []string) SplitTransf
 		for _, c := range chunks {
 			feeBase += c.AmountCents
 		}
-		tierIndex, rateBps = l.rediscloseFeeTierLocked(entries, feeBase)
+		tierIndex, rateBps = l.rediscloseFeeTierLocked(splitBaseID(entries[0].ID), entries, feeBase)
 	}
 	return SplitTransferReceipt{
 		TransferID:   t.ID,
@@ -1117,8 +1135,8 @@ func (l *Ledger) rebuildSplitReceiptLocked(t Transfer, ids []string) SplitTransf
 // and the fee matches the policy computation on the source-currency
 // base amount, the tier re-derives exactly (the fee policy is
 // construction-time immutable). Otherwise -1/0. Callers must hold l.mu.
-func (l *Ledger) rediscloseFeeTierLocked(entries []JournalEntry, feeBase int64) (tierIndex int, rateBps int64) {
-	feeCents := feeCentsOf(entries)
+func (l *Ledger) rediscloseFeeTierLocked(transferID string, entries []JournalEntry, feeBase int64) (tierIndex int, rateBps int64) {
+	feeCents := feeCentsOf(transferID, entries)
 	tierIndex, rateBps = -1, int64(0)
 	if len(l.feeTiers) > 0 && l.feeRevenueAccount != "" {
 		for _, e := range entries {
@@ -1127,6 +1145,23 @@ func (l *Ledger) rediscloseFeeTierLocked(entries []JournalEntry, feeBase int64) 
 					tierIndex, rateBps = idx, rate
 				}
 				break
+			}
+		}
+		// Fee-split legs ("<id>/fee/<i>", see fee_split.go) carry no
+		// revenue-account marker — a policy fee split across arbitrary
+		// recipients re-derives its tier from the total instead, under
+		// the same documented caveat as the single-leg case (an
+		// explicit split whose total equals the policy fee is
+		// indistinguishable, and the disclosed rate still matches the
+		// fee math).
+		if tierIndex == -1 {
+			for _, e := range entries {
+				if isFeeLegID(transferID, e.ID) && !strings.HasSuffix(e.ID, "/fee") {
+					if idx, rate := l.feeTierFor(feeBase); policyFeeCents(feeBase, rate) == feeCents {
+						tierIndex, rateBps = idx, rate
+					}
+					break
+				}
 			}
 		}
 	}
