@@ -160,6 +160,11 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountDenied) {
 			s.metrics.DenylistRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -261,6 +266,11 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -398,6 +408,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -683,6 +698,11 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrPeriodClosed) {
 			s.metrics.PeriodRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -832,6 +852,11 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountDenied) {
 			s.metrics.DenylistRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -913,6 +938,11 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrPeriodClosed) {
 			s.metrics.PeriodRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -971,6 +1001,11 @@ func (s *server) handleDryRunSweep(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ledger.ErrPeriodClosed) {
@@ -1127,6 +1162,11 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1555,6 +1595,11 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 			errors.Is(err, ledger.ErrHoldNotActive) ||
 			errors.Is(err, ledger.ErrHoldExpired) {
 			s.metrics.HoldRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -2725,6 +2770,9 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 			case errors.Is(err, ledger.ErrDailyLimitExceeded):
 				s.metrics.DailyLimitRejections.Add(1)
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrBudgetExceeded):
+				s.metrics.BudgetRejections.Add(1)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			case errors.Is(err, ledger.ErrPeriodClosed):
 				s.metrics.PeriodRejections.Add(1)
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -3642,6 +3690,24 @@ func main() {
 			opts = append(opts, ledger.WithDailyLimit(dl.Account, dl.Currency, dl.LimitCents))
 		}
 		log.Printf("ledger-api-go: daily outflow limits = %d configured", len(limits))
+	}
+
+	// LEDGER_MONTHLY_SPEND_BUDGETS configures per-account per-currency
+	// monthly spend budgets (see ledger.ParseAccountBudgets for the
+	// syntax, e.g. "cust-123:USD:500000,cust-456:EUR:200000"). Postings
+	// that would take an account's cumulative spend for the UTC calendar
+	// month above its budget are rejected with 422. Unset means no
+	// budgets. An invalid value fails the startup fast (log.Fatal): a
+	// misconfigured risk control must never silently run unenforced.
+	if raw := os.Getenv("LEDGER_MONTHLY_SPEND_BUDGETS"); raw != "" {
+		budgets, err := ledger.ParseAccountBudgets(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		for _, b := range budgets {
+			opts = append(opts, ledger.WithAccountBudget(b.Account, b.Currency, b.BudgetCents))
+		}
+		log.Printf("ledger-api-go: monthly spend budgets = %d configured", len(budgets))
 	}
 
 	// LEDGER_LOW_BALANCE_THRESHOLDS configures per-account per-currency

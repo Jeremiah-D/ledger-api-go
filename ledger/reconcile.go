@@ -143,6 +143,14 @@ type ReconciliationReport struct {
 	// section risk tooling watches for velocity-limit pressure; for a
 	// leaf account the subtree is the account itself.
 	SubtreeLimitUtilization []SubtreeLimitUsage `json:"subtree_limit_utilization"`
+	// BudgetUtilization lists every configured monthly spend budget
+	// (see SetAccountBudget) with the current UTC month's booked spend
+	// and its utilization fraction (LG-81), sorted by (account,
+	// currency). Booked spend includes spend reserved by pending
+	// dual-control reviews. This is the section risk tooling watches
+	// for accounting-period spend pressure; the daily limit is the
+	// rolling outflow window, the budget is the calendar-month control.
+	BudgetUtilization []AccountBudgetUsage `json:"budget_utilization"`
 	// BalanceWatches lists every configured balance threshold watch
 	// (see SetBalanceWatch), sorted by (account, currency). Operations
 	// tooling reads this to know which accounts alert on balance
@@ -441,6 +449,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
 		SubtreeLimitUtilization:    l.subtreeLimitUtilizationLocked(now),
+		BudgetUtilization:          l.budgetUtilizationLocked(now),
 		BalanceWatches:             l.balanceWatchesLocked(),
 		AccountTypeTotals:          l.accountTypeTotalsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),

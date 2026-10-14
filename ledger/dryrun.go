@@ -61,11 +61,33 @@ type DryRunLeg struct {
 // Legs and version fields are zero on failure: nothing would have been
 // recorded.
 type DryRunResult struct {
-	WouldSucceed  bool        `json:"would_succeed"`
-	Duplicate     bool        `json:"duplicate"`
-	VersionBefore uint64      `json:"version_before"`
-	VersionAfter  uint64      `json:"version_after"`
-	Legs          []DryRunLeg `json:"legs"`
+	WouldSucceed  bool          `json:"would_succeed"`
+	Duplicate     bool          `json:"duplicate"`
+	VersionBefore uint64        `json:"version_before"`
+	VersionAfter  uint64        `json:"version_after"`
+	Legs          []DryRunLeg   `json:"legs"`
+	// BudgetImpact previews the monthly spend budgets (LG-81) the
+	// simulated posting would move: one row per budgeted (account,
+	// currency, month) whose spend changed, with the month's used
+	// figure before and after the simulation. Empty on failure, and
+	// empty for idempotent replays — a replay books nothing new, so it
+	// consumes no budget.
+	BudgetImpact []BudgetImpact `json:"budget_impact,omitempty"`
+}
+
+// BudgetImpact is one monthly spend budget (see SetAccountBudget) as a
+// dry run would change it: the configured budget and the UTC month's
+// used spend before and after the simulated posting. Only budgets whose
+// spend the simulation changed are listed.
+type BudgetImpact struct {
+	Account AccountID `json:"account"`
+	Currency string   `json:"currency"`
+	// Month is the UTC calendar month the figures describe, as
+	// "2006-01".
+	Month           string `json:"month"`
+	BudgetCents     int64  `json:"budget_cents"`
+	UsedBeforeCents int64  `json:"used_before_cents"`
+	UsedAfterCents  int64  `json:"used_after_cents"`
 }
 
 // cloneForDryRunLocked deep-copies the ledger into a private, disposable
@@ -93,6 +115,8 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		noOverdraft:          make(map[AccountID]bool, len(l.noOverdraft)),
 		dailyLimits:          make(map[dailyLimitKey]int64, len(l.dailyLimits)),
 		dailyOutflow:         make(map[dailyLimitKey]int64, len(l.dailyOutflow)),
+		budgets:              make(map[budgetKey]int64, len(l.budgets)),
+		monthlySpend:         make(map[monthlySpendKey]int64, len(l.monthlySpend)),
 		parents:              make(map[AccountID]AccountID, len(l.parents)),
 		transferKeys:         make(map[string][]string, len(l.transferKeys)),
 		holds:                make(map[string]Hold, len(l.holds)),
@@ -113,6 +137,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		pruneInterval:        l.pruneInterval,
 		lastKeyPrune:         l.lastKeyPrune,
 		lastDailyPrune:       l.lastDailyPrune,
+		lastBudgetPrune:      l.lastBudgetPrune,
 		// audit intentionally nil: the dry run emits nothing.
 		// outbox intentionally nil: the dry run emits no domain events
 		// either — the twin's simulated commits must not pollute the
@@ -156,6 +181,12 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	}
 	for k, v := range l.dailyOutflow {
 		c.dailyOutflow[k] = v
+	}
+	for k, v := range l.budgets {
+		c.budgets[k] = v
+	}
+	for k, v := range l.monthlySpend {
+		c.monthlySpend[k] = v
 	}
 	for k, v := range l.parents {
 		c.parents[k] = v
@@ -267,7 +298,9 @@ func (l *Ledger) dryRunLegsLocked(entries []JournalEntry, apply bool) []DryRunLe
 // dryRunResultLocked packages a successful simulation: the committed
 // entries become legs (with movement applied unless the simulation was an
 // idempotent replay), and the version bracket comes from the live ledger
-// and the twin. Callers must hold l.mu; the read lock suffices.
+// and the twin. The budget impact previews the monthly spend budgets the
+// simulation moved, by diffing the twin's spend buckets against the live
+// ledger's. Callers must hold l.mu; the read lock suffices.
 func (l *Ledger) dryRunResultLocked(entries []JournalEntry, twin *Ledger, duplicate bool) DryRunResult {
 	after := twin.version
 	if duplicate {
@@ -281,6 +314,7 @@ func (l *Ledger) dryRunResultLocked(entries []JournalEntry, twin *Ledger, duplic
 		VersionBefore: l.version,
 		VersionAfter:  after,
 		Legs:          l.dryRunLegsLocked(entries, !duplicate),
+		BudgetImpact:  l.budgetImpactLocked(twin),
 	}
 }
 

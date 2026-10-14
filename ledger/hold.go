@@ -577,6 +577,15 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		return CaptureReceipt{}, ErrAccountOverdraft
 	}
 
+	// Monthly spend budgets guard the hold account's settlement spend: a
+	// capture that would take the account's cumulative spend for the UTC
+	// calendar month above its configured budget is rejected with
+	// ErrBudgetExceeded. Runs after overdraft and before the period
+	// gate — a replay books nothing new, so it returned above.
+	if l.budgetRejectedLocked(h.Account, h.Currency, c.AmountCents, entry.CreatedAt) {
+		return CaptureReceipt{}, ErrBudgetExceeded
+	}
+
 	// The period gate is keyed on the capture entry's final timestamp
 	// (see period.go): a capture posting into a closed accounting period
 	// is rejected with ErrPeriodClosed. It runs after the idempotency
@@ -587,12 +596,14 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	}
 
 	l.maybePruneIdempotencyKeys(now)
+	l.maybePruneMonthlySpendLocked(now)
 	versionBefore := l.version
 	// Pre-commit balance snapshot for the opt-in balance-change hook
 	// (see balance_hook.go): nil when no hook is registered.
 	hookTouched := touchedAccounts([]JournalEntry{entry})
 	hookOld := l.balanceSnapshotLocked(hookTouched)
 	l.commitEntryLocked(entry)
+	l.addMonthlySpendLocked(h.Account, h.Currency, c.AmountCents, entry.CreatedAt)
 	h.Status = HoldStatusCaptured
 	l.holds[c.HoldID] = h
 

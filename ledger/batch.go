@@ -303,6 +303,25 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		batchOutflow[bucket] = satAddInt64(batchOutflow[bucket], e.AmountCents)
 	}
 
+	// 8b. Monthly-budget simulation: same sequential semantics — earlier
+	// entries in the batch consume the UTC month's budget for later ones.
+	// Unlike the daily limit (LG-80 subtree semantics), budgets are
+	// per-account: each posting account's own (account, currency) budget
+	// is checked against its month-to-date spend plus the batch's planned
+	// spend. The two controls are orthogonal, so both are checked.
+	batchBudgetSpend := make(map[monthlySpendKey]int64)
+	for i := range entries {
+		if replayed[i] {
+			continue
+		}
+		e := &entries[i]
+		if l.budgetViolatedLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt, batchBudgetSpend) {
+			return BatchReceipt{}, ErrBudgetExceeded
+		}
+		bucket := monthlySpendKey{account: e.CreditAccount, currency: e.Currency, month: utcMonth(e.CreatedAt)}
+		batchBudgetSpend[bucket] = satAddInt64(batchBudgetSpend[bucket], e.AmountCents)
+	}
+
 	// 9. Atomic commit: every new entry's journal row, idempotency index
 	// entries, per-account index rows, balances, totals, chain links, and
 	// version bumps land together, under the one write lock, after all
@@ -310,6 +329,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 	// mutation, so there is nothing to roll back.
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
+	l.maybePruneMonthlySpendLocked(now)
 	versionBefore := l.version
 	committedIDs := make([]string, 0, len(entries))
 	accounts := make([]AccountID, 0, 2*len(entries))
@@ -323,6 +343,7 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		e.BatchID = b.ID
 		l.commitEntryLocked(*e)
 		l.addDailyOutflowLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt)
+		l.addMonthlySpendLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt)
 		for _, a := range []AccountID{e.DebitAccount, e.CreditAccount} {
 			if !seenAccounts[a] {
 				seenAccounts[a] = true

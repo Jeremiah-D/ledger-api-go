@@ -102,6 +102,12 @@ type Metrics struct {
 	// have taken the account's cumulative outflow for the UTC day above
 	// its configured daily outflow limit.
 	DailyLimitRejections atomic.Uint64
+	// BudgetRejections counts POST /entries, POST /entries/batch,
+	// POST /transfers, POST /sweeps, and POST /holds/{id}/capture
+	// requests rejected with 422 because they would have taken the
+	// account's cumulative spend for the UTC calendar month above its
+	// configured monthly spend budget (see ledger.SetAccountBudget).
+	BudgetRejections atomic.Uint64
 	// DenylistRejections counts POST /entries, POST /entries/batch,
 	// POST /transfers, and POST /holds/{id}/capture requests rejected
 	// with 422 because a leg of the posting named an account on the
@@ -460,6 +466,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_daily_limit_rejections_total",
 		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected because they would have taken the account's daily outflow above its configured limit.",
 		m.DailyLimitRejections.Load())
+	writeCounter(&sb, "ledger_budget_rejections_total",
+		"Total POST /entries, POST /entries/batch, POST /transfers, POST /sweeps, and POST /holds/{id}/capture requests rejected because they would have taken the account's UTC-calendar-month cumulative spend above its configured monthly spend budget.",
+		m.BudgetRejections.Load())
 	writeCounter(&sb, "ledger_denylist_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, and POST /holds/{id}/capture requests rejected because a leg of the posting named an account on the sanctions/denylist.",
 		m.DenylistRejections.Load())

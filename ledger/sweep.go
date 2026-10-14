@@ -202,15 +202,37 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 		}
 	}
 
+	// The sweep's effective post time is finalized before the budget and
+	// period checks: spend is booked against the sweep's own UTC calendar
+	// month, and the period gate is keyed on the same instant.
+	createdAt := s.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+
+	// Monthly spend budgets guard every source leg: a sweep whose source
+	// leg would take the account's cumulative spend for the UTC calendar
+	// month above its configured budget is rejected with
+	// ErrBudgetExceeded. Legs are checked in order with the sweep's
+	// planned spend carried forward, so earlier legs consume the
+	// month's budget for later ones. The check runs after the frozen
+	// checks and before the period gate — like the other risk controls,
+	// it only evaluates sweeps that book something new (idempotent
+	// replays returned above).
+	sweepBudgetSpend := make(map[monthlySpendKey]int64)
+	for _, leg := range legs {
+		if l.budgetViolatedLocked(leg.From, leg.Currency, leg.AmountCents, createdAt, sweepBudgetSpend) {
+			return SweepReceipt{}, ErrBudgetExceeded
+		}
+		bucket := monthlySpendKey{account: leg.From, currency: leg.Currency, month: utcMonth(createdAt)}
+		sweepBudgetSpend[bucket] = satAddInt64(sweepBudgetSpend[bucket], leg.AmountCents)
+	}
+
 	// The period gate is keyed on the sweep's effective post time (see
 	// period.go): a backdated sweep landing in a closed accounting period
 	// is rejected with ErrPeriodClosed. It runs after the idempotency
 	// replay check above, so replaying a key swept before the period
 	// closed returns the original receipt.
-	createdAt := s.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now()
-	}
 	if err := l.periodRejectedLocked(createdAt); err != nil {
 		return SweepReceipt{}, err
 	}
@@ -222,6 +244,7 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 	// roll back.
 	now := time.Now()
 	l.maybePruneIdempotencyKeys(now)
+	l.maybePruneMonthlySpendLocked(now)
 	versionBefore := l.version
 	entries := make([]JournalEntry, 0, len(legs))
 	// Pre-commit balance snapshot for the opt-in balance-change hook
@@ -244,6 +267,7 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 			CreatedAt:     createdAt,
 		}
 		l.commitEntryLocked(e)
+		l.addMonthlySpendLocked(leg.From, leg.Currency, leg.AmountCents, createdAt)
 		entries = append(entries, e)
 	}
 	if s.IdempotencyKey != "" {

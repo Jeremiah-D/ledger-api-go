@@ -582,6 +582,9 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	if l.dailyLimitRejectedLocked(t.From, t.Currency, totalOutflow, t.CreatedAt) {
 		return TransferReceipt{}, ErrDailyLimitExceeded
 	}
+	if l.budgetRejectedLocked(t.From, t.Currency, totalOutflow, t.CreatedAt) {
+		return TransferReceipt{}, ErrBudgetExceeded
+	}
 
 	// The period gate is keyed on the transfer's effective post time (see
 	// period.go): a backdated transfer landing in a closed accounting
@@ -686,6 +689,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// lock, after all checks passed.
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
+	l.maybePruneMonthlySpendLocked(now)
 	versionBefore := l.version	// Pre-commit balance snapshot for the opt-in balance-change hook
 	// (see balance_hook.go): nil when no hook is registered.
 	hookTouched := touchedAccounts(entries)
@@ -694,6 +698,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		l.commitEntryLocked(e)
 	}
 	l.addDailyOutflowLocked(t.From, t.Currency, totalOutflow, t.CreatedAt)
+	l.addMonthlySpendLocked(t.From, t.Currency, totalOutflow, t.CreatedAt)
 	if t.IdempotencyKey != "" {
 		ids := make([]string, 0, len(entries))
 		for _, e := range entries {

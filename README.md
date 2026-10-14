@@ -856,6 +856,50 @@ with its subtree's booked outflow, utilization fraction, and account
 count for the report day, so risk tooling can watch velocity-limit
 pressure per hierarchy.
 
+### Monthly spend budgets
+
+Per-account, per-currency cap on how much money an account may spend in
+one UTC calendar month (fintech risk control — accounting-period spend
+control, the counterpart to the daily velocity limit above). Configure
+with the `LEDGER_MONTHLY_SPEND_BUDGETS` environment variable or the
+`ledger.WithAccountBudget` / `SetAccountBudget` API. A `POST /entries`
+whose credit (payer) leg would take the account's cumulative spend for
+the UTC month above the budget is rejected with `422`; `POST /transfers`
+counts the payer's total outflow (amount + fee leg, source currency for
+FX transfers), `POST /entries/batch` every entry's credit leg,
+`POST /sweeps` every source leg, and `POST /holds/{id}/capture` the hold
+account's settlement leg.
+
+Spend accumulates per UTC calendar month of each entry's own timestamp,
+so the window rolls at the UTC month boundary and backdated entries
+count toward their own month. Budgets are opt-in per (account,
+currency); the check runs after the daily outflow limit among the risk
+controls, idempotent replays consume no budget, and a rejected posting
+books nothing. The daily limit and the monthly budget are orthogonal —
+a rolling outflow window and an accounting-period control — and a posting
+must clear both. Spend reserved by pending dual-control reviews counts
+in the month's used figure from review creation (the freeze is atomic,
+covering funds, daily limit, and budget together); approval settles
+against the already-reserved budget. Setting or clearing a budget is
+structural — no version bump — and visible to audit tooling: the change
+lands in the structured audit log (`budget_set` / `budget_cleared`),
+each trial balance carries a `budget_cents` field (default currency),
+and the reconcile report's `budget_utilization` section lists every
+configured budget with its limit, booked spend, and utilization fraction
+for the report month. Rejections are counted in
+`ledger_budget_rejections_total`. `POST /entries/dry-run`,
+`/transfers/dry-run`, and `/sweeps/dry-run` preview the budget impact:
+the response's `budget_impact` rows show each affected budget's used
+spend before and after the simulated posting.
+
+```bash
+LEDGER_MONTHLY_SPEND_BUDGETS="cust-123:USD:500000" ./ledger-api-go
+curl -s -X POST localhost:8080/entries \
+  -d '{"debit_account":"cash","credit_account":"cust-123","amount_cents":500000}'
+# 201 on the first $5000.00 of the UTC month, then:
+# 422 {"error":"ledger: posting would exceed the account's monthly spend budget"}
+```
+
 ### Sanctions/denylist screening (`POST /denylist`)
 
 Opt-in sanctions/denylist: exact account IDs and prefix patterns whose
@@ -2537,6 +2581,11 @@ curl -s localhost:8080/metrics
   `POST /transfers` requests rejected with `422` because the posting would
   have taken the account's UTC-day cumulative outflow above its configured
   daily outflow limit.
+- `ledger_budget_rejections_total` — `POST /entries`,
+  `POST /entries/batch`, `POST /transfers`, `POST /sweeps`, and
+  `POST /holds/{id}/capture` requests rejected with `422` because the
+  posting would have taken the account's UTC-calendar-month cumulative
+  spend above its configured monthly spend budget.
 - `ledger_low_balance_breaches_total` — low-balance alert events emitted
   (advisory; the alert never rejects a posting). Synced from the ledger on
   every scrape, like the audit-log counters.
@@ -2767,6 +2816,12 @@ Environment:
   USD outflow at $1000.00). Postings that would exceed the day's budget
   are rejected with `422`. Unset means no limits; an invalid value fails
   startup fast.
+- `LEDGER_MONTHLY_SPEND_BUDGETS` — per-account per-currency monthly spend
+  budgets, `"<account>:<currency>:<budgetCents>,..."` (e.g.
+  `LEDGER_MONTHLY_SPEND_BUDGETS="cust-123:USD:500000"` caps cust-123's
+  monthly USD spend at $5000.00). Postings that would take the account's
+  UTC-calendar-month cumulative spend above its budget are rejected with
+  `422`. Unset means no budgets; an invalid value fails startup fast.
 - `LEDGER_LOW_BALANCE_THRESHOLDS` — per-account per-currency low-balance
   alert levels, `"<account>:<currency>:<thresholdCents>,..."` (e.g.
   `LEDGER_LOW_BALANCE_THRESHOLDS="cust-123:USD:50000"` alerts when

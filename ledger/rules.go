@@ -469,11 +469,11 @@ func (l *Ledger) derivedRuleLegsLocked(e JournalEntry) (derived []JournalEntry, 
 	}
 
 	// Aggregate outflow per (credit account, currency) across the
-	// principal and all derived legs: overdraft protection and daily
-	// limits guard total outflow, not per-leg slices — a principal that
-	// passes alone must still fail when its rule legs push the payer
-	// over the line. Totals saturate instead of overflowing; the gates
-	// below only compare.
+	// principal and all derived legs: overdraft protection, daily
+	// limits, and monthly spend budgets guard total outflow, not
+	// per-leg slices — a principal that passes alone must still fail
+	// when its rule legs push the payer over the line. Totals saturate
+	// instead of overflowing; the gates below only compare.
 	outflow := make(map[accountCurrency]int64)
 	addOutflow := func(a AccountID, amount int64) {
 		k := accountCurrency{account: a, currency: e.Currency}
@@ -495,6 +495,11 @@ func (l *Ledger) derivedRuleLegsLocked(e JournalEntry) (derived []JournalEntry, 
 	for k, total := range outflow {
 		if l.dailyLimitRejectedLocked(k.account, k.currency, total, e.CreatedAt) {
 			return nil, nil, ErrDailyLimitExceeded
+		}
+	}
+	for k, total := range outflow {
+		if l.budgetRejectedLocked(k.account, k.currency, total, e.CreatedAt) {
+			return nil, nil, ErrBudgetExceeded
 		}
 	}
 	// Period gate: derived legs share the principal's timestamp, which

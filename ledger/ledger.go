@@ -250,6 +250,15 @@ type Ledger struct {
 	// currency; structural config, like frozen and noOverdraft.
 	dailyLimits  map[dailyLimitKey]int64
 	dailyOutflow map[dailyLimitKey]int64
+	// budgets maps (account, currency) to the account's monthly spend
+	// budget in cents, and monthlySpend accumulates the spend booked per
+	// (account, currency, UTC month). A posting that would take the
+	// month's cumulative spend above the budget is rejected with
+	// ErrBudgetExceeded (see budget.go). Opt-in per account and
+	// currency; structural config, like dailyLimits — setting or
+	// clearing a budget does not bump the journal version.
+	budgets      map[budgetKey]int64
+	monthlySpend map[monthlySpendKey]int64
 	// balanceWatches maps (account, currency) to the account's balance
 	// threshold watch (see balance_watch.go): an opt-in low and/or high
 	// alert level in cents. balanceWatchBreached marks the (account,
@@ -536,6 +545,7 @@ type Ledger struct {
 	pruneInterval  time.Duration // min gap between lazy key sweeps
 	lastKeyPrune   time.Time
 	lastDailyPrune time.Time // last run of the daily-outflow bucket sweep
+	lastBudgetPrune time.Time // last run of the monthly-spend bucket sweep
 	// anchor holds the external audit-chain anchoring state (LG-44):
 	// the configured Ed25519 key and the loaded checkpoints. See
 	// anchor.go for the lock-order contract.
@@ -630,6 +640,8 @@ func New(opts ...Option) *Ledger {
 		deniedPrefixes:       make(map[string]DenylistEntry),
 		dailyLimits:          make(map[dailyLimitKey]int64),
 		dailyOutflow:         make(map[dailyLimitKey]int64),
+		budgets:              make(map[budgetKey]int64),
+		monthlySpend:         make(map[monthlySpendKey]int64),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch),
 		balanceWatchBreached: make(map[balanceWatchKey]watchBreachState),
 		settlementChannels:   make(map[AccountID]string),
@@ -772,14 +784,19 @@ func validateJournalEntry(e *JournalEntry) error {
 // SetDailyLimit) rejects any post that would take the UTC day's
 // cumulative outflow above the limit with ErrDailyLimitExceeded; the check
 // runs last among the account risk controls, so it only ever evaluates postings
-// that book something new. A journal entry whose timestamp falls in a closed
+// that book something new. A credit (payer) account with a configured
+// monthly spend budget (see SetAccountBudget) rejects any post that would
+// take the UTC calendar month's cumulative spend above the budget with
+// ErrBudgetExceeded; it runs after the daily-limit check — the two are
+// orthogonal (rolling outflow window vs accounting-period spend control)
+// and a posting must clear both. A journal entry whose timestamp falls in a closed
 // accounting period (see period.go) is rejected with ErrPeriodClosed; the
 // period gate runs last overall, after the idempotency replay check, so
 // replaying a key posted before the period closed returns the original
 // entry. Rejected posts —
 // validation failures, frozen rejections, chart-direction rejections,
 // overdraft rejections,
-// daily-limit rejections, and closed-period rejections alike —
+// daily-limit rejections, budget rejections, and closed-period rejections alike —
 // record nothing: no journal row, no chain link, no version bump.
 //
 // The commit is atomic: while holding the ledger's single mutex, Post
@@ -796,8 +813,8 @@ func validateJournalEntry(e *JournalEntry) error {
 // above, each matching enabled rule appends its legs as full journal
 // entries (own chain links, deterministic IDs "<entry ID>/rule/<rule
 // ID>/<i>"), each re-checked through the frozen/overdraft/daily-limit/
-// period gates. The commit stays atomic across principal and derived legs,
-// and the audit event lists every committed entry ID.
+// monthly-budget/period gates. The commit stays atomic across principal
+// and derived legs, and the audit event lists every committed entry ID.
 func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -897,6 +914,17 @@ func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry
 		return JournalEntry{}, false, ErrDailyLimitExceeded
 	}
 
+	// Monthly spend budgets are the last of the account risk controls,
+	// after the daily outflow limit: a replay books nothing new, so it
+	// returned above; anything reaching this check books new spend. The
+	// limited side is the credit (payer) account — the account funds
+	// leave — matching the daily limit. The two are orthogonal (LG-26 is
+	// a rolling outflow window, LG-81 an accounting-period spend
+	// control) and accumulate independently: a posting must clear both.
+	if l.budgetRejectedLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt) {
+		return JournalEntry{}, false, ErrBudgetExceeded
+	}
+
 	// The period gate is the last risk control overall, and it is keyed
 	// on the entry's own timestamp — the last thing finalized above: a
 	// backdated entry landing in a closed accounting period is rejected
@@ -932,6 +960,7 @@ func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry
 
 	l.maybePruneIdempotencyKeys(time.Now())
 	l.maybePruneDailyOutflowLocked(time.Now())
+	l.maybePruneMonthlySpendLocked(time.Now())
 	versionBefore := l.version
 	committed := make([]JournalEntry, 0, 1+len(derived))
 	committed = append(committed, e)
@@ -944,6 +973,7 @@ func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry
 	for _, c := range committed {
 		l.commitEntryLocked(c)
 		l.addDailyOutflowLocked(c.CreditAccount, c.Currency, c.AmountCents, c.CreatedAt)
+		l.addMonthlySpendLocked(c.CreditAccount, c.Currency, c.AmountCents, c.CreatedAt)
 	}
 	l.ruleLegsCommitted.Add(uint64(len(derived)))
 	// Low-balance alert evaluation: strictly after the atomic commit
@@ -1168,6 +1198,13 @@ type TrialBalance struct {
 	// for the default currency; per-currency limits live in the
 	// reconciliation report and on Ledger.DailyLimit.
 	DailyLimitCents int64 `json:"daily_limit_cents"`
+	// BudgetCents reports the account's configured monthly spend budget
+	// in the default currency (see SetAccountBudget): postings that
+	// would take the UTC calendar month's cumulative spend above this
+	// number are rejected with ErrBudgetExceeded. 0 means no budget is
+	// configured for the default currency; per-currency budgets live in
+	// the reconciliation report and on Ledger.AccountBudget.
+	BudgetCents int64 `json:"budget_cents"`
 	// LowBalanceThresholdCents reports the account's configured
 	// low-balance alert level in the default currency (see
 	// SetLowBalanceThreshold): the first posting that takes the balance
@@ -1218,6 +1255,7 @@ func (l *Ledger) trialBalanceLocked(a AccountID) TrialBalance {
 		AccountType:              l.chart[a],
 		OverdraftProtected:       l.noOverdraft[a],
 		DailyLimitCents:          l.dailyLimits[dailyLimitKey{account: a, currency: DefaultCurrency}],
+		BudgetCents:              l.budgets[budgetKey{account: a, currency: DefaultCurrency}],
 		LowBalanceThresholdCents: l.balanceWatchLowCentsLocked(a, DefaultCurrency),
 		HighBalanceThresholdCents: l.balanceWatchHighCentsLocked(a, DefaultCurrency),
 	}

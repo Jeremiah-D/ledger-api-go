@@ -52,7 +52,11 @@ import (
 //   - The daily outflow budget is reserved at review creation: the
 //     payer's total outflow (amount + fee) was limit-checked when the
 //     review was created, and the budget is consumed then — the freeze
-//     is atomic, covering funds and limit alike.
+//     is atomic, covering funds and limit alike. The monthly spend
+//     budget (LG-81) is reserved the same way: the transfer was
+//     budget-checked to reach this gate, so its outflow counts in the
+//     month's used figure from creation, and approval settles against
+//     the already-reserved budget.
 //   - For overdraft-protected payers the freeze additionally requires
 //     available coverage (balance minus active holds and pending
 //     reviews); otherwise ErrInsufficientAvailableFunds. Unprotected
@@ -407,6 +411,15 @@ func (l *Ledger) maybeReviewTransferLocked(t Transfer, entries []JournalEntry, f
 	// atomic — funds and limit budget lock together. Approval later
 	// settles against the already-reserved budget.
 	l.addDailyOutflowLocked(t.From, t.Currency, totalOutflow, entries[0].CreatedAt)
+	// The monthly spend budget is reserved at creation too, like the
+	// daily outflow budget above: the transfer passed the budget check
+	// to reach this gate, and the freeze is atomic — funds, daily
+	// limit, and monthly budget lock together. The reserved spend counts
+	// in the month's used figure from creation; approval later settles
+	// against the already-reserved budget without consuming it twice.
+	// Rejected or expired reviews keep their reservation, exactly like
+	// the daily outflow budget.
+	l.addMonthlySpendLocked(t.From, t.Currency, totalOutflow, entries[0].CreatedAt)
 	if t.IdempotencyKey != "" {
 		ids := make([]string, 0, len(entries))
 		for _, e := range entries {

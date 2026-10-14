@@ -190,6 +190,13 @@ type snapshotConfigLine struct {
 	// zero, which fail-opens for the remainder of that day — operators
 	// should treat a restore as a risk-control reset event.
 	DailyLimits []DailyLimit `json:"daily_limits,omitempty"`
+	// Budgets carries the monthly spend budgets (see SetAccountBudget);
+	// absent in snapshots written before budgets existed. Like the daily
+	// limits, the accumulated per-month spend counters are deliberately
+	// NOT restored: a restore resets the current month's spend to zero,
+	// which fail-opens for the remainder of the month — operators should
+	// treat a restore as a risk-control reset event.
+	Budgets []AccountBudget `json:"budgets,omitempty"`
 	// Denylist carries the sanctions/denylist rows (see AddDeniedAccount,
 	// AddDeniedPrefix); absent in snapshots written before the denylist
 	// existed. A restore that dropped the list would silently lift
@@ -694,6 +701,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		SplitFeePerChunk:      l.splitFeePerChunk,
 		IdempotencyTTL:       l.idempotencyTTL.String(),
 		DailyLimits:          l.dailyLimitsLocked(),
+		Budgets:              l.budgetsLocked(),
 		Denylist:             l.denylistLocked(),
 		FXRates:              l.fxRatesLocked(),
 		FXAccount:            l.fxAccount,
@@ -1291,7 +1299,7 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 // applySnapshotConfigLocked installs a snapshot's operational config on
 // the ledger: frozen and overdraft-protected accounts, the sub-account
 // hierarchy, the transfer fee policy, the idempotency TTL, daily outflow
-// limits, and the FX rate table. It validates every row before applying
+// limits, monthly spend budgets, and the FX rate table. It validates every row before applying
 // anything: invalid config is an error and leaves the ledger untouched —
 // a restore must never silently drop a risk control or convert at a bad
 // rate. Callers must hold the write lock. For a full restore the ledger
@@ -1320,6 +1328,24 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("negative daily limit for account %q (%s)", dl.Account, dl.Currency)
 		}
 		limits = append(limits, validatedLimit{dailyLimitKey{account: dl.Account, currency: cur}, dl.LimitCents})
+	}
+	type validatedBudget struct {
+		key    budgetKey
+		budget int64
+	}
+	var budgetRows []validatedBudget
+	for _, b := range cfg.Budgets {
+		if b.Account == "" {
+			return bad("monthly budget with empty account")
+		}
+		cur, err := normalizeCurrency(b.Currency)
+		if err != nil {
+			return bad("bad monthly budget currency %q: %v", b.Currency, err)
+		}
+		if b.BudgetCents < 0 {
+			return bad("negative monthly budget for account %q (%s)", b.Account, b.Currency)
+		}
+		budgetRows = append(budgetRows, validatedBudget{budgetKey{account: b.Account, currency: cur}, b.BudgetCents})
 	}
 	var ttl time.Duration
 	ttlSet := false
@@ -1559,6 +1585,13 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	for _, vl := range limits {
 		l.dailyLimits[vl.key] = vl.limit
+	}
+	// Monthly spend budgets restore like the daily outflow limits: the
+	// accumulated per-month spend counters are deliberately not
+	// restored (fail-open for the remainder of the month), only the
+	// configured budgets.
+	for _, vb := range budgetRows {
+		l.budgets[vb.key] = vb.budget
 	}
 	// Sanctions/denylist rows restore like the frozen-account list: a
 	// restore that dropped them would silently lift screening. Rows are
@@ -1928,6 +1961,9 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.dailyLimits, b.dailyLimits) {
+		return false
+	}
+	if !reflect.DeepEqual(a.budgets, b.budgets) {
 		return false
 	}
 	// Balance threshold watches must round-trip; the breach flags are

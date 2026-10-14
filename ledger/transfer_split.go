@@ -300,6 +300,25 @@ func (l *Ledger) checkSplitDailyOutflowLocked(account AccountID, currency string
 	return nil
 }
 
+// checkSplitBudgetLocked simulates the monthly-budget check for a
+// sequence of payer outflows without mutating the buckets: each outflow
+// is checked in order against the running month total — the ledger's
+// committed buckets plus the earlier outflows in the sequence — with the
+// same overflow-safe comparison as budgetRejectedLocked, and the running
+// total saturates like addMonthlySpendLocked. Unlike the daily limit,
+// budgets are per-account (no subtree semantics). Callers must hold l.mu.
+func (l *Ledger) checkSplitBudgetLocked(account AccountID, currency string, outflows []int64, at time.Time) error {
+	extra := make(map[monthlySpendKey]int64, len(outflows))
+	for _, outflow := range outflows {
+		if l.budgetViolatedLocked(account, currency, outflow, at, extra) {
+			return ErrBudgetExceeded
+		}
+		key := monthlySpendKey{account: account, currency: currency, month: utcMonth(at)}
+		extra[key] = satAddInt64(extra[key], outflow)
+	}
+	return nil
+}
+
 // postTransferSplitLocked records a same-currency split transfer: every
 // check runs before the first mutation, so a rejection records nothing.
 // Callers must hold the write lock.
@@ -395,6 +414,9 @@ func (l *Ledger) postTransferSplitLocked(t Transfer, chunkSize int64, now time.T
 		outflows = append(outflows, fee.total)
 	}
 	if err := l.checkSplitDailyOutflowLocked(t.From, t.Currency, outflows, t.CreatedAt); err != nil {
+		return SplitTransferReceipt{}, err
+	}
+	if err := l.checkSplitBudgetLocked(t.From, t.Currency, outflows, t.CreatedAt); err != nil {
 		return SplitTransferReceipt{}, err
 	}
 
@@ -622,6 +644,9 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 	if err := l.checkSplitDailyOutflowLocked(t.From, t.Currency, outflows, t.CreatedAt); err != nil {
 		return SplitTransferReceipt{}, err
 	}
+	if err := l.checkSplitBudgetLocked(t.From, t.Currency, outflows, t.CreatedAt); err != nil {
+		return SplitTransferReceipt{}, err
+	}
 
 	if err := l.periodRejectedLocked(t.CreatedAt); err != nil {
 		return SplitTransferReceipt{}, err
@@ -756,6 +781,7 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 func (l *Ledger) commitSplitLocked(t Transfer, entries []JournalEntry, outflows []int64, feeTotal int64, now time.Time, auditDetails map[string]any, outboxExtra map[string]any) {
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
+	l.maybePruneMonthlySpendLocked(now)
 	versionBefore := l.version
 	// Pre-commit balance snapshot for the opt-in balance-change hook
 	// (see balance_hook.go): nil when no hook is registered.
@@ -768,6 +794,7 @@ func (l *Ledger) commitSplitLocked(t Transfer, entries []JournalEntry, outflows 
 	// the transfer's (source) currency — mirroring the cumulative check.
 	for _, outflow := range outflows {
 		l.addDailyOutflowLocked(t.From, t.Currency, outflow, t.CreatedAt)
+		l.addMonthlySpendLocked(t.From, t.Currency, outflow, t.CreatedAt)
 	}
 	if t.IdempotencyKey != "" {
 		ids := make([]string, 0, len(entries))

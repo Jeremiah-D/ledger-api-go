@@ -607,6 +607,15 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 		return TransferReceipt{}, ErrDailyLimitExceeded
 	}
 
+	// Monthly spend budgets guard the same total outflow (amount + fee)
+	// per UTC calendar month: the payer's cumulative spend for the month
+	// may not exceed the configured budget. Runs right after the daily
+	// outflow limit — the two controls are orthogonal (rolling outflow
+	// window vs accounting-period spend) and both are checked.
+	if l.budgetRejectedLocked(t.From, t.Currency, totalOutflow, t.CreatedAt) {
+		return TransferReceipt{}, ErrBudgetExceeded
+	}
+
 	// The period gate is keyed on the transfer's effective post time: a
 	// backdated transfer landing in a closed accounting period is rejected
 	// with ErrPeriodClosed. It runs after the idempotency replay check
@@ -679,6 +688,7 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 	// returned before the first mutation, so there is nothing to roll back.
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
+	l.maybePruneMonthlySpendLocked(now)
 	versionBefore := l.version
 	// Pre-commit balance snapshot for the opt-in balance-change hook
 	// (see balance_hook.go): nil when no hook is registered.
@@ -688,6 +698,7 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 		l.commitEntryLocked(e)
 	}
 	l.addDailyOutflowLocked(t.From, t.Currency, totalOutflow, principal.CreatedAt)
+	l.addMonthlySpendLocked(t.From, t.Currency, totalOutflow, principal.CreatedAt)
 	if t.IdempotencyKey != "" {
 		ids := make([]string, 0, len(entries))
 		for _, e := range entries {
