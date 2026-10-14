@@ -813,8 +813,25 @@ func journalEntriesEqual(a, b JournalEntry) bool {
 		a.BatchID == b.BatchID &&
 		a.Memo == b.Memo &&
 		a.ExternalRef == b.ExternalRef &&
+		attachmentsEqual(a.Attachments, b.Attachments) &&
 		a.PendingReview == b.PendingReview &&
 		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano()
+}
+
+// attachmentsEqual compares two attachment lists element-wise: a nil list
+// and an empty list are equal (JSON round-trips preserve neither
+// distinction — omitempty drops both), so snapshot fidelity checks must
+// not distinguish them either.
+func attachmentsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ImportSnapshot reads a disaster-recovery snapshot produced by

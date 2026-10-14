@@ -346,6 +346,9 @@ func (l *Ledger) reviewHeldLocked(a AccountID, currency string, now time.Time) i
 // exports. Callers must hold the write lock.
 func (l *Ledger) commitReviewEntryLocked(e JournalEntry) {
 	e.PendingReview = true
+	// Like commitEntryLocked, the frozen row must carry a private copy
+	// of the attachments slice (see isolateAttachments).
+	e = isolateAttachments(e)
 	l.entries[e.ID] = e
 	if e.IdempotencyKey != "" {
 		l.byKey[e.IdempotencyKey] = e
@@ -641,7 +644,11 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 	hookOld := l.balanceSnapshotLocked(hookTouched)
 	for i := range r.Entries {
 		r.Entries[i].PendingReview = false
-		e := r.Entries[i]
+		// The settled row must carry a private copy of the attachments
+		// slice, like commitEntryLocked (see isolateAttachments): the
+		// review record's entries still alias the submitter's array.
+		e := isolateAttachments(r.Entries[i])
+		r.Entries[i] = e
 		l.entries[e.ID] = e
 		if e.IdempotencyKey != "" {
 			// Refresh the idempotency index copy: it still carries the

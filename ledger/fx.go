@@ -620,6 +620,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 			Currency:      t.Currency,
 			Memo:          t.Memo,
 			ExternalRef:   t.ExternalRef,
+			Attachments:   t.Attachments,
 			CreatedAt:     t.CreatedAt,
 		},
 	}

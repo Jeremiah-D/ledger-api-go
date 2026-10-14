@@ -205,6 +205,7 @@ func (l *Ledger) ReverseEntry(entryID string, idempotencyKey string) (reversal J
 		IdempotencyKey: idempotencyKey,
 		Memo:           reversalMemoFor(entryID),
 		ExternalRef:    inheritedRef,
+		Attachments:    append([]string(nil), orig.Attachments...),
 		CreatedAt:      now,
 	}
 	if err := validateJournalEntry(&reversal); err != nil {

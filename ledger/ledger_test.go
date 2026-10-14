@@ -29,13 +29,13 @@ func TestPostValidEntryUpdatesBalances(t *testing.T) {
 	if dup {
 		t.Fatalf("Post reported duplicate for a first-time entry")
 	}
-	if posted != e {
+	if !journalEntriesEqual(posted, e) {
 		// Post normalizes an empty currency to the default before
 		// committing, so the returned entry is the canonical journaled
 		// form, not a byte copy of the input.
 		want := e
 		want.Currency = DefaultCurrency
-		if posted != want {
+		if !journalEntriesEqual(posted, want) {
 			t.Fatalf("Post returned modified entry: got %+v, want %+v", posted, want)
 		}
 	}
@@ -108,7 +108,7 @@ func TestPostIdempotency(t *testing.T) {
 	if !dup {
 		t.Fatalf("retry Post did not report duplicate")
 	}
-	if second != first {
+	if !journalEntriesEqual(second, first) {
 		t.Fatalf("retry Post returned %+v, want original %+v", second, first)
 	}
 
@@ -128,7 +128,7 @@ func TestPostIdempotency(t *testing.T) {
 	if !ok {
 		t.Fatalf("GetByIdempotencyKey did not find posted key")
 	}
-	if stored != first {
+	if !journalEntriesEqual(stored, first) {
 		t.Fatalf("GetByIdempotencyKey returned %+v, want %+v", stored, first)
 	}
 	if _, ok := l.GetByIdempotencyKey("never-posted"); ok {

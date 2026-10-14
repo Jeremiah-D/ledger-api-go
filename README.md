@@ -70,6 +70,17 @@ curl -s -X POST localhost:8080/entries \
   when overlong or duplicated. Independent of the idempotency-key
   namespace: an idempotent replay returns the original entry without
   consulting the reference index.
+- `attachments`: optional evidence references for the entry (a receipt
+  scan, an invoice PDF, a compliance document) — at most 8 `https` URIs,
+  each at most 512 UTF-8 characters. They are journaled with the entry,
+  covered by the audit-chain hash (rewriting a journaled attachment breaks
+  the chain exactly like rewriting an amount), carried through snapshots
+  and idempotent replays, and echoed by `GET /entries`. `POST /transfers`
+  stamps them on the principal entry (the fee leg carries none);
+  `POST /entries/{id}/reverse` inherits the original entry's attachments;
+  `POST /holds/{id}/capture` stamps the capture's attachments on the
+  settlement entry. Anything else — more than 8, a non-`https` URI, or an
+  overlong URI — is rejected with `400` before anything is recorded.
 
 ### `POST /entries/batch`
 

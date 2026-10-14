@@ -322,6 +322,15 @@ func TestBalanceHistoryRecorderTicks(t *testing.T) {
 	if r.Ticks() < 2 {
 		t.Fatalf("Ticks() = %d, want >= 2", r.Ticks())
 	}
+	// Stop the recorder before asserting: no more ticks can fire, so
+	// tickPoints, tickErrs, and the on-disk rows are stable and mutually
+	// consistent (every tick that wrote a row also ran onTick before the
+	// recorder goroutine exited). Stop must run while mu is free — a tick
+	// in flight blocks on mu inside onTick, and Stop waits for the
+	// recorder goroutine to exit, so taking mu first would deadlock the
+	// suite.
+	r.Stop()
+
 	mu.Lock()
 	defer mu.Unlock()
 	for i, err := range tickErrs {
@@ -349,7 +358,6 @@ func TestBalanceHistoryRecorderTicks(t *testing.T) {
 	}
 
 	// Stop is idempotent and the goroutine exits on cancel.
-	r.Stop()
 	r.Stop()
 	cancel()
 }

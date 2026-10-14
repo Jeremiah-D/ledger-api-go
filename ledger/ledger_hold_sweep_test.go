@@ -57,9 +57,12 @@ func TestHoldSweeperExpiresLapsedHolds(t *testing.T) {
 	}
 	defer sw.Stop()
 
+	// Wait for both the status flip and the sweeper's counter: the sweep
+	// marks the hold expired before incrementing ExpiredTotal, so
+	// observing only the status can race the counter update.
 	waitFor(t, 5*time.Second, "sweeper to expire the lapsed hold", func() bool {
 		h, ok := l.GetHold("old")
-		return ok && h.Status == HoldStatusExpired
+		return ok && h.Status == HoldStatusExpired && sw.ExpiredTotal() == 1
 	})
 
 	if h, _ := l.GetHold("fresh"); h.Status != HoldStatusActive {

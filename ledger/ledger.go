@@ -14,6 +14,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -70,6 +71,18 @@ type JournalEntry struct {
 	// the idempotency-key namespace: an idempotent replay returns the
 	// original entry without consulting the reference index.
 	ExternalRef string `json:"external_ref,omitempty"`
+	// Attachments are caller-supplied evidence references for the entry
+	// (a receipt scan, an invoice PDF, a compliance document): at most
+	// maxAttachments https URIs, each at most maxAttachmentRunes UTF-8
+	// characters (see ErrInvalidAttachment). They are journal metadata
+	// like the memo: the audit-chain hash covers them, snapshots carry
+	// them, GET /entries echoes them, and idempotent replays return them
+	// with the original entry. Transfers stamp them on the principal
+	// entry (the fee leg carries none), reversals inherit the original
+	// entry's attachments, and captures stamp the capture's attachments
+	// on the settlement entry. Holds are off-journal reservations and
+	// carry no attachments.
+	Attachments []string `json:"attachments,omitempty"`
 	// PendingReview marks a journal row frozen by the large-transfer
 	// dual-control review (see review.go): the row is booked but not
 	// effective — balances, debit/credit totals, the ledger version,
@@ -105,6 +118,11 @@ var (
 	// the idempotency-key namespace; an idempotent replay of the
 	// original entry does not consult it.
 	ErrDuplicateExternalRef = errors.New("ledger: external_ref already used by another journal entry")
+	// ErrInvalidAttachment is returned when a journal entry's
+	// attachments violate the attachment contract: more than
+	// maxAttachments entries, a non-https URI, or a URI longer than
+	// maxAttachmentRunes UTF-8 characters.
+	ErrInvalidAttachment = errors.New("ledger: attachments must be at most 8 https URIs of at most 512 characters each")
 )
 
 // maxMemoRunes caps a journal entry's memo at 255 UTF-8 characters. Long
@@ -135,6 +153,39 @@ const maxExternalRefRunes = 64
 func checkExternalRefLength(ref string) error {
 	if utf8.RuneCountInString(ref) > maxExternalRefRunes {
 		return ErrExternalRefTooLong
+	}
+	return nil
+}
+
+// maxAttachments caps a journal entry's evidence attachments at 8 URIs:
+// enough for a receipt scan plus supporting documents, few enough to
+// keep journal rows bounded.
+const maxAttachments = 8
+
+// maxAttachmentRunes caps one attachment URI at 512 UTF-8 characters:
+// enough for a signed object-storage URL with query parameters, short
+// enough to keep the journal and the audit chain bounded.
+const maxAttachmentRunes = 512
+
+// checkAttachments enforces the attachment contract: at most
+// maxAttachments entries, each an https URI of at most
+// maxAttachmentRunes UTF-8 characters. The https-only rule keeps
+// evidence references tamper-resistant in transit; a URI that does not
+// parse, has no host, or uses another scheme is rejected. Callers:
+// validateJournalEntry (Post and PostBatch entries), PostTransfer
+// (transfer-level attachments), and Capture (capture-level attachments).
+func checkAttachments(atts []string) error {
+	if len(atts) > maxAttachments {
+		return ErrInvalidAttachment
+	}
+	for _, a := range atts {
+		if utf8.RuneCountInString(a) > maxAttachmentRunes {
+			return ErrInvalidAttachment
+		}
+		u, err := url.Parse(a)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return ErrInvalidAttachment
+		}
 	}
 	return nil
 }
@@ -747,6 +798,13 @@ func validateJournalEntry(e *JournalEntry) error {
 	// reference longer than maxExternalRefRunes UTF-8 characters is
 	// rejected before anything is recorded.
 	if err := checkExternalRefLength(e.ExternalRef); err != nil {
+		return err
+	}
+	// Attachments are field validation like the memo and the external
+	// reference: more than maxAttachments entries, a non-https URI, or
+	// a URI longer than maxAttachmentRunes characters is rejected before
+	// anything is recorded.
+	if err := checkAttachments(e.Attachments); err != nil {
 		return err
 	}
 	// Currency is field validation, like the legs and the amount: an

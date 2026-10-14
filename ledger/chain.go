@@ -33,6 +33,10 @@ type chainLink struct {
 // rewriting an amount (see LG-38). The external reference is covered
 // like the memo (see LG-57): rewriting a journaled correlation
 // identifier breaks the chain exactly like rewriting an amount. The
+// attachments are covered like the memo (see LG-83): rewriting a
+// journaled evidence reference breaks the chain exactly like rewriting
+// an amount — the attachment count is hashed first so an empty list and
+// a missing list hash identically, then each URI length-prefixed. The
 // pending-review marker is covered
 // as a single fixed byte: flipping a frozen row to effective (or vice
 // versa) outside the approve path breaks the chain exactly like rewriting
@@ -60,6 +64,10 @@ func hashChainLink(prevHash [32]byte, e JournalEntry) [32]byte {
 	writeString(e.IdempotencyKey)
 	writeString(e.Memo)
 	writeString(e.ExternalRef)
+	writeInt(int64(len(e.Attachments)))
+	for _, a := range e.Attachments {
+		writeString(a)
+	}
 	if e.PendingReview {
 		h.Write([]byte{1})
 	} else {

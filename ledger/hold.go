@@ -145,6 +145,10 @@ type Capture struct {
 	// ErrExternalRefTooLong); a reference already journaled is rejected
 	// with ErrDuplicateExternalRef.
 	ExternalRef string    `json:"external_ref,omitempty"`
+	// Attachments are caller-supplied evidence references for the
+	// capture (see JournalEntry.Attachments): they are stamped on the
+	// settlement journal entry, like the external reference.
+	Attachments []string  `json:"attachments,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -498,6 +502,13 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	if err := checkExternalRefLength(c.ExternalRef); err != nil {
 		return CaptureReceipt{}, err
 	}
+	// Attachments are field validation, like the external reference:
+	// more than maxAttachments entries, a non-https URI, or a URI
+	// longer than maxAttachmentRunes characters is rejected before
+	// anything is recorded.
+	if err := checkAttachments(c.Attachments); err != nil {
+		return CaptureReceipt{}, err
+	}
 
 	// The hold is looked up before the idempotency replay check: the
 	// sanctions/denylist screen below needs the hold's account (the
@@ -564,6 +575,7 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		AmountCents:   c.AmountCents,
 		Currency:      h.Currency,
 		ExternalRef:   c.ExternalRef,
+		Attachments:   c.Attachments,
 		CreatedAt:     c.CreatedAt,
 	}
 	if entry.CreatedAt.IsZero() {

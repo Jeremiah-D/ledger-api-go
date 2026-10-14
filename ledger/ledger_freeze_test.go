@@ -129,7 +129,7 @@ func TestIdempotencyReplaySurvivesFreeze(t *testing.T) {
 	if !dup {
 		t.Fatalf("replay after freeze: dup = false, want true")
 	}
-	if replayed != first {
+	if !journalEntriesEqual(replayed, first) {
 		t.Fatalf("replay after freeze returned modified entry")
 	}
 	// Still exactly one booking.

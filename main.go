@@ -64,6 +64,7 @@ type createEntryRequest struct {
 	IdempotencyKey string           `json:"idempotency_key"`
 	Memo           string           `json:"memo"`
 	ExternalRef    string           `json:"external_ref"`
+	Attachments    []string         `json:"attachments"`
 }
 
 func newID() string {
@@ -131,6 +132,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
 		ExternalRef:    req.ExternalRef,
+		Attachments:    req.Attachments,
 		CreatedAt:      time.Now(),
 	}
 
@@ -237,6 +239,7 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
 		ExternalRef:    req.ExternalRef,
+		Attachments:    req.Attachments,
 		CreatedAt:      time.Now(),
 	}
 
@@ -307,6 +310,7 @@ type createTransferRequest struct {
 	IdempotencyKey string           `json:"idempotency_key"`
 	Memo           string           `json:"memo"`
 	ExternalRef    string           `json:"external_ref"`
+	Attachments    []string         `json:"attachments"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
@@ -384,6 +388,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
 		ExternalRef:    req.ExternalRef,
+		Attachments:    req.Attachments,
 		CreatedAt:      time.Now(),
 	}
 	if req.ToCurrency != "" {
@@ -673,6 +678,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: req.IdempotencyKey,
 		Memo:           req.Memo,
 		ExternalRef:    req.ExternalRef,
+		Attachments:    req.Attachments,
 		CreatedAt:      time.Now(),
 	}
 
@@ -745,6 +751,7 @@ type batchEntryRequest struct {
 	IdempotencyKey string           `json:"idempotency_key"`
 	Memo           string           `json:"memo"`
 	ExternalRef    string           `json:"external_ref"`
+	Attachments    []string         `json:"attachments"`
 }
 
 type createBatchRequest struct {
@@ -816,6 +823,7 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			IdempotencyKey: re.IdempotencyKey,
 			Memo:           re.Memo,
 			ExternalRef:    re.ExternalRef,
+			Attachments:    re.Attachments,
 			CreatedAt:      time.Now(),
 		})
 	}
@@ -1519,6 +1527,7 @@ type captureHoldRequest struct {
 	AmountCents    int64            `json:"amount_cents"`
 	IdempotencyKey string           `json:"idempotency_key"`
 	ExternalRef    string           `json:"external_ref"`
+	Attachments    []string         `json:"attachments"`
 }
 
 // handleCaptureHold implements POST /holds/{id}/capture, the settlement
@@ -1560,6 +1569,7 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 		AmountCents:    req.AmountCents,
 		IdempotencyKey: req.IdempotencyKey,
 		ExternalRef:    req.ExternalRef,
+		Attachments:    req.Attachments,
 		CreatedAt:      time.Now(),
 	})
 	if err != nil {

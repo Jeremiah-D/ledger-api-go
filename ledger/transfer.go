@@ -117,6 +117,12 @@ type Transfer struct {
 	// UTF-8 characters (see ErrExternalRefTooLong); a reference that
 	// is already journaled is rejected with ErrDuplicateExternalRef.
 	ExternalRef string `json:"external_ref,omitempty"`
+	// Attachments are caller-supplied evidence references for the
+	// transfer (see JournalEntry.Attachments): they are stamped on the
+	// principal journal entry (the fee leg carries none), mirroring the
+	// memo. On cross-currency transfers they ride the source-currency
+	// leg (the /fx leg), mirroring the memo.
+	Attachments []string `json:"attachments,omitempty"`
 }
 
 // TransferReceipt reports what PostTransfer committed.
@@ -461,6 +467,13 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 	if err := checkExternalRefLength(t.ExternalRef); err != nil {
 		return t, "", err
 	}
+	// Attachments are field validation, like the memo: more than
+	// maxAttachments entries, a non-https URI, or a URI longer than
+	// maxAttachmentRunes characters is rejected before anything is
+	// recorded, on both paths.
+	if err := checkAttachments(t.Attachments); err != nil {
+		return t, "", err
+	}
 	return t, toCurrency, nil
 }
 
@@ -639,6 +652,7 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 		IdempotencyKey: t.IdempotencyKey,
 		Memo:           t.Memo,
 		ExternalRef:    t.ExternalRef,
+		Attachments:    t.Attachments,
 		CreatedAt:      t.CreatedAt,
 	}
 	if principal.CreatedAt.IsZero() {
@@ -825,13 +839,33 @@ func feeCentsOf(entries []JournalEntry) int64 {
 	return total
 }
 
+// isolateAttachments returns a copy of e whose attachments slice has a
+// private backing array. Journal rows stored in the ledger must never
+// alias caller-owned slices: see commitEntryLocked and
+// commitReviewEntryLocked.
+func isolateAttachments(e JournalEntry) JournalEntry {
+	if e.Attachments != nil {
+		atts := make([]string, len(e.Attachments))
+		copy(atts, e.Attachments)
+		e.Attachments = atts
+	}
+	return e
+}
+
 // commitEntryLocked applies every effect of one validated journal entry —
-// the journal row, the idempotency index, the per-account index, both net
-// balances, both debit/credit totals, the audit-chain link, and the version
-// bump. Callers must hold the write lock and must have run all validation
+// the journal row, the idempotency index, both net balances, both
+// debit/credit totals, the audit-chain link, and the version bump.
+// Callers must hold the write lock and must have run all validation
 // and risk checks first; after this call returns the entry is fully
 // committed — there is no partial state to roll back.
+//
+// The journaled row carries a private copy of the attachments slice
+// (see isolateAttachments): the stored row must never alias a
+// caller-owned backing array, or a caller mutating the entry it got back
+// could rewrite journaled evidence references behind the audit chain's
+// back.
 func (l *Ledger) commitEntryLocked(e JournalEntry) {
+	e = isolateAttachments(e)
 	l.entries[e.ID] = e
 	if e.IdempotencyKey != "" {
 		l.byKey[e.IdempotencyKey] = e
