@@ -87,6 +87,19 @@ var (
 	// malformed rate: bad currency codes, equal from/to, or a
 	// non-positive numerator or denominator.
 	ErrInvalidFXRate = errors.New("ledger: invalid FX rate")
+	// ErrFXSlippageExceeded is returned by a cross-currency transfer
+	// that opted into a slippage cap (see Transfer.MaxSlippageBps, LG-86)
+	// when the effective rate moved beyond the cap between request
+	// admission and commit. It is a 422-class semantic rejection: the
+	// request was well-formed and the admission quote was live, but the
+	// price the transfer would settle at drifted past the caller's
+	// tolerance. The rejection records nothing — no journal rows, no
+	// chain links, no version bump — exactly like ErrFXRateMissing.
+	ErrFXSlippageExceeded = errors.New("ledger: FX rate moved beyond the transfer's max slippage since admission")
+	// ErrInvalidMaxSlippage is returned at field validation when
+	// Transfer.MaxSlippageBps is negative. It is a 400-class error: the
+	// caller can fix it by passing a non-negative cap (or omitting it).
+	ErrInvalidMaxSlippage = errors.New("ledger: max_slippage_bps must not be negative")
 )
 
 // fxPair is the directional lookup key of the rate table: (from, to) and
@@ -94,6 +107,190 @@ var (
 type fxPair struct {
 	from string
 	to   string
+}
+
+// effectiveFXRate is the full price of one directional FX pair at one
+// instant: the market-table rate plus any active LG-69 manual override.
+type effectiveFXRate struct {
+	// Rate is the market-table entry, kept for provenance disclosure
+	// (the market price the override was measured against).
+	Rate ExchangeRate
+	// Num/Den is the price conversions actually settle at: the override
+	// price while an override is active, the market rate otherwise.
+	Num, Den int64
+	// EffectiveVersion and ExpiresAt describe the price above: the
+	// override's while active, the market rate's otherwise.
+	EffectiveVersion uint64
+	ExpiresAt        time.Time
+	// Overridden reports whether the price is an active LG-69 manual
+	// override; Override is that override (a copy).
+	Overridden bool
+	Override   RateOverride
+}
+
+// effectiveFXRateLocked resolves the full effective rate for pair at
+// now: the market rate from the rate table, priced through any active
+// LG-69 manual override (see fx_override.go). A pair with no configured
+// rate reports ErrFXRateMissing; a rate past its expiry reports
+// ErrFXRateExpired — the expiry check runs against now, like the
+// transfer gate, and the override's lazy expiry predicate works the
+// same way. Callers must hold l.mu; the read lock suffices (pure read,
+// no mutation). Admission (admitFXRateQuote) and commit
+// (postTransferFXLocked, the split FX chunk path) share this body: one
+// definition of the effective price, zero logic fork.
+func (l *Ledger) effectiveFXRateLocked(pair fxPair, now time.Time) (effectiveFXRate, error) {
+	rate, ok := l.fxRates[pair]
+	if !ok {
+		return effectiveFXRate{}, ErrFXRateMissing
+	}
+	if !rate.ExpiresAt.IsZero() && !now.Before(rate.ExpiresAt) {
+		return effectiveFXRate{}, ErrFXRateExpired
+	}
+	eff := effectiveFXRate{
+		Rate:             rate,
+		Num:              rate.Num,
+		Den:              rate.Den,
+		EffectiveVersion: rate.EffectiveVersion,
+		ExpiresAt:        rate.ExpiresAt,
+	}
+	if override, overridden := l.activeRateOverrideLocked(pair, now); overridden {
+		eff.Num, eff.Den = override.Num, override.Den
+		eff.EffectiveVersion = override.EffectiveVersion
+		eff.ExpiresAt = override.ExpiresAt
+		eff.Overridden = true
+		eff.Override = override
+	}
+	return eff, nil
+}
+
+// FXRateQuote is a rate quote locked in at request admission (LG-86).
+// The zero quote means "no quote": the transfer is not cross-currency,
+// its currency fields are invalid (validation rejects it later), or the
+// pair had no live rate at admission — missing or expired. A transfer
+// posted with a zero quote converts at the commit-time rate, exactly as
+// before: the no-admission paths (PostTransferSplit's no-split delegate
+// and chunk path, which hold the write lock from entry, and therefore
+// have no admission window) keep commit-time semantics and carry no
+// slippage gate. Never invent a quote for a path that did not admit
+// one: the quote must be measured, never synthesized.
+type FXRateQuote struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	// Num/Den is the full effective price at admission: the market rate
+	// resolved through any active LG-69 manual override, exactly what
+	// effectiveFXRateLocked returned — admission and commit share one
+	// definition of the effective price.
+	Num int64 `json:"num"`
+	Den int64 `json:"den"`
+	// EffectiveVersion is the ledger version at which the admitted
+	// price took effect (the override's while overridden, like
+	// ExchangeRate.EffectiveVersion).
+	EffectiveVersion uint64 `json:"effective_version"`
+	// ExpiresAt is the admitted price's expiry (the override's while
+	// overridden); the zero time means the price never expires.
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	// AdmittedAt is the wall-clock time the quote was taken.
+	AdmittedAt time.Time `json:"admitted_at"`
+	// OverrideApplied reports whether the admitted price was an active
+	// LG-69 override; OverrideApprovedBy and MarketNum/MarketDen carry
+	// its provenance (the checker, and the market rate it priced
+	// against at admission).
+	OverrideApplied    bool   `json:"override_applied,omitempty"`
+	OverrideApprovedBy string `json:"override_approved_by,omitempty"`
+	// OverrideProposedBy and OverrideReason carry the admitted
+	// override's full provenance: the fx_rate_overridden audit event
+	// binds every overridden conversion to its proposer and reason,
+	// and the admission quote must preserve that binding — the
+	// commit-time table may hold a different override by commit time,
+	// so the commit-time override's provenance must never be mixed
+	// into a conversion that settled at the admitted price.
+	OverrideProposedBy string `json:"override_proposed_by,omitempty"`
+	OverrideReason     string `json:"override_reason,omitempty"`
+	MarketNum          int64  `json:"market_rate_num,omitempty"`
+	MarketDen          int64  `json:"market_rate_den,omitempty"`
+	// RateSnapshotVersion pins the quote to one versioned copy of the
+	// rate table (see fx_snapshot.go), like FXConversion.
+	RateSnapshotVersion uint64 `json:"rate_snapshot_version,omitempty"`
+}
+
+// admitFXRateQuote snapshots the effective FX rate for t at request
+// admission: it runs before the write lock is taken, so the price a
+// transfer settles at is the price quoted when the request arrived —
+// not the live rate at commit time. The rate table moves under the
+// write lock (SetFXRate), so the admission→commit window is real: the
+// commit re-resolves the live rate, measures the drift (see
+// fxSlippageBps), gates it against the caller's opt-in cap, and
+// discloses both prices.
+//
+// The caller must not hold l.mu: the rate table is read under the read
+// lock. Currency normalization is pure (no lock needed) and mirrors
+// validateTransferFields, so the admitted pair is the pair the commit
+// validates — a transfer whose currencies validate admits the quote
+// for the pair it converts.
+func (l *Ledger) admitFXRateQuote(t Transfer) FXRateQuote {
+	currency, err := normalizeCurrency(t.Currency)
+	if err != nil {
+		return FXRateQuote{}
+	}
+	to := currency
+	if t.ToCurrency != "" {
+		if to, err = normalizeCurrency(t.ToCurrency); err != nil {
+			return FXRateQuote{}
+		}
+	}
+	if to == currency {
+		return FXRateQuote{}
+	}
+	now := time.Now()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	eff, err := l.effectiveFXRateLocked(fxPair{from: currency, to: to}, now)
+	if err != nil {
+		// No live rate at admission: the commit path surfaces
+		// ErrFXRateMissing/ErrFXRateExpired exactly as before.
+		return FXRateQuote{}
+	}
+	q := FXRateQuote{
+		From:                currency,
+		To:                  to,
+		Num:                 eff.Num,
+		Den:                 eff.Den,
+		EffectiveVersion:    eff.EffectiveVersion,
+		ExpiresAt:           eff.ExpiresAt,
+		AdmittedAt:          now,
+		RateSnapshotVersion: l.fxSnapshotVersion,
+	}
+	if eff.Overridden {
+		q.OverrideApplied = true
+		q.OverrideApprovedBy = eff.Override.Approver
+		q.OverrideProposedBy = eff.Override.Proposer
+		q.OverrideReason = eff.Override.Reason
+		q.MarketNum, q.MarketDen = eff.Rate.Num, eff.Rate.Den
+	}
+	return q
+}
+
+// fxSlippageBps measures how far the commit-time effective rate drifted
+// from the admitted quote: floor(|commit − admitted| / admitted * 10000),
+// in basis points. Exact big.Rat math — no float64 touches money —
+// matching the LG-69 override-deviation convention (see
+// fx_override.go). All four inputs are positive ratios (the admitted
+// quote and the commit-time effective rate always are); the result
+// saturates at math.MaxInt64 rather than overflowing on pathological
+// inputs.
+func fxSlippageBps(commitNum, commitDen, admitNum, admitDen int64) int64 {
+	commit := new(big.Rat).SetFrac64(commitNum, commitDen)
+	admitted := new(big.Rat).SetFrac64(admitNum, admitDen)
+	dev := new(big.Rat).Sub(commit, admitted)
+	dev.Abs(dev)
+	dev.Quo(dev, admitted)
+	dev.Mul(dev, big.NewRat(10000, 1))
+	// The deviation is non-negative, so integer division floors.
+	bps := new(big.Int).Quo(dev.Num(), dev.Denom())
+	if !bps.IsInt64() {
+		return math.MaxInt64
+	}
+	return bps.Int64()
 }
 
 // ExchangeRate is one directional conversion rate: converting
@@ -461,13 +658,41 @@ type FXConversion struct {
 	MarketRateNum      int64  `json:"market_rate_num,omitempty"`
 	MarketRateDen      int64  `json:"market_rate_den,omitempty"`
 	OverrideApprovedBy string `json:"override_approved_by,omitempty"`
+	// AdmittedRateNum/AdmittedRateDen is the LG-86 admission quote: the
+	// full effective price locked when the request was admitted, before
+	// the write lock was taken. When the rate moved between admission
+	// and commit, the transfer still settled at this price — RateNum/
+	// RateDen always name the price that converted, and SlippageBps
+	// measures how far the live rate had drifted from this quote. Zero
+	// (omitted) on the no-admission paths, which convert at the
+	// commit-time rate (see FXRateQuote).
+	AdmittedRateNum int64 `json:"admitted_rate_num,omitempty"`
+	AdmittedRateDen int64 `json:"admitted_rate_den,omitempty"`
+	// AdmittedEffectiveVersion is the ledger version at which the
+	// admitted price took effect; AdmittedAt is when the quote was
+	// taken. Both are omitted when no quote was admitted.
+	AdmittedEffectiveVersion uint64    `json:"admitted_effective_version,omitempty"`
+	AdmittedAt               time.Time `json:"admitted_at,omitempty"`
+	// SlippageBps is floor(|commit − admitted| / admitted * 10000): how
+	// far the live effective rate had drifted from the admitted quote
+	// by commit time, in basis points (exact big.Rat math, see
+	// fxSlippageBps). Omitted when no quote was admitted.
+	SlippageBps int64 `json:"slippage_bps,omitempty"`
 }
 
 // postTransferFXLocked records a cross-currency transfer: t.Currency is
 // the source currency, toCurrency the settlement currency
 // (toCurrency != t.Currency). Callers must hold the write lock; every
 // check runs before the first mutation, so a rejection records nothing.
-func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Time) (TransferReceipt, error) {
+//
+// quote is the LG-86 admission quote (see FXRateQuote): when it names
+// this transfer's pair, the transfer settles at the admitted price —
+// not the live rate — and the drift between the two is measured,
+// gated against the opt-in slippage cap, and disclosed on the receipt
+// and the audit event. The zero quote means commit-time semantics:
+// the transfer converts at the rate resolved here, with no slippage
+// gate (the no-admission paths, e.g. PostTransferSplit).
+func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Time, quote FXRateQuote) (TransferReceipt, error) {
 	feeCents, feeAccount, feeSplits, tierIndex, rateBps, err := l.resolveFeeLocked(t)
 	if err != nil {
 		return TransferReceipt{}, err
@@ -493,34 +718,68 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		}
 	}
 
-	rate, ok := l.fxRates[fxPair{from: t.Currency, to: toCurrency}]
-	if !ok {
-		return TransferReceipt{}, ErrFXRateMissing
-	}
-	// A rate past its expiry is never applied silently: the transfer is
-	// rejected until the operator installs a fresh rate. The check runs
-	// against the transfer's post time and after the idempotency replay
-	// check above, so replaying a key posted while the rate was live
-	// still returns the original receipt.
-	if !rate.ExpiresAt.IsZero() && !now.Before(rate.ExpiresAt) {
-		return TransferReceipt{}, ErrFXRateExpired
-	}
-	// Manual rate override (LG-69): an approved, unexpired override for
-	// the pair prices the conversion instead of the market rate. The
-	// override cleared maker-checker (proposed by one operator,
-	// approved by a second) and its deviation from the market rate was
-	// within the configured cap at both proposal and approval; its
-	// active window is the approval's TTL, and expiry is lazy by
-	// predicate (see fx_override.go), exactly like rate expiry above.
+	// The commit-time effective rate, re-resolved live: the market rate
+	// from the table priced through any active LG-69 manual override
+	// (see effectiveFXRateLocked — the same body the admission quote
+	// was resolved with). A pair with no configured rate reports
+	// ErrFXRateMissing; a rate past its expiry reports ErrFXRateExpired:
+	// a stale rate is never applied silently, and the check runs against
+	// the transfer's post time, after the idempotency replay check
+	// above, so replaying a key posted while the rate was live still
+	// returns the original receipt.
 	pair := fxPair{from: t.Currency, to: toCurrency}
-	effNum, effDen := rate.Num, rate.Den
-	effVersion := rate.EffectiveVersion
-	effExpiresAt := rate.ExpiresAt
-	override, overridden := l.activeRateOverrideLocked(pair, now)
-	if overridden {
-		effNum, effDen = override.Num, override.Den
-		effVersion = override.EffectiveVersion
-		effExpiresAt = override.ExpiresAt
+	commitEff, err := l.effectiveFXRateLocked(pair, now)
+	if err != nil {
+		return TransferReceipt{}, err
+	}
+	rate := commitEff.Rate // the market-table entry, for provenance disclosure
+	effNum, effDen := commitEff.Num, commitEff.Den
+	effVersion := commitEff.EffectiveVersion
+	effExpiresAt := commitEff.ExpiresAt
+	override := commitEff.Override
+	overridden := commitEff.Overridden
+	// LG-86: settle at the admitted price. The admission quote and the
+	// commit-time rate can differ — the rate table moves under the same
+	// write lock, so a concurrent SetFXRate between admission and this
+	// commit is a real window. The drift is measured in basis points
+	// (exact big.Rat math, see fxSlippageBps) and gated against the
+	// caller's opt-in cap: a breach records nothing, exactly like the
+	// other commit-time rejections. The quote is only honored when it
+	// names this transfer's pair — an admission taken for other
+	// currencies (or a zero quote) means commit-time semantics.
+	var admitted *FXRateQuote
+	var slippageBps int64
+	if quote.From != "" && quote.From == t.Currency && quote.To == toCurrency {
+		slippageBps = fxSlippageBps(commitEff.Num, commitEff.Den, quote.Num, quote.Den)
+		if t.MaxSlippageBps > 0 && slippageBps > t.MaxSlippageBps {
+			return TransferReceipt{}, ErrFXSlippageExceeded
+		}
+		// The rate move after admission changes disclosure, never the
+		// booked legs: the transfer settles at the admitted price.
+		effNum, effDen = quote.Num, quote.Den
+		effVersion = quote.EffectiveVersion
+		effExpiresAt = quote.ExpiresAt
+		overridden = quote.OverrideApplied
+		if overridden {
+			// The admitted price was an override: rebind its
+			// provenance from the quote (the commit-time table may
+			// have moved on since admission). Proposer and reason
+			// ride the quote too: the fx_rate_overridden audit
+			// event binds every overridden conversion to the
+			// override that priced it.
+			override = RateOverride{
+				Num:              quote.Num,
+				Den:              quote.Den,
+				Approver:         quote.OverrideApprovedBy,
+				Proposer:         quote.OverrideProposedBy,
+				Reason:           quote.OverrideReason,
+				EffectiveVersion: quote.EffectiveVersion,
+				ExpiresAt:        quote.ExpiresAt,
+			}
+		} else {
+			override = RateOverride{}
+		}
+		admitted = &quote
 	}
 	fxAccount := t.FXAccount
 	if fxAccount == "" {
@@ -656,6 +915,15 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		// the receipt stays reproducible after the rate changes.
 		RateSnapshotVersion: l.fxSnapshotVersion,
 	}
+	if admitted != nil {
+		// LG-86: disclose the admission quote the transfer settled
+		// at and the drift the commit-time rate had from it.
+		fxConv.AdmittedRateNum = admitted.Num
+		fxConv.AdmittedRateDen = admitted.Den
+		fxConv.AdmittedEffectiveVersion = admitted.EffectiveVersion
+		fxConv.AdmittedAt = admitted.AdmittedAt
+		fxConv.SlippageBps = slippageBps
+	}
 	if overridden {
 		fxConv.OverrideApplied = true
 		fxConv.MarketRateNum = rate.Num
@@ -729,6 +997,29 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		// the converted amount); this event binds them to the rate.
 		"rate_effective_version": rate.EffectiveVersion,
 		"fee_cents":              feeCents,
+	}
+	if admitted != nil {
+		// LG-86: the admission quote the transfer settled at, the live
+		// rate at commit it was measured against, the drift in basis
+		// points, and the caller's cap when one was set — sealed by
+		// the audit log's hash chain with the rest of the conversion's
+		// provenance. The no-admission paths omit these keys and keep
+		// the pre-LG-86 disclosure shape.
+		fxDetails["admitted_rate"] = map[string]any{
+			"num":               admitted.Num,
+			"den":               admitted.Den,
+			"effective_version": admitted.EffectiveVersion,
+			"admitted_at":       admitted.AdmittedAt.UTC().Format(time.RFC3339Nano),
+		}
+		fxDetails["committed_rate"] = map[string]any{
+			"num":               commitEff.Num,
+			"den":               commitEff.Den,
+			"effective_version": commitEff.EffectiveVersion,
+		}
+		fxDetails["slippage_bps"] = slippageBps
+		if t.MaxSlippageBps > 0 {
+			fxDetails["max_slippage_bps"] = t.MaxSlippageBps
+		}
 	}
 	if len(feeSplits) > 0 {
 		// The per-recipient split breakdown enters the structured

@@ -135,6 +135,19 @@ type Transfer struct {
 	// memo. On cross-currency transfers they ride the source-currency
 	// leg (the /fx leg), mirroring the memo.
 	Attachments []string `json:"attachments,omitempty"`
+	// MaxSlippageBps is the opt-in LG-86 slippage cap for
+	// cross-currency transfers, in basis points: the request's FX rate
+	// is locked at admission (see FXRateQuote), and when the effective
+	// rate has drifted more than this from the admitted quote by commit
+	// time the transfer is rejected with ErrFXSlippageExceeded (HTTP
+	// 422) and records nothing. Zero (the default) means no cap: the
+	// transfer still settles at the admitted price, and the drift is
+	// disclosed on the receipt (FXConversion.SlippageBps) and the audit
+	// event. A negative cap is rejected at validation
+	// (ErrInvalidMaxSlippage). The field is ignored on same-currency
+	// transfers — a non-FX transfer carrying it is neither rejected nor
+	// gated.
+	MaxSlippageBps int64 `json:"max_slippage_bps,omitempty"`
 }
 
 // TransferReceipt reports what PostTransfer committed.
@@ -519,6 +532,13 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 	if err := checkAttachments(t.Attachments); err != nil {
 		return t, "", err
 	}
+	// The slippage cap (see Transfer.MaxSlippageBps) is field
+	// validation, like the fee config: a negative cap is a caller bug,
+	// rejected before any risk check. A positive cap on a
+	// same-currency transfer is ignored, not rejected.
+	if t.MaxSlippageBps < 0 {
+		return t, "", ErrInvalidMaxSlippage
+	}
 	// Fee splits (see fee_split.go) are field validation, like the legs
 	// and the amount: FeeSplits replaces the single FeeAccount, so the
 	// two are mutually exclusive, and a split needs a fee to divide,
@@ -571,16 +591,27 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 // fee entries). A zero CreatedAt is filled with the current time.
 
 func (l *Ledger) PostTransfer(t Transfer) (TransferReceipt, error) {
+	// LG-86: the FX rate quote is admitted before the write lock is
+	// taken (see admitFXRateQuote): the price a cross-currency transfer
+	// settles at is locked at admission, and any drift of the live
+	// rate by commit time is measured against it. The zero quote means
+	// "no admission" — the transfer converts at the commit-time rate,
+	// as before.
+	quote := l.admitFXRateQuote(t)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.postTransferLocked(t)
+	return l.postTransferLocked(t, quote)
 }
 
 // postTransferLocked is the lock-held core of PostTransfer; see its doc
-// comment for the full contract. PostTransferSplit delegates to it when
-// a transfer needs no splitting, so a non-split transfer posts exactly
-// as PostTransfer would.
-func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
+// comment for the full contract. quote is the LG-86 admission quote
+// (see FXRateQuote); internal callers with no admission context pass
+// the zero quote, which keeps commit-time rate semantics and carries
+// no slippage gate. PostTransferSplit delegates to it when a transfer
+// needs no splitting, so a non-split transfer posts exactly as
+// PostTransfer would (at the commit-time rate — the split path holds
+// the write lock from entry and admits no quote).
+func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferReceipt, error) {
 	var err error
 	var toCurrency string
 	if t, toCurrency, err = validateTransferFields(t); err != nil {
@@ -599,7 +630,7 @@ func (l *Ledger) postTransferLocked(t Transfer) (TransferReceipt, error) {
 	}
 
 	if toCurrency != t.Currency {
-		return l.postTransferFXLocked(t, toCurrency, time.Now())
+		return l.postTransferFXLocked(t, toCurrency, time.Now(), quote)
 	}
 
 	feeCents, feeAccount, feeSplits, tierIndex, rateBps, err := l.resolveFeeLocked(t)

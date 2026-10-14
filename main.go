@@ -312,6 +312,11 @@ type createTransferRequest struct {
 	Memo           string            `json:"memo"`
 	ExternalRef    string            `json:"external_ref"`
 	Attachments    []string          `json:"attachments"`
+	// MaxSlippageBps is the opt-in LG-86 slippage cap for
+	// cross-currency transfers, in basis points (see
+	// ledger.Transfer.MaxSlippageBps). It is plumbed through to both
+	// POST /transfers and POST /transfers/dry-run.
+	MaxSlippageBps int64 `json:"max_slippage_bps"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
@@ -393,6 +398,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		Memo:           req.Memo,
 		ExternalRef:    req.ExternalRef,
 		Attachments:    req.Attachments,
+		MaxSlippageBps: req.MaxSlippageBps,
 		CreatedAt:      time.Now(),
 	}
 	if req.ToCurrency != "" {
@@ -448,6 +454,15 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrFXRateExpired) {
 			s.metrics.CurrencyRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrFXSlippageExceeded) {
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidMaxSlippage) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ledger.ErrFXAccountNotConfigured) || errors.Is(err, ledger.ErrInvalidFXAccount) {
@@ -684,6 +699,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		Memo:           req.Memo,
 		ExternalRef:    req.ExternalRef,
 		Attachments:    req.Attachments,
+		MaxSlippageBps: req.MaxSlippageBps,
 		CreatedAt:      time.Now(),
 	}
 
@@ -732,6 +748,15 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrFXRateExpired) {
 			s.metrics.CurrencyRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrFXSlippageExceeded) {
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidMaxSlippage) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ledger.ErrFXAccountNotConfigured) || errors.Is(err, ledger.ErrInvalidFXAccount) {

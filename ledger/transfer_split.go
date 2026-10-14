@@ -160,8 +160,11 @@ func (l *Ledger) PostTransferSplit(t Transfer) (SplitTransferReceipt, error) {
 	chunkSize := l.splitChunkSizeLocked(t.From, t.Currency)
 	if chunkSize <= 0 || t.AmountCents <= chunkSize {
 		// No split needed: delegate so a non-split transfer is
-		// byte-for-byte what PostTransfer would have booked.
-		receipt, err := l.postTransferLocked(t)
+		// byte-for-byte what PostTransfer would have booked. The
+		// split path holds the write lock from entry, so there is
+		// no admission window: the zero quote keeps commit-time FX
+		// rate semantics with no slippage gate (see FXRateQuote).
+		receipt, err := l.postTransferLocked(t, FXRateQuote{})
 		if err != nil {
 			return SplitTransferReceipt{}, err
 		}
@@ -543,23 +546,22 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 		}
 	}
 
-	rate, ok := l.fxRates[fxPair{from: t.Currency, to: toCurrency}]
-	if !ok {
-		return SplitTransferReceipt{}, ErrFXRateMissing
-	}
-	if !rate.ExpiresAt.IsZero() && !now.Before(rate.ExpiresAt) {
-		return SplitTransferReceipt{}, ErrFXRateExpired
-	}
+	// The one rate for the whole split, resolved at commit: the chunk
+	// path holds the write lock from entry, so there is no admission
+	// window — every chunk prices at this rate (see effectiveFXRateLocked;
+	// LG-86 admission quotes and the slippage gate apply only to the
+	// PostTransfer path, which admits before taking the write lock).
 	pair := fxPair{from: t.Currency, to: toCurrency}
-	effNum, effDen := rate.Num, rate.Den
-	effVersion := rate.EffectiveVersion
-	effExpiresAt := rate.ExpiresAt
-	override, overridden := l.activeRateOverrideLocked(pair, now)
-	if overridden {
-		effNum, effDen = override.Num, override.Den
-		effVersion = override.EffectiveVersion
-		effExpiresAt = override.ExpiresAt
+	commitEff, err := l.effectiveFXRateLocked(pair, now)
+	if err != nil {
+		return SplitTransferReceipt{}, err
 	}
+	rate := commitEff.Rate
+	effNum, effDen := commitEff.Num, commitEff.Den
+	effVersion := commitEff.EffectiveVersion
+	effExpiresAt := commitEff.ExpiresAt
+	override := commitEff.Override
+	overridden := commitEff.Overridden
 	fxAccount := t.FXAccount
 	if fxAccount == "" {
 		fxAccount = l.fxAccount

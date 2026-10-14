@@ -1301,6 +1301,23 @@ disaster-recovery snapshots (with their effective versions) and are
 listed in the `POST /reconcile` report's `fx_rates` section. Cross-currency
 attempts are counted in `ledger_fx_transfers_total`.
 
+The conversion price is **locked at request admission**: `POST /transfers`
+snapshots the effective rate before taking the write lock, and the
+transfer settles at that admitted price even if the rate table moves
+before commit (a `SetFXRate` between admission and commit is a real
+window — both mutate under the same lock). The drift between the live
+rate and the admitted quote is measured in basis points (exact `big.Rat`
+math): the receipt discloses `fx.slippage_bps` plus the admitted quote
+(`fx.admitted_rate_num/den`, `fx.admitted_effective_version`,
+`fx.admitted_at`), and the `transfer` audit event seals the full detail
+(`admitted_rate`, `committed_rate`, `slippage_bps`, and the caller's
+`max_slippage_bps` when set). The opt-in `max_slippage_bps` request field caps the
+drift: a transfer whose live rate moved past the cap is rejected with
+`422` and records nothing. A negative cap is rejected with `400`. A
+conversion that settled at an approved manual rate override keeps the
+override's full provenance (`proposed_by`, `approved_by`, `reason`) in
+the `fx_rate_overridden` audit event.
+
 #### Rate-table snapshot versioning
 
 Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,
