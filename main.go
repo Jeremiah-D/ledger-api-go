@@ -1630,6 +1630,60 @@ func (s *server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMerkleProof implements GET /accounts/{id}/merkle-proof[?currency=XXX]
+// (LG-78): the inclusion proof for one account's balance in the snapshot
+// balance-Merkle tree (see ledger/merkle.go). The proof is self-contained:
+// it carries the leaf (the committed balance), the sibling hash path up
+// to the root, and the root itself, so an offline verifier needs nothing
+// else — ledger.VerifyMerkleProof recomputes the leaf hash and folds the
+// siblings, reporting whether they reach the anchored root.
+//
+// currency is optional and defaults to USD; an unknown account (no leaf
+// in the tree) reports 404 — there is no committed balance to prove.
+func (s *server) handleMerkleProof(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	currency := r.URL.Query().Get("currency")
+	proof, rootHex, version, err := s.ledgerFor(r).MerkleProofFor(ledger.AccountID(id), currency)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrMerkleLeafNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrInvalidCurrency):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	if currency == "" {
+		currency = ledger.DefaultCurrency
+	}
+	leafHex := hex.EncodeToString(ledger.MerkleLeafEncoding(proof.Leaf))
+	siblings := make([]string, len(proof.Siblings))
+	for i, sib := range proof.Siblings {
+		siblings[i] = hex.EncodeToString(sib[:])
+	}
+	s.metrics.MerkleProofQueries.Add(1)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":       id,
+		"currency":      currency,
+		"balance_cents": proof.Leaf.BalanceCents,
+		"version":       version,
+		"merkle_root":   rootHex,
+		"leaf_index":    proof.LeafIndex,
+		// The hex canonical leaf encoding, so a verifier can recompute
+		// the leaf hash without reimplementing the field layout:
+		// sha256(0x00 || leaf) must equal the first proof step.
+		"leaf": leafHex,
+		"leaf_encoding": "u64be(len(account)) || account || u64be(len(currency)) || currency || i64be(balance_cents), hashed as sha256(0x00 || encoding); inner nodes sha256(0x01 || left || right); odd last node pairs with itself",
+		"siblings":      siblings,
+	})
+}
+
 // handleBalanceAt implements GET /accounts/{id}/balance-at?version=N[&currency=XXX].
 // Returns the account's net balance as of ledger version N — the balance
 // after exactly N successful posts — for audit replay and point-in-time
@@ -3058,6 +3112,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
+	mux.HandleFunc("GET /accounts/{id}/merkle-proof", s.handleMerkleProof)
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/ofx", s.handleOFXExport)
 	mux.HandleFunc("GET /accounts/{id}/statement", s.handleStatement)

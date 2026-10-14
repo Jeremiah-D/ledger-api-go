@@ -18,6 +18,7 @@ The design borrows its posting semantics from a publicly described concept: **"i
 - All state is guarded by an `RWMutex`: reads (`Balance`, `Snapshot`, listings, chain verification) take the read lock and run concurrently, while `Post` and idempotency-key expiry take the write lock. Reads never block each other — only writers serialize.
 - A per-account index maps each account to the IDs of the entries that touched it (as debit or credit leg), so per-account listing scans only that account's entries instead of the whole journal.
 - Every post appends a tamper-evident audit-chain link: `SHA-256(prevHash || entry)` over a length-prefixed encoding of the entry's fields (standard library only). Rewriting a journaled entry, deleting a link, or splicing the chain breaks the hash continuity, and `VerifyChain` / `GET /entries/verify` detect it by recomputation.
+- Snapshots commit to the balance sheet too: every export builds a deterministic Merkle tree over `(account, currency) -> balance` leaves (`SHA-256`, standard library) and writes the root into the snapshot header; `GET /accounts/{id}/merkle-proof` serves offline-verifiable inclusion proofs, the backup worker anchors the root with the snapshot version in the sealed audit trail, and `ImportSnapshot` rejects a header whose root does not recompute from the refolded balances.
 - A thin `net/http` JSON API exposes the ledger: no external dependencies.
 - Opt-in journal rules (`PUT /rules/{id}`): match raw postings on account/currency/amount range and auto-append derived journal legs (tax withholding, platform fees). Rules fire only after the principal clears the full `Post` check order; each derived leg re-runs the frozen/overdraft/daily-limit/period gates on the aggregate outflow, the commit is atomic, illegal rules are rejected at construction, rule changes land in the structured audit log, and the rule set round-trips through snapshots.
 
@@ -1934,7 +1935,7 @@ ledger):
 var buf bytes.Buffer
 if err := l.ExportSnapshot(&buf); err != nil { /* ... */ }
 // buf now holds one JSON object per line:
-//   {"record":"meta",...}                 exactly one, always first
+//   {"record":"meta",...}                 exactly one, always first (carries merkle_root)
 //   {"record":"entry",...}                journal entries, in Post (chain) order
 //   {"record":"link",...}                 audit-chain links, seq 1..N
 //   {"record":"hold",...}                 authorization holds
@@ -1968,6 +1969,57 @@ if err != nil {
 report := restored.Reconcile(time.Now())
 // report.AccountingEquationOK && report.AuditChain.VerifyOK => safe to promote
 ```
+
+#### Balance Merkle inclusion proofs (`ledger/merkle.go`, `GET /accounts/{id}/merkle-proof`)
+
+Snapshots anchor the balance sheet, not just the journal. At export
+time the ledger builds a deterministic Merkle tree over every
+`(account, currency) -> balance` leaf and writes the root into the
+snapshot header (`meta.merkle_root`):
+
+- **Leaves** are sorted by `(account, currency)`; each leaf encodes
+  `u64be(len(account)) || account || u64be(len(currency)) || currency || i64be(balance_cents)`
+  (length-prefixed so `"a"+"bc"` cannot alias `"ab"+"c"`).
+- **Leaf hash**: `SHA-256(0x00 || leaf encoding)`; **inner nodes**:
+  `SHA-256(0x01 || left || right)` — the `0x00`/`0x01` domain
+  separators are second-preimage protection, so a leaf hash can never
+  be mistaken for an inner hash.
+- An odd level's last node pairs with itself (documented, not
+  folklore); an empty ledger commits to the all-zero "genesis" root.
+- Pure standard library (`crypto/sha256`) — no third-party crypto.
+
+`GET /accounts/cash/merkle-proof[?currency=EUR]` returns the account's
+inclusion proof: the committed balance, its leaf index, the sibling
+hash path, and the root — everything an offline verifier needs:
+
+```bash
+curl -s localhost:8080/accounts/cash/merkle-proof
+# {"account":"cash","currency":"USD","balance_cents":1000,"version":42,
+#  "merkle_root":"9f2c...","leaf_index":3,"leaf":"...","leaf_encoding":"...",
+#  "siblings":["ab12...","34cd...",...]}
+```
+
+The proof is verified with `ledger.VerifyMerkleProof(root, proof)`,
+a pure function — no ledger, no network. A rewritten balance, a
+spliced sibling, a swapped leaf index, or a wrong root all fail
+verification, so a tampered snapshot is caught even by an auditor who
+never sees the live ledger. Unknown accounts 404 (no committed
+balance to prove); `?currency=` defaults to USD; proofs are counted
+in `ledger_merkle_proof_queries_total`.
+
+The root also travels with the snapshot version into the sealed
+audit trail: the periodic backup worker's `snapshot_backup` audit
+event carries `merkle_root` alongside `version_after`, so
+`GET /audit/verify` proves exactly which root was committed for which
+snapshot version. This rides the audit log's own hash chain — the
+per-post journal chain (`VerifyChain`) is untouched: no new journal
+link type, no changed link semantics.
+
+On import, `ImportSnapshot` recomputes the root from the refolded
+balances and rejects the snapshot (`ErrSnapshotInvalid`) when the
+header's `merkle_root` does not match — a header rewritten after
+export cannot be promoted. Snapshots written before this feature
+carry no `merkle_root` and import unchanged (the check is skipped).
 
 #### Incremental snapshots (`ledger/incremental.go`)
 
@@ -2493,6 +2545,8 @@ curl -s localhost:8080/metrics
   ticks that failed after retries.
 - `ledger_snapshot_diffs_total` — `GET /snapshots/diff` requests served
   successfully (read-only version diffs between backup snapshots).
+- `ledger_merkle_proof_queries_total` — `GET /accounts/{id}/merkle-proof`
+  requests served successfully (balance Merkle inclusion proofs).
 - `ledger_settlement_runs_total` — `GET /settlement` requests served
   (all formats: `json`, `csv`, `sql`).
 - `ledger_settlement_alerts_total` — settlement mismatch alerts across

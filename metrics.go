@@ -131,6 +131,11 @@ type Metrics struct {
 	// diffs between backup snapshots. Rejected requests (bad versions,
 	// unknown versions, unconfigured backup dir) are not counted.
 	SnapshotDiffsTotal atomic.Uint64
+	// MerkleProofQueries counts GET /accounts/{id}/merkle-proof
+	// requests served successfully (see ledger.MerkleProofFor).
+	// Rejected requests (unknown account, bad currency) are not
+	// counted.
+	MerkleProofQueries atomic.Uint64
 	// HoldsTotal counts POST /holds requests received (all attempts,
 	// including duplicates and rejected payloads).
 	HoldsTotal atomic.Uint64
@@ -502,6 +507,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_snapshot_diffs_total",
 		"Total GET /snapshots/diff requests served successfully (read-only version diffs between backup snapshots).",
 		m.SnapshotDiffsTotal.Load())
+	writeCounter(&sb, "ledger_merkle_proof_queries_total",
+		"Total GET /accounts/{id}/merkle-proof requests served successfully (balance Merkle inclusion proofs).",
+		m.MerkleProofQueries.Load())
 	writeCounter(&sb, "ledger_review_pending_total",
 		"Total POST /transfers requests that entered dual-control pending review (first-time freezes only).",
 		m.ReviewPendingTotal.Load())

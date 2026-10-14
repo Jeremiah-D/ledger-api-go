@@ -72,6 +72,13 @@ type snapshotMetaLine struct {
 	// that follow (see review.go). Absent (zero) in snapshots written
 	// before LG-42.
 	ReviewCount int `json:"review_count,omitempty"`
+	// MerkleRoot is the hex balance-Merkle root (see ledger/merkle.go,
+	// LG-78): the tree commits to every (account, currency) -> balance
+	// leaf at export time. Absent in snapshots written before LG-78;
+	// ImportSnapshot skips the root check for those, but every export
+	// this build writes carries it, and a present root that does not
+	// match the refolded balances rejects the import.
+	MerkleRoot string `json:"merkle_root"`
 }
 
 // snapshotEntryLine carries one journal entry, in chain order.
@@ -331,6 +338,10 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 		HoldCount:     len(l.holds),
 		ScheduleCount: len(l.schedules),
 		ReviewCount:   len(l.reviews),
+		// LG-78: the balance Merkle root commits to every
+		// (account, currency) -> balance at export time, under the
+		// same read lock as the rest of the document.
+		MerkleRoot: l.merkleTreeLocked().RootHex(),
 	}
 	if err := enc.Encode(meta); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -1252,6 +1263,20 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	// ever returned.
 	if err := l.verifyChainLocked(); err != nil {
 		return nil, fmt.Errorf("%w: audit chain verification failed: %v", ErrSnapshotInvalid, err)
+	}
+
+	// LG-78: when the snapshot header carries a balance Merkle root,
+	// the refolded balances must recompute to exactly that root. The
+	// journal fold and chain verification above already proved the
+	// journal is intact; this proves the committed balance sheet
+	// matches the header's commitment too — a tampered merkle_root
+	// rejects the import. Snapshots written before LG-78 carry no root
+	// and skip this check.
+	if meta.MerkleRoot != "" {
+		if got := l.merkleTreeLocked().RootHex(); got != meta.MerkleRoot {
+			return fail("snapshot balance merkle root mismatch: header commits to %s, refolded balances recompute to %s",
+				meta.MerkleRoot, got)
+		}
 	}
 	return l, nil
 }

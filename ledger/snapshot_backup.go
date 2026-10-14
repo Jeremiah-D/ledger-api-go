@@ -3,6 +3,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -209,9 +210,10 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 	// its whole duration, so each attempt describes one consistent
 	// point in time; a retry re-reads the (possibly advanced) ledger.
 	var (
-		data    []byte
-		version uint64
-		err     error
+		data       []byte
+		version    uint64
+		merkleRoot string
+		err        error
 	)
 	for attempt := 0; attempt <= sw.cfg.MaxRetries; attempt++ {
 		var buf bytes.Buffer
@@ -223,6 +225,24 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 		if err == nil {
 			data = buf.Bytes()
 			version = sw.l.Version()
+			// LG-78: read the balance Merkle root back out of the
+			// exported meta line (first line of the document) so the
+			// audit event below anchors exactly the root this file
+			// commits to — before LG-77's encryption seals the bytes,
+			// and with no window for a concurrent Post to desync a
+			// recomputation from the live ledger. Incremental
+			// snapshots are journal deltas, not balance commitments,
+			// so only full snapshots carry a root.
+			if full {
+				if line, _, ok := bytes.Cut(data, []byte("\n")); ok {
+					var meta struct {
+						MerkleRoot string `json:"merkle_root"`
+					}
+					if uerr := json.Unmarshal(line, &meta); uerr == nil && meta.MerkleRoot != "" {
+						merkleRoot = meta.MerkleRoot
+					}
+				}
+			}
 			break
 		}
 		// Brief backoff between attempts; the final attempt reports
@@ -273,6 +293,26 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 	// The rotation is structural bookkeeping, not a posting: it never
 	// bumps the ledger version, but it belongs in the audit trail so a
 	// restore can prove which snapshot a recovery started from.
+	// LG-78: the balance Merkle root travels with the snapshot version
+	// into the hash-chained audit trail (the `merkleRoot` captured at
+	// export time above). The audit event is sealed into the audit
+	// log's own hash chain (see ledger/audit_chain.go), so a later
+	// VerifyAuditLog proves exactly which root was committed for which
+	// snapshot version — this is the chain-head anchoring for
+	// snapshots. The journal's VerifyChain semantics are untouched: no
+	// new journal link type is introduced, because the anchoring rides
+	// the structured audit log, not the per-post journal chain.
+	details := map[string]any{
+		"kind":      kind,
+		"path":      filepath.Join(sw.cfg.Dir, name),
+		"bytes":     len(data),
+		"pruned":    pruned,
+		"encrypted": encrypted,
+		"key_id":    keyID,
+	}
+	if merkleRoot != "" {
+		details["merkle_root"] = merkleRoot
+	}
 	// emitAudit requires holding l.mu (either lock suffices); the
 	// exports above already released theirs.
 	sw.l.mu.RLock()
@@ -282,14 +322,7 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 		TraceID:       name,
 		VersionBefore: base,
 		VersionAfter:  version,
-		Details: map[string]any{
-			"kind":      kind,
-			"path":      filepath.Join(sw.cfg.Dir, name),
-			"bytes":     len(data),
-			"pruned":    pruned,
-			"encrypted": encrypted,
-			"key_id":    keyID,
-		},
+		Details:       details,
 	})
 	sw.l.mu.RUnlock()
 
