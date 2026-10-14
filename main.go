@@ -2360,6 +2360,7 @@ func (s *server) handleVerifyEntries(w http.ResponseWriter, r *http.Request) {
 		"links":  links,
 		"head":   head,
 		"anchor": s.ledgerFor(r).AnchorStatus(),
+		"tsa":    s.ledgerFor(r).TimestampAnchorStatus(),
 	})
 }
 
@@ -2377,6 +2378,34 @@ func (s *server) handleAnchorCheckpoint(w http.ResponseWriter, r *http.Request) 
 	}
 	s.metrics.AnchorsTotal.Add(1)
 	writeJSON(w, http.StatusOK, cp)
+}
+
+// handleTSAAnchor implements POST /entries/tsa-anchor: countersigns the
+// current audit-chain head with the configured RFC 3161 timestamp
+// authority and appends the token to tsa_anchors.jsonl (see
+// ledger.AnchorTimestamp). 200 returns the anchor. Without a configured
+// TSA URL or audit directory the server cannot anchor — a deployment
+// misconfiguration, so 500, not 404. A TSA-side failure (network,
+// rejection) is 502: the TSA is an upstream dependency, the periodic
+// worker retries on its next tick, and posting never waits for an
+// anchor.
+func (s *server) handleTSAAnchor(w http.ResponseWriter, r *http.Request) {
+	tsaURL := s.ledgerFor(r).TSAURL()
+	if tsaURL == "" {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "TSA anchoring not configured (LEDGER_TSA_URL)"})
+		return
+	}
+	anchor, err := s.ledgerFor(r).AnchorTimestamp(r.Context(), &ledger.RFC3161Client{URL: tsaURL})
+	if err != nil {
+		if errors.Is(err, ledger.ErrTSAURLNotConfigured) || errors.Is(err, ledger.ErrTSAAuditDirRequired) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	s.metrics.TSAAnchorsTotal.Add(1)
+	writeJSON(w, http.StatusOK, anchor)
 }
 
 // handleAuditVerify implements GET /audit/verify: the operator-facing
@@ -3323,6 +3352,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /entries", s.handleListEntries)
 	mux.HandleFunc("GET /entries/verify", s.handleVerifyEntries)
 	mux.HandleFunc("POST /entries/anchor", s.handleAnchorCheckpoint)
+	mux.HandleFunc("POST /entries/tsa-anchor", s.handleTSAAnchor)
 	mux.HandleFunc("GET /audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("GET /events", s.handleOutboxEvents)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
@@ -3923,6 +3953,32 @@ func main() {
 		log.Printf("ledger-api-go: anchor key configured")
 	}
 
+	// LEDGER_TSA_URL configures the RFC 3161 timestamp authority
+	// endpoint for external audit-chain anchoring (LG-84): the
+	// background worker countersigns the chain head on
+	// LEDGER_TSA_INTERVAL. Unset means TSA anchoring is disabled.
+	// LEDGER_TSA_CERT_FILE optionally pins the TSA trust anchor (PEM
+	// certificate): verification then reports trust-pinned results;
+	// without it, token signatures verify against the token's own
+	// embedded certificate and are honestly reported untrusted. An
+	// unreadable/invalid cert file fails the startup fast.
+	if raw := os.Getenv("LEDGER_TSA_URL"); raw != "" {
+		opts = append(opts, ledger.WithTSAURL(raw))
+		log.Printf("ledger-api-go: TSA anchoring enabled (url %s)", raw)
+	}
+	if path := os.Getenv("LEDGER_TSA_CERT_FILE"); path != "" {
+		pemBytes, err := os.ReadFile(path)
+		if err != nil {
+			log.Fatalf("ledger-api-go: read LEDGER_TSA_CERT_FILE: %v", err)
+		}
+		cert, err := ledger.ParseTSATrustCert(pemBytes)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		opts = append(opts, ledger.WithTSATrustCert(cert))
+		log.Printf("ledger-api-go: TSA trust anchor configured")
+	}
+
 	// SIGINT/SIGTERM cancel the context; runServer then drains in-flight
 	// requests instead of dropping them.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -3941,6 +3997,27 @@ func main() {
 		})
 		log.Printf("ledger-api-go: hold sweep worker started (interval %v)", interval)
 		defer sweeper.Stop()
+	}
+
+	// Optional background TSA anchoring worker (LG-84): periodically
+	// countersigns the audit-chain head with the external RFC 3161
+	// timestamp authority. It shares the server context, so
+	// SIGINT/SIGTERM stops it. TSA outages never block posting — each
+	// failure is recorded as a `tsa_anchor_failed` audit event (the
+	// degraded alert) and counted in ledger_tsa_anchor_failures_total.
+	// Unset URL or invalid interval means disabled.
+	if tsaURL := os.Getenv("LEDGER_TSA_URL"); tsaURL != "" {
+		if interval, ok := tsaAnchorInterval(); ok {
+			authority := &tsaMetricsAuthority{
+				inner:   &ledger.RFC3161Client{URL: tsaURL},
+				metrics: srv.metrics,
+			}
+			anchorer := ledger.StartTimestampAnchoring(ctx, srv.ledger, interval, authority, func(anchor ledger.TimestampAnchor) {
+				srv.metrics.TSAAnchorsTotal.Add(1)
+			})
+			log.Printf("ledger-api-go: TSA anchoring worker started (interval %v, url %s)", interval, tsaURL)
+			defer anchorer.Stop()
+		}
 	}
 
 	// Optional background review-expiry sweeper: auto-rejects pending
@@ -4198,6 +4275,40 @@ func reportSweepInterval() (time.Duration, bool) {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		log.Printf("ledger-api-go: ignoring invalid LEDGER_REPORT_SWEEP_INTERVAL %q, report sweep worker disabled", raw)
+		return 0, false
+	}
+	return d, true
+}
+
+// tsaMetricsAuthority wraps a ledger.TimestampAuthority to count TSA
+// outcomes in the server metrics. Failures are additionally recorded
+// as `tsa_anchor_failed` audit events by the worker itself (the
+// degraded alert); the counter here feeds /metrics scraping.
+type tsaMetricsAuthority struct {
+	inner   ledger.TimestampAuthority
+	metrics *Metrics
+}
+
+func (a *tsaMetricsAuthority) Timestamp(ctx context.Context, digest [32]byte) (ledger.TimestampToken, error) {
+	tok, err := a.inner.Timestamp(ctx, digest)
+	if err != nil {
+		a.metrics.TSAAnchorFailuresTotal.Add(1)
+	}
+	return tok, err
+}
+
+// tsaAnchorInterval reads LEDGER_TSA_INTERVAL (a Go duration string,
+// e.g. "1h") for the background RFC 3161 anchoring worker. Unset or
+// invalid values mean the worker is disabled; a non-positive duration
+// is invalid and falls back to disabled with a log line.
+func tsaAnchorInterval() (time.Duration, bool) {
+	raw := os.Getenv("LEDGER_TSA_INTERVAL")
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_TSA_INTERVAL %q, TSA anchoring worker disabled", raw)
 		return 0, false
 	}
 	return d, true

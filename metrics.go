@@ -36,6 +36,14 @@ type Metrics struct {
 	// AnchorsTotal counts POST /entries/anchor requests that signed a
 	// chain-head checkpoint.
 	AnchorsTotal atomic.Uint64
+	// TSAAnchorsTotal counts successful RFC 3161 timestamp anchorings of
+	// the audit-chain head (LG-84): manual POST /entries/tsa-anchor plus
+	// background worker ticks.
+	TSAAnchorsTotal atomic.Uint64
+	// TSAAnchorFailuresTotal counts failed TSA anchoring attempts
+	// (network, TSA rejection). Failures are degraded, never fatal:
+	// each one is also recorded as a `tsa_anchor_failed` audit event.
+	TSAAnchorFailuresTotal atomic.Uint64
 	// ReconcileRuns counts POST /reconcile requests served.
 	ReconcileRuns atomic.Uint64
 	// ReconcileExportRuns counts POST /reconcile/export requests served
@@ -373,6 +381,10 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
 	writeCounter(&sb, "ledger_anchors_total",
 		"Total POST /entries/anchor requests that signed a chain-head checkpoint.", m.AnchorsTotal.Load())
+	writeCounter(&sb, "ledger_tsa_anchors_total",
+		"Total successful RFC 3161 timestamp anchorings of the audit-chain head (manual plus background worker).", m.TSAAnchorsTotal.Load())
+	writeCounter(&sb, "ledger_tsa_anchor_failures_total",
+		"Total failed TSA anchoring attempts (network errors, TSA rejections); each is also a tsa_anchor_failed audit event.", m.TSAAnchorFailuresTotal.Load())
 	writeCounter(&sb, "ledger_reconcile_runs_total",
 		"Total POST /reconcile requests served.", m.ReconcileRuns.Load())
 	writeCounter(&sb, "ledger_reconcile_export_runs_total",

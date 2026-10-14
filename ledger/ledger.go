@@ -603,18 +603,22 @@ type Ledger struct {
 	// idempotency. Structural state like the idempotency indexes — it
 	// survives snapshots, because a restore that dropped it would
 	// re-import the same statement as new.
-	ofxImports map[string]*OFXImportReport
-	chain          []chainLink   // audit chain, one link per successful Post, in order
-	version        uint64        // bumped by every successful Post
-	idempotencyTTL time.Duration // 0 = never expire idempotency keys
-	pruneInterval  time.Duration // min gap between lazy key sweeps
-	lastKeyPrune   time.Time
-	lastDailyPrune time.Time // last run of the daily-outflow bucket sweep
+	ofxImports      map[string]*OFXImportReport
+	chain           []chainLink   // audit chain, one link per successful Post, in order
+	version         uint64        // bumped by every successful Post
+	idempotencyTTL  time.Duration // 0 = never expire idempotency keys
+	pruneInterval   time.Duration // min gap between lazy key sweeps
+	lastKeyPrune    time.Time
+	lastDailyPrune  time.Time // last run of the daily-outflow bucket sweep
 	lastBudgetPrune time.Time // last run of the monthly-spend bucket sweep
 	// anchor holds the external audit-chain anchoring state (LG-44):
 	// the configured Ed25519 key and the loaded checkpoints. See
 	// anchor.go for the lock-order contract.
 	anchor anchorState
+	// tsa holds the RFC 3161 timestamp-authority anchoring state
+	// (LG-84): the configured TSA client/trust anchor and the loaded
+	// timestamp anchors. See tsa.go for the lock-order contract.
+	tsa tsaAnchorState
 }
 
 // Option configures a Ledger.
@@ -741,12 +745,12 @@ func New(opts ...Option) *Ledger {
 		// WithRateOverrideTTL / WithRateOverrideMaxDeviationBps).
 		rateOverrideTTL:             defaultRateOverrideTTL,
 		rateOverrideMaxDeviationBps: defaultRateOverrideMaxDeviationBps,
-		closedPeriods:        make(map[string]bool),
-		closingPL:            make(map[AccountID]bool),
-		journalRules:         make(map[string]JournalRule),
-		revalBaselines:       make(map[revalKey]revalBaseline),
-		ofxImports:           make(map[string]*OFXImportReport),
-		pruneInterval:        defaultKeyPruneInterval,
+		closedPeriods:               make(map[string]bool),
+		closingPL:                   make(map[AccountID]bool),
+		journalRules:                make(map[string]JournalRule),
+		revalBaselines:              make(map[revalKey]revalBaseline),
+		ofxImports:                  make(map[string]*OFXImportReport),
+		pruneInterval:               defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
 		opt(l)
@@ -1323,16 +1327,16 @@ func (l *Ledger) TrialBalance(a AccountID) TrialBalance {
 // read lock as the rest of the report.
 func (l *Ledger) trialBalanceLocked(a AccountID) TrialBalance {
 	tb := TrialBalance{
-		Account:                  a,
-		Currency:                 DefaultCurrency,
-		Version:                  l.version,
-		Frozen:                   l.frozen[a],
-		Closed:                   l.closedLocked(a),
-		AccountType:              l.chart[a],
-		OverdraftProtected:       l.noOverdraft[a],
-		DailyLimitCents:          l.dailyLimits[dailyLimitKey{account: a, currency: DefaultCurrency}],
-		BudgetCents:              l.budgets[budgetKey{account: a, currency: DefaultCurrency}],
-		LowBalanceThresholdCents: l.balanceWatchLowCentsLocked(a, DefaultCurrency),
+		Account:                   a,
+		Currency:                  DefaultCurrency,
+		Version:                   l.version,
+		Frozen:                    l.frozen[a],
+		Closed:                    l.closedLocked(a),
+		AccountType:               l.chart[a],
+		OverdraftProtected:        l.noOverdraft[a],
+		DailyLimitCents:           l.dailyLimits[dailyLimitKey{account: a, currency: DefaultCurrency}],
+		BudgetCents:               l.budgets[budgetKey{account: a, currency: DefaultCurrency}],
+		LowBalanceThresholdCents:  l.balanceWatchLowCentsLocked(a, DefaultCurrency),
 		HighBalanceThresholdCents: l.balanceWatchHighCentsLocked(a, DefaultCurrency),
 	}
 	if t, ok := l.tags[a]; ok {

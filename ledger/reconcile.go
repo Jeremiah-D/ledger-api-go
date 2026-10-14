@@ -65,6 +65,20 @@ type AuditChainHealth struct {
 	// matches the chain (journal rewritten after anchoring), a forged
 	// signature, or an anchor past the chain end (truncated chain).
 	AnchorError string `json:"anchor_error,omitempty"`
+	// TSAAnchors is the number of RFC 3161 timestamp anchors (LG-84)
+	// loaded from tsa_anchors.jsonl.
+	TSAAnchors int `json:"tsa_anchors"`
+	// TSAAnchorOK reports the TSA anchor check: every stored anchor's
+	// token cryptographically verifies and its (seq, headHash) still
+	// matches the live chain. Vacuously true with zero anchors. A
+	// token whose linkage no longer matches means the journal was
+	// rewritten after the TSA countersigned it — the wholesale-rewrite
+	// attack this feature exists to detect.
+	TSAAnchorOK bool `json:"tsa_anchor_ok"`
+	// TSAAnchorError describes the first TSA anchor verification
+	// failure: a tampered token, a signer outside the trust anchor, or
+	// a (seq, headHash) the live chain no longer attests.
+	TSAAnchorError string `json:"tsa_anchor_error,omitempty"`
 }
 
 // AccountMerge is one committed account merge (see PostMerge) as reported
@@ -784,6 +798,21 @@ func (l *Ledger) auditChainHealthLocked() AuditChainHealth {
 		h.AnchorError = err.Error()
 	} else {
 		h.AnchorOK = true
+	}
+
+	// RFC 3161 timestamp anchors (LG-84): replay every stored anchor
+	// against the live chain and the configured trust anchor. The
+	// anchor list is loaded lazily and guarded by its own mutex (see
+	// tsa.go); reading the count takes that mutex, while
+	// verifyTimestampAnchorsLocked runs under this function's l.mu.
+	l.ensureTSAAnchorsLoaded()
+	l.tsa.mu.Lock()
+	h.TSAAnchors = len(l.tsa.anchors)
+	l.tsa.mu.Unlock()
+	if err := l.verifyTimestampAnchorsLocked(); err != nil {
+		h.TSAAnchorError = err.Error()
+	} else {
+		h.TSAAnchorOK = true
 	}
 	return h
 }

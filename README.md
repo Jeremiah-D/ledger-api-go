@@ -1831,6 +1831,46 @@ curl -s -X POST localhost:8080/entries/anchor
   or a forged signature surfaces there.
 - `ledger_anchors_total` counts anchors in `/metrics`.
 
+### RFC 3161 timestamp anchoring (`POST /entries/tsa-anchor`)
+
+Self-signed checkpoints prove *what* was anchored, not *when*. For
+external, independently verifiable time, the audit-chain head can be
+countersigned by an RFC 3161 timestamp authority (TSA — e.g. FreeTSA or
+your own `openssl ts` service): `POST /entries/tsa-anchor` sends the
+SHA-256 head digest to the TSA, parses and validates the returned CMS
+`TimeStampToken` (hand-rolled DER parser — no third-party dependency),
+and appends a `TimestampAnchor{seq, head_hash, tsa_url, token_der,
+trusted, anchored_at}` as one JSON line to `tsa_anchors.jsonl` in the
+audit directory (fsync'd before the call returns).
+
+```bash
+curl -s -X POST localhost:8080/entries/tsa-anchor
+# {"seq":128,"head_hash":"9f2c...","tsa_url":"https://tsa.example.com/tsa",
+#  "token_der":"MIIN...","trusted":true,"anchored_at":"2026-10-14T...Z"}
+```
+
+- The endpoint comes from `LEDGER_TSA_URL`; `LEDGER_TSA_CERT_FILE`
+  (PEM certificate) optionally pins the TSA trust anchor. Without a
+  pinned cert, token signatures verify against the token's own embedded
+  certificate and are honestly reported with `"trusted":false` — the
+  timestamp is TSA-signed either way, but not anchored to *your* TSA.
+- A background worker (`LEDGER_TSA_INTERVAL`, e.g. `"1h"`) re-anchors
+  the head on a cadence; the first tick happens after one full interval.
+  Anchoring is idempotent for an unchanged head. TSA outages never block
+  posting — each failure is degraded, not fatal: a `tsa_anchor_failed`
+  audit event is recorded, `ledger_tsa_anchor_failures_total` ticks up,
+  and the worker retries on the next tick.
+- `GET /entries/verify` gains a `tsa` section (`configured`, `anchors`,
+  `trusted`, `last_anchor`), and the Reconcile report's `audit_chain`
+  section gains `tsa_anchors`, `tsa_anchor_ok`, `tsa_anchor_error`:
+  every stored token is cryptographically re-verified and replayed
+  against the live chain, so a journal rewritten after the TSA
+  countersigned it — the wholesale-rewrite attack this feature exists to
+  detect — surfaces there. An offline verifier is available for
+  third-party audit: `ledger.VerifyTimestampAnchors(dir, trusted)`.
+- `ledger_tsa_anchors_total` counts successful anchors in `/metrics`
+  (manual requests and worker ticks alike).
+
 ### `POST /reconcile`
 
 The end-of-day reconciliation job. Runs a full read-only scan of the live
