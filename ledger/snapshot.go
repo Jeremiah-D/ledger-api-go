@@ -102,6 +102,12 @@ type snapshotHoldLine struct {
 	Hold   Hold   `json:"hold"`
 }
 
+// snapshotTermDepositLine carries one term deposit.
+type snapshotTermDepositLine struct {
+	Record      string      `json:"record"`
+	TermDeposit TermDeposit `json:"term_deposit"`
+}
+
 // snapshotSweep is the exportable form of the unexported sweepRecord.
 type snapshotSweep struct {
 	SweepID   string    `json:"sweep_id"`
@@ -153,6 +159,7 @@ const (
 	snapshotNSMergeKey = "merge_key" // key -> merge ID (mergeKeys)
 	snapshotNSBatch    = "batch"     // key -> snapshotBatch (batchKeys)
 	snapshotNSAlloc    = "allocation" // key -> snapshotAllocation (allocKeys)
+	snapshotNSTermDeposit = "term_deposit" // key -> deposit ID (termDepositKeys)
 )
 
 // snapshotIdempotencyLine carries one idempotency-key registration. Only
@@ -171,6 +178,9 @@ type snapshotIdempotencyLine struct {
 	// Allocation carries the allocation receipt row for the
 	// "allocation" namespace (see allocation.go).
 	Allocation *snapshotAllocation `json:"allocation,omitempty"`
+	// TermDepositID carries the deposit ID for the "term_deposit"
+	// namespace (see termdeposit.go).
+	TermDepositID string `json:"term_deposit_id,omitempty"`
 }
 
 // snapshotConfigLine carries operational config that a faithful restore
@@ -333,6 +343,12 @@ type snapshotConfigLine struct {
 	// imported statement as new, so the registry round-trips like the
 	// idempotency indexes.
 	OFXImportRegistry []OFXImportRecord `json:"ofx_import_registry,omitempty"`
+	// TdInterestExpense carries the ledger-wide term-deposit
+	// interest-expense account (see SetTermDepositInterestExpense);
+	// absent in snapshots written before term deposits existed. A
+	// restore that dropped it would turn fail-closed accruals into
+	// fail-open ones, so it round-trips like the fee-revenue account.
+	TdInterestExpense AccountID `json:"td_interest_expense,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -407,6 +423,9 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 	}
 
 	if err := l.exportHoldsLocked(enc); err != nil {
+		return err
+	}
+	if err := l.exportTermDepositsLocked(enc); err != nil {
 		return err
 	}
 	if err := l.exportMergesLocked(enc); err != nil {
@@ -515,6 +534,23 @@ func (l *Ledger) exportHoldsLocked(enc *json.Encoder) error {
 	})
 	for _, h := range holds {
 		if err := enc.Encode(snapshotHoldLine{Record: "hold", Hold: h}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
+	return nil
+}
+
+// exportTermDepositsLocked writes the term-deposit records, sorted by
+// deposit ID for determinism. Callers must hold l.mu; the read lock
+// suffices.
+func (l *Ledger) exportTermDepositsLocked(enc *json.Encoder) error {
+	deposits := make([]TermDeposit, 0, len(l.termDeposits))
+	for _, td := range l.termDeposits {
+		deposits = append(deposits, td)
+	}
+	sort.Slice(deposits, func(i, j int) bool { return deposits[i].ID < deposits[j].ID })
+	for _, td := range deposits {
+		if err := enc.Encode(snapshotTermDepositLine{Record: "term_deposit", TermDeposit: td}); err != nil {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
@@ -707,6 +743,18 @@ func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
+	termDepositKeyList := make([]string, 0, len(l.termDepositKeys))
+	for k := range l.termDepositKeys {
+		termDepositKeyList = append(termDepositKeyList, k)
+	}
+	for _, k := range sortedKeys(termDepositKeyList) {
+		if err := enc.Encode(snapshotIdempotencyLine{
+			Record: "idempotency", Namespace: snapshotNSTermDeposit, Key: k,
+			TermDepositID: l.termDepositKeys[k],
+		}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -761,6 +809,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		AccountTags:          l.accountTagsLocked(),
 		ClosedAccounts:       l.closedCopyLocked(),
 		OFXImportRegistry:    l.ofxImportsLocked(),
+		TdInterestExpense:    l.tdInterestExpense,
 	}
 	plAccounts, retainedEarnings := l.closingAccountsLocked()
 	if retainedEarnings != "" {
@@ -864,9 +913,11 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	entries := map[string]JournalEntry{}
 	var linkOrder []snapshotLinkLine
 	holds := map[string]Hold{}
+	termDeposits := map[string]TermDeposit{}
 	byKey := map[string]JournalEntry{}
 	transferKeys := map[string][]string{}
 	holdKeys := map[string]string{}
+	termDepositKeys := map[string]string{}
 	captureKeys := map[string]CaptureReceipt{}
 	sweepKeys := map[string]sweepRecord{}
 	merges := map[string]mergeRecord{}
@@ -962,6 +1013,21 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 				return fail("line %d: duplicate hold ID %q", lineNo, hl.Hold.ID)
 			}
 			holds[hl.Hold.ID] = hl.Hold
+		case "term_deposit":
+			if meta == nil {
+				return fail("line %d: term_deposit before meta", lineNo)
+			}
+			var tl snapshotTermDepositLine
+			if err := json.Unmarshal(line, &tl); err != nil {
+				return fail("line %d: malformed term_deposit: %v", lineNo, err)
+			}
+			if tl.TermDeposit.ID == "" {
+				return fail("line %d: term_deposit with empty ID", lineNo)
+			}
+			if _, dup := termDeposits[tl.TermDeposit.ID]; dup {
+				return fail("line %d: duplicate term deposit ID %q", lineNo, tl.TermDeposit.ID)
+			}
+			termDeposits[tl.TermDeposit.ID] = tl.TermDeposit
 		case "merge":
 			if meta == nil {
 				return fail("line %d: merge before meta", lineNo)
@@ -1017,6 +1083,14 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
 				}
 				holdKeys[il.Key] = il.HoldID
+			case snapshotNSTermDeposit:
+				if il.TermDepositID == "" {
+					return fail("line %d: term_deposit-namespace record without deposit ID", lineNo)
+				}
+				if _, dup := termDepositKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				termDepositKeys[il.Key] = il.TermDepositID
 			case snapshotNSCapture:
 				if il.Receipt == nil {
 					return fail("line %d: capture-namespace record without receipt", lineNo)
@@ -1210,6 +1284,21 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	for _, h := range holdList {
 		l.holds[h.ID] = h
 		l.holdsByAccount[h.Account] = append(l.holdsByAccount[h.Account], h.ID)
+	}
+
+	// Term deposits, rebuilt in export (ID) order. The interest rows are
+	// ordinary journal entries and were already folded above; the
+	// deposit records and their idempotency index restore here.
+	tdIDs := make([]string, 0, len(termDeposits))
+	for id := range termDeposits {
+		tdIDs = append(tdIDs, id)
+	}
+	sort.Strings(tdIDs)
+	for _, id := range tdIDs {
+		l.termDeposits[id] = termDeposits[id]
+	}
+	for k, id := range termDepositKeys {
+		l.termDepositKeys[k] = id
 	}
 
 	// Transfer schedules, rebuilt in export (ID) order. The run history
@@ -1790,6 +1879,13 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		l.feeTiers = []FeeTier{{MinAmountCents: 0, RateBps: cfg.FeeRateBps}}
 	}
 	l.feeRevenueAccount = cfg.FeeRevenueAccount
+	// Term-deposit and credit-line config restores like the other
+	// structural config: the fail-closed interest accounts (an absent
+	// account keeps accruals rejected) and the credit-line registry. A
+	// restore that dropped the credit lines would silently lift the
+	// -limit floor back to zero, so they round-trip like the
+	// overdraft-protection list.
+	l.tdInterestExpense = cfg.TdInterestExpense
 	// Split-transfer chunking config (LG-75), validated above.
 	l.maxTransferChunkCents = cfg.MaxTransferChunkCents
 	l.splitFeePerChunk = cfg.SplitFeePerChunk
@@ -1915,6 +2011,21 @@ func holdsEqual(a, b Hold) bool {
 		a.Currency == b.Currency &&
 		a.ExpiresAt.UnixNano() == b.ExpiresAt.UnixNano() &&
 		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano() &&
+		a.IdempotencyKey == b.IdempotencyKey &&
+		a.Status == b.Status
+}
+
+// termDepositsEqual compares two term-deposit records field by field,
+// ignoring time.Location representation (see holdsEqual).
+func termDepositsEqual(a, b TermDeposit) bool {
+	return a.ID == b.ID &&
+		a.Account == b.Account &&
+		a.AmountCents == b.AmountCents &&
+		a.Currency == b.Currency &&
+		a.RateBps == b.RateBps &&
+		a.TermDays == b.TermDays &&
+		a.OpenedAt.UnixNano() == b.OpenedAt.UnixNano() &&
+		a.MaturesAt.UnixNano() == b.MaturesAt.UnixNano() &&
 		a.IdempotencyKey == b.IdempotencyKey &&
 		a.Status == b.Status
 }
@@ -2093,6 +2204,26 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.feeTiers, b.feeTiers) || a.feeRevenueAccount != b.feeRevenueAccount {
+		return false
+	}
+	// Term deposits must round-trip: the deposit records, their
+	// idempotency index, and the fail-closed interest-expense account.
+	// A restore that dropped a deposit would unlock its principal early.
+	// Times compare by UnixNano (see holdsEqual): the JSON round trip
+	// strips the monotonic reading and normalizes the location.
+	if len(a.termDeposits) != len(b.termDeposits) {
+		return false
+	}
+	for id, td := range a.termDeposits {
+		other, ok := b.termDeposits[id]
+		if !ok || !termDepositsEqual(td, other) {
+			return false
+		}
+	}
+	if !reflect.DeepEqual(a.termDepositKeys, b.termDepositKeys) {
+		return false
+	}
+	if a.tdInterestExpense != b.tdInterestExpense {
 		return false
 	}
 	// Split-transfer chunking config must round-trip (LG-75).

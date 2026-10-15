@@ -257,6 +257,28 @@ type ReconciliationReport struct {
 	// rollup by business line or segment over the trial balances in this
 	// same report. Empty when no account is tagged.
 	AccountTags []AccountTag `json:"account_tags,omitempty"`
+	// TermDeposits lists every term deposit (see OpenTermDeposit),
+	// sorted by deposit ID: the locked principal, the rate and tenor,
+	// the lifecycle status, and the interest journaled so far (recovered
+	// from the deterministic "term-interest/<id>/" rows, like the
+	// dividend disclosure). Risk tooling reads this to know which funds
+	// are locked and when they release.
+	TermDeposits []TermDepositReport `json:"term_deposits"`
+}
+
+// TermDepositReport is one term deposit's Reconcile disclosure: the
+// locked principal and the interest the journal has booked for it.
+type TermDepositReport struct {
+	ID                   string    `json:"id"`
+	Account              AccountID `json:"account"`
+	PrincipalCents       int64     `json:"principal_cents"`
+	Currency             string    `json:"currency"`
+	RateBps              int64     `json:"rate_bps"`
+	TermDays             int64     `json:"term_days"`
+	Status               string    `json:"status"`
+	OpenedAt             time.Time `json:"opened_at"`
+	MaturesAt            time.Time `json:"matures_at"`
+	AccruedInterestCents int64     `json:"accrued_interest_cents"`
 }
 
 // ReconcileOptions tunes Reconcile. BaseCurrency opts into the
@@ -485,6 +507,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		RevaluationAccount:         l.revalAccount,
 		RevaluationImpact:          l.revaluationPositionsLocked(),
 		AccountTags:                l.accountTagsLocked(),
+		TermDeposits:               l.termDepositReportsLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit

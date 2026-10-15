@@ -182,6 +182,31 @@ type Metrics struct {
 	// LEDGER_HOLD_SWEEP_INTERVAL). Both paths run the same ExpireHolds
 	// sweep; the counter measures sweep executions, not expired holds.
 	HoldSweeps atomic.Uint64
+	// TermDepositsTotal counts POST /term-deposits requests received
+	// (all attempts, including duplicates and rejected payloads).
+	TermDepositsTotal atomic.Uint64
+	// TermDepositIdempotencyHits counts POST /term-deposits requests
+	// that replayed an already-opened deposit idempotency key and
+	// returned the original deposit.
+	TermDepositIdempotencyHits atomic.Uint64
+	// TermDepositAccrualsTotal counts POST /term-deposits/{id}/accrue
+	// requests received (all attempts, including replays and
+	// rejections).
+	TermDepositAccrualsTotal atomic.Uint64
+	// TermDepositMaturitiesTotal counts POST /term-deposits/{id}/mature
+	// requests received.
+	TermDepositMaturitiesTotal atomic.Uint64
+	// TermDepositWithdrawalsTotal counts POST
+	// /term-deposits/{id}/withdraw requests received.
+	TermDepositWithdrawalsTotal atomic.Uint64
+	// TermDepositSweepsTotal counts POST /term-deposits/sweep requests
+	// received.
+	TermDepositSweepsTotal atomic.Uint64
+	// TermDepositRejectionsTotal counts term-deposit-domain requests
+	// rejected with 422 for semantic reasons: insufficient available
+	// funds on open, accruing past maturity, or maturing/withdrawing a
+	// deposit in the wrong state.
+	TermDepositRejections atomic.Uint64
 	// SweepsTotal counts POST /sweeps requests received (all attempts,
 	// including duplicates and rejected payloads).
 	SweepsTotal atomic.Uint64
@@ -425,6 +450,22 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /holds/{id}/release requests received.", m.ReleasesTotal.Load())
 	writeCounter(&sb, "ledger_hold_sweeps_total",
 		"Total hold-expiry sweeps: POST /holds/expire requests plus background hold-sweeper ticks.", m.HoldSweeps.Load())
+	writeCounter(&sb, "ledger_term_deposits_total",
+		"Total POST /term-deposits requests received.", m.TermDepositsTotal.Load())
+	writeCounter(&sb, "ledger_term_deposit_idempotency_hits_total",
+		"Total POST /term-deposits requests that replayed an existing deposit idempotency key.",
+		m.TermDepositIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_term_deposit_accruals_total",
+		"Total POST /term-deposits/{id}/accrue requests received.", m.TermDepositAccrualsTotal.Load())
+	writeCounter(&sb, "ledger_term_deposit_maturities_total",
+		"Total POST /term-deposits/{id}/mature requests received.", m.TermDepositMaturitiesTotal.Load())
+	writeCounter(&sb, "ledger_term_deposit_withdrawals_total",
+		"Total POST /term-deposits/{id}/withdraw requests received.", m.TermDepositWithdrawalsTotal.Load())
+	writeCounter(&sb, "ledger_term_deposit_sweeps_total",
+		"Total POST /term-deposits/sweep requests received.", m.TermDepositSweepsTotal.Load())
+	writeCounter(&sb, "ledger_term_deposit_rejections_total",
+		"Total term-deposit-domain requests rejected with 422: insufficient available funds, accruing past maturity, or wrong-state maturity/withdrawal.",
+		m.TermDepositRejections.Load())
 	writeCounter(&sb, "ledger_sweeps_total",
 		"Total POST /sweeps requests received.", m.SweepsTotal.Load())
 	writeCounter(&sb, "ledger_sweep_idempotency_hits_total",

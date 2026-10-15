@@ -445,6 +445,20 @@ type Ledger struct {
 	// entry/transfer key namespaces; all of them expire with the TTL.
 	holdKeys    map[string]string
 	captureKeys map[string]CaptureReceipt
+	// termDeposits maps term-deposit IDs to their records (see
+	// termdeposit.go): time-bound principal locks that reserve available
+	// funds off-journal, like authorization holds. termDepositKeys maps
+	// a deposit open's idempotency key to its deposit ID — its own
+	// namespace, expiring with the TTL like every other key index (see
+	// pruneTermDepositKeysLocked). tdInterestExpense is the
+	// ledger-wide interest-expense account term-deposit interest
+	// accruals credit (see SetTermDepositInterestExpense): empty means
+	// unconfigured and accruals are fail-closed. Structural config and
+	// operational state like holds — both round-trip through
+	// disaster-recovery snapshots.
+	termDeposits     map[string]TermDeposit
+	termDepositKeys  map[string]string
+	tdInterestExpense AccountID
 	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so
 	// replays rebuild the full receipt (see sweep.go). Its own namespace,
 	// like holdKeys/captureKeys, expiring with the TTL.
@@ -733,6 +747,8 @@ func New(opts ...Option) *Ledger {
 		holdsByAccount:       make(map[AccountID][]string),
 		holdKeys:             make(map[string]string),
 		captureKeys:          make(map[string]CaptureReceipt),
+		termDeposits:         make(map[string]TermDeposit),
+		termDepositKeys:      make(map[string]string),
 		sweepKeys:            make(map[string]sweepRecord),
 		batchKeys:            make(map[string]batchRecord),
 		allocRules:           make(map[string]AllocationRule),
@@ -1244,13 +1260,15 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// batch keys (see pruneBatchKeysLocked in batch.go). Netting session
 	// keys expire on the same schedule, in their own namespace (see
 	// pruneNettingKeysLocked in netting.go), and so do allocation receipt
-	// keys (see pruneAllocKeysLocked in allocation.go).
+	// keys (see pruneAllocKeysLocked in allocation.go) and term-deposit
+	// open keys (see pruneTermDepositKeysLocked in termdeposit.go).
 	removed += l.pruneHoldKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
 	removed += l.pruneMergeKeysLocked(now)
 	removed += l.pruneBatchKeysLocked(now)
 	removed += l.pruneNettingKeysLocked(now)
 	removed += l.pruneAllocKeysLocked(now)
+	removed += l.pruneTermDepositKeysLocked(now)
 	return removed
 }
 

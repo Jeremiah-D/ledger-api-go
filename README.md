@@ -1334,6 +1334,65 @@ Status codes: `201` first booking / `200` idempotent replay or release;
 `422` insufficient available funds, capture exceeding the hold, or
 capture on a non-active/expired hold.
 
+### Term deposits (定存)
+
+A bank-style time deposit: `POST /term-deposits` locks a principal for a
+fixed term at an agreed rate. Like holds, the principal locks
+**available** funds off-journal (`available = balance − active holds −
+active term deposits`) without moving money through the journal — the
+interest accruals are the only journal rows, booked one per day per
+deposit via `POST /term-deposits/{id}/accrue` (optional `?asof=`,
+defaults to now). Interest for a day is
+`⌊principal × rate_bps / 10000 / 365⌋`, journaled debit the depositor /
+credit the interest-expense account, with a deterministic entry ID
+`term-interest/<deposit-id>/<YYYY-MM-DD>` so same-day replays return
+`200` without double-booking. Sub-dust accruals (a day's interest of 0)
+are rejected with `400` instead of booking a zero row.
+
+Lifecycle: `active → matured | withdrawn_early`. `POST
+/term-deposits/{id}/mature` unlocks the principal once `now ≥ matures_at`
+(`422` otherwise, surfacing `ErrTermNotMatured`); `POST
+/term-deposits/sweep` runs the batch job over every deposit: accrue the
+day, then mature anything due. `POST /term-deposits/{id}/withdraw`
+closes a deposit early with an optional `penalty_bps` (0–10000, default
+0); the penalty posts debit the fee-revenue account / credit the
+depositor and the principal unlocks — previously accrued interest rows
+are kept, never clawed back.
+
+Two fail-closed rules: accruals require the interest-expense account
+(`LEDGER_TD_INTEREST_EXPENSE`, `500` on a misconfigured server), and a
+positive early-withdrawal penalty requires the fee-revenue account
+(`LEDGER_TRANSFER_FEE`) or the withdrawal is rejected. Frozen accounts
+cannot open deposits (`403`); the frozen gate runs after the idempotency
+replay check, so replays of keys booked before the freeze still succeed.
+IDs must be slash-free (deterministic accrual IDs contain slashes) and
+unique — a second open under a claimed ID returns `409` — while
+idempotency keys live in their own namespace per LG convention and honor
+`LEDGER_IDEMPOTENCY_TTL`. Deposits are off-journal and never bump the
+ledger version; both the reconcile report and full snapshots disclose
+them (`term_deposits` section, `snapshotNS term_deposit`), and the
+dry-run twin copies deposit state so what-if postings respect the locks.
+
+```bash
+curl -s -X POST localhost:8080/term-deposits \
+  -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'
+# 201 {"id":"td-1","status":"active","matures_at":"...","principal_cents":400000,...}
+curl -s localhost:8080/accounts/saver/balance
+# {"account":"saver","balance_cents":1000000,"available_cents":600000,"frozen":false}
+curl -s -X POST localhost:8080/term-deposits/td-1/accrue?asof=2026-03-10T12:00:00Z
+# 201 {"id":"term-interest/td-1/2026-03-10",...,"amount_cents":54}
+curl -s -X POST localhost:8080/term-deposits/td-1/withdraw -d '{"penalty_bps":100}'
+# 201 {"deposit":{"status":"withdrawn_early",...},"penalty_cents":4000}
+```
+
+Status codes: `201` first booking / `200` idempotent replay or
+re-withdraw; `400` malformed request, bad currency/rate/penalty, or
+dust accrual; `403` frozen account; `404` unknown deposit; `409` ID
+conflict or duplicate open; `422` insufficient available funds,
+maturing before `matures_at`, withdrawing a matured deposit, or
+accruing after maturity; `500` interest-expense/penalty account not
+configured.
+
 ### Multi-currency
 
 Every entry carries a `currency`: a three-letter uppercase ISO 4217 code
@@ -2927,6 +2986,20 @@ curl -s localhost:8080/metrics
 - `ledger_hold_sweeps_total` — hold-expiry sweeps: `POST /holds/expire`
   requests received plus background hold-sweeper ticks (see
   `LEDGER_HOLD_SWEEP_INTERVAL` below).
+- `ledger_term_deposits_total` — term deposits opened:
+  `POST /term-deposits` requests received.
+- `ledger_term_deposit_idempotency_hits_total` — term-deposit opens
+  that replayed an existing idempotency key.
+- `ledger_term_deposit_accruals_total` — term-deposit interest accrual
+  requests received.
+- `ledger_term_deposit_maturities_total` — term-deposit maturity
+  requests received.
+- `ledger_term_deposit_withdrawals_total` — term-deposit early
+  withdrawals received.
+- `ledger_term_deposit_sweeps_total` — `POST /term-deposits/sweep`
+  requests received.
+- `ledger_term_deposit_rejections_total` — term-deposit requests rejected
+  (insufficient available funds, not-yet-matured, conflict, …).
 - `ledger_snapshot_backups_total` — successful periodic snapshot backup
   ticks (full and incremental; see `LEDGER_SNAPSHOT_BACKUP_DIR` below).
 - `ledger_snapshot_backups_failed_total` — periodic snapshot backup
@@ -3094,7 +3167,13 @@ Environment:
   (e.g. `"0:0,10000:250,1000000:100@fee-revenue"`). Applies to
   `POST /transfers` without an explicit fee unless the request sets
   `skip_fee`. Unset means no default fee; an invalid value fails startup
-  fast.
+  fast. The revenue account also collects term-deposit early-withdrawal
+  penalties.
+- `LEDGER_TD_INTEREST_EXPENSE` — the ledger-wide interest-expense
+  account for term-deposit daily interest accruals (e.g.
+  `LEDGER_TD_INTEREST_EXPENSE=interest-expense`). Accruals are
+  fail-closed: without this set, `POST /term-deposits/{id}/accrue`
+  returns `500`.
 - `LEDGER_DAILY_OUTFLOW_LIMITS` — per-account per-currency daily outflow
   limits, `"<account>:<currency>:<limitCents>,..."` (e.g.
   `LEDGER_DAILY_OUTFLOW_LIMITS="cust-123:USD:100000"` caps cust-123's daily

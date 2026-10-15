@@ -167,10 +167,12 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	entries := map[string]JournalEntry{}
 	var linkOrder []snapshotLinkLine
 	holds := map[string]Hold{}
+	termDeposits := map[string]TermDeposit{}
 	reviews := map[string]*TransferReview{}
 	byKey := map[string]JournalEntry{}
 	transferKeys := map[string][]string{}
 	holdKeys := map[string]string{}
+	termDepositKeys := map[string]string{}
 	captureKeys := map[string]CaptureReceipt{}
 	sweepKeys := map[string]sweepRecord{}
 	merges := map[string]mergeRecord{}
@@ -256,6 +258,21 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 				return fail("line %d: duplicate hold ID %q", lineNo, hl.Hold.ID)
 			}
 			holds[hl.Hold.ID] = hl.Hold
+		case "term_deposit":
+			if meta == nil {
+				return fail("line %d: term_deposit before meta", lineNo)
+			}
+			var tl snapshotTermDepositLine
+			if err := json.Unmarshal(line, &tl); err != nil {
+				return fail("line %d: malformed term_deposit: %v", lineNo, err)
+			}
+			if tl.TermDeposit.ID == "" {
+				return fail("line %d: term_deposit with empty ID", lineNo)
+			}
+			if _, dup := termDeposits[tl.TermDeposit.ID]; dup {
+				return fail("line %d: duplicate term deposit ID %q", lineNo, tl.TermDeposit.ID)
+			}
+			termDeposits[tl.TermDeposit.ID] = tl.TermDeposit
 		case "review":
 			if meta == nil {
 				return fail("line %d: review before meta", lineNo)
@@ -327,6 +344,14 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
 				}
 				holdKeys[il.Key] = il.HoldID
+			case snapshotNSTermDeposit:
+				if il.TermDepositID == "" {
+					return fail("line %d: term_deposit-namespace record without deposit ID", lineNo)
+				}
+				if _, dup := termDepositKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				termDepositKeys[il.Key] = il.TermDepositID
 			case snapshotNSCapture:
 				if il.Receipt == nil {
 					return fail("line %d: capture-namespace record without receipt", lineNo)
@@ -501,6 +526,25 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 		}
 		stagedHolds[h.ID] = h
 	}
+	// Term deposits merge like holds: identical rows merge cleanly;
+	// rows that differ under an existing deposit ID are corruption and
+	// reject the import. A deposit that changed status on the primary
+	// (active -> matured) after the replica's base version is such a
+	// conflict — the replica must re-sync from a full snapshot rather
+	// than skip the transition.
+	tdIDs := make([]string, 0, len(termDeposits))
+	for id := range termDeposits {
+		tdIDs = append(tdIDs, id)
+	}
+	sort.Strings(tdIDs)
+	stagedTermDeposits := make(map[string]TermDeposit, len(tdIDs))
+	for _, id := range tdIDs {
+		td := termDeposits[id]
+		if existing, ok := l.termDeposits[id]; ok && !termDepositsEqual(existing, td) {
+			return fail("term deposit %q conflicts with the ledger's record: refusing merge", id)
+		}
+		stagedTermDeposits[id] = td
+	}
 	// Transfer reviews merge like holds: identical rows merge cleanly;
 	// rows that differ under an existing transfer ID are corruption and
 	// reject the import. A review that changed state on the primary
@@ -557,6 +601,13 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 		_, ok := stagedHolds[id]
 		return ok
 	}
+	termDepositVisible := func(id string) bool {
+		if _, ok := l.termDeposits[id]; ok {
+			return true
+		}
+		_, ok := stagedTermDeposits[id]
+		return ok
+	}
 	for k, e := range byKey {
 		j, ok := entryVisible(e.ID)
 		if !ok {
@@ -585,6 +636,14 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 		}
 		if existing, ok := l.holdKeys[k]; ok && existing != id {
 			return fail("hold idempotency key %q conflicts with the ledger's registry: refusing merge", k)
+		}
+	}
+	for k, id := range termDepositKeys {
+		if !termDepositVisible(id) {
+			return fail("term deposit idempotency key %q references missing deposit %q", k, id)
+		}
+		if existing, ok := l.termDepositKeys[k]; ok && existing != id {
+			return fail("term deposit idempotency key %q conflicts with the ledger's registry: refusing merge", k)
 		}
 	}
 	for k, rc := range captureKeys {
@@ -675,6 +734,18 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 		if _, ok := l.holds[h.ID]; !ok {
 			l.holds[h.ID] = h
 			l.holdsByAccount[h.Account] = append(l.holdsByAccount[h.Account], h.ID)
+		}
+	}
+	// Term deposits apply like holds: identical rows merge cleanly, new
+	// ones register.
+	for id, td := range stagedTermDeposits {
+		if _, ok := l.termDeposits[id]; !ok {
+			l.termDeposits[id] = td
+		}
+	}
+	for k, id := range termDepositKeys {
+		if _, ok := l.termDepositKeys[k]; !ok {
+			l.termDepositKeys[k] = id
 		}
 	}
 	// New reviews register with their frozen rows (pending, rejected,

@@ -94,6 +94,13 @@ const (
 	OutboxReviewRejected  = "review_rejected"
 	OutboxReviewExpired   = "review_expired"
 	OutboxEntryReversed   = "entry_reversed"
+	// Term-deposit lifecycle (see termdeposit.go): opening locks the
+	// principal off-journal, maturing releases it at tenor end, and an
+	// early withdrawal releases it with a penalty. The interest accrual
+	// rows emit the usual entry_posted events.
+	OutboxTermDepositOpened    = "term_deposit_opened"
+	OutboxTermDepositMatured   = "term_deposit_matured"
+	OutboxTermDepositWithdrawn = "term_deposit_withdrawn"
 )
 
 // OutboxEvent is one domain fact in the outbox stream.

@@ -315,10 +315,12 @@ func (l *Ledger) heldLocked(a AccountID, currency string, now time.Time) int64 {
 // AvailableIn returns the account's available funds (in cents) in the
 // given currency: net balance minus active authorization holds minus
 // funds frozen by pending transfer reviews (see review.go — a pending
-// review deducts its frozen outflow exactly like a hold). Expired holds
-// and lapsed reviews count as inactive even before their sweeps. An
-// empty currency means the default currency. Unknown accounts report
-// zero.
+// review deducts its frozen outflow exactly like a hold) minus active
+// term-deposit principals (see termdeposit.go — a term deposit locks
+// its principal off-journal, like a hold). Expired holds and lapsed
+// reviews count as inactive even before their sweeps; matured and
+// early-withdrawn term deposits release their locks. An empty currency
+// means the default currency. Unknown accounts report zero.
 func (l *Ledger) AvailableIn(a AccountID, currency string) int64 {
 	if currency == "" {
 		currency = DefaultCurrency
@@ -327,12 +329,14 @@ func (l *Ledger) AvailableIn(a AccountID, currency string) int64 {
 	defer l.mu.RUnlock()
 	now := time.Now()
 	return l.balances[accountCurrency{account: a, currency: currency}] -
-		l.heldLocked(a, currency, now) - l.reviewHeldLocked(a, currency, now)
+		l.heldLocked(a, currency, now) - l.reviewHeldLocked(a, currency, now) -
+		l.termLockedLocked(a, currency, now)
 }
 
 // Available returns the account's available funds (in cents) in the
 // default currency: net balance minus active authorization holds minus
-// funds frozen by pending transfer reviews. See AvailableIn.
+// funds frozen by pending transfer reviews minus active term-deposit
+// principals. See AvailableIn.
 func (l *Ledger) Available(a AccountID) int64 {
 	return l.AvailableIn(a, DefaultCurrency)
 }

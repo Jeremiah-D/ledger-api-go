@@ -1753,6 +1753,261 @@ func (s *server) handleExpireHolds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"expired": s.ledgerFor(r).ExpireHolds()})
 }
 
+type openTermDepositRequest struct {
+	ID             string           `json:"id"`
+	Account        ledger.AccountID `json:"account"`
+	AmountCents    int64            `json:"amount_cents"`
+	Currency       string           `json:"currency"`
+	TermDays       int64            `json:"term_days"`
+	RateBps        int64            `json:"rate_bps"`
+	IdempotencyKey string           `json:"idempotency_key"`
+}
+
+// handleOpenTermDeposit implements POST /term-deposits: locks
+// amount_cents of the account's available funds until term_days from now
+// (see ledger.OpenTermDeposit). The principal is off-journal —
+// available_cents drops by the locked amount while balance_cents is
+// untouched — and interest accrues via POST
+// /term-deposits/{id}/accrue. The server generates the deposit ID when
+// the client omits it.
+//
+// A first-time open returns 201; a duplicate idempotency key returns 200
+// with the original deposit; malformed requests return 400; an open on a
+// frozen or closed account returns 403; an open the account's available
+// funds cannot cover returns 422. The currency field is optional and
+// defaults to USD; when given it must be a 3-letter uppercase ISO 4217
+// code. term_days must be 1..36500 and rate_bps 1..10000.
+func (s *server) handleOpenTermDeposit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.TermDepositsTotal.Add(1)
+	var req openTermDepositRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	id := req.ID
+	if id == "" {
+		id = newID()
+	}
+	td, duplicate, err := s.ledgerFor(r).OpenTermDeposit(ledger.TermDeposit{
+		ID:             id,
+		Account:        req.Account,
+		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
+		TermDays:       req.TermDays,
+		RateBps:        req.RateBps,
+		IdempotencyKey: req.IdempotencyKey,
+	})
+	if err != nil {
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInsufficientAvailableFunds) {
+			s.metrics.TermDepositRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		s.metrics.TermDepositIdempotencyHits.Add(1)
+		writeJSON(w, http.StatusOK, td)
+		return
+	}
+	writeJSON(w, http.StatusCreated, td)
+}
+
+// handleGetTermDeposit implements GET /term-deposits/{id}: returns the
+// deposit record. An unknown deposit returns 404.
+func (s *server) handleGetTermDeposit(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "term deposit id required"})
+		return
+	}
+	td, ok := s.ledgerFor(r).GetTermDeposit(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "term deposit not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, td)
+}
+
+// handleAccrueTermInterest implements POST /term-deposits/{id}/accrue:
+// books one day's interest on an active term deposit (see
+// ledger.AccrueTermInterest). The day defaults to today (UTC); pass
+// ?asof=RFC3339 to book a specific day. The booking is idempotent per
+// (deposit, day): re-running a day replays the original row with 200.
+//
+// A first-time accrual returns 201; an unknown deposit returns 404;
+// accruing a non-active deposit or past maturity returns 422; a ledger
+// without a configured interest-expense account returns 500 (operator
+// misconfiguration — see LEDGER_TD_INTEREST_EXPENSE).
+func (s *server) handleAccrueTermInterest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "term deposit id required"})
+		return
+	}
+	s.metrics.TermDepositAccrualsTotal.Add(1)
+	var asof time.Time
+	if raw := r.URL.Query().Get("asof"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid asof: " + err.Error()})
+			return
+		}
+		asof = t
+	}
+	entry, duplicate, err := s.ledgerFor(r).AccrueTermInterest(id, asof)
+	if err != nil {
+		if errors.Is(err, ledger.ErrTermDepositNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrTermDepositNotActive) || errors.Is(err, ledger.ErrTermDepositMatured) {
+			s.metrics.TermDepositRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrTermDepositInterestAccountNotConfigured) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, entry)
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+// handleMatureTermDeposit implements POST /term-deposits/{id}/mature:
+// releases an active deposit's principal back to available funds once
+// its maturity date has arrived (see ledger.MatureTermDeposit).
+// Maturing is idempotent — an already-matured deposit returns 200 as-is.
+// An unknown deposit returns 404; maturing before maturity returns 422.
+func (s *server) handleMatureTermDeposit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "term deposit id required"})
+		return
+	}
+	s.metrics.TermDepositMaturitiesTotal.Add(1)
+	td, err := s.ledgerFor(r).MatureTermDeposit(id, time.Now())
+	if err != nil {
+		if errors.Is(err, ledger.ErrTermDepositNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrTermNotMatured) || errors.Is(err, ledger.ErrTermDepositNotActive) {
+			s.metrics.TermDepositRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, td)
+}
+
+type withdrawTermDepositRequest struct {
+	PenaltyBps int64 `json:"penalty_bps"`
+}
+
+// handleWithdrawTermDeposit implements POST
+// /term-deposits/{id}/withdraw: releases an active deposit's principal
+// before maturity, booking the early-withdrawal penalty when
+// penalty_bps > 0 (see ledger.WithdrawTermDeposit). Interest already
+// journaled is not clawed back. The withdrawal is idempotent —
+// re-withdrawing returns the original receipt with 200.
+//
+// An unknown deposit returns 404; a malformed penalty rate returns 400;
+// withdrawing a matured deposit returns 422; a positive penalty without
+// a configured fee-revenue account returns 500 (operator
+// misconfiguration).
+func (s *server) handleWithdrawTermDeposit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "term deposit id required"})
+		return
+	}
+	s.metrics.TermDepositWithdrawalsTotal.Add(1)
+	var req withdrawTermDepositRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	receipt, err := s.ledgerFor(r).WithdrawTermDeposit(id, req.PenaltyBps, time.Now())
+	if err != nil {
+		if errors.Is(err, ledger.ErrTermDepositNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrTermDepositMatured) {
+			s.metrics.TermDepositRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidTermDepositPenalty) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrTermDepositPenaltyAccountNotConfigured) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if receipt.Duplicate {
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
+// handleSweepTermDeposits implements POST /term-deposits/sweep: the
+// operator's daily batch — accrues interest through today on every
+// active term deposit and matures every deposit whose maturity has
+// arrived (see ledger.SweepTermDeposits). Accrual is best-effort per
+// deposit; the deterministic interest IDs make retries idempotent. It
+// returns 200 {"matured": N, "accrued": M}.
+func (s *server) handleSweepTermDeposits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.TermDepositSweepsTotal.Add(1)
+	matured, accrued := s.ledgerFor(r).SweepTermDeposits(time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{"matured": matured, "accrued": accrued})
+}
+
 // handleBalance implements GET /accounts/{id}/balance.
 //
 // available_cents is the account's spendable funds: net balance minus
@@ -3419,6 +3674,12 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /aging", s.handleAging)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
 	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)
+	mux.HandleFunc("POST /term-deposits", s.handleOpenTermDeposit)
+	mux.HandleFunc("POST /term-deposits/sweep", s.handleSweepTermDeposits)
+	mux.HandleFunc("GET /term-deposits/{id}", s.handleGetTermDeposit)
+	mux.HandleFunc("POST /term-deposits/{id}/accrue", s.handleAccrueTermInterest)
+	mux.HandleFunc("POST /term-deposits/{id}/mature", s.handleMatureTermDeposit)
+	mux.HandleFunc("POST /term-deposits/{id}/withdraw", s.handleWithdrawTermDeposit)
 	mux.HandleFunc("POST /holds/{id}/capture", s.handleCaptureHold)
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
@@ -3966,6 +4227,16 @@ func main() {
 	if raw := os.Getenv("LEDGER_REVAL_ACCOUNT"); raw != "" {
 		opts = append(opts, ledger.WithRevaluationAccount(ledger.AccountID(raw)))
 		log.Printf("ledger-api-go: revaluation P&L account = %q", raw)
+	}
+
+	// LEDGER_TD_INTEREST_EXPENSE configures the ledger-wide
+	// interest-expense account that term-deposit interest accruals
+	// credit (see ledger.SetTermDepositInterestExpense and POST
+	// /term-deposits/{id}/accrue). Unset means unconfigured: accruals
+	// are fail-closed until the operator configures it.
+	if raw := os.Getenv("LEDGER_TD_INTEREST_EXPENSE"); raw != "" {
+		opts = append(opts, ledger.WithTermDepositInterestExpense(ledger.AccountID(raw)))
+		log.Printf("ledger-api-go: term-deposit interest expense account = %q", raw)
 	}
 
 	ln, err := net.Listen("tcp", addr)
