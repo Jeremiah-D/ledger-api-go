@@ -647,6 +647,53 @@ subtree (`POST /accounts/{id}/parent` hierarchy) in the same call — the
 merchant-offboarding path; each member gets its own closure record with
 the same `closed_at`.
 
+### Dormant accounts (Go API: `DetectDormant` / `ReactivateAccount` / `IsDormant` / `ChargeDormancyFee`)
+
+The inactive-account lifecycle marking (fintech compliance). Dormancy is
+a *state marking*, not fund control — it is orthogonal to the freeze
+above: freezing is a reversible risk-control stop on fund movement,
+dormancy marks that the account itself has gone quiet. Marking never
+freezes funds, never touches balances, totals, the ledger version, or the
+audit chain; it is structural config (like the frozen-account list) and
+round-trips through snapshots.
+
+```go
+// Mark every account with no journal activity in the last 30 days.
+report, err := l.DetectDormant(30)
+// report.Marked: the newly marked accounts, sorted, each with
+// {account, marked_at, last_activity}. Already-dormant accounts are
+// left alone; accounts with no journal history are never marked.
+l.IsDormant("old-customer") // true
+// Lift the stop (audited as dormant_reactivated).
+l.ReactivateAccount("old-customer")
+```
+
+A dormant account rejects operator `Post` and `Transfer` bookings with
+`ledger.ErrAccountDormant` until reactivated. The gate sits after the
+idempotency replay check (a replay of a pre-dormancy key still returns
+its original entry) and before the frozen check — lifecycle stops
+(closed, dormant) precede risk-control stops. Reads are unaffected.
+Each marking and reactivation is a structured audit event
+(`dormant_marked` / `dormant_reactivated`); only transfers' own legs
+(From/To) are gated, not system-routed fee legs.
+
+The opt-in monthly inactivity fee follows the accrual convention:
+
+```go
+// Deterministic ID "dormant-fee/<account>/<YYYY-MM>": re-charging the
+// same month replays (duplicate == true). capCents caps the cumulative
+// net fee (zero disables); reversible via the generic ReverseEntry.
+l.ChargeDormancyFee("old-customer", "fee-income", 500, asof, capCents)
+l.DormancyFeeTotal("old-customer", "fee-income", since, until)
+```
+
+The fee is an ordinary journal entry (own chain link, version bump) that
+runs the full `Post` gate order but never fires journal rules nor
+enters dual-control review. It deliberately skips the dormant-account
+stop itself — the fee exists to charge dormant accounts — posting
+through the same system path as accruals and dividends, which likewise
+keep posting through dormant accounts.
+
 ### Period close (`POST /periods/{id}/close` / `POST /periods/{id}/reopen`)
 
 Accounting-period lock for month-end close (fintech compliance). A period
@@ -869,7 +916,10 @@ Each leg runs the full `Post` gate order (validation, idempotency
 replay, chart direction, frozen, overdraft, daily-limit, budget,
 period) but, like accruals, never fires the journal rules engine and
 never enters dual-control review: dividends are system-generated
-corporate actions. Every leg is an ordinary journal entry — own
+corporate actions. Dividend legs post through the system path, so the
+dormant-account stop does not apply — paying a declared dividend to a
+dormant holder is the corporation's action, not operator activity.
+Every leg is an ordinary journal entry — own
 audit-chain link, version bump, entry_posted outbox event — and
 `Reconcile` discloses every declared dividend (pool, record date,
 total, per-holder payouts) in its `dividends` section.

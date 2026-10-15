@@ -693,6 +693,15 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 			return TransferReceipt{}, ErrAccountClosed
 		}
 	}
+	// Dormant accounts (see dormancy.go) reject operator transfers with
+	// ErrAccountDormant, after the idempotency replay and closed checks
+	// and before the frozen check — the same position as in Post's gate
+	// order. Only the transfer's own legs (From/To) are gated: fee legs
+	// are system-routed to operator-configured revenue accounts, not
+	// operator activity through those accounts.
+	if l.dormantLocked(t.From) || l.dormantLocked(t.To) {
+		return TransferReceipt{}, ErrAccountDormant
+	}
 	if l.frozenLocked(t.From) || l.frozenLocked(t.To) {
 		return TransferReceipt{}, ErrAccountFrozen
 	}

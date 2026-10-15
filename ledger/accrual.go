@@ -131,7 +131,10 @@ func checkAccrualAccounts(expense, payable AccountID) error {
 // returns the original entry with duplicate == true. The entry runs the
 // full Post gate order (frozen, overdraft, daily-limit, closed period)
 // but never fires journal rules and never enters dual-control review;
-// see the package doc comment above for why.
+// see the package doc comment above for why. The dormant-account stop
+// (see dormancy.go) is the one deliberate exception: accruals post
+// through the system path, so interest keeps accruing on dormant
+// accounts.
 func (l *Ledger) AccrueInterest(expense, payable AccountID, principalCents, rateBps int64, asof time.Time, capCents int64) (JournalEntry, bool, error) {
 	if rateBps < 1 || rateBps > 10000 {
 		return JournalEntry{}, false, ErrInvalidAccrualRate
@@ -163,6 +166,8 @@ func (l *Ledger) AccrueInterest(expense, payable AccountID, principalCents, rate
 //
 // The call is idempotent per calendar day, runs the full Post gate
 // order, and never fires journal rules nor enters dual-control review.
+// The dormant-account stop is the one deliberate exception (see
+// dormancy.go): fee accruals post through the system path.
 func (l *Ledger) AccrueFee(expense, payable AccountID, amountCents int64, asof time.Time, capCents int64) (JournalEntry, bool, error) {
 	if amountCents <= 0 {
 		return JournalEntry{}, false, ErrNonPositiveAmount
@@ -221,7 +226,7 @@ func (l *Ledger) accrue(kind string, expense, payable AccountID, amountCents, ca
 	// overdraft, daily-limit, period — commit a full journal row, and
 	// bump the version. Dual-control review is never consulted: review
 	// routing lives on PostTransfer's path only.
-	return l.postLocked(e, false)
+	return l.postSystemLocked(e, false)
 }
 
 // AccruedTotal returns the cumulative net accrual for one (kind,
@@ -322,5 +327,5 @@ func (l *Ledger) ReverseAccrual(accrualID string, asof time.Time) (JournalEntry,
 		Memo:           "accrual:reversal",
 		CreatedAt:      asof,
 	}
-	return l.postLocked(e, false)
+	return l.postSystemLocked(e, false)
 }

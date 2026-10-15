@@ -185,6 +185,12 @@ type snapshotConfigLine struct {
 	Frozen             []AccountID             `json:"frozen"`
 	OverdraftProtected []AccountID             `json:"overdraft_protected"`
 	Parents            map[AccountID]AccountID `json:"parents"`
+	// Dormant carries the dormancy markings (see dormancy.go): an empty
+	// account fails the import instead of installing a mark that could
+	// never have been created. The record is restored verbatim,
+	// including the original MarkedAt — a restore must not move an
+	// account's dormancy timestamp.
+	Dormant            []DormancyRecord        `json:"dormant,omitempty"`
 	FeeRateBps         int64                   `json:"fee_rate_bps"`
 	FeeTiers           []FeeTier               `json:"fee_tiers,omitempty"`
 	FeeRevenueAccount  AccountID               `json:"fee_revenue_account"`
@@ -726,6 +732,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		Frozen:               frozen,
 		OverdraftProtected:   overdraft,
 		Parents:              parents,
+		Dormant:              l.dormantCopyLocked(),
 		FeeRateBps:           flatFeeRateBps(l.feeTiers),
 		FeeTiers:             l.feeTiers,
 		FeeRevenueAccount:    l.feeRevenueAccount,
@@ -1614,6 +1621,17 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// Apply: every row above checked out.
 	for _, a := range cfg.Frozen {
 		l.frozen[a] = true
+	}
+	// Dormancy markings restore like the frozen list: an empty account
+	// fails the import instead of installing a mark that could never
+	// have been created. The record is restored verbatim, including the
+	// original MarkedAt and LastActivity — a restore must not move an
+	// account's dormancy timestamps.
+	for _, d := range cfg.Dormant {
+		if d.Account == "" {
+			return bad("dormancy record with empty account")
+		}
+		l.dormant[d.Account] = d
 	}
 	// Account closures restore like the frozen list: an empty account
 	// fails the import instead of installing a closure that could never

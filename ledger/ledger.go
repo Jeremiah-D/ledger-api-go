@@ -261,6 +261,16 @@ type Ledger struct {
 	// the records are structural config — they do not bump the journal
 	// version and they survive snapshots.
 	closed map[AccountID]AccountClosure
+	// dormant maps an account to its dormancy record (see dormancy.go):
+	// a dormant account rejects operator Post and Transfer bookings
+	// with ErrAccountDormant until ReactivateAccount clears the mark.
+	// Dormancy is a state marking, not fund control — unlike the
+	// terminal close above it is reversible, and unlike the frozen
+	// risk-control stop it does not gate system adjusting entries
+	// (accruals, dividends, dormancy fees), which post through the
+	// system path. Structural config: marking never bumps the journal
+	// version and survives snapshots.
+	dormant map[AccountID]DormancyRecord
 	// frozenAutoReleases counts automatic unfreezes (see FreezeUntil):
 	// every lazy write-path release and every background-sweeper (or
 	// explicit ExpireFrozenAccounts) release bumps it. Operational
@@ -702,6 +712,7 @@ func New(opts ...Option) *Ledger {
 		frozen:               make(map[AccountID]bool),
 		frozenUntil:          make(map[AccountID]time.Time),
 		closed:               make(map[AccountID]AccountClosure),
+		dormant:              make(map[AccountID]DormancyRecord),
 		chart:                make(map[AccountID]AccountType),
 		tags:                 make(map[AccountID]map[string]string),
 		noOverdraft:          make(map[AccountID]bool),
@@ -899,13 +910,34 @@ func (l *Ledger) Post(e JournalEntry) (posted JournalEntry, duplicate bool, err 
 	return l.postLocked(e, true)
 }
 
-// postLocked is Post's body. When fireRules is false, the journal rules
-// engine is skipped: the principal still clears every gate and commits a
-// full journal row (chain link, version bump, balance effects), but no
-// derived legs are evaluated. System postings that must not cascade
-// through operator-configured rules (accruals, see accrual.go) use the
-// skip path. Callers must hold the write lock.
+// postLocked is Post's body: the operator posting path. When fireRules is
+// false, the journal rules engine is skipped: the principal still clears
+// every gate and commits a full journal row (chain link, version bump,
+// balance effects), but no derived legs are evaluated. System postings
+// that must not cascade through operator-configured rules (accruals, see
+// accrual.go) use the skip path. The dormant-account stop applies here:
+// postings through dormant accounts are rejected with ErrAccountDormant
+// (see dormancy.go). Callers must hold the write lock.
 func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry, duplicate bool, err error) {
+	return l.postLockedGated(e, fireRules, true)
+}
+
+// postSystemLocked is the system-adjusting-entry posting path: the same
+// gates as postLocked except the dormant-account stop. Accruals,
+// dividends, and dormancy fees post through here — a dormant account's
+// own inactivity fee must be chargeable, and corporate actions paying a
+// dormant holder are the corporation's action, not operator activity
+// through the account. Callers must hold the write lock.
+func (l *Ledger) postSystemLocked(e JournalEntry, fireRules bool) (posted JournalEntry, duplicate bool, err error) {
+	return l.postLockedGated(e, fireRules, false)
+}
+
+// postLockedGated is the shared posting core. When enforceDormant is
+// true, postings through dormant accounts are rejected with
+// ErrAccountDormant after the idempotency replay check (a replay books
+// nothing new, so it must not fail on an account that went dormant after
+// the original posting). Callers must hold the write lock.
+func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant bool) (posted JournalEntry, duplicate bool, err error) {
 	if err := validateJournalEntry(&e); err != nil {
 		return JournalEntry{}, false, err
 	}
@@ -962,6 +994,19 @@ func (l *Ledger) postLocked(e JournalEntry, fireRules bool) (posted JournalEntry
 	// posting.
 	if l.closedLocked(e.DebitAccount) || l.closedLocked(e.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountClosed
+	}
+	// Dormant accounts (see dormancy.go) are a lifecycle state marking,
+	// not fund control: like the closed check it runs after the
+	// idempotency replay check — a replay books nothing new, so it must
+	// not fail on an account that went dormant after the original
+	// posting. It runs before the frozen check: lifecycle stops (closed,
+	// dormant) precede risk-control stops. System adjusting entries
+	// (accruals, dividends, dormancy fees) skip this gate via
+	// postSystemLocked: charging a dormant account's own inactivity fee,
+	// or paying a declared dividend to a dormant holder, is
+	// bookkeeping, not operator activity.
+	if enforceDormant && (l.dormantLocked(e.DebitAccount) || l.dormantLocked(e.CreditAccount)) {
+		return JournalEntry{}, false, ErrAccountDormant
 	}
 	if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountFrozen

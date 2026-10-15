@@ -39,7 +39,10 @@ import (
 // rules engine and never enters dual-control review: dividends are
 // system-generated corporate actions, and operator-configured rules
 // cascading derived legs off them would double-count the distribution.
-// Review routing lives on PostTransfer's path only.
+// Review routing lives on PostTransfer's path only. Dividend legs post
+// as system entries, so the dormant-account stop (see dormancy.go) does
+// not apply: paying a declared dividend to a dormant holder is the
+// corporation's action, not operator activity through the account.
 //
 // A dividend is ordinary bookkeeping: every leg carries its own
 // audit-chain link, bumps the ledger version, flows through
@@ -280,11 +283,13 @@ func (l *Ledger) DeclareDividend(pool AccountID, totalCents int64, currency stri
 			Memo:           dividendMemo(h.SharesBps),
 			CreatedAt:      recordDate,
 		}
-		// fireRules=false: dividends are corporate actions, never
-		// operator postings; journal rules and dual-control review do
-		// not apply (see the package doc comment). Each leg still runs
-		// the full Post gate order.
-		posted, _, err := l.postLocked(e, false)
+		// fireRules=false, system path: dividends are corporate
+		// actions, never operator postings; journal rules and
+		// dual-control review do not apply (see the package doc
+		// comment). The dormant-account stop does not apply either —
+		// paying a declared dividend to a dormant holder is the
+		// corporation's action, not the holder's.
+		posted, _, err := l.postSystemLocked(e, false)
 		if err != nil {
 			receipt.Duplicate = false
 			return receipt, fmt.Errorf("ledger: dividend %q leg %d (holder %q): %w", dividendID, i, h.Account, err)
