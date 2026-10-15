@@ -201,6 +201,12 @@ type ReconciliationReport struct {
 	// frozen — the frozen_accounts list in this report shows the
 	// resulting stops.
 	Merges []AccountMerge `json:"merges"`
+	// Dividends lists every declared dividend (see DeclareDividend),
+	// sorted by dividend ID: the retained-earnings pool, the record
+	// date, the total, and the per-holder payouts recovered from the
+	// journaled rows. The amounts are the books' own record — the sum
+	// of a dividend's legs always equals its declared total.
+	Dividends []DividendReceipt `json:"dividends"`
 	// ClosedPeriods lists the currently locked accounting periods
 	// ("YYYY-MM", UTC months; see ClosePeriod), sorted: no journal entry
 	// may be booked with a timestamp in one of these months, so the
@@ -443,6 +449,7 @@ func (l *Ledger) ReconcileWithOptions(now time.Time, opts ReconcileOptions) (Rec
 			"accounting_equation_ok": report.AccountingEquationOK,
 			"discrepancies":          len(report.Discrepancies),
 			"merges":                 len(report.Merges),
+			"dividends":              len(report.Dividends),
 			"fx_applied":             report.FXApplied,
 		},
 	})
@@ -470,6 +477,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FXRates:                    l.fxRatesLocked(),
 		FXRateVersions:             l.fxRateVersionReportLocked(),
 		Merges:                     l.mergesLocked(),
+		Dividends:                  l.dividendsLocked(),
 		ClosedPeriods:              l.closedPeriodsLocked(),
 		ActiveTransferSchedules:    l.activeScheduleCountLocked(),
 		PendingReviews:             l.pendingTransferReviewsLocked(now),

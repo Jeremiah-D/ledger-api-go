@@ -832,6 +832,48 @@ reversals debit the liability, which a strict chart rejects with
 route through a dedicated contra account; accounts that book reversals
 stay unregistered.
 
+### Dividend declaration (Go API: `DeclareDividend` / `Dividends`)
+
+Corporate-action dividend bookings (fintech corporate actions). One
+double-entry row per shareholder: debit the retained-earnings pool,
+credit the holder, for `floor(total * sharesBps / 10000)` cents each —
+the dust remainder lands on the first holder, so the declared total is
+always fully distributed and the books stay balanced. Shares must sum to
+exactly 10000 bps.
+
+```go
+r, err := l.DeclareDividend("retained-earnings", 1000000, "USD",
+    []ledger.DividendHolder{
+        {Account: "holder-a", SharesBps: 6000},
+        {Account: "holder-b", SharesBps: 4000},
+    }, recordDate)
+// r.DividendID == "dividend/retained-earnings/2026-10-15"
+// r.Payouts[i].EntryID == "dividend/retained-earnings/2026-10-15/<i>"
+// List every declared dividend, sorted by dividend ID:
+l.Dividends()
+```
+
+The declaration is idempotent by construction: the dividend ID is
+deterministic — `dividend/<pool>/<YYYY-MM-DD>` (recordDate, UTC) — and
+each holder's row carries `<dividendID>/<index>`. Re-running a
+declaration replays the original rows (`Duplicate == true`) instead of
+double-booking; a declaration interrupted by a failed leg is resumable —
+the retry skips the rows already journaled and books the rest. The
+record-date shareholding snapshot is tamper-evident: the holder table
+(account, sharesBps) is journaled (the share rides in the memo
+`dividend:<bps>bps`) and the audit-chain hash covers every journaled
+field, so a later-changed holder table cannot silently replace a
+declared dividend.
+
+Each leg runs the full `Post` gate order (validation, idempotency
+replay, chart direction, frozen, overdraft, daily-limit, budget,
+period) but, like accruals, never fires the journal rules engine and
+never enters dual-control review: dividends are system-generated
+corporate actions. Every leg is an ordinary journal entry — own
+audit-chain link, version bump, entry_posted outbox event — and
+`Reconcile` discloses every declared dividend (pool, record date,
+total, per-holder payouts) in its `dividends` section.
+
 ### Journal rules (`PUT /rules/{id}` / `DELETE /rules/{id}` / `GET /rules`)
 
 Opt-in automatic journaling: rules that match raw journal postings on
