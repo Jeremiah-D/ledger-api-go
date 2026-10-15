@@ -351,6 +351,24 @@ Fired runs increment `ledger_scheduled_transfers_total`. Schedules are
 structural state: they survive disaster-recovery snapshots (run history
 does not).
 
+A plan can be rehearsed before the sweeper touches it: `GET
+/transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
+default `24h`, max `8760h`) lists the nominal firing times inside the
+horizon — same recurrence arithmetic the sweeper uses (fixed `interval`
+cadence from `next_run_at`, `ends_at` truncation, no backfill of missed
+runs; paused/cancelled/completed plans preview zero firings) — and
+dry-runs each firing's transfer on a private copy of the ledger through
+the full `PostTransfer` admission chain (frozen, overdraft, daily-limit,
+budget, period). Each firing reports `admitted`, a stable failure
+`code` (e.g. `account_frozen`, `overdraft_not_allowed`,
+`daily_limit_exceeded`) with the exact rejection `reason`, and the
+simulated per-leg balance movement plus budget impact when admitted;
+firings are evaluated in nominal order so an admitted run's movement is
+visible to the later ones. The preview is strictly read-only: no journal
+writes, no version bump, no audit events, no idempotency keys consumed,
+and the schedule's `next_run_at`/`run_seq`/status are never mutated —
+the sweeper never sees a preview run.
+
 ### Scheduled reports (`Ledger.CreateReportSchedule`)
 
 Recurring report subscriptions — compliance packs, client statements,

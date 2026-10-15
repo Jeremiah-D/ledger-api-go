@@ -1440,6 +1440,41 @@ func (s *server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"schedule_id": id, "runs": runs})
 }
 
+// handlePreviewTransferSchedule implements GET
+// /transfer-schedules/{id}/preview: a read-only dry-run preview of the
+// schedule's nominal firings inside ?horizon= (a Go duration string like
+// "24h"; default 24h, max 8760h), each with its admission verdict from
+// the full PostTransfer chain (see ledger.PreviewSchedule). Unknown
+// schedule IDs are 404; unparsable or out-of-range horizons are 400.
+// Nothing fires and nothing is recorded — the schedule's state and the
+// ledger are untouched.
+func (s *server) handlePreviewTransferSchedule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	horizon := 24 * time.Hour
+	if raw := r.URL.Query().Get("horizon"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 || d > 8760*time.Hour {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid horizon: must be a positive Go duration like \"24h\", at most 8760h"})
+			return
+		}
+		horizon = d
+	}
+	id := r.PathValue("id")
+	preview, err := s.ledgerFor(r).PreviewSchedule(id, horizon)
+	if err != nil {
+		if errors.Is(err, ledger.ErrScheduleNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
 // scheduleTransition runs one pause/resume/cancel transition for
 // POST /transfer-schedules/{id}/{pause,resume,cancel}.
 func (s *server) scheduleTransition(w http.ResponseWriter, r *http.Request, action string) {
@@ -3363,6 +3398,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /transfer-schedules", s.handleCreateTransferSchedule)
 	mux.HandleFunc("GET /transfer-schedules/{id}", s.handleGetTransferSchedule)
 	mux.HandleFunc("GET /transfer-schedules/{id}/runs", s.handleListScheduleRuns)
+	mux.HandleFunc("GET /transfer-schedules/{id}/preview", s.handlePreviewTransferSchedule)
 	mux.HandleFunc("POST /transfer-schedules/{id}/pause", func(w http.ResponseWriter, r *http.Request) {
 		s.scheduleTransition(w, r, "pause")
 	})
