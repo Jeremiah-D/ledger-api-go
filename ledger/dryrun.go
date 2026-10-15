@@ -127,6 +127,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		batchKeys:            make(map[string]batchRecord, len(l.batchKeys)),
 		merges:               make(map[string]mergeRecord, len(l.merges)),
 		mergeKeys:            make(map[string]string, len(l.mergeKeys)),
+		creditLines:          make(map[creditLineKey]CreditLine, len(l.creditLines)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
 		closedPeriods:        make(map[string]bool, len(l.closedPeriods)),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch, len(l.balanceWatches)),
@@ -175,6 +176,12 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	}
 	for k, v := range l.noOverdraft {
 		c.noOverdraft[k] = v
+	}
+	// Credit lines travel with the twin: the dry-run's overdraft gate
+	// must see the same -limit floor the real Post applies, or a
+	// within-line dry-run would wrongly report a rejection.
+	for k, v := range l.creditLines {
+		c.creditLines[k] = v
 	}
 	for k, v := range l.dailyLimits {
 		c.dailyLimits[k] = v

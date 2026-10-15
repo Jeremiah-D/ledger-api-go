@@ -152,6 +152,11 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountDirectionMismatch) {
 			s.metrics.ChartDirectionRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -259,6 +264,11 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -421,6 +431,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -554,6 +569,11 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -720,6 +740,11 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -877,6 +902,11 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1122,6 +1152,11 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrPeriodClosed) {
 			s.metrics.PeriodRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1195,6 +1230,11 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1676,6 +1716,11 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountDenied) {
 			s.metrics.DenylistRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -2006,6 +2051,190 @@ func (s *server) handleSweepTermDeposits(w http.ResponseWriter, r *http.Request)
 	s.metrics.TermDepositSweepsTotal.Add(1)
 	matured, accrued := s.ledgerFor(r).SweepTermDeposits(time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{"matured": matured, "accrued": accrued})
+}
+
+type grantCreditLineRequest struct {
+	Account    ledger.AccountID `json:"account"`
+	LimitCents int64            `json:"limit_cents"`
+	Currency   string           `json:"currency"`
+	RateBps    int64            `json:"rate_bps"`
+}
+
+// handleGrantCreditLine implements POST /credit-lines: grants a credit
+// line of limit_cents in the currency to the account (see
+// ledger.GrantCreditLine). A protected account with a line may carry a
+// negative balance down to -limit; utilization beyond the floor is
+// rejected with 422 ErrCreditLimitExceeded. Granting is create-only —
+// re-granting an existing line returns 409; change it with POST
+// /credit-lines/reduce. Malformed requests return 400. The currency
+// field is optional and defaults to USD; rate_bps must be 1..10000.
+func (s *server) handleGrantCreditLine(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.CreditLinesTotal.Add(1)
+	var req grantCreditLineRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	cl, err := s.ledgerFor(r).GrantCreditLine(req.Account, req.LimitCents, req.Currency, req.RateBps)
+	if err != nil {
+		if errors.Is(err, ledger.ErrCreditLineExists) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, cl)
+}
+
+type reduceCreditLineRequest struct {
+	Account    ledger.AccountID `json:"account"`
+	Currency   string           `json:"currency"`
+	LimitCents int64            `json:"limit_cents"`
+}
+
+// handleReduceCreditLine implements POST /credit-lines/reduce: lowers a
+// credit line's limit (see ledger.ReduceCreditLine). The new limit must
+// not sit below the line's current utilization (422); reducing to zero
+// revokes the line. An unknown line returns 404; malformed requests
+// return 400.
+func (s *server) handleReduceCreditLine(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req reduceCreditLineRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	cl, err := s.ledgerFor(r).ReduceCreditLine(req.Account, req.Currency, req.LimitCents)
+	if err != nil {
+		if errors.Is(err, ledger.ErrCreditLineNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCreditLineBelowUtilization) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, cl)
+}
+
+// handleGetCreditLine implements GET /credit-lines?account=&currency=:
+// reports a credit line's limit, drawn utilization, and remaining
+// availability. An unknown line returns 404; a missing account returns
+// 400.
+func (s *server) handleGetCreditLine(w http.ResponseWriter, r *http.Request) {
+	account := r.URL.Query().Get("account")
+	if account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account query parameter required"})
+		return
+	}
+	currency := r.URL.Query().Get("currency")
+	cl, ok := s.ledgerFor(r).GetCreditLine(ledger.AccountID(account), currency)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no credit line for this account and currency"})
+		return
+	}
+	used, available, limit, _ := s.ledgerFor(r).CreditLineUtilization(ledger.AccountID(account), cl.Currency)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":          cl.Account,
+		"currency":         cl.Currency,
+		"limit_cents":      limit,
+		"used_cents":       used,
+		"available_cents":  available,
+		"rate_bps":         cl.RateBps,
+		"granted_at":       cl.GrantedAt,
+	})
+}
+
+// handleAccrueCreditInterest implements POST
+// /credit-lines/accrue-interest: books one day's interest on a credit
+// line's utilization (see ledger.AccrueCreditInterest). The body carries
+// account and an optional currency; the day defaults to today (UTC) and
+// can be pinned with ?asof=RFC3339. The booking is idempotent per
+// (account, currency, day): re-running a day replays the original row
+// with 200.
+//
+// A first-time accrual returns 201; an unknown line returns 404;
+// interest that would breach the line's floor returns 422
+// (ErrCreditLimitExceeded); a ledger without a configured
+// interest-income account returns 500 (operator misconfiguration — see
+// LEDGER_CREDIT_INTEREST_INCOME).
+// decodeOptionalJSONBody is decodeJSONBody for endpoints where the
+// request body is fully optional (parameters also arrive via the query
+// string). A missing body leaves v at its zero value instead of
+// rejecting with "invalid JSON body: EOF".
+func (s *server) decodeOptionalJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if r.ContentLength == 0 {
+		return true
+	}
+	return s.decodeJSONBody(w, r, v)
+}
+
+func (s *server) handleAccrueCreditInterest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.CreditInterestAccrualsTotal.Add(1)
+	var req struct {
+		Account  ledger.AccountID `json:"account"`
+		Currency string           `json:"currency"`
+	}
+	if !s.decodeOptionalJSONBody(w, r, &req) {
+		return
+	}
+	var asof time.Time
+	if raw := r.URL.Query().Get("asof"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid asof: " + err.Error()})
+			return
+		}
+		asof = t
+	}
+	// Account and currency ride in the JSON body or the query string,
+	// whichever the client sent.
+	account, currency := req.Account, req.Currency
+	if account == "" {
+		account = ledger.AccountID(r.URL.Query().Get("account"))
+	}
+	if currency == "" {
+		currency = r.URL.Query().Get("currency")
+	}
+	entry, duplicate, err := s.ledgerFor(r).AccrueCreditInterest(account, currency, asof)
+	if err != nil {
+		if errors.Is(err, ledger.ErrCreditLineNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCreditInterestIncomeNotConfigured) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, entry)
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
 }
 
 // handleBalance implements GET /accounts/{id}/balance.
@@ -3146,6 +3375,9 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 			case errors.Is(err, ledger.ErrAccountOverdraft):
 				s.metrics.OverdraftRejections.Add(1)
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrCreditLimitExceeded):
+				s.metrics.CreditLimitRejections.Add(1)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			case errors.Is(err, ledger.ErrDailyLimitExceeded):
 				s.metrics.DailyLimitRejections.Add(1)
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -3680,6 +3912,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /term-deposits/{id}/accrue", s.handleAccrueTermInterest)
 	mux.HandleFunc("POST /term-deposits/{id}/mature", s.handleMatureTermDeposit)
 	mux.HandleFunc("POST /term-deposits/{id}/withdraw", s.handleWithdrawTermDeposit)
+	mux.HandleFunc("POST /credit-lines", s.handleGrantCreditLine)
+	mux.HandleFunc("POST /credit-lines/reduce", s.handleReduceCreditLine)
+	mux.HandleFunc("GET /credit-lines", s.handleGetCreditLine)
+	mux.HandleFunc("POST /credit-lines/accrue-interest", s.handleAccrueCreditInterest)
 	mux.HandleFunc("POST /holds/{id}/capture", s.handleCaptureHold)
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
@@ -4237,6 +4473,16 @@ func main() {
 	if raw := os.Getenv("LEDGER_TD_INTEREST_EXPENSE"); raw != "" {
 		opts = append(opts, ledger.WithTermDepositInterestExpense(ledger.AccountID(raw)))
 		log.Printf("ledger-api-go: term-deposit interest expense account = %q", raw)
+	}
+
+	// LEDGER_CREDIT_INTEREST_INCOME configures the ledger-wide
+	// interest-income account that credit-line interest accruals debit
+	// (see ledger.SetCreditInterestIncome and POST
+	// /credit-lines/accrue-interest). Unset means unconfigured:
+	// accruals are fail-closed until the operator configures it.
+	if raw := os.Getenv("LEDGER_CREDIT_INTEREST_INCOME"); raw != "" {
+		opts = append(opts, ledger.WithCreditInterestIncome(ledger.AccountID(raw)))
+		log.Printf("ledger-api-go: credit-line interest income account = %q", raw)
 	}
 
 	ln, err := net.Listen("tcp", addr)

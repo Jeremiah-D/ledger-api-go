@@ -207,6 +207,16 @@ type Metrics struct {
 	// funds on open, accruing past maturity, or maturing/withdrawing a
 	// deposit in the wrong state.
 	TermDepositRejections atomic.Uint64
+	// CreditLinesTotal counts POST /credit-lines requests received
+	// (all attempts, including duplicates and rejected payloads).
+	CreditLinesTotal atomic.Uint64
+	// CreditInterestAccrualsTotal counts POST
+	// /credit-lines/accrue-interest requests received.
+	CreditInterestAccrualsTotal atomic.Uint64
+	// CreditLimitRejectionsTotal counts postings rejected with 422
+	// because they would breach a credit line's floor
+	// (ErrCreditLimitExceeded).
+	CreditLimitRejections atomic.Uint64
 	// SweepsTotal counts POST /sweeps requests received (all attempts,
 	// including duplicates and rejected payloads).
 	SweepsTotal atomic.Uint64
@@ -466,6 +476,13 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_term_deposit_rejections_total",
 		"Total term-deposit-domain requests rejected with 422: insufficient available funds, accruing past maturity, or wrong-state maturity/withdrawal.",
 		m.TermDepositRejections.Load())
+	writeCounter(&sb, "ledger_credit_lines_total",
+		"Total POST /credit-lines requests received.", m.CreditLinesTotal.Load())
+	writeCounter(&sb, "ledger_credit_interest_accruals_total",
+		"Total POST /credit-lines/accrue-interest requests received.", m.CreditInterestAccrualsTotal.Load())
+	writeCounter(&sb, "ledger_credit_limit_rejections_total",
+		"Total postings rejected with 422 because they would breach a credit line's floor.",
+		m.CreditLimitRejections.Load())
 	writeCounter(&sb, "ledger_sweeps_total",
 		"Total POST /sweeps requests received.", m.SweepsTotal.Load())
 	writeCounter(&sb, "ledger_sweep_idempotency_hits_total",

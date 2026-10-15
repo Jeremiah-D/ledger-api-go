@@ -264,6 +264,11 @@ type ReconciliationReport struct {
 	// dividend disclosure). Risk tooling reads this to know which funds
 	// are locked and when they release.
 	TermDeposits []TermDepositReport `json:"term_deposits"`
+	// CreditLines lists every granted credit line (see
+	// GrantCreditLine), sorted by (account, currency): the limit, the
+	// drawn utilization, and the remaining availability. Risk tooling
+	// reads this for the ledger's credit exposure at report time.
+	CreditLines []CreditLineReport `json:"credit_lines"`
 }
 
 // TermDepositReport is one term deposit's Reconcile disclosure: the
@@ -279,6 +284,18 @@ type TermDepositReport struct {
 	OpenedAt             time.Time `json:"opened_at"`
 	MaturesAt            time.Time `json:"matures_at"`
 	AccruedInterestCents int64     `json:"accrued_interest_cents"`
+}
+
+// CreditLineReport is one credit line's Reconcile disclosure: the limit
+// and the exposure drawn against it.
+type CreditLineReport struct {
+	Account          AccountID `json:"account"`
+	Currency         string    `json:"currency"`
+	LimitCents       int64     `json:"limit_cents"`
+	UsedCents        int64     `json:"used_cents"`
+	AvailableCents   int64     `json:"available_cents"`
+	RateBps          int64     `json:"rate_bps"`
+	GrantedAt        time.Time `json:"granted_at"`
 }
 
 // ReconcileOptions tunes Reconcile. BaseCurrency opts into the
@@ -508,6 +525,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		RevaluationImpact:          l.revaluationPositionsLocked(),
 		AccountTags:                l.accountTagsLocked(),
 		TermDeposits:               l.termDepositReportsLocked(),
+		CreditLines:                l.creditLineReportsLocked(),
 	}
 
 	// Every account that has ever been touched. Net balances, debit

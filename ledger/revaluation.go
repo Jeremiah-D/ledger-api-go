@@ -452,8 +452,11 @@ func (l *Ledger) RevalueBalances(asOf time.Time, baseCurrency string) (Revaluati
 			gateErr = ErrAccountClosed
 		case l.frozenLocked(entry.DebitAccount) || l.frozenLocked(entry.CreditAccount):
 			gateErr = ErrAccountFrozen
-		case l.overdraftRejectedLocked(entry):
-			gateErr = ErrAccountOverdraft
+		case l.overdraftRejectedLocked(entry) != nil:
+			// A credit line (see creditline.go) lowers the floor to
+			// -limit: breaching it surfaces as ErrCreditLimitExceeded,
+			// not ErrAccountOverdraft.
+			gateErr = l.overdraftRejectedLocked(entry)
 		case l.dailyLimitRejectedLocked(entry.CreditAccount, entry.Currency, entry.AmountCents, entry.CreatedAt):
 			gateErr = ErrDailyLimitExceeded
 		default:

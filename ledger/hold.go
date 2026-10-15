@@ -589,8 +589,8 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	// like Post: a capture that would take a protected held account below
 	// zero is rejected. The comparison never subtracts, so it cannot
 	// overflow (see overdraft.go).
-	if l.overdraftRejectedLocked(entry) {
-		return CaptureReceipt{}, ErrAccountOverdraft
+	if err := l.overdraftRejectedLocked(entry); err != nil {
+		return CaptureReceipt{}, err
 	}
 
 	// Monthly spend budgets guard the hold account's settlement spend: a

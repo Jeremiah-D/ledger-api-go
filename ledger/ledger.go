@@ -459,6 +459,16 @@ type Ledger struct {
 	termDeposits     map[string]TermDeposit
 	termDepositKeys  map[string]string
 	tdInterestExpense AccountID
+	// creditLines maps (account, currency) to the granted credit line
+	// (see creditline.go): an opt-in per-account overdraft floor of
+	// -limit with daily interest on utilization. creditInterestIncome
+	// is the ledger-wide interest-income account credit-line interest
+	// accruals debit (see SetCreditInterestIncome): empty means
+	// unconfigured and accruals are fail-closed. Structural config,
+	// like noOverdraft — it never bumps the journal version and it
+	// survives disaster-recovery snapshots.
+	creditLines          map[creditLineKey]CreditLine
+	creditInterestIncome AccountID
 	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so
 	// replays rebuild the full receipt (see sweep.go). Its own namespace,
 	// like holdKeys/captureKeys, expiring with the TTL.
@@ -749,6 +759,7 @@ func New(opts ...Option) *Ledger {
 		captureKeys:          make(map[string]CaptureReceipt),
 		termDeposits:         make(map[string]TermDeposit),
 		termDepositKeys:      make(map[string]string),
+		creditLines:          make(map[creditLineKey]CreditLine),
 		sweepKeys:            make(map[string]sweepRecord),
 		batchKeys:            make(map[string]batchRecord),
 		allocRules:           make(map[string]AllocationRule),
@@ -1033,8 +1044,11 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 	// the overdraft question even arises) and after the idempotency replay
 	// check above (a replay books nothing new, so it must not fail on an
 	// account that was protected after the original posting).
-	if l.overdraftRejectedLocked(e) {
-		return JournalEntry{}, false, ErrAccountOverdraft
+	// A credit line (see creditline.go) lowers the floor to -limit for
+	// the entry's currency: within-line postings clear the gate, and
+	// breaching the floor is rejected with ErrCreditLimitExceeded.
+	if err := l.overdraftRejectedLocked(e); err != nil {
+		return JournalEntry{}, false, err
 	}
 
 	// CreatedAt is filled before the daily-limit check: the outflow is

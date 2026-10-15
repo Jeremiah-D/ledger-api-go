@@ -349,6 +349,17 @@ type snapshotConfigLine struct {
 	// restore that dropped it would turn fail-closed accruals into
 	// fail-open ones, so it round-trips like the fee-revenue account.
 	TdInterestExpense AccountID `json:"td_interest_expense,omitempty"`
+	// CreditInterestIncome carries the ledger-wide credit-line
+	// interest-income account (see SetCreditInterestIncome); absent in
+	// snapshots written before credit lines existed, for the same
+	// fail-closed reason as TdInterestExpense.
+	CreditInterestIncome AccountID `json:"credit_interest_income,omitempty"`
+	// CreditLines carries the granted credit lines (see
+	// GrantCreditLine), sorted by (account, currency); absent in
+	// snapshots written before credit lines existed. A restore that
+	// dropped them would silently lift the -limit floor back to zero,
+	// so they round-trip like the overdraft-protection list.
+	CreditLines []CreditLine `json:"credit_lines,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -810,6 +821,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		ClosedAccounts:       l.closedCopyLocked(),
 		OFXImportRegistry:    l.ofxImportsLocked(),
 		TdInterestExpense:    l.tdInterestExpense,
+		CreditInterestIncome: l.creditInterestIncome,
+		CreditLines:          l.creditLinesLocked(),
 	}
 	plAccounts, retainedEarnings := l.closingAccountsLocked()
 	if retainedEarnings != "" {
@@ -1886,6 +1899,11 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// -limit floor back to zero, so they round-trip like the
 	// overdraft-protection list.
 	l.tdInterestExpense = cfg.TdInterestExpense
+	l.creditInterestIncome = cfg.CreditInterestIncome
+	l.creditLines = make(map[creditLineKey]CreditLine, len(cfg.CreditLines))
+	for _, cl := range cfg.CreditLines {
+		l.creditLines[creditLineKey{account: cl.Account, currency: cl.Currency}] = cl
+	}
 	// Split-transfer chunking config (LG-75), validated above.
 	l.maxTransferChunkCents = cfg.MaxTransferChunkCents
 	l.splitFeePerChunk = cfg.SplitFeePerChunk
@@ -2028,6 +2046,16 @@ func termDepositsEqual(a, b TermDeposit) bool {
 		a.MaturesAt.UnixNano() == b.MaturesAt.UnixNano() &&
 		a.IdempotencyKey == b.IdempotencyKey &&
 		a.Status == b.Status
+}
+
+// creditLinesEqual compares two credit-line records field by field,
+// ignoring time.Location representation (see holdsEqual).
+func creditLinesEqual(a, b CreditLine) bool {
+	return a.Account == b.Account &&
+		a.Currency == b.Currency &&
+		a.LimitCents == b.LimitCents &&
+		a.RateBps == b.RateBps &&
+		a.GrantedAt.UnixNano() == b.GrantedAt.UnixNano()
 }
 
 // mergeRecordsEqual compares two merge registry entries field by field,
@@ -2224,6 +2252,21 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if a.tdInterestExpense != b.tdInterestExpense {
+		return false
+	}
+	// Credit lines must round-trip with their fail-closed income
+	// account: a restore that dropped the lines would silently lift the
+	// -limit floor back to zero.
+	if len(a.creditLines) != len(b.creditLines) {
+		return false
+	}
+	for k, cl := range a.creditLines {
+		other, ok := b.creditLines[k]
+		if !ok || !creditLinesEqual(cl, other) {
+			return false
+		}
+	}
+	if a.creditInterestIncome != b.creditInterestIncome {
 		return false
 	}
 	// Split-transfer chunking config must round-trip (LG-75).

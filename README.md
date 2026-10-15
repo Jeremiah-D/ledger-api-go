@@ -1393,6 +1393,57 @@ maturing before `matures_at`, withdrawing a matured deposit, or
 accruing after maturity; `500` interest-expense/penalty account not
 configured.
 
+### Credit lines (授信)
+
+`POST /credit-lines` grants a per-account, per-currency credit line
+(`limit_cents`, `rate_bps`) — the overdraft-floor counterpart to term
+deposits. For an overdraft-protected account the balance floor drops
+from `0` to `−limit` in the line's currency: postings are rejected only
+when `balance < amount + floor`, i.e. the balance may rest exactly at
+`−limit` but never below. Breaching the floor returns the dedicated
+`ErrCreditLimitExceeded` (`422`) rather than the plain
+`ErrAccountOverdraft`, so clients can distinguish "overdrawn" from
+"past the credit line"; accounts without a line keep the zero floor
+unchanged. The floor is strictly per-currency (a USD line does not cover
+EUR postings), unprotected accounts ignore the line for posting but still
+track utilization, and a frozen account stays fully blocked — the line
+never un-freezes anything.
+
+Grants are create-only: a second grant for the same account+currency
+returns `409` (`ErrCreditLineExists`); adjust with `POST
+/credit-lines/reduce`, which lowers the limit (rejecting any limit below
+current utilization with `422`, `ErrCreditLineBelowUtilization`) and
+revokes the line entirely at `0` (`GET` then returns `404`). `GET
+/credit-lines?account=&currency=` reports `limit_cents`, `used_cents`
+(the negative-balance portion in that currency), and
+`available_cents`. `POST /credit-lines/accrue-interest` books one day
+of interest on the utilization —
+`⌊used × rate_bps / 10000 / 365⌋`, debit the interest-income account /
+credit the borrower, deterministic ID
+`credit-interest/<account>/<currency>/<YYYY-MM-DD>` — and is
+fail-closed: it requires the income account
+(`LEDGER_CREDIT_INTEREST_INCOME`, `500` unconfigured) and rejects an
+interest charge that would itself breach the floor with
+`ErrCreditLimitExceeded` instead of posting it. Lines and the income
+account round-trip through snapshots and are disclosed in the reconcile
+report's `credit_lines` section.
+
+```bash
+curl -s -X POST localhost:8080/credit-lines \
+  -d '{"account":"trader","limit_cents":50000,"currency":"USD","rate_bps":800}'
+# 201 {"account":"trader","currency":"USD","limit_cents":50000,"rate_bps":800,...}
+curl -s "localhost:8080/credit-lines?account=trader&currency=USD"
+# {"account":"trader","limit_cents":50000,"used_cents":40000,"available_cents":10000}
+curl -s -X POST localhost:8080/credit-lines/reduce \
+  -d '{"account":"trader","currency":"USD","limit_cents":0}'   # revoke
+# 200 {"revoked":true,...}
+```
+
+Status codes: `201` first grant / `200` reduce; `400` malformed request
+or bad account/currency/rate; `404` unknown line; `409` duplicate grant;
+`422` reducing below utilization, interest breaching the floor, or
+posting past the credit limit.
+
 ### Multi-currency
 
 Every entry carries a `currency`: a three-letter uppercase ISO 4217 code
@@ -3000,6 +3051,12 @@ curl -s localhost:8080/metrics
   requests received.
 - `ledger_term_deposit_rejections_total` — term-deposit requests rejected
   (insufficient available funds, not-yet-matured, conflict, …).
+- `ledger_credit_lines_total` — credit lines granted plus
+  reduce/revoke requests received.
+- `ledger_credit_interest_accruals_total` — credit-line interest
+  accrual requests received.
+- `ledger_credit_limit_rejections_total` — postings and accruals rejected
+  at the credit-line floor (`ErrCreditLimitExceeded`).
 - `ledger_snapshot_backups_total` — successful periodic snapshot backup
   ticks (full and incremental; see `LEDGER_SNAPSHOT_BACKUP_DIR` below).
 - `ledger_snapshot_backups_failed_total` — periodic snapshot backup
@@ -3173,6 +3230,11 @@ Environment:
   account for term-deposit daily interest accruals (e.g.
   `LEDGER_TD_INTEREST_EXPENSE=interest-expense`). Accruals are
   fail-closed: without this set, `POST /term-deposits/{id}/accrue`
+  returns `500`.
+- `LEDGER_CREDIT_INTEREST_INCOME` — the ledger-wide interest-income
+  account for credit-line utilization interest (e.g.
+  `LEDGER_CREDIT_INTEREST_INCOME=interest-income`). Accruals are
+  fail-closed: without this set, `POST /credit-lines/accrue-interest`
   returns `500`.
 - `LEDGER_DAILY_OUTFLOW_LIMITS` — per-account per-currency daily outflow
   limits, `"<account>:<currency>:<limitCents>,..."` (e.g.
