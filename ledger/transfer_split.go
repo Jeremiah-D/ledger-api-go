@@ -551,8 +551,11 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 	// window — every chunk prices at this rate (see effectiveFXRateLocked;
 	// LG-86 admission quotes and the slippage gate apply only to the
 	// PostTransfer path, which admits before taking the write lock).
+	// Since LG-93 the resolution is side-aware (see fxSideOf): chunks
+	// price at the dealing price like a plain FX transfer.
+	side := fxSideOf(t)
 	pair := fxPair{from: t.Currency, to: toCurrency}
-	commitEff, err := l.effectiveFXRateLocked(pair, now)
+	commitEff, err := l.effectiveFXRateLocked(pair, side, now)
 	if err != nil {
 		return SplitTransferReceipt{}, err
 	}
@@ -594,6 +597,36 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 		}
 	}
 
+	// LG-93: the spread accrues per chunk, against the same reference
+	// mid as the plain path (see fxSpreadCentsOf), and books as one
+	// aggregated "<transfer ID>/spread" leg — the transfer-level P&L,
+	// mirroring the once-per-transfer fee leg's shape. The per-chunk
+	// spread may differ by a cent from converting the whole amount at
+	// once, exactly like the conversion itself.
+	var totalSpread int64
+	for _, amt := range chunks {
+		midC, ok := fxConvertCents(amt, commitEff.MidNum, commitEff.MidDen)
+		if !ok {
+			return SplitTransferReceipt{}, ErrAmountOverflow
+		}
+		sideC, ok := fxConvertCents(amt, effNum, effDen)
+		if !ok {
+			return SplitTransferReceipt{}, ErrAmountOverflow
+		}
+		s, ok := addCents(totalSpread, fxSpreadCentsOf(side, sideC, midC))
+		if !ok {
+			return SplitTransferReceipt{}, ErrAmountOverflow
+		}
+		totalSpread = s
+	}
+	// Fail-closed, before any mutation: a positive spread with no usable
+	// income account rejects the split — the P&L must have somewhere to
+	// go (see resolveFXIncomeAccountLocked).
+	incomeAccount, err := l.resolveFXIncomeAccountLocked(t, fxAccount, totalSpread)
+	if err != nil {
+		return SplitTransferReceipt{}, err
+	}
+
 	for i := range chunks {
 		for _, id := range []string{splitChunkEntryID(t.ID, i), splitChunkEntryID(t.ID, i) + "/fx"} {
 			if _, exists := l.entries[id]; exists {
@@ -619,19 +652,27 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 			return SplitTransferReceipt{}, fmt.Errorf("%w: reference %q already journaled on entry %q", ErrDuplicateExternalRef, t.ExternalRef, owner)
 		}
 	}
+	// LG-93: the aggregated spread leg's namespace, like the fee leg's.
+	if _, exists := l.entries[t.ID+"/spread"]; exists {
+		return SplitTransferReceipt{}, ErrTransferIDConflict
+	}
 
 	l.releaseExpiredFreezesLocked(now, "write_path")
 
 	// Frozen and overdraft checks cover every account a leg touches. The
 	// payer's risk is entirely in the source currency, like
 	// postTransferFXLocked: overdraft and the daily limit both guard the
-	// source-currency total outflow, never the converted amounts.
+	// source-currency total outflow, never the converted amounts. The
+	// FX income account walks the same frozen/closed checks as the FX
+	// account when a spread leg books (LG-93).
 	if l.closedLocked(t.From) || l.closedLocked(t.To) || l.closedLocked(fxAccount) ||
-		(fee.account != "" && l.closedLocked(fee.account)) {
+		(fee.account != "" && l.closedLocked(fee.account)) ||
+		(incomeAccount != "" && l.closedLocked(incomeAccount)) {
 		return SplitTransferReceipt{}, ErrAccountClosed
 	}
 	if l.frozenLocked(t.From) || l.frozenLocked(t.To) || l.frozenLocked(fxAccount) ||
-		(fee.account != "" && l.frozenLocked(fee.account)) {
+		(fee.account != "" && l.frozenLocked(fee.account)) ||
+		(incomeAccount != "" && l.frozenLocked(incomeAccount)) {
 		return SplitTransferReceipt{}, ErrAccountFrozen
 	}
 	if l.noOverdraft[t.From] &&
@@ -729,6 +770,14 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 		}
 		entries = append(entries, fe)
 	}
+	// LG-93: the aggregated spread leg — one "<transfer ID>/spread" leg
+	// for the whole split, debit FX account, credit the FX income
+	// account, target currency. Like the plain path, it books after the
+	// conversion legs; it is deliberately outside chunkEntryIdx (a
+	// transfer-level leg, like the once-per-transfer fee leg).
+	if totalSpread > 0 {
+		entries = append(entries, buildFXSpreadLeg(t.ID, fxAccount, incomeAccount, totalSpread, toCurrency, t.CreatedAt))
+	}
 
 	// Every leg is single-currency by construction; the check is the
 	// explicit seam keeping mixed-currency legs rejected.
@@ -749,6 +798,18 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 		RateExpiresAt:    effExpiresAt,
 		// LG-45: pin the conversion to the current snapshot version.
 		RateSnapshotVersion: l.fxSnapshotVersion,
+		// LG-93: the dealing side, the two-sided quote, and the
+		// aggregated spread, like the plain path.
+		Direction:       side,
+		MidNum:          commitEff.MidNum,
+		MidDen:          commitEff.MidDen,
+		BidNum:          commitEff.BidNum,
+		BidDen:          commitEff.BidDen,
+		AskNum:          commitEff.AskNum,
+		AskDen:          commitEff.AskDen,
+		SpreadBps:       fxSpreadBps(commitEff.BidNum, commitEff.BidDen, commitEff.AskNum, commitEff.AskDen, commitEff.MidNum, commitEff.MidDen),
+		SpreadCents:     totalSpread,
+		FXIncomeAccount: incomeAccount,
 	}
 	if overridden {
 		fxConv.OverrideApplied = true
@@ -764,7 +825,7 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 		l.emitRateOverriddenAuditLocked(t, toCurrency, override, rate, totalConverted)
 	}
 
-	l.commitSplitLocked(t, entries, outflows, fee.total, now, map[string]any{
+	auditDetails := map[string]any{
 		"amount_cents":     t.AmountCents,
 		"currency":         t.Currency,
 		"to_currency":      toCurrency,
@@ -774,7 +835,23 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 		"fee_per_chunk":    fee.perChunk,
 		"fee_tier_index":   fee.tierIndex,
 		"fee_rate_bps":     fee.rateBps,
-	}, map[string]any{"split": true, "chunk_count": len(chunks)})
+		// LG-93: the dealing side and the spread, sealed with the rest
+		// of the conversion's provenance.
+		"direction":    side,
+		"spread_bps":   fxConv.SpreadBps,
+		"spread_cents": totalSpread,
+	}
+	if incomeAccount != "" {
+		auditDetails["fx_income_account"] = string(incomeAccount)
+	}
+	l.commitSplitLocked(t, entries, outflows, fee.total, now, auditDetails,
+		map[string]any{"split": true, "chunk_count": len(chunks), "direction": side, "spread_cents": totalSpread})
+
+	// LG-93: the spread booking counters, like the plain path.
+	if totalSpread > 0 {
+		l.fxSpreadBookings++
+		l.fxSpreadCentsTotal += totalSpread
+	}
 
 	receipt := assembleSplitReceipt(t, chunks, fee, entries, chunkEntryIdx, fxConv)
 	return receipt, nil

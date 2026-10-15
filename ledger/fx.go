@@ -115,8 +115,21 @@ type effectiveFXRate struct {
 	// Rate is the market-table entry, kept for provenance disclosure
 	// (the market price the override was measured against).
 	Rate ExchangeRate
-	// Num/Den is the price conversions actually settle at: the override
-	// price while an override is active, the market rate otherwise.
+	// MidNum/MidDen is the reference mid price: the table's Num/Den, or
+	// the override price while an override is active. The spread is
+	// measured against the mid (see fx_spread.go).
+	MidNum, MidDen int64
+	// BidNum/BidDen and AskNum/AskDen are the dealing prices: the
+	// table's two-sided quote when set, the mid otherwise (a mid-only
+	// rate deals at mid on both sides). While an LG-69 override is
+	// active all three prices collapse to the override price — an
+	// override is a single manual price, so there is no spread to book.
+	BidNum, BidDen int64
+	AskNum, AskDen int64
+	// Num/Den is the price conversions actually settle at: the dealing
+	// price for the requested side (bid for a sell, ask for a buy),
+	// the mid when the pair is mid-only, or the override price while an
+	// override is active.
 	Num, Den int64
 	// EffectiveVersion and ExpiresAt describe the price above: the
 	// override's while active, the market rate's otherwise.
@@ -130,15 +143,17 @@ type effectiveFXRate struct {
 
 // effectiveFXRateLocked resolves the full effective rate for pair at
 // now: the market rate from the rate table, priced through any active
-// LG-69 manual override (see fx_override.go). A pair with no configured
-// rate reports ErrFXRateMissing; a rate past its expiry reports
-// ErrFXRateExpired — the expiry check runs against now, like the
-// transfer gate, and the override's lazy expiry predicate works the
-// same way. Callers must hold l.mu; the read lock suffices (pure read,
-// no mutation). Admission (admitFXRateQuote) and commit
-// (postTransferFXLocked, the split FX chunk path) share this body: one
-// definition of the effective price, zero logic fork.
-func (l *Ledger) effectiveFXRateLocked(pair fxPair, now time.Time) (effectiveFXRate, error) {
+// LG-69 manual override (see fx_override.go). side selects the dealing
+// price conversions settle at (see fxSideOf): FXSideBuy settles at ask,
+// anything else at bid. A pair with no configured rate reports
+// ErrFXRateMissing; a rate past its expiry reports ErrFXRateExpired — the
+// expiry check runs against now, like the transfer gate, and the
+// override's lazy expiry predicate works the same way. Callers must hold
+// l.mu; the read lock suffices (pure read, no mutation). Admission
+// (admitFXRateQuote) and commit (postTransferFXLocked, the split FX chunk
+// path) share this body: one definition of the effective price, zero
+// logic fork.
+func (l *Ledger) effectiveFXRateLocked(pair fxPair, side string, now time.Time) (effectiveFXRate, error) {
 	rate, ok := l.fxRates[pair]
 	if !ok {
 		return effectiveFXRate{}, ErrFXRateMissing
@@ -148,13 +163,36 @@ func (l *Ledger) effectiveFXRateLocked(pair fxPair, now time.Time) (effectiveFXR
 	}
 	eff := effectiveFXRate{
 		Rate:             rate,
-		Num:              rate.Num,
-		Den:              rate.Den,
+		MidNum:           rate.Num,
+		MidDen:           rate.Den,
+		BidNum:           rate.BidNum,
+		BidDen:           rate.BidDen,
+		AskNum:           rate.AskNum,
+		AskDen:           rate.AskDen,
 		EffectiveVersion: rate.EffectiveVersion,
 		ExpiresAt:        rate.ExpiresAt,
 	}
+	// A mid-only rate (zero bid/ask) deals at mid on both sides.
+	if eff.BidNum == 0 || eff.BidDen == 0 {
+		eff.BidNum, eff.BidDen = eff.MidNum, eff.MidDen
+	}
+	if eff.AskNum == 0 || eff.AskDen == 0 {
+		eff.AskNum, eff.AskDen = eff.MidNum, eff.MidDen
+	}
+	if side == FXSideBuy {
+		eff.Num, eff.Den = eff.AskNum, eff.AskDen
+	} else {
+		eff.Num, eff.Den = eff.BidNum, eff.BidDen
+	}
 	if override, overridden := l.activeRateOverrideLocked(pair, now); overridden {
+		// An override is a single manual price: bid, ask, and mid all
+		// collapse to it, so the spread is zero and no spread leg
+		// books — the override's own audit event
+		// (fx_rate_overridden) carries the re-pricing.
 		eff.Num, eff.Den = override.Num, override.Den
+		eff.MidNum, eff.MidDen = override.Num, override.Den
+		eff.BidNum, eff.BidDen = override.Num, override.Den
+		eff.AskNum, eff.AskDen = override.Num, override.Den
 		eff.EffectiveVersion = override.EffectiveVersion
 		eff.ExpiresAt = override.ExpiresAt
 		eff.Overridden = true
@@ -173,15 +211,33 @@ func (l *Ledger) effectiveFXRateLocked(pair fxPair, now time.Time) (effectiveFXR
 // have no admission window) keep commit-time semantics and carry no
 // slippage gate. Never invent a quote for a path that did not admit
 // one: the quote must be measured, never synthesized.
+//
+// Since LG-93 the quote is side-correct: Num/Den is the dealing price
+// the transfer settles at (bid for a sell, ask for a buy — see
+// Transfer.FXSide), and the quote also pins the bid, the ask, and the
+// reference mid it was measured against, so the spread disclosure on
+// the receipt is exact even after the table moves.
 type FXRateQuote struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 	// Num/Den is the full effective price at admission: the market rate
 	// resolved through any active LG-69 manual override, exactly what
 	// effectiveFXRateLocked returned — admission and commit share one
-	// definition of the effective price.
+	// definition of the effective price. Since LG-93 it is the
+	// SIDE-correct dealing price (bid for a sell, ask for a buy — see
+	// Transfer.FXSide), not the mid.
 	Num int64 `json:"num"`
 	Den int64 `json:"den"`
+	// BidNum/BidDen, AskNum/AskDen, and MidNum/MidDen are the dealing
+	// prices and the reference mid at admission (see fx_spread.go): the
+	// spread the transfer settles at is measured against this mid, so
+	// the quote pins all three. A mid-only rate quotes bid = ask = mid.
+	BidNum int64 `json:"bid_num,omitempty"`
+	BidDen int64 `json:"bid_den,omitempty"`
+	AskNum int64 `json:"ask_num,omitempty"`
+	AskDen int64 `json:"ask_den,omitempty"`
+	MidNum int64 `json:"mid_num,omitempty"`
+	MidDen int64 `json:"mid_den,omitempty"`
 	// EffectiveVersion is the ledger version at which the admitted
 	// price took effect (the override's while overridden, like
 	// ExchangeRate.EffectiveVersion).
@@ -244,7 +300,11 @@ func (l *Ledger) admitFXRateQuote(t Transfer) FXRateQuote {
 	now := time.Now()
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	eff, err := l.effectiveFXRateLocked(fxPair{from: currency, to: to}, now)
+	// The quote is side-correct: a "buy" transfer admits the ask, a
+	// "sell" (the default) the bid (see fxSideOf) — the slippage gate at
+	// commit measures drift on the dealing price the transfer settles
+	// at, not the mid.
+	eff, err := l.effectiveFXRateLocked(fxPair{from: currency, to: to}, fxSideOf(t), now)
 	if err != nil {
 		// No live rate at admission: the commit path surfaces
 		// ErrFXRateMissing/ErrFXRateExpired exactly as before.
@@ -255,6 +315,12 @@ func (l *Ledger) admitFXRateQuote(t Transfer) FXRateQuote {
 		To:                  to,
 		Num:                 eff.Num,
 		Den:                 eff.Den,
+		BidNum:              eff.BidNum,
+		BidDen:              eff.BidDen,
+		AskNum:              eff.AskNum,
+		AskDen:              eff.AskDen,
+		MidNum:              eff.MidNum,
+		MidDen:              eff.MidDen,
 		EffectiveVersion:    eff.EffectiveVersion,
 		ExpiresAt:           eff.ExpiresAt,
 		AdmittedAt:          now,
@@ -315,6 +381,18 @@ type ExchangeRate struct {
 	Den              int64     `json:"den"`
 	EffectiveVersion uint64    `json:"effective_version"`
 	ExpiresAt        time.Time `json:"expires_at,omitempty"`
+	// BidNum/BidDen and AskNum/AskDen are the pair's two-sided dealing
+	// prices (LG-93, see fx_spread.go): a "sell" transfer converts at
+	// bid, a "buy" transfer at ask, while Num/Den stays the reference
+	// mid. Zero bid/ask means a mid-only legacy rate: bid = ask = mid,
+	// zero spread, no spread leg — exactly the pre-LG-93 behavior.
+	// The dealing spread always brackets the mid
+	// (0 < bid <= mid <= ask, enforced by SetFXBidAskRate), so the
+	// spread is dealer-favorable by construction.
+	BidNum int64 `json:"bid_num,omitempty"`
+	BidDen int64 `json:"bid_den,omitempty"`
+	AskNum int64 `json:"ask_num,omitempty"`
+	AskDen int64 `json:"ask_den,omitempty"`
 }
 
 // WithFXAccount configures the ledger-wide FX clearing account used as
@@ -351,6 +429,10 @@ func WithFXRateOption(from, to string, num, den int64) Option {
 // and num and den must be positive. The rate takes effect immediately and
 // records the current ledger version as its effective version. A rate of
 // (from, from) or a non-positive ratio is rejected with ErrInvalidFXRate.
+//
+// The installed rate is mid-only: it clears any LG-93 bid/ask dealing
+// prices on the pair (see SetFXBidAskRate) — re-install them afterwards
+// when a spread is wanted.
 //
 // SetFXRate is a structural change, like Freeze or SetDailyLimit: it
 // takes the write lock, does not bump the ledger version, and survives
@@ -622,7 +704,10 @@ func fxConvertCents(amount, num, den int64) (int64, bool) {
 // FXConversion discloses how a cross-currency transfer was converted: the
 // rate that applied (with the ledger version at which it took effect and
 // the rate's expiry, when the rate carries one) and the settled amounts on
-// both sides — SourceCents before conversion, ConvertedCents after. It is
+// both sides — SourceCents before conversion, ConvertedCents after. Since
+// LG-93 the rate that applied is the SIDE-correct dealing price (bid for
+// a sell, ask for a buy — see Direction); the reference mid and the full
+// two-sided quote ride alongside, with the spread the desk earned. It is
 // carried on TransferReceipt for the original posting; idempotent replays
 // return FX == nil, because the rate table may have changed since — the
 // replayed journal entries are the authoritative record.
@@ -678,6 +763,34 @@ type FXConversion struct {
 	// by commit time, in basis points (exact big.Rat math, see
 	// fxSlippageBps). Omitted when no quote was admitted.
 	SlippageBps int64 `json:"slippage_bps,omitempty"`
+	// Direction is the dealing side the transfer priced at (LG-93, see
+	// fx_spread.go): "sell" (the default) converts at the bid, "buy" at
+	// the ask. RateNum/RateDen above name the dealing price that
+	// converted; MidNum/MidDen is the reference mid it was measured
+	// against, and BidNum/BidDen / AskNum/AskDen are the pair's
+	// two-sided quote. A mid-only rate discloses bid = ask = mid.
+	Direction string `json:"direction,omitempty"`
+	MidNum    int64  `json:"mid_num,omitempty"`
+	MidDen    int64  `json:"mid_den,omitempty"`
+	BidNum    int64  `json:"bid_num,omitempty"`
+	BidDen    int64  `json:"bid_den,omitempty"`
+	AskNum    int64  `json:"ask_num,omitempty"`
+	AskDen    int64  `json:"ask_den,omitempty"`
+	// SpreadBps is the full bid-ask spread against the mid, in basis
+	// points: floor((ask − bid)/mid · 10000), exact big.Rat math (see
+	// fxSpreadBps). Zero for a mid-only rate.
+	SpreadBps int64 `json:"spread_bps,omitempty"`
+	// SpreadCents is the dealer's spread on this transfer, in target
+	// currency cents: floor(amount·mid) − floor(amount·bid) on a sell,
+	// floor(amount·ask) − floor(amount·mid) on a buy — always ≥ 0, and
+	// zero when the rate is mid-only or the spread is dust. A positive
+	// spread books the "<transfer ID>/spread" leg (debit FX account,
+	// credit FXIncomeAccount, target currency); zero books no leg.
+	SpreadCents int64 `json:"spread_cents,omitempty"`
+	// FXIncomeAccount is the account the spread leg credited: the
+	// transfer's override, or the ledger's configured FX income
+	// account. Empty when no spread leg booked.
+	FXIncomeAccount AccountID `json:"fx_income_account,omitempty"`
 }
 
 // postTransferFXLocked records a cross-currency transfer: t.Currency is
@@ -721,14 +834,17 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// The commit-time effective rate, re-resolved live: the market rate
 	// from the table priced through any active LG-69 manual override
 	// (see effectiveFXRateLocked — the same body the admission quote
-	// was resolved with). A pair with no configured rate reports
-	// ErrFXRateMissing; a rate past its expiry reports ErrFXRateExpired:
-	// a stale rate is never applied silently, and the check runs against
-	// the transfer's post time, after the idempotency replay check
-	// above, so replaying a key posted while the rate was live still
-	// returns the original receipt.
+	// was resolved with). Since LG-93 the resolution is side-aware (see
+	// fxSideOf): a "buy" transfer resolves the ask, a "sell" (the
+	// default) the bid — the price conversions settle at. A pair with no
+	// configured rate reports ErrFXRateMissing; a rate past its expiry
+	// reports ErrFXRateExpired: a stale rate is never applied silently,
+	// and the check runs against the transfer's post time, after the
+	// idempotency replay check above, so replaying a key posted while
+	// the rate was live still returns the original receipt.
+	side := fxSideOf(t)
 	pair := fxPair{from: t.Currency, to: toCurrency}
-	commitEff, err := l.effectiveFXRateLocked(pair, now)
+	commitEff, err := l.effectiveFXRateLocked(pair, side, now)
 	if err != nil {
 		return TransferReceipt{}, err
 	}
@@ -796,12 +912,44 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		return TransferReceipt{}, ErrAmountOverflow
 	}
 
+	// LG-93: the dealing spread. midNum/midDen is the reference mid the
+	// spread is measured against — the admission mid on the admitted
+	// path (the transfer settled at the admitted dealing price, so its
+	// spread is measured against the admitted mid), the commit-time mid
+	// otherwise. sideConverted is the floored conversion at the dealing
+	// price the transfer settled at (converted, above); midConverted
+	// the floored conversion at mid. Sell-side the desk keeps
+	// mid − bid, buy-side ask − mid — always ≥ 0 (see
+	// fxSpreadCentsOf). A mid-only rate, an active override (bid = ask
+	// = mid), or spread dust all measure zero: no leg books.
+	midNum, midDen := commitEff.MidNum, commitEff.MidDen
+	bidNum, bidDen := commitEff.BidNum, commitEff.BidDen
+	askNum, askDen := commitEff.AskNum, commitEff.AskDen
+	if admitted != nil {
+		midNum, midDen = admitted.MidNum, admitted.MidDen
+		bidNum, bidDen = admitted.BidNum, admitted.BidDen
+		askNum, askDen = admitted.AskNum, admitted.AskDen
+	}
+	midConverted, ok := fxConvertCents(t.AmountCents, midNum, midDen)
+	if !ok {
+		return TransferReceipt{}, ErrAmountOverflow
+	}
+	spreadCents := fxSpreadCentsOf(side, converted, midConverted)
+	spreadBps := fxSpreadBps(bidNum, bidDen, askNum, askDen, midNum, midDen)
+	// Fail-closed, before any mutation: a positive spread with no usable
+	// income account rejects the transfer — the P&L must have somewhere
+	// to go (see resolveFXIncomeAccountLocked).
+	incomeAccount, err := l.resolveFXIncomeAccountLocked(t, fxAccount, spreadCents)
+	if err != nil {
+		return TransferReceipt{}, err
+	}
+
 	feeEntryIDs := feeLegIDs(t.ID, feeCents, feeSplits)
 	// A split transfer reserves the "<id>/chunk-0" namespace for its
 	// chunk entries (see PostTransferSplit): a plain transfer reusing a
 	// split transfer's ID would create two transfers sharing one
 	// identity — the non-FX path checks this too (transfer.go).
-	for _, id := range append([]string{t.ID, t.ID + "/fx", t.ID + "/chunk-0"}, feeEntryIDs...) {
+	for _, id := range append([]string{t.ID, t.ID + "/fx", t.ID + "/spread", t.ID + "/chunk-0"}, feeEntryIDs...) {
 		if id == "" {
 			continue
 		}
@@ -823,7 +971,8 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// payer's risk is entirely in the source currency: overdraft and the
 	// daily limit both guard the total outflow (amount + fee) against the
 	// source-currency balance, never against the converted amount.
-	if l.closedLocked(t.From) || l.closedLocked(t.To) || l.closedLocked(fxAccount) {
+	if l.closedLocked(t.From) || l.closedLocked(t.To) || l.closedLocked(fxAccount) ||
+		(incomeAccount != "" && l.closedLocked(incomeAccount)) {
 		return TransferReceipt{}, ErrAccountClosed
 	}
 	for _, fa := range feeLegAccounts(feeAccount, feeSplits) {
@@ -831,7 +980,8 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 			return TransferReceipt{}, ErrAccountClosed
 		}
 	}
-	if l.frozenLocked(t.From) || l.frozenLocked(t.To) || l.frozenLocked(fxAccount) {
+	if l.frozenLocked(t.From) || l.frozenLocked(t.To) || l.frozenLocked(fxAccount) ||
+		(incomeAccount != "" && l.frozenLocked(incomeAccount)) {
 		return TransferReceipt{}, ErrAccountFrozen
 	}
 	// Every fee recipient walks the same frozen check the single fee
@@ -865,9 +1015,11 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		return TransferReceipt{}, err
 	}
 
-	// Every leg is single-currency by construction; the two journal
-	// entries keep each currency's books balanced independently, with the
-	// FX account as the shared counterparty.
+	// Every leg is single-currency by construction; the journal entries
+	// keep each currency's books balanced independently, with the FX
+	// account as the shared counterparty. The optional spread leg
+	// (LG-93) books right after the /fx leg: it is part of the
+	// conversion, so the review gate freezes it with the other legs.
 	entries := []JournalEntry{
 		{
 			ID:             t.ID,
@@ -889,6 +1041,9 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 			Attachments:   t.Attachments,
 			CreatedAt:     t.CreatedAt,
 		},
+	}
+	if spreadCents > 0 {
+		entries = append(entries, buildFXSpreadLeg(t.ID, fxAccount, incomeAccount, spreadCents, toCurrency, t.CreatedAt))
 	}
 	if feeCents > 0 {
 		// The fee legs — one "<transfer ID>/fee" leg for a single fee
@@ -930,12 +1085,29 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		fxConv.MarketRateDen = rate.Den
 		fxConv.OverrideApprovedBy = override.Approver
 	}
+	// LG-93: disclose the dealing side, the two-sided quote, and the
+	// spread. RateNum/RateDen above name the dealing price that
+	// converted; the mid and the full quote ride alongside so the
+	// spread is auditable without the rate table.
+	fxConv.Direction = side
+	fxConv.MidNum, fxConv.MidDen = midNum, midDen
+	fxConv.BidNum, fxConv.BidDen = bidNum, bidDen
+	fxConv.AskNum, fxConv.AskDen = askNum, askDen
+	fxConv.SpreadBps = spreadBps
+	fxConv.SpreadCents = spreadCents
+	fxConv.FXIncomeAccount = incomeAccount
 	if receipt, reviewed, err := l.maybeReviewTransferLocked(t, entries, feeCents, tierIndex, rateBps, fxConv, totalOutflow, now); reviewed || err != nil {
 		// The override priced the frozen legs too: record the
 		// re-pricing before returning the review receipt.
 		if overridden {
 			l.fxOverrideConversions++
 			l.emitRateOverriddenAuditLocked(t, toCurrency, override, rate, converted)
+		}
+		// The spread leg is journaled (frozen) on the review path too:
+		// count the booking here, like the direct path below.
+		if reviewed && spreadCents > 0 {
+			l.fxSpreadBookings++
+			l.fxSpreadCentsTotal += spreadCents
 		}
 		return receipt, err
 	}
@@ -978,6 +1150,13 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	for _, e := range entries {
 		fxEntryIDs = append(fxEntryIDs, e.ID)
 	}
+	// LG-93: the spread booking counters feed ledger_fx_spread_bookings_total
+	// and ledger_fx_spread_cents_total. Counted at journal time, like the
+	// override counter above.
+	if spreadCents > 0 {
+		l.fxSpreadBookings++
+		l.fxSpreadCentsTotal += spreadCents
+	}
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
 	l.evaluateBalanceWatchesLocked(touchedAccounts(entries), t.ID, "PostTransfer")
@@ -997,6 +1176,17 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		// the converted amount); this event binds them to the rate.
 		"rate_effective_version": rate.EffectiveVersion,
 		"fee_cents":              feeCents,
+		// LG-93: the dealing side, the two-sided quote, and the spread —
+		// sealed with the rest of the conversion's provenance.
+		"direction":    side,
+		"mid_rate":     fmt.Sprintf("%d/%d", midNum, midDen),
+		"bid_rate":     fmt.Sprintf("%d/%d", bidNum, bidDen),
+		"ask_rate":     fmt.Sprintf("%d/%d", askNum, askDen),
+		"spread_bps":   spreadBps,
+		"spread_cents": spreadCents,
+	}
+	if incomeAccount != "" {
+		fxDetails["fx_income_account"] = string(incomeAccount)
 	}
 	if admitted != nil {
 		// LG-86: the admission quote the transfer settled at, the live
@@ -1056,6 +1246,11 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		"converted_cents": converted,
 		"rate_num":        rate.Num,
 		"rate_den":        rate.Den,
+		// LG-93: the dealing side and the spread on the envelope, so
+		// downstream consumers see the P&L without parsing legs.
+		"direction":    side,
+		"spread_bps":   spreadBps,
+		"spread_cents": spreadCents,
 	})
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.

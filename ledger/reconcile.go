@@ -201,6 +201,13 @@ type ReconciliationReport struct {
 	// frozen — the frozen_accounts list in this report shows the
 	// resulting stops.
 	Merges []AccountMerge `json:"merges"`
+	// FXSpreadPNL lists the dealer's realized FX spread income (LG-93,
+	// see fx_spread.go), summed per settlement currency and sorted by
+	// currency: the booked "<transfer ID>/spread" legs, net of their
+	// direct reversals. Pending-review spread legs are excluded — the
+	// P&L is realized when the transfer settles, not when the
+	// dual-control gate freezes it. Empty when no spread ever booked.
+	FXSpreadPNL []FXSpreadPNLTotals `json:"fx_spread_pnl"`
 	// Dividends lists every declared dividend (see DeclareDividend),
 	// sorted by dividend ID: the retained-earnings pool, the record
 	// date, the total, and the per-holder payouts recovered from the
@@ -371,16 +378,17 @@ func (l *Ledger) eclReportsLocked() ([]ECLExposureReport, []ECLCoverageRow) {
 	}
 	return exposures, coverage
 }
+
 // CreditLineReport is one credit line's Reconcile disclosure: the limit
 // and the exposure drawn against it.
 type CreditLineReport struct {
-	Account          AccountID `json:"account"`
-	Currency         string    `json:"currency"`
-	LimitCents       int64     `json:"limit_cents"`
-	UsedCents        int64     `json:"used_cents"`
-	AvailableCents   int64     `json:"available_cents"`
-	RateBps          int64     `json:"rate_bps"`
-	GrantedAt        time.Time `json:"granted_at"`
+	Account        AccountID `json:"account"`
+	Currency       string    `json:"currency"`
+	LimitCents     int64     `json:"limit_cents"`
+	UsedCents      int64     `json:"used_cents"`
+	AvailableCents int64     `json:"available_cents"`
+	RateBps        int64     `json:"rate_bps"`
+	GrantedAt      time.Time `json:"granted_at"`
 }
 
 // ReconcileOptions tunes Reconcile. BaseCurrency opts into the
@@ -466,9 +474,9 @@ type BaseCurrencySummary struct {
 // day. For a parent account the subtree spans every descendant; for a
 // leaf account the subtree is the account itself.
 type SubtreeLimitUsage struct {
-	Account   AccountID `json:"account"`
-	Currency  string    `json:"currency"`
-	LimitCents int64    `json:"limit_cents"`
+	Account    AccountID `json:"account"`
+	Currency   string    `json:"currency"`
+	LimitCents int64     `json:"limit_cents"`
 	// SubtreeUsedCents is the subtree's booked outflow for the report's
 	// UTC day, in cents.
 	SubtreeUsedCents int64 `json:"subtree_used_cents"`
@@ -601,16 +609,21 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FXRates:                    l.fxRatesLocked(),
 		FXRateVersions:             l.fxRateVersionReportLocked(),
 		Merges:                     l.mergesLocked(),
-		Dividends:                  l.dividendsLocked(),
-		ClosedPeriods:              l.closedPeriodsLocked(),
-		ActiveTransferSchedules:    l.activeScheduleCountLocked(),
-		PendingReviews:             l.pendingTransferReviewsLocked(now),
-		ReviewThresholds:           l.reviewThresholdsLocked(),
-		RevaluationAccount:         l.revalAccount,
-		RevaluationImpact:          l.revaluationPositionsLocked(),
-		AccountTags:                l.accountTagsLocked(),
-		TermDeposits:               l.termDepositReportsLocked(),
-		CreditLines:                l.creditLineReportsLocked(),
+		// LG-93: the spread P&L is derived from the journal's
+		// "<transfer ID>/spread" legs (see fxSpreadPNLLocked) — the
+		// same legs the audit chain and trial balances already
+		// carry, so the section can never disagree with the books.
+		FXSpreadPNL:             l.fxSpreadPNLLocked(),
+		Dividends:               l.dividendsLocked(),
+		ClosedPeriods:           l.closedPeriodsLocked(),
+		ActiveTransferSchedules: l.activeScheduleCountLocked(),
+		PendingReviews:          l.pendingTransferReviewsLocked(now),
+		ReviewThresholds:        l.reviewThresholdsLocked(),
+		RevaluationAccount:      l.revalAccount,
+		RevaluationImpact:       l.revaluationPositionsLocked(),
+		AccountTags:             l.accountTagsLocked(),
+		TermDeposits:            l.termDepositReportsLocked(),
+		CreditLines:             l.creditLineReportsLocked(),
 	}
 	report.ECLExposures, report.ECLCoverage = l.eclReportsLocked()
 

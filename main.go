@@ -25,7 +25,7 @@ import (
 )
 
 type server struct {
-	ledger       *ledger.Ledger
+	ledger *ledger.Ledger
 	// tenants is the multi-tenant registry (see ledger.TenantStore):
 	// the default ledger above is adopted as the default tenant, and
 	// every request that names a tenant (via the /tenants/{id} path
@@ -327,6 +327,14 @@ type createTransferRequest struct {
 	// ledger.Transfer.MaxSlippageBps). It is plumbed through to both
 	// POST /transfers and POST /transfers/dry-run.
 	MaxSlippageBps int64 `json:"max_slippage_bps"`
+	// FXSide selects the dealing price of a cross-currency transfer
+	// (see ledger.Transfer.FXSide, LG-93): "sell" (the default) converts
+	// at the pair's bid, "buy" at the ask. Anything else is a 400.
+	FXSide string `json:"fx_side"`
+	// FXIncomeAccount overrides the ledger's FX spread-income account
+	// for this transfer (see ledger.Transfer.FXIncomeAccount, LG-93):
+	// the credit counterparty of the "<transfer_id>/spread" leg.
+	FXIncomeAccount ledger.AccountID `json:"fx_income_account"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
@@ -393,23 +401,25 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		id = newID()
 	}
 	transfer := ledger.Transfer{
-		ID:             id,
-		From:           req.FromAccount,
-		To:             req.ToAccount,
-		AmountCents:    req.AmountCents,
-		Currency:       req.Currency,
-		ToCurrency:     req.ToCurrency,
-		FXAccount:      req.FXAccount,
-		FeeCents:       req.FeeCents,
-		FeeAccount:     req.FeeAccount,
-		FeeSplits:      req.FeeSplits,
-		SkipFee:        req.SkipFee,
-		IdempotencyKey: req.IdempotencyKey,
-		Memo:           req.Memo,
-		ExternalRef:    req.ExternalRef,
-		Attachments:    req.Attachments,
-		MaxSlippageBps: req.MaxSlippageBps,
-		CreatedAt:      time.Now(),
+		ID:              id,
+		From:            req.FromAccount,
+		To:              req.ToAccount,
+		AmountCents:     req.AmountCents,
+		Currency:        req.Currency,
+		ToCurrency:      req.ToCurrency,
+		FXAccount:       req.FXAccount,
+		FeeCents:        req.FeeCents,
+		FeeAccount:      req.FeeAccount,
+		FeeSplits:       req.FeeSplits,
+		SkipFee:         req.SkipFee,
+		IdempotencyKey:  req.IdempotencyKey,
+		Memo:            req.Memo,
+		ExternalRef:     req.ExternalRef,
+		Attachments:     req.Attachments,
+		MaxSlippageBps:  req.MaxSlippageBps,
+		FXSide:          req.FXSide,
+		FXIncomeAccount: req.FXIncomeAccount,
+		CreatedAt:       time.Now(),
 	}
 	if req.ToCurrency != "" {
 		s.metrics.FXTransfersTotal.Add(1)
@@ -481,6 +491,10 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, ledger.ErrFXAccountNotConfigured) || errors.Is(err, ledger.ErrInvalidFXAccount) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidFXSide) || errors.Is(err, ledger.ErrFXIncomeAccountNotConfigured) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -704,23 +718,25 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		id = newID()
 	}
 	transfer := ledger.Transfer{
-		ID:             id,
-		From:           req.FromAccount,
-		To:             req.ToAccount,
-		AmountCents:    req.AmountCents,
-		Currency:       req.Currency,
-		ToCurrency:     req.ToCurrency,
-		FXAccount:      req.FXAccount,
-		FeeCents:       req.FeeCents,
-		FeeAccount:     req.FeeAccount,
-		FeeSplits:      req.FeeSplits,
-		SkipFee:        req.SkipFee,
-		IdempotencyKey: req.IdempotencyKey,
-		Memo:           req.Memo,
-		ExternalRef:    req.ExternalRef,
-		Attachments:    req.Attachments,
-		MaxSlippageBps: req.MaxSlippageBps,
-		CreatedAt:      time.Now(),
+		ID:              id,
+		From:            req.FromAccount,
+		To:              req.ToAccount,
+		AmountCents:     req.AmountCents,
+		Currency:        req.Currency,
+		ToCurrency:      req.ToCurrency,
+		FXAccount:       req.FXAccount,
+		FeeCents:        req.FeeCents,
+		FeeAccount:      req.FeeAccount,
+		FeeSplits:       req.FeeSplits,
+		SkipFee:         req.SkipFee,
+		IdempotencyKey:  req.IdempotencyKey,
+		Memo:            req.Memo,
+		ExternalRef:     req.ExternalRef,
+		Attachments:     req.Attachments,
+		MaxSlippageBps:  req.MaxSlippageBps,
+		FXSide:          req.FXSide,
+		FXIncomeAccount: req.FXIncomeAccount,
+		CreatedAt:       time.Now(),
 	}
 
 	result, err := s.ledgerFor(r).DryRunTransfer(transfer)
@@ -785,6 +801,10 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, ledger.ErrFXAccountNotConfigured) || errors.Is(err, ledger.ErrInvalidFXAccount) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidFXSide) || errors.Is(err, ledger.ErrFXIncomeAccountNotConfigured) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -2147,13 +2167,13 @@ func (s *server) handleGetCreditLine(w http.ResponseWriter, r *http.Request) {
 	}
 	used, available, limit, _ := s.ledgerFor(r).CreditLineUtilization(ledger.AccountID(account), cl.Currency)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"account":          cl.Account,
-		"currency":         cl.Currency,
-		"limit_cents":      limit,
-		"used_cents":       used,
-		"available_cents":  available,
-		"rate_bps":         cl.RateBps,
-		"granted_at":       cl.GrantedAt,
+		"account":         cl.Account,
+		"currency":        cl.Currency,
+		"limit_cents":     limit,
+		"used_cents":      used,
+		"available_cents": available,
+		"rate_bps":        cl.RateBps,
+		"granted_at":      cl.GrantedAt,
 	})
 }
 
@@ -4140,6 +4160,8 @@ func (s *server) handler() http.Handler {
 		var fxStaleAlerts, fxExpiredAlerts, fxOverridden uint64
 		var fxRefreshes, fxMoves, fxProviderFails uint64
 		var fxInconsistent uint64
+		var fxSpreadBookings uint64
+		var fxSpreadCents int64
 		var eclProvisions, eclMigrations uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
@@ -4161,6 +4183,8 @@ func (s *server) handler() http.Handler {
 			fxMoves += l.FXRateMovedCount()
 			fxProviderFails += l.FXRateProviderFailCount()
 			fxInconsistent += l.FXRateInconsistencyAlertCount()
+			fxSpreadBookings += l.FXSpreadBookingCount()
+			fxSpreadCents += l.FXSpreadCentsTotal()
 			eclProvisions += l.ECLProvisionCount()
 			eclMigrations += l.ECLStageMigrationCount()
 		}
@@ -4201,6 +4225,11 @@ func (s *server) handler() http.Handler {
 		// ledger: inconsistencies are edge-triggered by the background
 		// consistency watcher inside the ledger package.
 		s.metrics.FXRateInconsistencyTotal.Store(fxInconsistent)
+		// The FX-spread booking counters likewise live in the ledger:
+		// spread legs journal inside the FX write paths, not in a
+		// handler (see ledger/fx_spread.go, LG-93).
+		s.metrics.FXSpreadBookingsTotal.Store(fxSpreadBookings)
+		s.metrics.FXSpreadCentsTotal.Store(fxSpreadCents)
 		// The ECL provision and stage-migration counters likewise live
 		// in the ledger: provisions commit inside BookECLProvision and
 		// migrations record inside the staging paths, not in a handler.
@@ -4616,6 +4645,17 @@ func main() {
 	if raw := os.Getenv("LEDGER_FX_ACCOUNT"); raw != "" {
 		opts = append(opts, ledger.WithFXAccount(ledger.AccountID(raw)))
 		log.Printf("ledger-api-go: FX clearing account = %q", raw)
+	}
+
+	// LEDGER_FX_INCOME_ACCOUNT configures the ledger-wide FX
+	// spread-income account, the credit counterparty of cross-currency
+	// spread legs (see ledger.WithFXIncomeAccount, LG-93). Unset means
+	// spread-earning transfers must carry fx_income_account on each
+	// request (a positive spread with no usable income account is
+	// rejected fail-closed).
+	if raw := os.Getenv("LEDGER_FX_INCOME_ACCOUNT"); raw != "" {
+		opts = append(opts, ledger.WithFXIncomeAccount(ledger.AccountID(raw)))
+		log.Printf("ledger-api-go: FX spread income account = %q", raw)
 	}
 
 	// LEDGER_FX_RATES configures the FX rate table (see ledger.ParseFXRates

@@ -35,6 +35,18 @@ import (
 //     says a quote is a well-formed (from, to, rate) triple.
 //   - A pair under an active manual override (see fx_override.go,
 //     LG-69) is never re-priced by the feed: the human price wins.
+//   - Provider quotes are MID quotes: they install through the
+//     SetFXRateRat write path, which writes a mid-only rate — when the
+//     quote moves the price (or re-stamps expiry), any
+//     operator-installed bid/ask dealing prices (see fx_spread.go,
+//     LG-93) on the pair are cleared. This is deliberate: the feed
+//     moves the reference mid, and a stale absolute bid/ask around a
+//     moved mid could invert the spread (bid > mid), breaking the
+//     dealer-favorable invariant the spread leg relies on. A static
+//     quote (same mid, no expiry change) skips the write and leaves
+//     the dealing prices untouched. The operator re-installs dealing
+//     prices with SetFXBidAskRate after the feed moves, when a spread
+//     is wanted.
 //   - Static quotes never churn: a quote whose price equals the table
 //     and that carries no expiry (and the table has none) skips the
 //     write entirely — no snapshot bump, no fx_rate_change noise.

@@ -151,14 +151,14 @@ type snapshotMergeLine struct {
 // Idempotency-key namespaces in a snapshot. One record per key, so every
 // namespace stays independently addressable on import.
 const (
-	snapshotNSEntry    = "entry"     // key -> JournalEntry (byKey)
-	snapshotNSTransfer = "transfer"  // key -> []entry IDs (transferKeys)
-	snapshotNSHold     = "hold"      // key -> hold ID (holdKeys)
-	snapshotNSCapture  = "capture"   // key -> CaptureReceipt (captureKeys)
-	snapshotNSSweep    = "sweep"     // key -> snapshotSweep (sweepKeys)
-	snapshotNSMergeKey = "merge_key" // key -> merge ID (mergeKeys)
-	snapshotNSBatch    = "batch"     // key -> snapshotBatch (batchKeys)
-	snapshotNSAlloc    = "allocation" // key -> snapshotAllocation (allocKeys)
+	snapshotNSEntry       = "entry"        // key -> JournalEntry (byKey)
+	snapshotNSTransfer    = "transfer"     // key -> []entry IDs (transferKeys)
+	snapshotNSHold        = "hold"         // key -> hold ID (holdKeys)
+	snapshotNSCapture     = "capture"      // key -> CaptureReceipt (captureKeys)
+	snapshotNSSweep       = "sweep"        // key -> snapshotSweep (sweepKeys)
+	snapshotNSMergeKey    = "merge_key"    // key -> merge ID (mergeKeys)
+	snapshotNSBatch       = "batch"        // key -> snapshotBatch (batchKeys)
+	snapshotNSAlloc       = "allocation"   // key -> snapshotAllocation (allocKeys)
 	snapshotNSTermDeposit = "term_deposit" // key -> deposit ID (termDepositKeys)
 )
 
@@ -200,18 +200,18 @@ type snapshotConfigLine struct {
 	// never have been created. The record is restored verbatim,
 	// including the original MarkedAt — a restore must not move an
 	// account's dormancy timestamp.
-	Dormant            []DormancyRecord        `json:"dormant,omitempty"`
-	FeeRateBps         int64                   `json:"fee_rate_bps"`
-	FeeTiers           []FeeTier               `json:"fee_tiers,omitempty"`
-	FeeRevenueAccount  AccountID               `json:"fee_revenue_account"`
+	Dormant           []DormancyRecord `json:"dormant,omitempty"`
+	FeeRateBps        int64            `json:"fee_rate_bps"`
+	FeeTiers          []FeeTier        `json:"fee_tiers,omitempty"`
+	FeeRevenueAccount AccountID        `json:"fee_revenue_account"`
 	// MaxTransferChunkCents carries the opt-in per-transfer chunk cap
 	// for PostTransferSplit (see WithMaxTransferChunkCents); absent
 	// (zero) in snapshots written before chunking existed or when
 	// chunking is disabled. SplitFeePerChunk carries the per-chunk fee
 	// mode (see WithSplitFeePerChunk).
-	MaxTransferChunkCents int64 `json:"max_transfer_chunk_cents,omitempty"`
-	SplitFeePerChunk      bool  `json:"split_fee_per_chunk,omitempty"`
-	IdempotencyTTL     string                  `json:"idempotency_ttl"`
+	MaxTransferChunkCents int64  `json:"max_transfer_chunk_cents,omitempty"`
+	SplitFeePerChunk      bool   `json:"split_fee_per_chunk,omitempty"`
+	IdempotencyTTL        string `json:"idempotency_ttl"`
 	// DailyLimits carries the daily outflow limits (see SetDailyLimit);
 	// absent in snapshots written before daily limits existed. The
 	// accumulated per-day outflow counters are deliberately NOT restored:
@@ -239,6 +239,10 @@ type snapshotConfigLine struct {
 	// conversion provenance as the original.
 	FXRates   []ExchangeRate `json:"fx_rates,omitempty"`
 	FXAccount AccountID      `json:"fx_account,omitempty"`
+	// FXIncomeAccount is the ledger-wide FX spread-income account (see
+	// WithFXIncomeAccount, LG-93); absent in snapshots written before
+	// spread support existed.
+	FXIncomeAccount AccountID `json:"fx_income_account,omitempty"`
 	// FXSnapshotVersion and FXRateTableSnapshots carry the FX rate-table
 	// snapshot history (LG-45, see fx_snapshot.go): the current version
 	// counter and the per-version table copies. Absent in snapshots
@@ -808,45 +812,46 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		parents[c] = p
 	}
 	cfg := snapshotConfigLine{
-		Record:               "config",
-		Frozen:               frozen,
-		OverdraftProtected:   overdraft,
-		Parents:              parents,
-		Dormant:              l.dormantCopyLocked(),
-		FeeRateBps:           flatFeeRateBps(l.feeTiers),
-		FeeTiers:             l.feeTiers,
-		FeeRevenueAccount:    l.feeRevenueAccount,
+		Record:                "config",
+		Frozen:                frozen,
+		OverdraftProtected:    overdraft,
+		Parents:               parents,
+		Dormant:               l.dormantCopyLocked(),
+		FeeRateBps:            flatFeeRateBps(l.feeTiers),
+		FeeTiers:              l.feeTiers,
+		FeeRevenueAccount:     l.feeRevenueAccount,
 		MaxTransferChunkCents: l.maxTransferChunkCents,
 		SplitFeePerChunk:      l.splitFeePerChunk,
-		IdempotencyTTL:       l.idempotencyTTL.String(),
-		DailyLimits:          l.dailyLimitsLocked(),
-		Budgets:              l.budgetsLocked(),
-		Denylist:             l.denylistLocked(),
-		FXRates:              l.fxRatesLocked(),
-		FXAccount:            l.fxAccount,
-		FXSnapshotVersion:    l.fxSnapshotVersion,
-		FXRateTableSnapshots: l.fxRateTableSnapshotsLocked(),
-		ClosedPeriods:        l.closedPeriodsLocked(),
-		BalanceWatches:         l.balanceWatchesLocked(),
-		ReviewThresholds:     l.reviewThresholdsLocked(),
-		ReviewThresholdCents: l.reviewThreshold,
-		SettlementChannels:   l.settlementChannelsLocked(),
-		JournalRules:         l.journalRulesLocked(),
-		JournalRuleVersion:   l.journalRuleVersion,
-		AllocationRules:      l.allocationRulesLocked(),
+		IdempotencyTTL:        l.idempotencyTTL.String(),
+		DailyLimits:           l.dailyLimitsLocked(),
+		Budgets:               l.budgetsLocked(),
+		Denylist:              l.denylistLocked(),
+		FXRates:               l.fxRatesLocked(),
+		FXAccount:             l.fxAccount,
+		FXIncomeAccount:       l.fxIncomeAccount,
+		FXSnapshotVersion:     l.fxSnapshotVersion,
+		FXRateTableSnapshots:  l.fxRateTableSnapshotsLocked(),
+		ClosedPeriods:         l.closedPeriodsLocked(),
+		BalanceWatches:        l.balanceWatchesLocked(),
+		ReviewThresholds:      l.reviewThresholdsLocked(),
+		ReviewThresholdCents:  l.reviewThreshold,
+		SettlementChannels:    l.settlementChannelsLocked(),
+		JournalRules:          l.journalRulesLocked(),
+		JournalRuleVersion:    l.journalRuleVersion,
+		AllocationRules:       l.allocationRulesLocked(),
 		AllocationRuleVersion: l.allocRuleVersion,
-		RevalAccount:         l.revalAccount,
-		RevalBaselines:       l.revaluationPositionsLocked(),
-		AccountTypes:         l.accountTypesLocked(),
-		AccountTags:          l.accountTagsLocked(),
-		ClosedAccounts:       l.closedCopyLocked(),
-		OFXImportRegistry:    l.ofxImportsLocked(),
-		TdInterestExpense:    l.tdInterestExpense,
-		CreditInterestIncome: l.creditInterestIncome,
-		CreditLines:          l.creditLinesLocked(),
-		ECLExpenseAccount:    l.eclExpenseAccount,
-		ECLAllowanceAccount:  l.eclAllowanceAccount,
-		ECLExposures:         l.eclExposureRecordsLocked(),
+		RevalAccount:          l.revalAccount,
+		RevalBaselines:        l.revaluationPositionsLocked(),
+		AccountTypes:          l.accountTypesLocked(),
+		AccountTags:           l.accountTagsLocked(),
+		ClosedAccounts:        l.closedCopyLocked(),
+		OFXImportRegistry:     l.ofxImportsLocked(),
+		TdInterestExpense:     l.tdInterestExpense,
+		CreditInterestIncome:  l.creditInterestIncome,
+		CreditLines:           l.creditLinesLocked(),
+		ECLExpenseAccount:     l.eclExpenseAccount,
+		ECLAllowanceAccount:   l.eclAllowanceAccount,
+		ECLExposures:          l.eclExposureRecordsLocked(),
 	}
 	eclCfg := l.eclStageConfig
 	cfg.ECLStageConfig = &eclCfg
@@ -1578,6 +1583,13 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			Den:              r.Den,
 			EffectiveVersion: r.EffectiveVersion,
 			ExpiresAt:        r.ExpiresAt,
+			// LG-93: the two-sided dealing prices round-trip like the
+			// mid — a restored ledger deals at the same bid/ask the
+			// original did.
+			BidNum: r.BidNum,
+			BidDen: r.BidDen,
+			AskNum: r.AskNum,
+			AskDen: r.AskDen,
 		}
 	}
 	// FX snapshot history (LG-45): snapshots present require a nonzero
@@ -1964,6 +1976,7 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	l.fxRates = fx
 	l.fxAccount = cfg.FXAccount
+	l.fxIncomeAccount = cfg.FXIncomeAccount
 	// FX snapshot history (LG-45): restore the version counter and the
 	// per-version tables. Legacy snapshots predate versioning — rebuild
 	// version 1 from the imported table when it is non-empty, so the
@@ -2372,6 +2385,9 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if a.fxAccount != b.fxAccount {
+		return false
+	}
+	if a.fxIncomeAccount != b.fxIncomeAccount {
 		return false
 	}
 	if !reflect.DeepEqual(a.fxRates, b.fxRates) {

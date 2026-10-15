@@ -403,6 +403,20 @@ type Metrics struct {
 	// opt-in basis-point threshold. It is synced from the ledger on
 	// every GET /metrics scrape, like the rate-watch counters.
 	FXRateInconsistencyTotal atomic.Uint64
+	// FXSpreadBookingsTotal counts journaled FX spread legs (see
+	// ledger/fx_spread.go, LG-93): the "<transfer ID>/spread" legs that
+	// book the dealer's spread to the FX income account. It is synced
+	// from the ledger on every GET /metrics scrape, like the
+	// rate-watch counters.
+	FXSpreadBookingsTotal atomic.Uint64
+	// FXSpreadCentsTotal is the total spread cents journaled across all
+	// settlement currencies since process start (see
+	// ledger/fx_spread.go, LG-93): an operational counter, not an
+	// accounting total — currencies are never summed on the books; the
+	// per-currency P&L lives in POST /reconcile's fx_spread_pnl section.
+	// It is synced from the ledger on every GET /metrics scrape, like
+	// the rate-watch counters.
+	FXSpreadCentsTotal atomic.Int64
 	// BalanceHistorySnapshots counts balance-history snapshot ticks
 	// completed by the background recorder (see
 	// LEDGER_BALANCE_HISTORY_DIR): one per tick that wrote rows, not per
@@ -622,6 +636,14 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_fx_rate_inconsistency_total",
 		"Total fx_rate_inconsistent alerts edge-triggered by the background FX-consistency watch (directed 3-cycles of the rate table whose exact product deviates from 1 beyond the opt-in basis-point threshold; advisory only, conversions are never blocked).",
 		m.FXRateInconsistencyTotal.Load())
+	writeCounter(&sb, "ledger_fx_spread_bookings_total",
+		"Total journaled FX spread legs (LG-93): the \"<transfer ID>/spread\" legs that book the dealer's two-sided dealing spread to the FX income account.",
+		m.FXSpreadBookingsTotal.Load())
+	// The spread-cents counter is non-negative by construction (only
+	// positive spreads book), so the uint64 conversion is exact.
+	writeCounter(&sb, "ledger_fx_spread_cents_total",
+		"Total spread cents journaled across all settlement currencies (LG-93): an operational counter, not an accounting total — the per-currency P&L lives in POST /reconcile's fx_spread_pnl section.",
+		uint64(m.FXSpreadCentsTotal.Load()))
 	writeCounter(&sb, "ledger_balance_history_snapshots_total",
 		"Total balance-history snapshot ticks completed by the background recorder (one per tick, not per row).",
 		m.BalanceHistorySnapshots.Load())

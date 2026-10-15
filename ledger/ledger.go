@@ -385,6 +385,11 @@ type Ledger struct {
 	// config — like frozen and feeTiers — and survive snapshots.
 	fxRates   map[fxPair]ExchangeRate
 	fxAccount AccountID
+	// fxIncomeAccount is the ledger-wide FX spread-income account (see
+	// WithFXIncomeAccount, fx_spread.go): the credit counterparty of
+	// cross-currency spread legs. Structural config — it survives
+	// snapshots, like fxAccount.
+	fxIncomeAccount AccountID
 	// fxSnapshotVersion counts FX rate-table mutations (LG-45): every
 	// SetFXRate / SetFXRateRat / RemoveFXRate bumps it and persists a
 	// full copy of the table in fxRateSnapshots at the new version, so a
@@ -412,6 +417,14 @@ type Ledger struct {
 	// events). In-memory only — it does not round-trip through
 	// snapshots.
 	fxOverrideConversions uint64
+	// fxSpreadBookings counts journaled FX spread legs (see
+	// fx_spread.go) and fxSpreadCentsTotal their total spread cents,
+	// since process start. Operational counters surfaced on GET
+	// /metrics as ledger_fx_spread_bookings_total and
+	// ledger_fx_spread_cents_total. In-memory only — they do not
+	// round-trip through snapshots, like fxOverrideConversions.
+	fxSpreadBookings   uint64
+	fxSpreadCentsTotal int64
 	// transferKeys maps a transfer's idempotency key to the IDs of the
 	// journal entries it posted, in commit order (principal, then the fee
 	// leg when one was booked), so a replayed transfer returns its full
@@ -456,8 +469,8 @@ type Ledger struct {
 	// unconfigured and accruals are fail-closed. Structural config and
 	// operational state like holds — both round-trip through
 	// disaster-recovery snapshots.
-	termDeposits     map[string]TermDeposit
-	termDepositKeys  map[string]string
+	termDeposits      map[string]TermDeposit
+	termDepositKeys   map[string]string
 	tdInterestExpense AccountID
 	// creditLines maps (account, currency) to the granted credit line
 	// (see creditline.go): an opt-in per-account overdraft floor of
@@ -483,10 +496,10 @@ type Ledger struct {
 	// eclStageMigrations counts stage migrations recorded (the durable
 	// record is the ecl_stage_migration audit events). Both are
 	// in-memory only — they do not round-trip through snapshots.
-	eclStageConfig       ECLStageConfig
-	eclExposures         map[eclExposureKey]eclExposureRow
-	eclExpenseAccount    AccountID
-	eclAllowanceAccount  AccountID
+	eclStageConfig         ECLStageConfig
+	eclExposures           map[eclExposureKey]eclExposureRow
+	eclExpenseAccount      AccountID
+	eclAllowanceAccount    AccountID
 	eclProvisionsCommitted atomic.Uint64
 	eclStageMigrations     atomic.Uint64
 	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so

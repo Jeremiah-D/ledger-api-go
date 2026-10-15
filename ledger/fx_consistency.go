@@ -32,6 +32,15 @@ import (
 // (basis points) is reported as an "fx_rate_inconsistent" structured
 // audit event plus the ledger_fx_rate_inconsistency_total counter.
 //
+// The scan runs on the reference MID prices (ExchangeRate.Num/Den),
+// not the LG-93 dealing prices, deliberately: bid ≤ mid ≤ ask by
+// construction, so the customer always deals at a price weakly worse
+// than mid — a mid-consistent table cannot offer the customer a
+// triangular arbitrage (any ask-cycle product is ≥ the mid-cycle
+// product), while the desk's own bid-side cycle is its inventory
+// business, not a book leak. The dealing spread is P&L attribution, not
+// a consistency property.
+//
 // Edge-triggered, LG-68 style: a cycle that stays inconsistent across
 // ticks alerts once, when it *becomes* inconsistent. The dedup identity
 // per canonical cycle is the three legs' (num, den) values — changing

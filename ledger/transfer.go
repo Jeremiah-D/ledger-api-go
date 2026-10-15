@@ -86,6 +86,22 @@ type Transfer struct {
 	// for this cross-currency transfer. It must differ from From and To.
 	// It is ignored for same-currency transfers.
 	FXAccount AccountID `json:"fx_account,omitempty"`
+	// FXSide selects the dealing price of a cross-currency transfer
+	// (LG-93, see fx_spread.go): "sell" (the default) converts at the
+	// pair's BID price — the customer sells the source currency — and
+	// "buy" converts at the ASK price — the customer buys the target
+	// currency. Anything but "buy"/"sell" (case-insensitive) is
+	// rejected at field validation (ErrInvalidFXSide). The side is
+	// ignored for same-currency transfers.
+	FXSide string `json:"fx_side,omitempty"`
+	// FXIncomeAccount overrides the ledger's configured FX
+	// spread-income account for this cross-currency transfer: the
+	// credit counterparty of the "<transfer ID>/spread" leg that books
+	// the dealer's spread (see fx_spread.go). It must differ from the
+	// FX clearing account when a spread books — enforced fail-closed
+	// (ErrFXIncomeAccountNotConfigured) before any mutation. It is
+	// ignored for same-currency transfers and when the spread is zero.
+	FXIncomeAccount AccountID `json:"fx_income_account,omitempty"`
 	// FeeCents is an explicit per-transfer fee, in cents, charged to the
 	// payer (From) on top of AmountCents and booked to FeeAccount. It must
 	// be non-negative; a positive fee requires FeeAccount. An explicit fee
@@ -538,6 +554,18 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 	// same-currency transfer is ignored, not rejected.
 	if t.MaxSlippageBps < 0 {
 		return t, "", ErrInvalidMaxSlippage
+	}
+	// The FX dealing side (see Transfer.FXSide) is field validation,
+	// like the slippage cap: anything but "buy"/"sell"
+	// (case-insensitive) is a caller bug, rejected before any risk
+	// check. The value is normalized to lowercase; it is ignored on
+	// same-currency transfers — the side only prices cross-currency
+	// conversions.
+	switch strings.ToLower(t.FXSide) {
+	case "", FXSideBuy, FXSideSell:
+		t.FXSide = strings.ToLower(t.FXSide)
+	default:
+		return t, "", ErrInvalidFXSide
 	}
 	// Fee splits (see fee_split.go) are field validation, like the legs
 	// and the amount: FeeSplits replaces the single FeeAccount, so the

@@ -1576,6 +1576,47 @@ conversion that settled at an approved manual rate override keeps the
 override's full provenance (`proposed_by`, `approved_by`, `reason`) in
 the `fx_rate_overridden` audit event.
 
+#### Two-sided dealing prices and spread P&L
+
+A rate can carry two-sided dealing prices on top of the reference mid:
+`SetFXBidAskRate(from, to, bidNum, bidDen, askNum, askDen)` installs a
+bid and an ask with `0 < bid ≤ mid ≤ ask` (exact rational checks — a
+spread that doesn't bracket the mid is rejected), or
+`TwoSidedFromMidSpread(midNum, midDen, spreadBps)` derives an exact
+symmetric quote from a mid plus a spread width in basis points. A rate
+without bid/ask is mid-only and behaves exactly as before.
+
+A cross-currency transfer names its dealing side with `fx_side`:
+`"sell"` (the default) converts at the **bid**, `"buy"` at the
+**ask**. Anything else is a `400`. The spread — `floor(amount·mid) −
+floor(amount·bid)` on a sell, `floor(amount·ask) − floor(amount·mid)`
+on a buy — books as its own double-entry leg `<transfer_id>/spread`:
+debit the FX account, credit the FX spread-income account (the
+transfer's `fx_income_account`, or the ledger-wide account), in the
+target currency. Each currency's books stay balanced independently, and
+the dealer's revenue lands in a real income account instead of hiding
+in the clearing account. A positive spread with no usable income
+account is rejected with `400` before anything is recorded
+(fail-closed); a zero spread (mid-only rate, active override, or dust)
+books no leg.
+
+The receipt's `fx` field discloses `direction`, the mid, the full
+two-sided quote, `spread_bps` (exact `big.Rat`), `spread_cents`, and
+`fx_income_account`; the `transfer` audit event seals the same detail.
+`POST /reconcile` reports the realized per-currency spread P&L in
+`fx_spread_pnl` (settled legs, net of direct reversals), and
+`ledger_fx_spread_bookings_total` / `ledger_fx_spread_cents_total`
+count the bookings. The admission quote is side-correct (the slippage
+gate measures drift on the dealing price), provider feed quotes stay
+mid-only, and the triangular-consistency scan keeps checking the mids —
+a mid-consistent table can't offer the customer a triangular arbitrage.
+
+```bash
+curl -s -X POST localhost:8080/transfers \
+  -d '{"transfer_id":"fx-002","from_account":"alice","to_account":"erin","amount_cents":10000,"currency":"USD","to_currency":"EUR","fx_side":"sell"}'
+# 201 {...,"fx":{"direction":"sell","bid_num":108,"bid_den":100,"ask_num":112,"ask_den":100,"spread_bps":363,"spread_cents":200,...}}
+```
+
 #### Rate-table snapshot versioning
 
 Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,

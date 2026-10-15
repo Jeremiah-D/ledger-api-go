@@ -61,11 +61,11 @@ type DryRunLeg struct {
 // Legs and version fields are zero on failure: nothing would have been
 // recorded.
 type DryRunResult struct {
-	WouldSucceed  bool          `json:"would_succeed"`
-	Duplicate     bool          `json:"duplicate"`
-	VersionBefore uint64        `json:"version_before"`
-	VersionAfter  uint64        `json:"version_after"`
-	Legs          []DryRunLeg   `json:"legs"`
+	WouldSucceed  bool        `json:"would_succeed"`
+	Duplicate     bool        `json:"duplicate"`
+	VersionBefore uint64      `json:"version_before"`
+	VersionAfter  uint64      `json:"version_after"`
+	Legs          []DryRunLeg `json:"legs"`
 	// BudgetImpact previews the monthly spend budgets (LG-81) the
 	// simulated posting would move: one row per budgeted (account,
 	// currency, month) whose spend changed, with the month's used
@@ -80,8 +80,8 @@ type DryRunResult struct {
 // used spend before and after the simulated posting. Only budgets whose
 // spend the simulation changed are listed.
 type BudgetImpact struct {
-	Account AccountID `json:"account"`
-	Currency string   `json:"currency"`
+	Account  AccountID `json:"account"`
+	Currency string    `json:"currency"`
 	// Month is the UTC calendar month the figures describe, as
 	// "2006-01".
 	Month           string `json:"month"`
@@ -231,6 +231,13 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		c.fxRates[k] = v
 	}
 	c.fxAccount = l.fxAccount
+	c.fxIncomeAccount = l.fxIncomeAccount
+	// The spread-booking counters travel with the twin like the other
+	// in-memory counters, so the simulated post sees the same income
+	// account and counter state; the twin's increments are discarded
+	// with the copy.
+	c.fxSpreadBookings = l.fxSpreadBookings
+	c.fxSpreadCentsTotal = l.fxSpreadCentsTotal
 	for k, v := range l.closedPeriods {
 		c.closedPeriods[k] = v
 	}
