@@ -360,6 +360,27 @@ type snapshotConfigLine struct {
 	// dropped them would silently lift the -limit floor back to zero,
 	// so they round-trip like the overdraft-protection list.
 	CreditLines []CreditLine `json:"credit_lines,omitempty"`
+	// ECLStageConfig carries the IFRS 9 staging configuration (see
+	// SetECLStageConfig); absent in snapshots written before ECL
+	// existed, in which case the restore keeps the ledger's default
+	// config. A restore that dropped it would re-stage every exposure
+	// under the wrong buckets, so it round-trips like the credit-line
+	// registry.
+	ECLStageConfig *ECLStageConfig `json:"ecl_stage_config,omitempty"`
+	// ECLExpenseAccount and ECLAllowanceAccount carry the ledger-wide
+	// fail-closed ECL booking accounts (see SetECLLossExpense and
+	// SetECLAllowance); absent in snapshots written before ECL
+	// existed. A restore that dropped them would turn fail-closed
+	// provisioning into fail-open provisioning, so they round-trip
+	// like the fee-revenue account.
+	ECLExpenseAccount   AccountID `json:"ecl_expense_account,omitempty"`
+	ECLAllowanceAccount AccountID `json:"ecl_allowance_account,omitempty"`
+	// ECLExposures carries the ECL exposure registry (see
+	// RegisterECLExposure), sorted by (account, currency); absent in
+	// snapshots written before ECL existed. A restore that dropped it
+	// would lose the provisioned-so-far coverage figures and the DPD
+	// staging, so it round-trips like the credit-line registry.
+	ECLExposures []ECLExposureRecord `json:"ecl_exposures,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -823,7 +844,12 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		TdInterestExpense:    l.tdInterestExpense,
 		CreditInterestIncome: l.creditInterestIncome,
 		CreditLines:          l.creditLinesLocked(),
+		ECLExpenseAccount:    l.eclExpenseAccount,
+		ECLAllowanceAccount:  l.eclAllowanceAccount,
+		ECLExposures:         l.eclExposureRecordsLocked(),
 	}
+	eclCfg := l.eclStageConfig
+	cfg.ECLStageConfig = &eclCfg
 	plAccounts, retainedEarnings := l.closingAccountsLocked()
 	if retainedEarnings != "" {
 		cfg.ClosingPLAccounts = plAccounts
@@ -1904,6 +1930,32 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, cl := range cfg.CreditLines {
 		l.creditLines[creditLineKey{account: cl.Account, currency: cl.Currency}] = cl
 	}
+	// ECL config restores like the other structural config: the staging
+	// configuration (validated — a corrupt snapshot must not install an
+	// inverted boundary), the fail-closed booking accounts (an absent
+	// account keeps provisioning rejected), and the exposure registry
+	// with its provisioned-so-far coverage figures. hasManual is
+	// recovered from the manual amount: the registry only ever stores
+	// positive manual exposures.
+	if cfg.ECLStageConfig != nil {
+		if err := cfg.ECLStageConfig.Validate(); err != nil {
+			return bad("bad ECL stage config: %v", err)
+		}
+		l.eclStageConfig = *cfg.ECLStageConfig
+	}
+	l.eclExpenseAccount = cfg.ECLExpenseAccount
+	l.eclAllowanceAccount = cfg.ECLAllowanceAccount
+	l.eclExposures = make(map[eclExposureKey]eclExposureRow, len(cfg.ECLExposures))
+	for _, rec := range cfg.ECLExposures {
+		l.eclExposures[eclExposureKey{account: rec.Account, currency: rec.Currency}] = eclExposureRow{
+			manualCents:      rec.ManualCents,
+			hasManual:        rec.ManualCents > 0,
+			daysPastDue:      rec.DaysPastDue,
+			stage:            rec.Stage,
+			provisionedCents: rec.ProvisionedCents,
+			updatedAt:        rec.UpdatedAt,
+		}
+	}
 	// Split-transfer chunking config (LG-75), validated above.
 	l.maxTransferChunkCents = cfg.MaxTransferChunkCents
 	l.splitFeePerChunk = cfg.SplitFeePerChunk
@@ -2056,6 +2108,17 @@ func creditLinesEqual(a, b CreditLine) bool {
 		a.LimitCents == b.LimitCents &&
 		a.RateBps == b.RateBps &&
 		a.GrantedAt.UnixNano() == b.GrantedAt.UnixNano()
+}
+
+// eclExposureRowsEqual compares two ECL exposure rows field by field,
+// ignoring time.Location representation (see holdsEqual).
+func eclExposureRowsEqual(a, b eclExposureRow) bool {
+	return a.manualCents == b.manualCents &&
+		a.hasManual == b.hasManual &&
+		a.daysPastDue == b.daysPastDue &&
+		a.stage == b.stage &&
+		a.provisionedCents == b.provisionedCents &&
+		a.updatedAt.UnixNano() == b.updatedAt.UnixNano()
 }
 
 // mergeRecordsEqual compares two merge registry entries field by field,
@@ -2268,6 +2331,26 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	}
 	if a.creditInterestIncome != b.creditInterestIncome {
 		return false
+	}
+	// ECL config must round-trip: the staging configuration, the
+	// fail-closed booking accounts, and the exposure registry with
+	// its provisioned-so-far coverage figures. A restore that dropped
+	// the staging config would re-stage every exposure under the wrong
+	// buckets. Times compare by UnixNano (see holdsEqual).
+	if a.eclStageConfig != b.eclStageConfig {
+		return false
+	}
+	if a.eclExpenseAccount != b.eclExpenseAccount || a.eclAllowanceAccount != b.eclAllowanceAccount {
+		return false
+	}
+	if len(a.eclExposures) != len(b.eclExposures) {
+		return false
+	}
+	for k, row := range a.eclExposures {
+		other, ok := b.eclExposures[k]
+		if !ok || !eclExposureRowsEqual(row, other) {
+			return false
+		}
 	}
 	// Split-transfer chunking config must round-trip (LG-75).
 	if a.maxTransferChunkCents != b.maxTransferChunkCents || a.splitFeePerChunk != b.splitFeePerChunk {

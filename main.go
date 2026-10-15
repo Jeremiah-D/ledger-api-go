@@ -2237,6 +2237,173 @@ func (s *server) handleAccrueCreditInterest(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusCreated, entry)
 }
 
+type registerECLExposureRequest struct {
+	Account       ledger.AccountID `json:"account"`
+	Currency      string           `json:"currency"`
+	ExposureCents int64            `json:"exposure_cents"`
+	DaysPastDue   int64            `json:"days_past_due"`
+}
+
+// handleRegisterECLExposure implements POST /ecl/exposures: registers
+// (or re-registers) a manual credit exposure for an obligor without a
+// credit line (see ledger.RegisterECLExposure). The body carries the
+// account, the exposure in cents, and the days past due; the currency
+// defaults to USD. Re-registering updates the amount and DPD in place.
+// Malformed requests return 400.
+func (s *server) handleRegisterECLExposure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.ECLExposureRequestsTotal.Add(1)
+	var req registerECLExposureRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	exp, err := s.ledgerFor(r).RegisterECLExposure(req.Account, req.Currency, req.ExposureCents, req.DaysPastDue)
+	if err != nil {
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, exp)
+}
+
+type setECLDaysPastDueRequest struct {
+	Account     ledger.AccountID `json:"account"`
+	Currency    string           `json:"currency"`
+	DaysPastDue int64            `json:"days_past_due"`
+}
+
+// handleSetECLDaysPastDue implements POST /ecl/exposures/dpd: updates
+// the days-past-due tracking for an (account, currency) exposure (see
+// ledger.SetECLDaysPastDue). It works on both exposure sources — a
+// manually registered exposure, or a credit-line-sourced exposure,
+// whose row is created on first update. With neither a manual exposure
+// nor a credit line the call returns 404; malformed requests return
+// 400.
+func (s *server) handleSetECLDaysPastDue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req setECLDaysPastDueRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if err := s.ledgerFor(r).SetECLDaysPastDue(req.Account, req.Currency, req.DaysPastDue); err != nil {
+		if errors.Is(err, ledger.ErrECLExposureNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleListECLExposures implements GET /ecl/exposures: lists every
+// tracked ECL exposure row, sorted by (account, currency) (see
+// ledger.ECLExposures).
+func (s *server) handleListECLExposures(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.ledgerFor(r).ECLExposures())
+}
+
+// handleBookECLProvision implements POST /ecl/provisions: books one
+// day's expected credit loss provision for an obligor (see
+// ledger.BookECLProvision). The body carries account and an optional
+// currency; the day defaults to today (UTC) and can be pinned with
+// ?asof=RFC3339. The booking is idempotent per (account, currency,
+// day): re-running a day replays the original row with 200.
+//
+// A first-time provision returns 201; an obligor with no tracked
+// exposure returns 404; a ledger without the configured expense or
+// allowance account returns 500 (operator misconfiguration — see
+// LEDGER_ECL_EXPENSE and LEDGER_ECL_ALLOWANCE); a dust provision
+// returns 400.
+func (s *server) handleBookECLProvision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.ECLProvisionRequestsTotal.Add(1)
+	var req struct {
+		Account  ledger.AccountID `json:"account"`
+		Currency string           `json:"currency"`
+	}
+	if !s.decodeOptionalJSONBody(w, r, &req) {
+		return
+	}
+	var asof time.Time
+	if raw := r.URL.Query().Get("asof"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid asof: " + err.Error()})
+			return
+		}
+		asof = t
+	}
+	// Account and currency ride in the JSON body or the query string,
+	// whichever the client sent.
+	account, currency := req.Account, req.Currency
+	if account == "" {
+		account = ledger.AccountID(r.URL.Query().Get("account"))
+	}
+	if currency == "" {
+		currency = r.URL.Query().Get("currency")
+	}
+	entry, duplicate, err := s.ledgerFor(r).BookECLProvision(account, currency, asof)
+	if err != nil {
+		s.metrics.ECLProvisionRejectionsTotal.Add(1)
+		if errors.Is(err, ledger.ErrECLExposureNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrECLLossExpenseNotConfigured) ||
+			errors.Is(err, ledger.ErrECLAllowanceNotConfigured) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		s.metrics.ECLProvisionReplaysTotal.Add(1)
+		writeJSON(w, http.StatusOK, entry)
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+// handleSetECLStageConfig implements POST /ecl/config: replaces the
+// ledger's IFRS 9 staging configuration (see ledger.SetECLStageConfig).
+// An invalid configuration returns 400; the change is structural
+// config and never bumps the journal version.
+func (s *server) handleSetECLStageConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var cfg ledger.ECLStageConfig
+	if !s.decodeJSONBody(w, r, &cfg) {
+		return
+	}
+	if err := s.ledgerFor(r).SetECLStageConfig(cfg); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.ledgerFor(r).ECLStageConfig())
+}
+
 // handleBalance implements GET /accounts/{id}/balance.
 //
 // available_cents is the account's spendable funds: net balance minus
@@ -3916,6 +4083,11 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /credit-lines/reduce", s.handleReduceCreditLine)
 	mux.HandleFunc("GET /credit-lines", s.handleGetCreditLine)
 	mux.HandleFunc("POST /credit-lines/accrue-interest", s.handleAccrueCreditInterest)
+	mux.HandleFunc("POST /ecl/exposures", s.handleRegisterECLExposure)
+	mux.HandleFunc("POST /ecl/exposures/dpd", s.handleSetECLDaysPastDue)
+	mux.HandleFunc("GET /ecl/exposures", s.handleListECLExposures)
+	mux.HandleFunc("POST /ecl/provisions", s.handleBookECLProvision)
+	mux.HandleFunc("POST /ecl/config", s.handleSetECLStageConfig)
 	mux.HandleFunc("POST /holds/{id}/capture", s.handleCaptureHold)
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
@@ -3968,6 +4140,7 @@ func (s *server) handler() http.Handler {
 		var fxStaleAlerts, fxExpiredAlerts, fxOverridden uint64
 		var fxRefreshes, fxMoves, fxProviderFails uint64
 		var fxInconsistent uint64
+		var eclProvisions, eclMigrations uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -3988,6 +4161,8 @@ func (s *server) handler() http.Handler {
 			fxMoves += l.FXRateMovedCount()
 			fxProviderFails += l.FXRateProviderFailCount()
 			fxInconsistent += l.FXRateInconsistencyAlertCount()
+			eclProvisions += l.ECLProvisionCount()
+			eclMigrations += l.ECLStageMigrationCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -4026,6 +4201,11 @@ func (s *server) handler() http.Handler {
 		// ledger: inconsistencies are edge-triggered by the background
 		// consistency watcher inside the ledger package.
 		s.metrics.FXRateInconsistencyTotal.Store(fxInconsistent)
+		// The ECL provision and stage-migration counters likewise live
+		// in the ledger: provisions commit inside BookECLProvision and
+		// migrations record inside the staging paths, not in a handler.
+		s.metrics.ECLProvisionsTotal.Store(eclProvisions)
+		s.metrics.ECLStageMigrationsTotal.Store(eclMigrations)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the
@@ -4483,6 +4663,24 @@ func main() {
 	if raw := os.Getenv("LEDGER_CREDIT_INTEREST_INCOME"); raw != "" {
 		opts = append(opts, ledger.WithCreditInterestIncome(ledger.AccountID(raw)))
 		log.Printf("ledger-api-go: credit-line interest income account = %q", raw)
+	}
+
+	// LEDGER_ECL_EXPENSE configures the ledger-wide credit-loss expense
+	// account that ECL provisions debit (see ledger.SetECLLossExpense
+	// and POST /ecl/provisions). Unset means unconfigured: provisions
+	// are fail-closed until the operator configures it.
+	if raw := os.Getenv("LEDGER_ECL_EXPENSE"); raw != "" {
+		opts = append(opts, ledger.WithECLLossExpense(ledger.AccountID(raw)))
+		log.Printf("ledger-api-go: ECL loss expense account = %q", raw)
+	}
+
+	// LEDGER_ECL_ALLOWANCE configures the ledger-wide loss-allowance
+	// account that ECL provisions credit (see ledger.SetECLAllowance
+	// and POST /ecl/provisions). Unset means unconfigured: provisions
+	// are fail-closed until the operator configures it.
+	if raw := os.Getenv("LEDGER_ECL_ALLOWANCE"); raw != "" {
+		opts = append(opts, ledger.WithECLAllowance(ledger.AccountID(raw)))
+		log.Printf("ledger-api-go: ECL allowance account = %q", raw)
 	}
 
 	ln, err := net.Listen("tcp", addr)

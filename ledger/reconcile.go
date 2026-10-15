@@ -269,6 +269,17 @@ type ReconciliationReport struct {
 	// drawn utilization, and the remaining availability. Risk tooling
 	// reads this for the ledger's credit exposure at report time.
 	CreditLines []CreditLineReport `json:"credit_lines"`
+	// ECLExposures lists every ECL-tracked exposure with positive
+	// exposure at report time (see ecl.go), sorted by (account,
+	// currency): the obligor's IFRS 9 stage, the exposure in cents,
+	// and the provisioned amount so far. DPD-only tracking rows and
+	// fully repaid credit lines (zero resolved exposure) are absent.
+	ECLExposures []ECLExposureReport `json:"ecl_exposures"`
+	// ECLCoverage rolls the exposures above up per currency, sorted by
+	// currency code: coverage_ratio is provisioned/exposure, the IFRS 9
+	// provision-coverage metric risk tooling watches. Currencies are
+	// never summed together — each currency's coverage is its own row.
+	ECLCoverage []ECLCoverageRow `json:"ecl_coverage"`
 }
 
 // TermDepositReport is one term deposit's Reconcile disclosure: the
@@ -286,6 +297,80 @@ type TermDepositReport struct {
 	AccruedInterestCents int64     `json:"accrued_interest_cents"`
 }
 
+// ECLExposureReport is one exposure's Reconcile disclosure: the
+// obligor's IFRS 9 stage and the exposure/provision figures behind the
+// coverage ratio.
+type ECLExposureReport struct {
+	Account          AccountID `json:"account"`
+	Currency         string    `json:"currency"`
+	Source           string    `json:"source"`
+	DaysPastDue      int64     `json:"days_past_due"`
+	Stage            int       `json:"stage"`
+	ExposureCents    int64     `json:"exposure_cents"`
+	ProvisionedCents int64     `json:"provisioned_cents"`
+}
+
+// ECLCoverageRow is one currency's ECL provision-coverage rollup:
+// coverage_ratio = provisioned_cents / exposure_cents, 0 when the
+// exposure is 0.
+type ECLCoverageRow struct {
+	Currency         string  `json:"currency"`
+	ExposureCents    int64   `json:"exposure_cents"`
+	ProvisionedCents int64   `json:"provisioned_cents"`
+	CoverageRatio    float64 `json:"coverage_ratio"`
+}
+
+// eclReportsLocked builds the Reconcile ECL disclosure: every tracked
+// exposure whose resolved exposure is positive, sorted by (account,
+// currency), plus the per-currency provision-coverage rollup, sorted by
+// currency code. Callers must hold l.mu; the read lock suffices.
+func (l *Ledger) eclReportsLocked() ([]ECLExposureReport, []ECLCoverageRow) {
+	exposures := make([]ECLExposureReport, 0, len(l.eclExposures))
+	byCurrency := make(map[string]*ECLCoverageRow)
+	for k, row := range l.eclExposures {
+		exposure, dpd, source, ok := l.eclExposureLocked(k, row)
+		if !ok || exposure <= 0 {
+			continue
+		}
+		stage := l.eclStageConfig.StageForDPD(dpd)
+		exposures = append(exposures, ECLExposureReport{
+			Account:          k.account,
+			Currency:         k.currency,
+			Source:           source,
+			DaysPastDue:      dpd,
+			Stage:            stage,
+			ExposureCents:    exposure,
+			ProvisionedCents: row.provisionedCents,
+		})
+		agg, exists := byCurrency[k.currency]
+		if !exists {
+			agg = &ECLCoverageRow{Currency: k.currency}
+			byCurrency[k.currency] = agg
+		}
+		agg.ExposureCents += exposure
+		agg.ProvisionedCents += row.provisionedCents
+	}
+	sort.Slice(exposures, func(i, j int) bool {
+		if exposures[i].Account != exposures[j].Account {
+			return exposures[i].Account < exposures[j].Account
+		}
+		return exposures[i].Currency < exposures[j].Currency
+	})
+	currencies := make([]string, 0, len(byCurrency))
+	for c := range byCurrency {
+		currencies = append(currencies, c)
+	}
+	sort.Strings(currencies)
+	coverage := make([]ECLCoverageRow, 0, len(currencies))
+	for _, c := range currencies {
+		row := byCurrency[c]
+		if row.ExposureCents > 0 {
+			row.CoverageRatio = float64(row.ProvisionedCents) / float64(row.ExposureCents)
+		}
+		coverage = append(coverage, *row)
+	}
+	return exposures, coverage
+}
 // CreditLineReport is one credit line's Reconcile disclosure: the limit
 // and the exposure drawn against it.
 type CreditLineReport struct {
@@ -527,6 +612,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		TermDeposits:               l.termDepositReportsLocked(),
 		CreditLines:                l.creditLineReportsLocked(),
 	}
+	report.ECLExposures, report.ECLCoverage = l.eclReportsLocked()
 
 	// Every account that has ever been touched. Net balances, debit
 	// totals, and credit totals each cover a different (account, currency)

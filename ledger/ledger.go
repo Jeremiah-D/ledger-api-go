@@ -469,6 +469,26 @@ type Ledger struct {
 	// survives disaster-recovery snapshots.
 	creditLines          map[creditLineKey]CreditLine
 	creditInterestIncome AccountID
+	// eclStageConfig is the IFRS 9 staging configuration (see ecl.go):
+	// the DPD buckets and per-stage provision rates. eclExposures
+	// tracks the per-(account, currency) exposure state: manually
+	// registered exposures and DPD tracking for credit-line-sourced
+	// exposures. eclExpenseAccount / eclAllowanceAccount are the
+	// fail-closed P&L/allowance accounts ECL provisions book through —
+	// empty means unconfigured and BookECLProvision refuses.
+	// Structural config, like creditLines: it never bumps the journal
+	// version and it survives disaster-recovery snapshots.
+	// eclProvisionsCommitted counts ECL provision journal entries ever
+	// committed (idempotent replays are not counted);
+	// eclStageMigrations counts stage migrations recorded (the durable
+	// record is the ecl_stage_migration audit events). Both are
+	// in-memory only — they do not round-trip through snapshots.
+	eclStageConfig       ECLStageConfig
+	eclExposures         map[eclExposureKey]eclExposureRow
+	eclExpenseAccount    AccountID
+	eclAllowanceAccount  AccountID
+	eclProvisionsCommitted atomic.Uint64
+	eclStageMigrations     atomic.Uint64
 	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so
 	// replays rebuild the full receipt (see sweep.go). Its own namespace,
 	// like holdKeys/captureKeys, expiring with the TTL.
@@ -760,6 +780,8 @@ func New(opts ...Option) *Ledger {
 		termDeposits:         make(map[string]TermDeposit),
 		termDepositKeys:      make(map[string]string),
 		creditLines:          make(map[creditLineKey]CreditLine),
+		eclStageConfig:       DefaultECLStageConfig(),
+		eclExposures:         make(map[eclExposureKey]eclExposureRow),
 		sweepKeys:            make(map[string]sweepRecord),
 		batchKeys:            make(map[string]batchRecord),
 		allocRules:           make(map[string]AllocationRule),

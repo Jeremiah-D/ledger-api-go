@@ -217,6 +217,31 @@ type Metrics struct {
 	// because they would breach a credit line's floor
 	// (ErrCreditLimitExceeded).
 	CreditLimitRejections atomic.Uint64
+	// ECLExposureRequestsTotal counts POST /ecl/exposures requests
+	// received (all attempts, including rejected payloads).
+	ECLExposureRequestsTotal atomic.Uint64
+	// ECLProvisionRequestsTotal counts POST /ecl/provisions requests
+	// received (all attempts, including replays and rejections).
+	ECLProvisionRequestsTotal atomic.Uint64
+	// ECLProvisionReplaysTotal counts POST /ecl/provisions requests
+	// that replayed an already-booked provision entry for the day and
+	// returned the original row.
+	ECLProvisionReplaysTotal atomic.Uint64
+	// ECLProvisionRejectionsTotal counts POST /ecl/provisions requests
+	// rejected with 400/404/500 for semantic reasons: no tracked
+	// exposure, unconfigured booking accounts (fail-closed), or a dust
+	// provision.
+	ECLProvisionRejectionsTotal atomic.Uint64
+	// ECLProvisionsTotal counts ECL provision journal entries committed
+	// via POST /ecl/provisions. It is synced from the ledgers on every
+	// GET /metrics scrape, like JournalRuleLegsTotal: idempotent
+	// replays are not counted twice.
+	ECLProvisionsTotal atomic.Uint64
+	// ECLStageMigrationsTotal counts ECL stage migrations recorded. It
+	// is synced from the ledgers on every GET /metrics scrape, like
+	// ECLProvisionsTotal; the durable record is the
+	// ecl_stage_migration audit events.
+	ECLStageMigrationsTotal atomic.Uint64
 	// SweepsTotal counts POST /sweeps requests received (all attempts,
 	// including duplicates and rejected payloads).
 	SweepsTotal atomic.Uint64
@@ -483,6 +508,22 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_credit_limit_rejections_total",
 		"Total postings rejected with 422 because they would breach a credit line's floor.",
 		m.CreditLimitRejections.Load())
+	writeCounter(&sb, "ledger_ecl_exposure_requests_total",
+		"Total POST /ecl/exposures requests received.", m.ECLExposureRequestsTotal.Load())
+	writeCounter(&sb, "ledger_ecl_provision_requests_total",
+		"Total POST /ecl/provisions requests received.", m.ECLProvisionRequestsTotal.Load())
+	writeCounter(&sb, "ledger_ecl_provision_replays_total",
+		"Total POST /ecl/provisions requests that replayed an already-booked provision entry for the day.",
+		m.ECLProvisionReplaysTotal.Load())
+	writeCounter(&sb, "ledger_ecl_provision_rejections_total",
+		"Total POST /ecl/provisions requests rejected: no tracked exposure, unconfigured booking accounts, or dust provision.",
+		m.ECLProvisionRejectionsTotal.Load())
+	writeCounter(&sb, "ledger_ecl_provisions_total",
+		"Total ECL provision journal entries committed via POST /ecl/provisions (idempotent replays not counted twice).",
+		m.ECLProvisionsTotal.Load())
+	writeCounter(&sb, "ledger_ecl_stage_migrations_total",
+		"Total ECL stage migrations recorded (ecl_stage_migration audit events).",
+		m.ECLStageMigrationsTotal.Load())
 	writeCounter(&sb, "ledger_sweeps_total",
 		"Total POST /sweeps requests received.", m.SweepsTotal.Load())
 	writeCounter(&sb, "ledger_sweep_idempotency_hits_total",

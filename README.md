@@ -1444,6 +1444,44 @@ or bad account/currency/rate; `404` unknown line; `409` duplicate grant;
 `422` reducing below utilization, interest breaching the floor, or
 posting past the credit limit.
 
+### ECL provisions (预期信用损失)
+
+`POST /ecl/exposures` registers a manual credit exposure for an obligor
+without a credit line (`exposure_cents`, `days_past_due`) — the
+standalone source. Where a credit line exists, its drawn utilization is
+the exposure instead (no registration needed); a manual exposure on the
+same obligor takes precedence. `POST /ecl/exposures/dpd` updates the
+days-past-due tracking on either source.
+
+`POST /ecl/provisions` books one day's IFRS 9 expected credit loss:
+the exposure is staged 1/2/3 by days past due under the configurable
+`ECLStageConfig` (default 30/90-day buckets, 1%/10%/50% provision
+rates; `POST /ecl/config` replaces it after validation), and the
+provision is `⌊exposure × stage_rate_bps / 10000⌋`, debit the
+credit-loss expense account / credit the loss-allowance account, under
+the deterministic ID `ecl/<account>/<currency>/<YYYY-MM-DD>` — a day's
+run is idempotent, replays return the original row with `200`. Both
+booking accounts are fail-closed (`LEDGER_ECL_EXPENSE`,
+`LEDGER_ECL_ALLOWANCE`; `500` unconfigured), dust provisions book
+nothing (`400`), and stage changes emit `ecl_stage_migration` audit
+events. `GET /ecl/exposures` lists the tracked exposures; the
+reconcile report discloses every exposure's stage/exposure/provisioned
+figures plus the per-currency provision-coverage ratio
+(`provisioned/exposure`).
+
+```bash
+curl -s -X POST localhost:8080/ecl/exposures \
+  -d '{"account":"borrower","currency":"USD","exposure_cents":100000,"days_past_due":45}'
+# 201 {"account":"borrower","stage":2,...}
+curl -s -X POST "localhost:8080/ecl/provisions?asof=2026-04-02T09:00:00Z" \
+  -d '{"account":"borrower","currency":"USD"}'
+# 201 {"id":"ecl/borrower/USD/2026-04-02","amount_cents":10000,...}
+```
+
+Status codes: `201` first provision / `200` replay; `400` malformed
+request, invalid stage config, or dust provision; `404` no tracked
+exposure; `500` unconfigured expense/allowance account.
+
 ### Multi-currency
 
 Every entry carries a `currency`: a three-letter uppercase ISO 4217 code
@@ -3057,6 +3095,19 @@ curl -s localhost:8080/metrics
   accrual requests received.
 - `ledger_credit_limit_rejections_total` — postings and accruals rejected
   at the credit-line floor (`ErrCreditLimitExceeded`).
+- `ledger_ecl_exposure_requests_total` — `POST /ecl/exposures` requests
+  received.
+- `ledger_ecl_provision_requests_total` — `POST /ecl/provisions`
+  requests received.
+- `ledger_ecl_provision_replays_total` — `POST /ecl/provisions`
+  requests that replayed an already-booked provision entry for the day.
+- `ledger_ecl_provision_rejections_total` — `POST /ecl/provisions`
+  requests rejected (no tracked exposure, unconfigured booking
+  accounts, dust provision).
+- `ledger_ecl_provisions_total` — ECL provision journal entries
+  committed (idempotent replays not counted twice).
+- `ledger_ecl_stage_migrations_total` — ECL stage migrations recorded
+  (`ecl_stage_migration` audit events).
 - `ledger_snapshot_backups_total` — successful periodic snapshot backup
   ticks (full and incremental; see `LEDGER_SNAPSHOT_BACKUP_DIR` below).
 - `ledger_snapshot_backups_failed_total` — periodic snapshot backup
@@ -3235,6 +3286,14 @@ Environment:
   account for credit-line utilization interest (e.g.
   `LEDGER_CREDIT_INTEREST_INCOME=interest-income`). Accruals are
   fail-closed: without this set, `POST /credit-lines/accrue-interest`
+  returns `500`.
+- `LEDGER_ECL_EXPENSE` — the ledger-wide credit-loss expense account
+  for ECL provisions (e.g. `LEDGER_ECL_EXPENSE=ecl-expense`).
+  Provisions are fail-closed: without this set, `POST /ecl/provisions`
+  returns `500`.
+- `LEDGER_ECL_ALLOWANCE` — the ledger-wide loss-allowance account for
+  ECL provisions (e.g. `LEDGER_ECL_ALLOWANCE=ecl-allowance`).
+  Provisions are fail-closed: without this set, `POST /ecl/provisions`
   returns `500`.
 - `LEDGER_DAILY_OUTFLOW_LIMITS` — per-account per-currency daily outflow
   limits, `"<account>:<currency>:<limitCents>,..."` (e.g.
