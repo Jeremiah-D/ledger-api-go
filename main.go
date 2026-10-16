@@ -3831,6 +3831,80 @@ func (s *server) handleReconcileExport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, exp)
 }
 
+// largeTxReportRequest is the body of POST /compliance/large-tx-reports.
+// Day is optional: empty means today (UTC).
+type largeTxReportRequest struct {
+	Day string `json:"day"`
+}
+
+// handleLargeTxReports implements POST /compliance/large-tx-reports, the
+// operator-facing large-transaction (CTR) report generator. It scans the
+// journal for one UTC calendar day and generates a report for every
+// (account, currency) whose inflow or outflow reaches the configured
+// per-currency threshold (see ledger.GenerateLargeTxReports). Generation
+// is read-only — it books nothing and never blocks postings — and is
+// idempotent: regenerating a day replays the stored reports instead of
+// double-reporting into the audit chain.
+//
+//	curl -s -X POST localhost:8080/compliance/large-tx-reports \
+//	  -d '{"day":"2026-10-15"}'
+func (s *server) handleLargeTxReports(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	// Bound the body like every other POST endpoint and decode strictly:
+	// unknown fields fail fast.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	var req largeTxReportRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	switch err := dec.Decode(&req); {
+	case err == io.EOF:
+		// No body: generate for today.
+	case err != nil:
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	default:
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+			return
+		}
+	}
+
+	reports, err := s.ledgerFor(r).GenerateLargeTxReports(req.Day)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	var generated int
+	for _, rep := range reports {
+		if !rep.Duplicate {
+			generated++
+		}
+	}
+	// Only new reports count: replays must not inflate the compliance
+	// counter.
+	s.metrics.LargeTxReportsTotal.Add(uint64(generated))
+	day := req.Day
+	if day == "" {
+		day = time.Now().UTC().Format("2006-01-02")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"day":        day,
+		"generated":  generated,
+		"duplicates": len(reports) - generated,
+		"reports":    reports,
+	})
+}
+
 // parseSettlementExpected parses one ?expected= query value of
 // GET /settlement: "<account>:<currency>:<cents>". The account may not be
 // empty; cents is a signed integer (negative expectations are legal for
@@ -4089,6 +4163,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /revaluations", s.handleCreateRevaluation)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
+	mux.HandleFunc("POST /compliance/large-tx-reports", s.handleLargeTxReports)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
 	mux.HandleFunc("GET /aging", s.handleAging)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
@@ -4621,6 +4696,37 @@ func main() {
 		}
 		opts = append(opts, ledger.WithReviewThresholds(thresholds))
 		log.Printf("ledger-api-go: per-account review thresholds = %d configured", len(thresholds))
+	}
+
+	// LEDGER_LARGE_TX_THRESHOLDS configures per-currency large-transaction
+	// (CTR) reporting thresholds (see ledger.ParseLargeTxThresholds for the
+	// syntax, e.g. "USD:1000000,EUR:900000"): an account's UTC-day inflow
+	// or outflow in that currency at/above the threshold generates a
+	// report into the structured audit chain on POST
+	// /compliance/large-tx-reports. Unset means no reporting. An invalid
+	// value fails the startup fast (log.Fatal), like every other risk
+	// control.
+	if raw := os.Getenv("LEDGER_LARGE_TX_THRESHOLDS"); raw != "" {
+		thresholds, err := ledger.ParseLargeTxThresholds(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		m := make(map[string]int64, len(thresholds))
+		for _, t := range thresholds {
+			m[t.Currency] = t.ThresholdCents
+		}
+		opts = append(opts, ledger.WithLargeTxThresholds(m))
+		log.Printf("ledger-api-go: large-transaction thresholds = %d configured", len(thresholds))
+	}
+
+	// LEDGER_LARGE_TX_REPORT_CURRENCY sets the currency converted
+	// large-transaction report amounts are disclosed in (default USD).
+	// An invalid value fails the startup fast (log.Fatal): a
+	// misconfigured compliance report must never silently run in the
+	// wrong currency.
+	if raw := os.Getenv("LEDGER_LARGE_TX_REPORT_CURRENCY"); raw != "" {
+		opts = append(opts, ledger.WithLargeTxReportCurrency(raw))
+		log.Printf("ledger-api-go: large-transaction report currency = %s", raw)
 	}
 
 	// LEDGER_REVIEW_EXPIRY bounds how long a pending review may wait for

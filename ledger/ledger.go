@@ -311,6 +311,25 @@ type Ledger struct {
 	// currency; structural config, like frozen and noOverdraft.
 	dailyLimits  map[dailyLimitKey]int64
 	dailyOutflow map[dailyLimitKey]int64
+	// largeTxThresholds maps an ISO 4217 currency to the daily
+	// large-transaction reporting threshold in that currency's cents (see
+	// ctr.go): an account's UTC-day inflow or outflow in that currency
+	// reaching the threshold generates a report on the next
+	// GenerateLargeTxReports call. Opt-in; structural config, like
+	// dailyLimits — threshold changes do not bump the journal version
+	// and survive disaster-recovery snapshots.
+	largeTxThresholds map[string]int64
+	// largeTxReportCurrency is the ISO currency converted report amounts
+	// are disclosed in (default USD, see SetLargeTxReportCurrency).
+	// Structural config, like largeTxThresholds.
+	largeTxReportCurrency string
+	// largeTxReports stores generated large-transaction reports keyed by
+	// (account, currency, day, direction): regenerating a day replays the
+	// stored rows instead of double-reporting into the audit chain.
+	// Pruned to the last two UTC days on each generation (see
+	// maybePruneLargeTxReportsLocked).
+	largeTxReports     map[largeTxReportKey]LargeTxReport
+	lastLargeTxPrune   time.Time
 	// budgets maps (account, currency) to the account's monthly spend
 	// budget in cents, and monthlySpend accumulates the spend booked per
 	// (account, currency, UTC month). A posting that would take the
@@ -777,6 +796,9 @@ func New(opts ...Option) *Ledger {
 		deniedPrefixes:       make(map[string]DenylistEntry),
 		dailyLimits:          make(map[dailyLimitKey]int64),
 		dailyOutflow:         make(map[dailyLimitKey]int64),
+		largeTxThresholds:    make(map[string]int64),
+		largeTxReportCurrency: DefaultCurrency,
+		largeTxReports:       make(map[largeTxReportKey]LargeTxReport),
 		budgets:              make(map[budgetKey]int64),
 		monthlySpend:         make(map[monthlySpendKey]int64),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch),

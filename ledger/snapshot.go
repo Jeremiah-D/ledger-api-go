@@ -219,6 +219,18 @@ type snapshotConfigLine struct {
 	// zero, which fail-opens for the remainder of that day — operators
 	// should treat a restore as a risk-control reset event.
 	DailyLimits []DailyLimit `json:"daily_limits,omitempty"`
+	// LargeTxThresholds carries the large-transaction reporting
+	// thresholds (see SetLargeTxThreshold); absent in snapshots written
+	// before large-transaction reporting existed. The generated report
+	// rows are deliberately NOT restored: the audit chain already carries
+	// every generated report, and a restore must not replay them into
+	// the chain — regenerating after a restore is explicit and
+	// idempotent, like the daily outflow counters.
+	LargeTxThresholds []LargeTxThreshold `json:"large_tx_thresholds,omitempty"`
+	// LargeTxReportCurrency carries the reporting currency (see
+	// SetLargeTxReportCurrency); absent in snapshots written before it
+	// existed, which import as the default (USD).
+	LargeTxReportCurrency string `json:"large_tx_report_currency,omitempty"`
 	// Budgets carries the monthly spend budgets (see SetAccountBudget);
 	// absent in snapshots written before budgets existed. Like the daily
 	// limits, the accumulated per-month spend counters are deliberately
@@ -824,6 +836,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		SplitFeePerChunk:      l.splitFeePerChunk,
 		IdempotencyTTL:        l.idempotencyTTL.String(),
 		DailyLimits:           l.dailyLimitsLocked(),
+		LargeTxThresholds:     l.largeTxThresholdsLocked(),
+		LargeTxReportCurrency: l.largeTxReportCurrency,
 		Budgets:               l.budgetsLocked(),
 		Denylist:              l.denylistLocked(),
 		FXRates:               l.fxRatesLocked(),
@@ -1542,6 +1556,29 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		limits = append(limits, validatedLimit{dailyLimitKey{account: dl.Account, currency: cur}, dl.LimitCents})
 	}
+	type validatedLargeTxThreshold struct {
+		currency  string
+		threshold int64
+	}
+	var largeTxThresholds []validatedLargeTxThreshold
+	for _, t := range cfg.LargeTxThresholds {
+		cur, err := normalizeCurrency(t.Currency)
+		if err != nil {
+			return bad("bad large-transaction threshold currency %q: %v", t.Currency, err)
+		}
+		if t.ThresholdCents <= 0 {
+			return bad("non-positive large-transaction threshold for %s", cur)
+		}
+		largeTxThresholds = append(largeTxThresholds, validatedLargeTxThreshold{cur, t.ThresholdCents})
+	}
+	reportCurrency := DefaultCurrency
+	if cfg.LargeTxReportCurrency != "" {
+		cur, err := normalizeCurrency(cfg.LargeTxReportCurrency)
+		if err != nil {
+			return bad("bad large-transaction report currency %q: %v", cfg.LargeTxReportCurrency, err)
+		}
+		reportCurrency = cur
+	}
 	type validatedBudget struct {
 		key    budgetKey
 		budget int64
@@ -1837,6 +1874,14 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, vl := range limits {
 		l.dailyLimits[vl.key] = vl.limit
 	}
+	// Large-transaction reporting thresholds restore like the daily
+	// outflow limits. Generated report rows are deliberately not
+	// restored: the audit chain already carries every generated report,
+	// and a restore must not replay them into the chain.
+	for _, vt := range largeTxThresholds {
+		l.largeTxThresholds[vt.currency] = vt.threshold
+	}
+	l.largeTxReportCurrency = reportCurrency
 	// Monthly spend budgets restore like the daily outflow limits: the
 	// accumulated per-month spend counters are deliberately not
 	// restored (fail-open for the remainder of the month), only the

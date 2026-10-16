@@ -157,6 +157,13 @@ type ReconciliationReport struct {
 	// section risk tooling watches for velocity-limit pressure; for a
 	// leaf account the subtree is the account itself.
 	SubtreeLimitUtilization []SubtreeLimitUsage `json:"subtree_limit_utilization"`
+	// LargeTxReports lists the large-transaction (CTR) reports generated
+	// for the report's UTC day (see GenerateLargeTxReports), sorted by
+	// (account, currency, direction). Empty when no thresholds are
+	// configured or no report was generated yet — generation is an
+	// explicit operator call (POST /compliance/large-tx-reports); the
+	// report discloses what was generated, it never generates.
+	LargeTxReports []LargeTxReport `json:"large_tx_reports"`
 	// BudgetUtilization lists every configured monthly spend budget
 	// (see SetAccountBudget) with the current UTC month's booked spend
 	// and its utilization fraction (LG-81), sorted by (account,
@@ -602,6 +609,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
 		SubtreeLimitUtilization:    l.subtreeLimitUtilizationLocked(now),
+		LargeTxReports:             l.largeTxReportsForDayLocked(utcDay(now)),
 		BudgetUtilization:          l.budgetUtilizationLocked(now),
 		BalanceWatches:             l.balanceWatchesLocked(),
 		AccountTypeTotals:          l.accountTypeTotalsLocked(),

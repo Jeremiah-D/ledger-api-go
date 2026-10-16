@@ -2272,6 +2272,7 @@ Report fields:
 | `merges`               | every committed account merge, sorted by merge ID: `merge_id`, `from_account`, `to_account`, the per-currency `legs`, and `created_at`. Merged sources stay frozen — cross-check `from_account` against `frozen_accounts` in the same report |
 | `fx_applied`           | `true` when the report carries the opt-in base-currency summary (see below); `false` on a plain scan |
 | `base_currency_summary` | the base-currency rollup, present only when `fx_applied` is `true`: `base_currency`, base-currency `total_debits_cents`/`total_credits_cents`, per-currency `conversions`, converted `discrepancies`, the `fx_snapshot` of rates used, `missing_rates`, and `fx_incomplete` |
+| `large_tx_reports` | the large-transaction (CTR) reports generated for the report's UTC day (LG-94), sorted by (account, currency, direction): `account`, `day`, `currency`, `direction` (`inflow`/`outflow`), `amount_cents`, `threshold_cents`, `report_currency`, `converted_cents` (+ `conversion_ok`, `rate_version`). Empty when nothing was generated — `POST /reconcile` discloses, it never generates |
 
 #### Base-currency summary (opt-in)
 
@@ -2369,6 +2370,38 @@ Daily cron example (midnight, keep 90 days of reports):
 
 Reports from a healthy ledger are byte-identical when scanned at the same
 `generated_at`, so plain `diff` works for day-over-day comparisons.
+
+### Large-transaction reporting (CTR)
+
+Currency Transaction Report generation for compliance (LG-94). The ledger
+aggregates every account's UTC-day inflow (debit legs) and outflow (credit
+legs) per currency; when one side reaches the configured per-currency
+threshold, `POST /compliance/large-tx-reports` generates a report entry
+into the structured audit chain (`op: "large_tx_report"`, hash-sealed like
+every other audit event).
+
+```bash
+curl -s -X POST localhost:8080/compliance/large-tx-reports \
+  -d '{"day":"2026-10-15"}'
+```
+
+- Thresholds are per currency in that currency's own cents — the CTR
+  convention (a USD $10,000 line and a EUR €9,000 line are independent).
+  Configure with `LEDGER_LARGE_TX_THRESHOLDS="USD:1000000,EUR:900000"`.
+- Every report discloses the converted amount in the reporting currency
+  (default USD, `LEDGER_LARGE_TX_REPORT_CURRENCY`), converted at the FX
+  table's mid price effective at the end of the report day. A flow
+  currency with no live rate is reported anyway with `conversion_ok:
+  false` — never silently dropped.
+- Generation is read-only (books nothing, never blocks postings) and
+  idempotent: regenerating a day replays the stored reports (`duplicate:
+  true`) instead of double-reporting. The first generation per
+  (account, currency, day, direction) wins — run it as an end-of-day
+  batch for complete daily totals. Rows pending dual-control review are
+  excluded (no money moved).
+- `ledger_large_tx_reports_total` counts newly generated reports (replays
+  excluded); the reconcile report's `large_tx_reports` section discloses
+  the report day's generated rows.
 
 ### `GET /settlement`
 
@@ -3380,6 +3413,16 @@ Environment:
   full interval; SIGINT/SIGTERM stops the worker with the server. Unset
   or invalid means disabled — expiry stays lazy by predicate and
   available on demand via `POST /transfers/reviews/expire`.
+- `LEDGER_LARGE_TX_THRESHOLDS` — per-currency large-transaction (CTR)
+  reporting thresholds, `"<currency>:<thresholdCents>,..."` (e.g.
+  `LEDGER_LARGE_TX_THRESHOLDS="USD:1000000,EUR:900000"`): an account's
+  UTC-day inflow or outflow in that currency at/above the threshold
+  generates a report into the structured audit chain on `POST
+  /compliance/large-tx-reports`. Unset means no reporting; an invalid
+  value fails startup fast.
+- `LEDGER_LARGE_TX_REPORT_CURRENCY` — the currency converted
+  large-transaction report amounts are disclosed in (default `USD`); an
+  invalid value fails startup fast.
 - `LEDGER_FX_ACCOUNT` — the ledger-wide FX clearing account, counterparty
   of cross-currency transfer legs. Unset means each cross-currency
   transfer must carry `fx_account`.
