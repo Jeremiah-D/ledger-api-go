@@ -968,15 +968,19 @@ func (l *Ledger) AnchorTimestamp(ctx context.Context, authority TimestampAuthori
 
 	t := &l.tsa
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	tsaURL := t.tsaURL
 	if n := len(t.anchors); n > 0 {
 		if last := t.anchors[n-1]; last.Seq == seq && last.HeadHash == headHex && last.TSAURL == tsaURL {
+			// Idempotent re-anchor of an unchanged head: nothing new
+			// happened, so no chain_anchored audit event — the original
+			// anchoring already recorded it.
+			t.mu.Unlock()
 			return last, nil
 		}
 	}
 	tok, err := authority.Timestamp(ctx, head)
 	if err != nil {
+		t.mu.Unlock()
 		return TimestampAnchor{}, err
 	}
 	a := TimestampAnchor{
@@ -989,9 +993,37 @@ func (l *Ledger) AnchorTimestamp(ctx context.Context, authority TimestampAuthori
 		Token:      base64.StdEncoding.EncodeToString(tok.Raw),
 	}
 	if err := appendTSAAnchorLine(dir, a); err != nil {
+		t.mu.Unlock()
 		return TimestampAnchor{}, err
 	}
 	t.anchors = append(t.anchors, a)
+	t.mu.Unlock()
+
+	// LG-100: record the anchoring in the hash-chained audit log as a
+	// chain_anchored op carrying {chain_seq, head_hash, tsa_token}, so
+	// deleting tsa_anchors.jsonl cannot erase all evidence that an
+	// anchor happened — the LG-32 hash chain still attests to it.
+	// Emitted only for new anchors (the idempotent path above returns
+	// early), and only after t.mu is released: Reconcile holds l.mu
+	// (write) while taking t.mu (verifyTimestampAnchorsLocked), so
+	// acquiring l.mu under t.mu would risk an ABBA deadlock. emitAudit
+	// requires l.mu (either lock suffices); the enqueue never blocks.
+	l.mu.RLock()
+	l.emitAudit(AuditEvent{
+		Op:            "chain_anchored",
+		Actor:         "TSAAnchorer",
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Details: map[string]any{
+			"chain_seq": a.Seq,
+			"head_hash": a.HeadHash,
+			"tsa_url":   a.TSAURL,
+			"gen_time":  a.GenTime.UTC().Format(time.RFC3339Nano),
+			"serial":    a.Serial,
+			"tsa_token": a.Token,
+		},
+	})
+	l.mu.RUnlock()
 	return a, nil
 }
 

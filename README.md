@@ -2468,6 +2468,11 @@ curl -s -X POST localhost:8080/entries/tsa-anchor
   detect — surfaces there. An offline verifier is available for
   third-party audit: `ledger.VerifyTimestampAnchors(dir, trusted)`.
 - `ledger_tsa_anchors_total` counts successful anchors in `/metrics`
+- Every *new* anchoring also appends a `chain_anchored` op to the
+  hash-chained audit log (`chain_seq`, `head_hash`, `tsa_url`, `gen_time`,
+  `serial`, `tsa_token`), so deleting `tsa_anchors.jsonl` cannot erase all
+  evidence that an anchor happened — the LG-32 chain still attests to it.
+  Idempotent re-anchors of an unchanged head emit no new op.
   (manual requests and worker ticks alike).
 
 ### `POST /reconcile`
