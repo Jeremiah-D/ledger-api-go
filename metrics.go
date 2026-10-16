@@ -119,6 +119,13 @@ type Metrics struct {
 	// after exhausting its retries: each was recorded as an
 	// audit_sink_dead_letter audit event and the cursor moved past it.
 	AuditSinkDeadLettersTotal atomic.Uint64
+	// WebhookFailuresTotal counts outbound webhook deliveries that
+	// exhausted their retries (LG-102): one event x endpoint pair the
+	// dispatcher gave up on. Mirrored from the dispatcher on every GET
+	// /metrics scrape; zero when webhooks are disabled. A rising count
+	// means a downstream consumer is down or rejecting — alert on it.
+	// Delivery failures never block the posting path.
+	WebhookFailuresTotal atomic.Uint64
 	// OverdraftRejections counts POST /entries, POST /entries/batch,
 	// POST /transfers, POST /merges, and capture requests rejected with
 	// 422 because they would have overdrawn an overdraft-protected
@@ -758,6 +765,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_audit_sink_dead_letter_total",
 		"Total events the audit sink gave up on after exhausting retries (each recorded as an audit_sink_dead_letter audit event).",
 		m.AuditSinkDeadLettersTotal.Load())
+	writeCounter(&sb, "ledger_webhook_failures_total",
+		"Total outbound webhook deliveries that exhausted their retries (one event x endpoint pair the dispatcher gave up on). A rising count means a downstream webhook consumer is down or rejecting; delivery failures never block the posting path.",
+		m.WebhookFailuresTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

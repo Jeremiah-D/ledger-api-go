@@ -54,6 +54,11 @@ type server struct {
 	// (LEDGER_AUDIT_SINK_URL). Nil when disabled; GET /metrics mirrors
 	// its counters when present.
 	auditSink *ledger.AuditSink
+	// webhooks is the outbound signed-webhook dispatcher
+	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
+	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
+	// its failure counter when present.
+	webhooks *ledger.WebhookDispatcher
 }
 
 type createEntryRequest struct {
@@ -3459,6 +3464,51 @@ func (s *server) handleOutboxEvents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleWebhookDeliveries implements GET /webhooks/deliveries (LG-102):
+// the operator-facing query over recent outbound webhook delivery
+// attempts, latest first.
+//
+//	GET /webhooks/deliveries?endpoint=<name>&status=<pending|delivered|failed>&limit=50
+//
+//   - endpoint filters to one registered endpoint name.
+//   - status filters to pending, delivered, or failed (anything else
+//     is 400).
+//   - limit caps the page at 1..100 (default 50; anything else is 400).
+//
+// Without LEDGER_WEBHOOKS the endpoint 404s fail-closed, like
+// handleOutboxEvents without LEDGER_OUTBOX_DIR: there is no delivery
+// log to query, and the 404 says so explicitly.
+func (s *server) handleWebhookDeliveries(w http.ResponseWriter, r *http.Request) {
+	d := s.webhooks
+	if d == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "outbound webhooks disabled (LEDGER_WEBHOOKS unset)"})
+		return
+	}
+	q := r.URL.Query()
+	limit := 50
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 100 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid limit: want 1..100"})
+			return
+		}
+		limit = n
+	}
+	status := q.Get("status")
+	switch status {
+	case "", ledger.WebhookDeliveryPending, ledger.WebhookDeliveryDelivered, ledger.WebhookDeliveryFailed:
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid status: want pending, delivered, or failed"})
+		return
+	}
+	recs := d.Deliveries(ledger.WebhookDeliveryQuery{
+		Endpoint: q.Get("endpoint"),
+		Status:   status,
+		Limit:    limit,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"deliveries": recs})
+}
+
 // freezeAccountRequest is the optional body of POST
 // /accounts/{id}/freeze: an RFC3339 timestamp at which the freeze lifts
 // automatically (see ledger.FreezeUntil). Omitted (or an empty body)
@@ -4657,6 +4707,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /entries/tsa-anchor", s.handleTSAAnchor)
 	mux.HandleFunc("GET /audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("GET /events", s.handleOutboxEvents)
+	mux.HandleFunc("GET /webhooks/deliveries", s.handleWebhookDeliveries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)
 	mux.HandleFunc("GET /accounts/{id}/snapshot", s.handleSnapshot)
@@ -4794,6 +4845,12 @@ func (s *server) handler() http.Handler {
 			s.metrics.AuditSinkSentTotal.Store(sent)
 			s.metrics.AuditSinkFailedAttemptsTotal.Store(failed)
 			s.metrics.AuditSinkDeadLettersTotal.Store(dead)
+		}
+		// The webhook failure counter likewise lives in the
+		// dispatcher; /metrics mirrors it when webhooks run.
+		if s.webhooks != nil {
+			_, _, failures, _ := s.webhooks.Stats()
+			s.metrics.WebhookFailuresTotal.Store(failures)
 		}
 		s.metrics.handleMetrics(w, r)
 	})
@@ -5391,6 +5448,37 @@ func main() {
 		log.Printf("ledger-api-go: domain event outbox enabled (dir %s)", dir)
 	}
 
+	// LEDGER_WEBHOOKS enables the outbound signed-webhook dispatcher
+	// (LG-102, see ledger.ParseWebhookEndpoints for the JSON syntax: a
+	// JSON array of endpoint objects with name, url, events, and
+	// signing key material). Each registered endpoint receives the
+	// outbox domain events its filter selects as HMAC-SHA256-signed
+	// JSON POSTs. Unset means disabled. An invalid value fails the
+	// startup fast (log.Fatal): a misconfigured webhook must never
+	// silently run unsigned or unfiltered.
+	//
+	// Webhooks subscribe to the outbox stream, so LEDGER_OUTBOX_DIR is
+	// required alongside: without an outbox there are no events to
+	// forward, and starting eventless would silently drop the
+	// operator's intent. Like WithOutbox, the dispatcher attaches to
+	// every tenant ledger through the tenant store's shared options.
+	var webhooks *ledger.WebhookDispatcher
+	if raw := os.Getenv("LEDGER_WEBHOOKS"); raw != "" {
+		if os.Getenv("LEDGER_OUTBOX_DIR") == "" {
+			log.Fatalf("ledger-api-go: LEDGER_WEBHOOKS is set but LEDGER_OUTBOX_DIR is not: webhooks subscribe to outbox domain events, nothing to forward without an outbox")
+		}
+		cfgs, err := ledger.ParseWebhookEndpoints(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: LEDGER_WEBHOOKS: %v", err)
+		}
+		webhooks, err = ledger.NewWebhookDispatcher(cfgs...)
+		if err != nil {
+			log.Fatalf("ledger-api-go: webhooks: %v", err)
+		}
+		opts = append(opts, ledger.WithWebhooks(webhooks))
+		log.Printf("ledger-api-go: outbound webhooks enabled (%d endpoints)", len(cfgs))
+	}
+
 	// LEDGER_ANCHOR_KEY configures the Ed25519 key used to sign audit-chain
 	// head checkpoints (see ledger.ParseAnchorKey: hex of a 32-byte seed
 	// or a 64-byte private key). Anchoring itself is operator-driven via
@@ -5439,6 +5527,10 @@ func main() {
 	defer stop()
 
 	srv := newServer(ledger.New(opts...), opts...)
+	if webhooks != nil {
+		srv.webhooks = webhooks
+		defer webhooks.Stop()
+	}
 
 	// Optional background hold-expiry sweeper: periodically marks lapsed
 	// holds expired so operators don't need to poll POST /holds/expire.

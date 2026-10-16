@@ -3242,6 +3242,76 @@ Delivery contract, stated honestly:
 responses, including dead letters' final attempts), and
 `ledger_audit_sink_dead_letter_total`.
 
+#### Outbound signed webhooks (`ledger/webhook.go`) — `GET /webhooks/deliveries`
+
+An opt-in subscriber of the domain-event outbox that POSTs selected
+domain facts — `transfer_posted` (settled), `review_rejected`,
+`pain001_status_changed` (instruction and per-transfer bank-side moves),
+or any other outbox event type — to a registry of external endpoints
+as HMAC-SHA256-signed JSON webhooks. Where the audit sink above is a
+single compliance pipe that tails the outbox files, the dispatcher is a
+live notification fan-out: each durably emitted event is pushed to
+every enabled endpoint whose event filter matches, on per-endpoint
+background workers. Disabled by default; set `LEDGER_WEBHOOKS` (and
+`LEDGER_OUTBOX_DIR`, which webhooks require) to enable — see
+[Environment](#running).
+
+```bash
+LEDGER_OUTBOX_DIR=/var/lib/ledger/outbox \
+LEDGER_WEBHOOKS='[{"name":"risk","url":"https://risk.example.com/hooks/ledger",
+  "events":["transfer_posted","review_rejected","pain001_status_changed"],
+  "secret":"<redacted>"}]' \
+  ./ledger-api-go
+```
+
+Endpoint object fields: `name` (required, unique), `url` (required,
+absolute http(s)), `events` (event-type filter; empty means all),
+`secret` (single-key shorthand; `key_id` names it, default `primary`)
+or `keys` (a list of `{id, secret, retired_at?}` — the first is the
+primary, the rest are retired keys still inside their grace period),
+`enabled` (default true), `max_attempts` (default 8),
+`initial_backoff`/`max_backoff` (defaults `500ms`/`30s`, Go duration
+strings), `http_timeout` (default `10s`), `queue_size` (default 1024),
+`key_grace_period` (default `24h`). An invalid value fails startup
+fast; an endpoint without key material refuses to register — unsigned
+webhooks can be forged.
+
+Delivery contract, stated honestly:
+
+- Every delivery POSTs the outbox event JSON with
+  `Content-Type: application/json`,
+  `X-Ledger-Signature: sha256=<hex>` (`HMAC-SHA256(key, body)`),
+  `X-Ledger-Key-Id` (which signing key), `X-Ledger-Event-Type`, and
+  `X-Ledger-Event-Seq`.
+- The posting path never blocks: fan-out uses non-blocking sends into
+  per-endpoint bounded queues, so a slow or dead endpoint cannot stall
+  `POST /entries` / `POST /transfers`. A full queue drops the event
+  (counted) — the outbox stream stays the durable record; webhooks are
+  a live fan-out, and a crash loses whatever sat in the in-memory
+  queues.
+- Retries use exponential backoff (doubling, plus up to +25% jitter)
+  up to `max_attempts`. Network errors, `429`s and `5xx` retry; other
+  `4xx` are terminal (the receiver rejects the payload — retrying the
+  same bytes will not help).
+- A delivery that exhausts its retries is recorded as `failed` and
+  counted by `ledger_webhook_failures_total` — alert on growth.
+- Signing keys rotate without downtime: `RotatingKey` keeps exactly
+  one primary (which signs) while retired keys keep verifying for the
+  grace period, so in-flight payloads signed with the old key stay
+  verifiable. Rotate at runtime via the Go API
+  (`dispatcher.RotateKey(endpoint, newID, newSecret)`).
+- `GET /webhooks/deliveries` queries recent delivery records
+  (`event_seq`, `endpoint`, `attempts`, `status`, `last_error`, `at`),
+  latest first, with `?endpoint=`, `?status=pending|delivered|failed`,
+  and `?limit=` (1–100, default 50). Without `LEDGER_WEBHOOKS` it 404s
+  fail-closed.
+
+```bash
+curl -s "localhost:8080/webhooks/deliveries?status=failed&limit=20"
+# {"deliveries":[{"event_seq":42,"endpoint":"risk","attempts":8,
+#   "status":"failed","last_error":"http 500","at":"2026-10-16T09:30:00Z"}]}
+```
+
 ### `GET /audit/verify`
 
 Replays the audit log's hash chain over every audit file — all days,
@@ -3772,6 +3842,14 @@ Environment:
   Required when `LEDGER_AUDIT_SINK_URL` is set: a URL without a secret
   fails startup fast, because unsigned webhooks can be forged. Never
   logged.
+- `LEDGER_WEBHOOKS` — enables the outbound signed-webhook dispatcher
+  (see above): a JSON array of endpoint objects (`name`, `url`,
+  `events`, `secret`/`keys`, plus optional tunables — see
+  `ledger.ParseWebhookEndpoints`). Unset means disabled. Requires
+  `LEDGER_OUTBOX_DIR` alongside (webhooks subscribe to the outbox
+  stream); an invalid value fails startup fast. Secrets ride in the
+  JSON — fine for dev/test; production deployments should render this
+  variable from a secret manager rather than baking it into an image.
 
 ## Benchmarks
 

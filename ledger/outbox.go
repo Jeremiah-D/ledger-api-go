@@ -101,6 +101,11 @@ const (
 	OutboxTermDepositOpened    = "term_deposit_opened"
 	OutboxTermDepositMatured   = "term_deposit_matured"
 	OutboxTermDepositWithdrawn = "term_deposit_withdrawn"
+	// pain.001 instruction lifecycle (see pain001_status.go, LG-102):
+	// every instruction-level or per-transfer status move emits one
+	// event, so downstream consumers can subscribe to bank-side
+	// settlement progress without polling.
+	OutboxPain001StatusChanged = "pain001_status_changed"
 )
 
 // OutboxEvent is one domain fact in the outbox stream.
@@ -255,6 +260,17 @@ func (o *Outbox) Emit(ev OutboxEvent) bool {
 // failing — alert on it, because the stream then has gaps.
 func (o *Outbox) Stats() (written, dropped uint64) {
 	return o.written.Load(), o.dropped.Load()
+}
+
+// LastSeq reports the most recently assigned event seq. The webhook
+// dispatcher (see webhook.go) uses it to stamp the outbox seq onto the
+// event it fans out: Emit assigns the seq to its own copy, and every
+// Emit funnels through emitOutboxLocked under the ledger's write lock,
+// so no other emit can interleave between Emit and this call.
+func (o *Outbox) LastSeq() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.seq
 }
 
 // Dir returns the outbox directory.
@@ -474,7 +490,22 @@ func (l *Ledger) emitOutboxLocked(ev OutboxEvent) {
 	if l.tenantID != DefaultTenantID {
 		ev.Tenant = string(l.tenantID)
 	}
-	l.outbox.Emit(ev)
+	if !l.outbox.Emit(ev) {
+		// The event was dropped (disk failure, closed outbox): it
+		// never entered the stream, so no subscriber sees it. The
+		// dropped counter is the record of the gap.
+		return
+	}
+	if l.webhooks == nil {
+		return
+	}
+	// Fan out to the webhook dispatcher (LG-102): the event is
+	// durable now, so stamp the assigned seq (see LastSeq) and notify.
+	// Notify never blocks — a full endpoint queue drops the event
+	// rather than stalling this commit.
+	ev.Seq = l.outbox.LastSeq()
+	ev.At = ev.At.UTC()
+	l.webhooks.Notify(ev)
 }
 
 // emitOutboxEntriesLocked emits one entry_posted event per committed

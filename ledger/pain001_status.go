@@ -277,6 +277,10 @@ func (l *Ledger) transitionPainInstructionLocked(rec *PainInstruction, to, actor
 			"to":     to,
 		},
 	})
+	// Domain outbox (LG-102): the instruction's status move is a
+	// domain fact — webhook subscribers watch it to track bank-side
+	// settlement progress without polling.
+	l.emitOutboxPain001StatusLocked(rec.MsgID, "", from, to, "", actor)
 	return nil
 }
 
@@ -422,6 +426,10 @@ func (l *Ledger) RecordPain001Receipts(msgID string, receipts []Pain001Receipt, 
 				"reason": m.tx.Reason,
 			},
 		})
+		// Domain outbox (LG-102): the bank's accepted/rejected
+		// verdict on one transfer is the per-transfer status move
+		// webhook subscribers watch.
+		l.emitOutboxPain001StatusLocked(rec.MsgID, m.tx.TxID, from, m.to, m.tx.Reason, actor)
 	}
 	if err := l.rollupPainInstructionLocked(rec, actor); err != nil {
 		return PainInstruction{}, err

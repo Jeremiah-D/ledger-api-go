@@ -640,6 +640,12 @@ type Ledger struct {
 	// read path is unaffected. The dry-run twin (see dryrun.go) always
 	// carries a nil outbox, so simulations emit no domain events.
 	outbox *Outbox
+	// webhooks is the outbound webhook dispatcher (see webhook.go, LG-102).
+	// Nil means disabled: emitOutboxLocked skips the fan-out entirely.
+	// It is a pure subscriber of the outbox stream — Notify runs after
+	// the event is durably emitted, never blocks, and never fails the
+	// posting.
+	webhooks *WebhookDispatcher
 	// closedPeriods is the set of locked accounting periods ("2006-01",
 	// UTC months; see period.go). Journal entries whose timestamp falls
 	// in a closed period are rejected with ErrPeriodClosed by every
