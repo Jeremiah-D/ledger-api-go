@@ -701,6 +701,18 @@ type Ledger struct {
 	// survives snapshots, because a restore that dropped it would
 	// re-import the same statement as new.
 	ofxImports      map[string]*OFXImportReport
+	// painTransfers is the ISO 20022 pain.001 export registry (see
+	// pain001.go): transfer ID -> transfer principal for every
+	// same-currency transfer (plain and split chunks), in booking order
+	// via (CreatedAt, TransferID) sort. Structural state like the
+	// idempotency indexes — it survives snapshots, because a restore
+	// that dropped it would silently un-export pre-restore transfers.
+	painTransfers map[string]PainTransfer
+	// accountIBANs is the opt-in IBAN registry (see SetAccountIBAN in
+	// pain001.go): the debtor/creditor identifiers pain.001 payment
+	// instructions name. Structural config like the account tags — it
+	// round-trips through snapshots.
+	accountIBANs     map[AccountID]AccountIBAN
 	chain           []chainLink   // audit chain, one link per successful Post, in order
 	version         uint64        // bumped by every successful Post
 	idempotencyTTL  time.Duration // 0 = never expire idempotency keys
@@ -857,6 +869,8 @@ func New(opts ...Option) *Ledger {
 		journalRules:                make(map[string]JournalRule),
 		revalBaselines:              make(map[revalKey]revalBaseline),
 		ofxImports:                  make(map[string]*OFXImportReport),
+		painTransfers:               make(map[string]PainTransfer),
+		accountIBANs:                make(map[AccountID]AccountIBAN),
 		pruneInterval:               defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {

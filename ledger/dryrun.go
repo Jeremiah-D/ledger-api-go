@@ -127,6 +127,8 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		batchKeys:            make(map[string]batchRecord, len(l.batchKeys)),
 		merges:               make(map[string]mergeRecord, len(l.merges)),
 		mergeKeys:            make(map[string]string, len(l.mergeKeys)),
+		painTransfers:        make(map[string]PainTransfer, len(l.painTransfers)),
+		accountIBANs:         make(map[AccountID]AccountIBAN, len(l.accountIBANs)),
 		creditLines:          make(map[creditLineKey]CreditLine, len(l.creditLines)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
 		closedPeriods:        make(map[string]bool, len(l.closedPeriods)),
@@ -224,6 +226,12 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	}
 	for k, v := range l.mergeKeys {
 		c.mergeKeys[k] = v
+	}
+	for k, v := range l.painTransfers {
+		c.painTransfers[k] = v
+	}
+	for k, v := range l.accountIBANs {
+		c.accountIBANs[k] = v
 	}
 	c.feeTiers = append([]FeeTier(nil), l.feeTiers...)
 	c.feeRevenueAccount = l.feeRevenueAccount

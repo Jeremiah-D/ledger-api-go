@@ -823,6 +823,19 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	// freezes instead of settling — journal rows marked pending review,
 	// funds deducted from available, nothing touching balances. The
 	// returned receipt carries review_status "pending_review".
+	//
+	// The pain.001 registry records the principal first, so
+	// review-routed transfers are registered too: ExportPain001
+	// excludes pending-review rows live (see pain001.go), and approval
+	// flips them exportable without any registry change.
+	l.registerPainTransferLocked(PainTransfer{
+		TransferID:  t.ID,
+		From:        t.From,
+		To:          t.To,
+		AmountCents: t.AmountCents,
+		Currency:    t.Currency,
+		CreatedAt:   principal.CreatedAt,
+	})
 	if receipt, reviewed, err := l.maybeReviewTransferLocked(t, entries, feeCents, tierIndex, rateBps, nil, totalOutflow, now); reviewed || err != nil {
 		return receipt, err
 	}

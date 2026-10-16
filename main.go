@@ -2626,6 +2626,59 @@ func (s *server) handleOFXExport(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePain001Export implements GET /exports/pain001: an ISO 20022
+// pain.001.001.03 customer credit transfer initiation generated from the
+// journaled transfer principals (see ledger.ExportPain001). Query
+// parameters: from/to (optional RFC 3339 time bounds, half-open
+// [from, to), the OFX export convention), debtor/creditor (optional
+// payer/payee account filters), currency (optional ISO 4217 code). A
+// malformed timestamp, an inverted window, or an invalid currency is a
+// 400, fail-fast; a payment whose debtor or creditor has no registered
+// IBAN fails the whole export with a 422 (fail-closed, see
+// ledger.ErrMissingAccountIBAN — no forged identifiers). The body is the
+// pain.001 XML document. The export is read-only: it bumps no version
+// and books nothing, but every export emits a pain001_exported audit
+// event.
+func (s *server) handlePain001Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain001Exports.Add(1)
+	q := r.URL.Query()
+	var from, to time.Time
+	if raw := q.Get("from"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from must be RFC 3339"})
+			return
+		}
+		from = t
+	}
+	if raw := q.Get("to"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to must be RFC 3339"})
+			return
+		}
+		to = t
+	}
+	doc, err := s.ledgerFor(r).ExportPain001(ledger.Pain001ExportOptions{
+		Debtor:   ledger.AccountID(q.Get("debtor")),
+		Creditor: ledger.AccountID(q.Get("creditor")),
+		Currency: q.Get("currency"),
+		Since:    from,
+		Until:    to,
+	})
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ledger.ErrMissingAccountIBAN) {
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleStatement implements GET /accounts/{id}/statement: a JSON
 // account statement for the half-open window [from, to) (see
 // ledger.GenerateStatement). Query parameters: from / to (optional
@@ -4222,6 +4275,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/merkle-proof", s.handleMerkleProof)
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/ofx", s.handleOFXExport)
+	mux.HandleFunc("GET /exports/pain001", s.handlePain001Export)
 	mux.HandleFunc("GET /accounts/{id}/statement", s.handleStatement)
 	mux.HandleFunc("POST /ofx/import", s.handleOFXImport)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)

@@ -1976,6 +1976,53 @@ skips. An unknown checkpoint fails `400` rather than silently
 re-exporting from the start (which would duplicate rows downstream).
 `GET /metrics` counts exports as `ledger_ofx_exports_total`.
 
+### `GET /exports/pain001` — ISO 20022 pain.001 payment instruction export
+
+A `pain.001.001.03` customer credit transfer initiation generated from
+the journaled transfer principals (Go: `ledger.ExportPain001`) — the
+payment instruction a corporate banking channel uploads. Query
+parameters: `from` / `to` (optional RFC 3339 time bounds, half-open
+`[from, to)`, the OFX export convention), `debtor` / `creditor`
+(optional payer/payee account filters), `currency` (optional ISO 4217
+code).
+
+```bash
+curl -s 'localhost:8080/exports/pain001?currency=USD' -o payments.xml
+```
+
+Semantics, stated so downstream banks and importers can trust them:
+
+- One `CdtTrfTxInf` per transfer; `EndToEndId` is the transfer ID —
+  stable across exports, so importers can dedupe on it. The debtor is
+  the transfer's payer (`From`), the creditor the payee (`To`).
+- Debtor/creditor identifiers are the **registered IBANs** (see
+  `ledger.SetAccountIBAN`): ISO 13616 mod-97 validated at registration,
+  optional ISO 9362 BICs ride `DbtrAgt` / `CdtrAgt`. Fail-closed: a
+  payment whose debtor or creditor has no registered IBAN refuses the
+  whole export (`422`) rather than emitting a forged identifier.
+- Amounts are the ledger's integer cents rendered as exact decimals —
+  no floats anywhere. `CtrlSum` is the overflow-checked sum of every
+  exported instruction; payments group into one `PmtInf` per (debtor,
+  currency), each with its own `NbOfTxs` / `CtrlSum`.
+- `MsgId` is deterministic in (window, filters, content): re-exporting
+  the same window renders byte-identical output, and any content change
+  changes the ID.
+- Pending-review transfers are excluded — a payment instruction must
+  never be generated from a frozen transfer. Re-export after approval
+  includes it. Split-transfer chunks export as individual instructions;
+  cross-currency transfers settle through the FX clearing account as two
+  legs (not one direct debtor-to-creditor payment) and are excluded.
+- The export is read-only: it takes the read lock, bumps no version,
+  appends no chain link, and consumes no idempotency key. Like
+  `Reconcile`, it still emits one structured audit event
+  (`pain001_exported`, details `msg_id` / `tx_count` /
+  `ctrl_sum_cents` / `currency`) so the compliance trail records every
+  generated instruction.
+
+A malformed timestamp, an inverted window, or an invalid currency is a
+`400`, fail-fast. `GET /metrics` counts exports as
+`ledger_pain001_exports_total`.
+
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
 The inverse of the export above: it parses an OFX 2.x bank statement

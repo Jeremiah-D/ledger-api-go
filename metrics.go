@@ -31,6 +31,8 @@ type Metrics struct {
 	// OFXImports counts POST /ofx/import requests served (all attempts,
 	// including duplicates and rejected payloads).
 	OFXImports atomic.Uint64
+	// Pain001Exports counts GET /exports/pain001 requests served.
+	Pain001Exports atomic.Uint64
 	// VerifyRequests counts GET /entries/verify requests served.
 	VerifyRequests atomic.Uint64
 	// AnchorsTotal counts POST /entries/anchor requests that signed a
@@ -455,6 +457,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /accounts/{id}/statement requests served.", m.StatementQueries.Load())
 	writeCounter(&sb, "ledger_ofx_imports_total",
 		"Total POST /ofx/import OFX statement pre-posting imports served, including duplicates and rejected payloads.", m.OFXImports.Load())
+	writeCounter(&sb, "ledger_pain001_exports_total",
+		"Total GET /exports/pain001 ISO 20022 pain.001 payment instruction exports served.", m.Pain001Exports.Load())
 	writeCounter(&sb, "ledger_verify_requests_total",
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
 	writeCounter(&sb, "ledger_anchors_total",

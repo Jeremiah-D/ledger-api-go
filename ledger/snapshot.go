@@ -9,6 +9,7 @@ import (
 	"io"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -406,6 +407,19 @@ type snapshotConfigLine struct {
 	// would lose the provisioned-so-far coverage figures and the DPD
 	// staging, so it round-trips like the credit-line registry.
 	ECLExposures []ECLExposureRecord `json:"ecl_exposures,omitempty"`
+	// PainTransfers carries the pain.001 export registry (see
+	// registerPainTransferLocked in pain001.go), sorted by transfer ID;
+	// absent in snapshots written before pain.001 export existed. A
+	// restore that dropped it would silently un-export pre-restore
+	// transfers, so the registry round-trips like the idempotency
+	// indexes.
+	PainTransfers []PainTransfer `json:"pain_transfers,omitempty"`
+	// AccountIBANs carries the opt-in IBAN registry (see SetAccountIBAN
+	// in pain001.go), sorted by account; absent in snapshots written
+	// before pain.001 export existed. A restore that dropped it would
+	// turn previously exportable payments into fail-closed refusals
+	// with no explanation, so it round-trips like the account tags.
+	AccountIBANs []AccountIBAN `json:"account_ibans,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -877,6 +891,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		ECLExpenseAccount:     l.eclExpenseAccount,
 		ECLAllowanceAccount:   l.eclAllowanceAccount,
 		ECLExposures:          l.eclExposureRecordsLocked(),
+		PainTransfers:         l.painTransfersLocked(),
+		AccountIBANs:          l.accountIBANsLocked(),
 	}
 	eclCfg := l.eclStageConfig
 	cfg.ECLStageConfig = &eclCfg
@@ -1711,6 +1727,49 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("ofx import record sha mismatch for %q", rec.DocumentSHA256)
 		}
 	}
+	// Pain.001 export registry (see pain001.go): every record must name
+	// a non-empty transfer ID, non-empty payer/payee, a positive
+	// amount, and a valid currency — the registry is the payment
+	// instruction source, and a restore must not silently re-key it.
+	seenPainIDs := make(map[string]bool, len(cfg.PainTransfers))
+	for _, pt := range cfg.PainTransfers {
+		if pt.TransferID == "" {
+			return bad("pain transfer record with empty transfer_id")
+		}
+		if seenPainIDs[pt.TransferID] {
+			return bad("duplicate pain transfer record for %q", pt.TransferID)
+		}
+		seenPainIDs[pt.TransferID] = true
+		if pt.From == "" || pt.To == "" {
+			return bad("pain transfer %q with empty from/to", pt.TransferID)
+		}
+		if pt.AmountCents <= 0 {
+			return bad("pain transfer %q with non-positive amount", pt.TransferID)
+		}
+		if _, err := normalizeCurrency(pt.Currency); err != nil {
+			return bad("pain transfer %q with invalid currency %q", pt.TransferID, pt.Currency)
+		}
+	}
+	// IBAN registry (see SetAccountIBAN in pain001.go): every record
+	// must name an account and carry a valid IBAN and BIC — a corrupt
+	// snapshot must not install an identifier the export would then
+	// emit to a bank.
+	seenIBANAccounts := make(map[AccountID]bool, len(cfg.AccountIBANs))
+	for _, reg := range cfg.AccountIBANs {
+		if reg.Account == "" {
+			return bad("account iban record with empty account")
+		}
+		if seenIBANAccounts[reg.Account] {
+			return bad("duplicate account iban record for %q", reg.Account)
+		}
+		seenIBANAccounts[reg.Account] = true
+		if !validIBAN(normalizeIBAN(reg.IBAN)) {
+			return bad("account iban record for %q with invalid iban", reg.Account)
+		}
+		if !validBIC(reg.BIC) {
+			return bad("account iban record for %q with invalid bic", reg.Account)
+		}
+	}
 	var reviewExpiry time.Duration
 	if cfg.ReviewExpiry != "" {
 		var err error
@@ -2121,6 +2180,22 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, rec := range cfg.OFXImportRegistry {
 		rep := rec.Report
 		l.ofxImports[rec.DocumentSHA256] = &rep
+	}
+	// The pain.001 export registry restores like the idempotency
+	// indexes: a restore that dropped it would silently un-export
+	// pre-restore transfers. Validated above; installed verbatim.
+	l.painTransfers = make(map[string]PainTransfer, len(cfg.PainTransfers))
+	for _, pt := range cfg.PainTransfers {
+		l.painTransfers[pt.TransferID] = pt
+	}
+	// The IBAN registry restores like the account tags: validated
+	// above, installed in canonical form so the export names exactly
+	// the identifiers the snapshot carried.
+	l.accountIBANs = make(map[AccountID]AccountIBAN, len(cfg.AccountIBANs))
+	for _, reg := range cfg.AccountIBANs {
+		reg.IBAN = normalizeIBAN(reg.IBAN)
+		reg.BIC = strings.ToUpper(reg.BIC)
+		l.accountIBANs[reg.Account] = reg
 	}
 	// Re-derive the balance-watch breach state from the restored
 	// balances: an account already outside its band counts as breached,

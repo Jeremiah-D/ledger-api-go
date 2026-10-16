@@ -508,6 +508,21 @@ func (l *Ledger) postTransferSplitLocked(t Transfer, chunkSize int64, now time.T
 		"fee_rate_bps":     fee.rateBps,
 	}, map[string]any{"split": true, "chunk_count": len(chunks)})
 
+	// Every same-currency chunk is its own debtor-to-creditor payment:
+	// register each chunk principal for pain.001 export (see
+	// pain001.go). Cross-currency splits settle through the FX clearing
+	// account and are excluded, like plain FX transfers.
+	for i, amt := range chunks {
+		l.registerPainTransferLocked(PainTransfer{
+			TransferID:  splitChunkEntryID(t.ID, i),
+			From:        t.From,
+			To:          t.To,
+			AmountCents: amt,
+			Currency:    t.Currency,
+			CreatedAt:   entries[chunkEntryIdx[i][0]].CreatedAt,
+		})
+	}
+
 	return assembleSplitReceipt(t, chunks, fee, entries, chunkEntryIdx, nil), nil
 }
 
