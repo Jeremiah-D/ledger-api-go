@@ -928,6 +928,38 @@ not subject to the business-day gate — it is a period-end adjustment.
 l.CapitalizeInterest("interest-expense", "interest-payable", "loan-principal", asof)
 ```
 
+#### Funds transfer pricing (Go API: `SetFtpCurve` / `FtpRateBps` / `FtpPreview` / `ChargeFtp`)
+
+Internal funding priced like a market: business units with a funding
+shortfall pay the treasury pool for funding; units with surplus funding
+get paid by the pool. One annualized rate curve per currency —
+`(tenorMonths, rateBps)` buckets, e.g. `{{1, 100}, {12, 500}}` —
+with linear interpolation between buckets and flat clamping outside the
+curve. `ChargeFtp` books one entry per (account, currency, tenor, UTC
+day): debit the FTP expense / credit the pool for a gap (positive
+`gapCents`), debit the pool / credit the FTP revenue for a surplus
+(negative) — the entry ID `ftp/<currency>/<account>/<tenor>/<YYYY-MM-DD>`
+makes the day's charge idempotent. `FtpPreview` prices with zero side
+effects. Curves are versioned (every `SetFtpCurve` bumps the version,
+stamps `SetAt`, and emits an `ftp_curve_set` audit event — the version
+on each charge names the curve that priced it), and curves plus the
+internal counterparties (`WithFtpAccounts`) round-trip through
+snapshots. Charges are system adjusting entries: full `Post` gates, own
+audit-chain link, no rules cascade, no dual-control. The charge is
+`floor(|gap| * rateBps / 10000 * tenorMonths / 12)` cents, overflow-safe;
+a dust charge that rounds to zero books nothing. `Reconcile` discloses
+per-currency `ftp_totals` (cost/revenue/charges, journal-derived so the
+section can never disagree with the books) and `ftp_curve_versions`.
+
+```go
+l := ledger.New(ledger.WithFtpAccounts(ledger.FtpAccounts{
+    PoolAccount: "treasury-pool", ExpenseAccount: "ftp-expense", RevenueAccount: "ftp-revenue",
+}))
+l.SetFtpCurve("USD", []ledger.FtpTenorPoint{{TenorMonths: 1, RateBps: 100}, {TenorMonths: 12, RateBps: 500}})
+l.FtpPreview("bu-lending", "USD", 12, 1_200_000) // read-only price
+l.ChargeFtp("bu-lending", "USD", 12, 1_200_000, asof) // books 60000c: debit ftp-expense / credit treasury-pool
+```
+
 ### Business-day calendar (LG-95)
 
 A configurable holiday calendar for interest accrual and settlement

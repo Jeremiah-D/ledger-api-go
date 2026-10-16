@@ -462,6 +462,13 @@ type Ledger struct {
 	// populated.
 	fxSnapshotVersion uint64
 	fxRateSnapshots   map[uint64]FXRateTableSnapshot
+	// ftpCurves is the per-currency FTP rate-curve registry (see
+	// ftp.go), keyed by normalized currency code. Each SetFtpCurve
+	// bumps the currency's version. ftpAccounts names the internal
+	// counterparties of every charge. Both are structural config —
+	// they survive snapshots, like the FX accounts.
+	ftpCurves   map[string]*FtpCurve
+	ftpAccounts FtpAccounts
 	// rateOverrides is the registry of manual FX rate overrides (see
 	// fx_override.go), keyed by directional pair: a pending override
 	// awaits a second operator's approval (maker-checker); an approved
@@ -911,6 +918,7 @@ func New(opts ...Option) *Ledger {
 		captureKeys:          make(map[string]CaptureReceipt),
 		termDeposits:         make(map[string]TermDeposit),
 		termDepositKeys:      make(map[string]string),
+		ftpCurves:            make(map[string]*FtpCurve),
 		creditLines:          make(map[creditLineKey]CreditLine),
 		eclStageConfig:       DefaultECLStageConfig(),
 		eclExposures:         make(map[eclExposureKey]eclExposureRow),

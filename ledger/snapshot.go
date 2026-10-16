@@ -466,6 +466,15 @@ type snapshotConfigLine struct {
 	// ledger carries the same mapping generation as the source.
 	VirtualAccounts       []VirtualAccount `json:"virtual_accounts,omitempty"`
 	VirtualAccountVersion uint64           `json:"virtual_account_version,omitempty"`
+	// FTPCurves carries the per-currency FTP rate curves with their
+	// versions (see SetFtpCurve in ftp.go), sorted by currency, and
+	// FTPAccounts the internal counterparties (see WithFtpAccounts).
+	// Absent in snapshots written before FTP support existed, which
+	// restore as unconfigured. A restore that dropped the curves
+	// would silently reprice future charges off no curve (fail-closed
+	// at charge time), so they round-trip with their versions.
+	FTPCurves   []FtpCurveSnapshot `json:"ftp_curves,omitempty"`
+	FTPAccounts FtpAccounts        `json:"ftp_accounts,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -949,6 +958,13 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		PainInstructions:      l.painInstructionsLocked(),
 		VirtualAccounts:       l.virtualAccountsLocked(),
 		VirtualAccountVersion: l.virtualAccountVersion,
+		// FTPCurves carries the per-currency FTP rate curves with
+		// their versions (see SetFtpCurve); FTPAccounts carries the
+		// internal counterparties (see WithFtpAccounts). Absent in
+		// snapshots written before FTP support existed, which import
+		// as unconfigured.
+		FTPCurves:   l.ftpCurvesSnapshotLocked(),
+		FTPAccounts: l.ftpAccounts,
 	}
 	eclCfg := l.eclStageConfig
 	cfg.ECLStageConfig = &eclCfg
@@ -2413,6 +2429,49 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		l.virtualAccounts[va.VAN] = va.Parent
 	}
 	l.virtualAccountVersion = cfg.VirtualAccountVersion
+	// The FTP curves restore like the VAN mappings: validated above,
+	// installed verbatim with their versions, so a restored ledger
+	// prices future charges off the same curve generation as the
+	// source. Snapshots written before FTP existed carry no curves,
+	// which restores as unconfigured. A curve row that fails
+	// validation fails the import — a restore must not silently
+	// install a curve that could never have been set.
+	l.ftpCurves = make(map[string]*FtpCurve, len(cfg.FTPCurves))
+	for _, snap := range cfg.FTPCurves {
+		cur, err := normalizeCurrency(snap.Currency)
+		if err != nil {
+			return bad("bad FTP curve currency %q: %v", snap.Currency, err)
+		}
+		if cur != snap.Currency {
+			return bad("bad FTP curve currency %q: not normalized", snap.Currency)
+		}
+		if _, dup := l.ftpCurves[cur]; dup {
+			return bad("duplicate FTP curve for currency %q", cur)
+		}
+		points, err := normalizeFtpPoints(snap.Points)
+		if err != nil {
+			return bad("bad FTP curve for currency %q: %v", cur, err)
+		}
+		if snap.Version == 0 {
+			return bad("FTP curve for currency %q has zero version", cur)
+		}
+		l.ftpCurves[cur] = &FtpCurve{
+			Currency: cur,
+			Points:   points,
+			Version:  snap.Version,
+			SetAt:    snap.SetAt,
+		}
+	}
+	// The FTP internal counterparties restore verbatim. An empty
+	// FTPAccounts is the unconfigured state (snapshots written before
+	// FTP existed); a partially-filled one is corrupt and fails the
+	// import, like the curve rows above.
+	if cfg.FTPAccounts != (FtpAccounts{}) {
+		if err := checkFtpAccounts(cfg.FTPAccounts); err != nil {
+			return bad("bad FTP accounts: %v", err)
+		}
+		l.ftpAccounts = cfg.FTPAccounts
+	}
 	// Re-derive the balance-watch breach state from the restored
 	// balances: an account already outside its band counts as breached,
 	// so the first posting after the restore does not backfire a stale

@@ -327,6 +327,15 @@ type ReconciliationReport struct {
 	// never settled, and the operator needs to see it to fix the
 	// cause and re-export.
 	Pain001Pending []Pain001PendingInstruction `json:"pain001_pending"`
+	// FtpTotals lists the per-currency booked FTP charge totals (see
+	// ChargeFtp in ftp.go), derived from the journal's "ftp:charge"
+	// rows and sorted by currency: the internal funding P&L the
+	// treasury charged the business units. FtpCurveVersions discloses
+	// each configured currency's curve version and points — the
+	// generation that priced the booked charges, so the reconciliation
+	// record reproduces the pricing basis.
+	FtpTotals        []FtpTotals        `json:"ftp_totals"`
+	FtpCurveVersions []FtpCurveSnapshot `json:"ftp_curve_versions"`
 }
 
 // TermDepositReport is one term deposit's Reconcile disclosure: the
@@ -624,6 +633,7 @@ func (l *Ledger) ReconcileWithOptions(now time.Time, opts ReconcileOptions) (Rec
 			"dividends":              len(report.Dividends),
 			"fx_applied":             report.FXApplied,
 			"pain001_pending":        len(report.Pain001Pending),
+			"ftp_totals":             len(report.FtpTotals),
 		},
 	})
 	return report, nil
@@ -683,6 +693,12 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// reconcile-confirmation worklist (see
 		// SettlePain001Instruction in pain001_status.go).
 		Pain001Pending: l.pain001PendingLocked(),
+		// LG-105: the report discloses the booked FTP charge totals
+		// and the curve versions that priced them — the internal
+		// funding P&L plus its pricing basis, both derived from the
+		// journal so the section can never disagree with the books.
+		FtpTotals:        l.ftpTotalsLocked(),
+		FtpCurveVersions: l.ftpCurveVersionsLocked(),
 	}
 	report.ECLExposures, report.ECLCoverage = l.eclReportsLocked()
 
