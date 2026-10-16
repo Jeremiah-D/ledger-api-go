@@ -196,7 +196,30 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		newKeys[e.IdempotencyKey] = true
 	}
 
-	// 4b. External-reference uniqueness, atomically for the whole
+	// 4b. Virtual-account attribution (see virtual_account.go): a VAN
+	// on a paying leg rejects the whole batch (ErrVANNoDebit); a VAN on
+	// a receiving leg rewrites to its parent with a
+	// "van-attribution:<van>" memo marker. Replayed entries carry
+	// their original legs (attribution was applied — or rejected — at
+	// the original posting), so they skip this step, mirroring the
+	// replay-first order of the other gates. Runs before every account
+	// risk gate below, so frozen/overdraft/daily-limit/period checks
+	// see the real (parent) accounts.
+	var vanAttrs []*vanAttribution
+	for i := range entries {
+		if replayed[i] {
+			continue
+		}
+		attr, err := l.resolveVANEntryLocked(&entries[i])
+		if err != nil {
+			return BatchReceipt{}, err
+		}
+		if attr != nil {
+			vanAttrs = append(vanAttrs, attr)
+		}
+	}
+
+	// 4c. External-reference uniqueness, atomically for the whole
 	// batch: a non-empty reference on a new entry must not repeat
 	// inside the batch, and must not collide with a reference already
 	// journaled. Replayed entries carry their original entry's
@@ -374,6 +397,9 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 			"new_entries": len(committedIDs) - countTrue(replayed),
 		},
 	})
+	// Virtual-account attributions ride their own audit events (see
+	// virtual_account.go), after the batch's own event.
+	l.emitVANAttributionsLocked(vanAttrs, b.ID, "PostBatch")
 	// Domain outbox: only freshly committed entries — replayed entries
 	// were already emitted by their original commit.
 	var fresh []JournalEntry

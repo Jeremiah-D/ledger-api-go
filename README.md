@@ -2177,6 +2177,48 @@ curl -s localhost:8080/accounts/merchant/rollup
   together, mirroring the accounting equation). Unknown accounts roll up
   to just themselves with zero balances.
 
+### Virtual accounts (`POST /virtual-accounts`, `GET /virtual-accounts`, `DELETE /virtual-accounts/{van}`)
+
+**Virtual account numbers (VANs)** for collection: map a customer-facing
+account number to a real parent account, and every receipt naming the VAN
+is booked to the parent instead — the VAN itself never holds a balance
+(zero-balance pass-through). The classic shape is one VAN per customer
+or invoice, all attributing to the merchant's operating account.
+
+```bash
+curl -s -X POST localhost:8080/virtual-accounts \
+  -H 'Content-Type: application/json' -d '{"van":"van-cust-1","parent":"merchant"}'
+# 200 {"van":"van-cust-1","parent":"merchant","version":1}
+```
+
+- Receipts crediting the VAN (the receiving leg) book to the parent:
+  `POST /entries`, `POST /transfers` (principal and fee legs),
+  split-transfer chunk principals, `POST /entries/batch`, and
+  cross-currency transfers all attribute. The journal row carries a
+  `van-attribution:<van>` memo marker (following the `rule:<id>` /
+  `dividend:<bps>` marker conventions; fee-split legs keep their
+  machine-readable memo and disclose via audit instead), and every
+  attribution emits a `virtual_account_attribution` audit event with
+  `van` / `parent` / `amount_cents` / `currency`.
+- A posting that would **debit** the VAN (pay from it) is rejected with
+  `422` (`ErrVANNoDebit`) — there is no balance to pay from.
+- The idempotency replay check runs before VAN validation: replaying a
+  key posted before the VAN was registered returns the original entry,
+  not an attribution or a rejection. Every account risk gate (frozen,
+  overdraft, daily-limit, period) sees the parent, so freezing the
+  parent stops VAN receipts.
+- Registration is structural, not bookkeeping: like freeze/unfreeze, it
+  does not bump the ledger version. Every mapping change bumps the
+  mapping's own version counter (`version` in the responses,
+  `virtual_account_version` in `POST /reconcile`); re-registering an
+  identical mapping and unregistering an unknown VAN are idempotent
+  no-ops. Validation is fail-closed: empty VAN/parent, self-mapping, and
+  chained mappings (a parent that is itself a VAN, or a VAN that already
+  parents another VAN — attribution is exactly one hop) are rejected.
+- The mapping table round-trips through snapshots, and `POST /reconcile`
+  discloses the mappings plus the version. `GET /metrics` counts
+  attributions as `ledger_van_attributions_total`.
+
 ### Account tags and the tag-dimension rollup (`PUT /accounts/{id}/tags`, `GET /rollup?tag=k:v`)
 
 Tags are small `(key, value)` classification labels on accounts — a

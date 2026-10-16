@@ -831,6 +831,25 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		}
 	}
 
+	// Virtual-account attribution (see virtual_account.go): after the
+	// idempotency replay check — a replay returns the original receipt
+	// instead of failing on a VAN registered after the original posting
+	// — and before every account risk gate, so frozen/overdraft/
+	// daily-limit checks see the real (parent) accounts. The payer leg
+	// rejects on a VAN (ErrVANNoDebit); the payee leg resolves to its
+	// parent, with the attribution amount filled once the conversion is
+	// priced below.
+	if err := l.vanDebitRejectedLocked(t.From); err != nil {
+		return TransferReceipt{}, err
+	}
+	var vanAttrs []*vanAttribution
+	var toAttr *vanAttribution
+	if parent, ok := l.vanParentLocked(t.To); ok {
+		toAttr = &vanAttribution{VAN: t.To, Parent: parent, Currency: toCurrency, EntryID: t.ID}
+		vanAttrs = append(vanAttrs, toAttr)
+		t.To = parent
+	}
+
 	// The commit-time effective rate, re-resolved live: the market rate
 	// from the table priced through any active LG-69 manual override
 	// (see effectiveFXRateLocked — the same body the admission quote
@@ -911,6 +930,11 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	if !ok {
 		return TransferReceipt{}, ErrAmountOverflow
 	}
+	// The payee attribution (if any) books the converted amount in the
+	// settlement currency.
+	if toAttr != nil {
+		toAttr.AmountCents = converted
+	}
 
 	// LG-93: the dealing spread. midNum/midDen is the reference mid the
 	// spread is measured against — the admission mid on the admitted
@@ -942,6 +966,30 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	incomeAccount, err := l.resolveFXIncomeAccountLocked(t, fxAccount, spreadCents)
 	if err != nil {
 		return TransferReceipt{}, err
+	}
+
+	// Virtual-account attribution, continued: the FX clearing account
+	// counters both legs and the spread-income account pays the spread
+	// leg — a VAN on either paying leg is rejected (ErrVANNoDebit), a
+	// zero-balance account can be neither a clearing account nor a P&L
+	// source. Fee recipients attribute to their parents, like the plain
+	// path.
+	if err := l.vanDebitRejectedLocked(fxAccount); err != nil {
+		return TransferReceipt{}, err
+	}
+	if err := l.vanDebitRejectedLocked(incomeAccount); err != nil {
+		return TransferReceipt{}, err
+	}
+	var fa *vanAttribution
+	if feeAccount != "" {
+		if feeAccount, fa = l.attributeVANRecipientLocked(feeAccount, feeCents, t.Currency, t.ID+"/fee"); fa != nil {
+			vanAttrs = append(vanAttrs, fa)
+		}
+	}
+	for i := range feeSplits {
+		if feeSplits[i].Account, fa = l.attributeVANRecipientLocked(feeSplits[i].Account, feeSplits[i].FeeCents, t.Currency, t.ID+"/fee/"+strconv.Itoa(i)); fa != nil {
+			vanAttrs = append(vanAttrs, fa)
+		}
 	}
 
 	feeEntryIDs := feeLegIDs(t.ID, feeCents, feeSplits)
@@ -1096,6 +1144,12 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	fxConv.SpreadBps = spreadBps
 	fxConv.SpreadCents = spreadCents
 	fxConv.FXIncomeAccount = incomeAccount
+	// The journal memo marker for attributed legs (see
+	// virtual_account.go): applied before the review gate so
+	// review-frozen rows carry it too.
+	if err := annotateVANMemos(entries, vanAttrs); err != nil {
+		return TransferReceipt{}, err
+	}
 	if receipt, reviewed, err := l.maybeReviewTransferLocked(t, entries, feeCents, tierIndex, rateBps, fxConv, totalOutflow, now); reviewed || err != nil {
 		// The override priced the frozen legs too: record the
 		// re-pricing before returning the review receipt.
@@ -1238,6 +1292,10 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		Accounts:      []AccountID{t.From, t.To},
 		Details:       fxDetails,
 	})
+	// Virtual-account attributions ride their own audit events (see
+	// virtual_account.go), after the transfer's own event. Review-routed
+	// transfers return above, so only settled transfers attribute here.
+	l.emitVANAttributionsLocked(vanAttrs, t.ID, "PostTransfer")
 	// Domain outbox: entry_posted per leg (principal + FX leg + fee
 	// leg), then the transfer_posted envelope with the conversion's
 	// provenance.

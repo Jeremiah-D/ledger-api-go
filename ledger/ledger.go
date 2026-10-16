@@ -679,6 +679,22 @@ type Ledger struct {
 	// not books: it is in-memory only and does not round-trip through
 	// snapshots.
 	ruleLegsCommitted atomic.Uint64
+	// vanAttributions counts virtual-account attributions ever applied
+	// (see virtual_account.go). Operational metric (surfaced on GET
+	// /metrics), not books: in-memory only, no snapshot round-trip.
+	vanAttributions atomic.Uint64
+	// virtualAccounts maps a virtual account number to its parent
+	// account (see RegisterVirtualAccount in virtual_account.go):
+	// receipts naming the VAN attribute to the parent. Structural
+	// config like the account tags — it round-trips through snapshots,
+	// because a restore that dropped it would silently stop
+	// attributing VAN receipts to parents.
+	virtualAccounts map[AccountID]AccountID
+	// virtualAccountVersion is the VAN mapping mutation counter (see
+	// VirtualAccountVersion): every registration change bumps it. It
+	// round-trips through the snapshot config record, so a restored
+	// ledger carries the same mapping generation as the source.
+	virtualAccountVersion uint64
 	// revalAccount is the P&L account that receives the gain/loss legs
 	// of FX revaluations (see RevalueBalances in revaluation.go). Empty
 	// means revaluation is not configured: RevalueBalances refuses with
@@ -871,6 +887,7 @@ func New(opts ...Option) *Ledger {
 		ofxImports:                  make(map[string]*OFXImportReport),
 		painTransfers:               make(map[string]PainTransfer),
 		accountIBANs:                make(map[AccountID]AccountIBAN),
+		virtualAccounts:           make(map[AccountID]AccountID),
 		pruneInterval:               defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
@@ -1066,6 +1083,20 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 		}
 	}
 
+	// Virtual-account attribution (see virtual_account.go): a VAN on
+	// the paying leg is rejected (ErrVANNoDebit — a virtual account
+	// never holds a balance to pay from); a VAN on the receiving leg is
+	// rewritten to its parent with a "van-attribution:<van>" memo
+	// marker. Runs after the idempotency replay check — a replay books
+	// nothing new, so it returns the original entry instead of failing
+	// on a VAN registered after the original posting — and before every
+	// account risk gate below, so frozen/overdraft/daily-limit/period
+	// checks see the real (parent) account.
+	var vanAttr *vanAttribution
+	if vanAttr, err = l.resolveVANEntryLocked(&e); err != nil {
+		return JournalEntry{}, false, err
+	}
+
 	// External-reference uniqueness is a journal-level constraint, not
 	// bookkeeping validation: it runs after the idempotency replay
 	// check — a replay of the original entry's own key returns the
@@ -1247,6 +1278,12 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 		Accounts:      accounts,
 		Details:       postDetails,
 	})
+	// The virtual-account attribution rides its own audit event (see
+	// virtual_account.go): the aliasing is a compliance fact distinct
+	// from the posting itself.
+	if vanAttr != nil {
+		l.emitVANAttributionAuditLocked(vanAttr, e.ID, "Post")
+	}
 	// Domain outbox: one entry_posted per committed journal row
 	// (principal plus any journal-rule derived legs).
 	l.emitOutboxEntriesLocked(committed)

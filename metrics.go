@@ -358,6 +358,11 @@ type Metrics struct {
 	// audit-log counters, so it stays meaningful even though the legs
 	// are committed inside the ledger package.
 	JournalRuleLegsTotal atomic.Uint64
+	// VANAttributionsTotal counts virtual-account attributions applied
+	// (see ledger.RegisterVirtualAccount). It is synced from the ledger
+	// on every GET /metrics scrape, like JournalRuleLegsTotal: the
+	// attributions happen inside Post/Transfer/..., not in a handler.
+	VANAttributionsTotal atomic.Uint64
 	// PeriodClosesTotal counts POST /periods/{id}/close requests
 	// received (all attempts, including rejected ones and plain closes
 	// without closing entries).
@@ -699,6 +704,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_journal_rule_legs_total",
 		"Total derived journal legs committed by the opt-in journal rules engine.",
 		m.JournalRuleLegsTotal.Load())
+	writeCounter(&sb, "ledger_van_attributions_total",
+		"Total virtual-account attributions applied: receipts naming a registered VAN booked to its parent.",
+		m.VANAttributionsTotal.Load())
 	writeCounter(&sb, "ledger_freeze_auto_releases_total",
 		"Total automatic account unfreezes: timed freezes whose deadline passed, released by the write-path lazy check, the background freeze sweeper, or an explicit ExpireFrozenAccounts call.",
 		m.FreezeAutoReleasesTotal.Load())

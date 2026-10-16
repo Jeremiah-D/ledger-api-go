@@ -420,6 +420,16 @@ type snapshotConfigLine struct {
 	// turn previously exportable payments into fail-closed refusals
 	// with no explanation, so it round-trips like the account tags.
 	AccountIBANs []AccountIBAN `json:"account_ibans,omitempty"`
+	// VirtualAccounts carries the van -> parent mappings (see
+	// RegisterVirtualAccount in virtual_account.go), sorted by VAN, and
+	// VirtualAccountVersion the mapping mutation counter; absent in
+	// snapshots written before virtual accounts existed. A restore that
+	// dropped them would silently stop attributing VAN receipts to
+	// parents, so they round-trip like the frozen-account list — and the
+	// counter round-trips like the journal-rule version, so a restored
+	// ledger carries the same mapping generation as the source.
+	VirtualAccounts       []VirtualAccount `json:"virtual_accounts,omitempty"`
+	VirtualAccountVersion uint64           `json:"virtual_account_version,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -893,6 +903,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		ECLExposures:          l.eclExposureRecordsLocked(),
 		PainTransfers:         l.painTransfersLocked(),
 		AccountIBANs:          l.accountIBANsLocked(),
+		VirtualAccounts:       l.virtualAccountsLocked(),
+		VirtualAccountVersion: l.virtualAccountVersion,
 	}
 	eclCfg := l.eclStageConfig
 	cfg.ECLStageConfig = &eclCfg
@@ -1770,6 +1782,39 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("account iban record for %q with invalid bic", reg.Account)
 		}
 	}
+	// Virtual-account mappings (see RegisterVirtualAccount in
+	// virtual_account.go): validated like every other config row — an
+	// empty VAN or parent, a self-mapping, or a chained mapping fails
+	// the import instead of installing a mapping that could never have
+	// been created.
+	seenVANs := make(map[AccountID]bool, len(cfg.VirtualAccounts))
+	vanParents := make(map[AccountID]AccountID, len(cfg.VirtualAccounts))
+	for _, va := range cfg.VirtualAccounts {
+		if va.VAN == "" {
+			return bad("virtual account record with empty van")
+		}
+		if va.Parent == "" {
+			return bad("virtual account %q with empty parent", va.VAN)
+		}
+		if va.VAN == va.Parent {
+			return bad("virtual account %q mapped to itself", va.VAN)
+		}
+		if seenVANs[va.VAN] {
+			return bad("duplicate virtual account record for %q", va.VAN)
+		}
+		seenVANs[va.VAN] = true
+		vanParents[va.VAN] = va.Parent
+	}
+	for van, parent := range vanParents {
+		if vanParents[parent] != "" {
+			return bad("virtual account %q chains through VAN parent %q", van, parent)
+		}
+		for v2, p2 := range vanParents {
+			if p2 == van {
+				return bad("virtual account %q already parents VAN %q", van, v2)
+			}
+		}
+	}
 	var reviewExpiry time.Duration
 	if cfg.ReviewExpiry != "" {
 		var err error
@@ -2197,6 +2242,16 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		reg.BIC = strings.ToUpper(reg.BIC)
 		l.accountIBANs[reg.Account] = reg
 	}
+	// The VAN mappings restore like the frozen-account list: validated
+	// above, installed verbatim, with the mapping version counter so a
+	// restored ledger carries the same mapping generation as the
+	// source. Snapshots written before virtual accounts existed carry
+	// no records, which restores as an empty mapping at version 0.
+	l.virtualAccounts = make(map[AccountID]AccountID, len(cfg.VirtualAccounts))
+	for _, va := range cfg.VirtualAccounts {
+		l.virtualAccounts[va.VAN] = va.Parent
+	}
+	l.virtualAccountVersion = cfg.VirtualAccountVersion
 	// Re-derive the balance-watch breach state from the restored
 	// balances: an account already outside its band counts as breached,
 	// so the first posting after the restore does not backfire a stale

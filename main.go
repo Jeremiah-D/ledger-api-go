@@ -152,6 +152,10 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrVANNoDebit) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
 			s.metrics.CreditLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -438,6 +442,10 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrVANNoDebit) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -3420,6 +3428,88 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
+// registerVirtualAccountRequest is the POST /virtual-accounts body.
+type registerVirtualAccountRequest struct {
+	VAN    ledger.AccountID `json:"van"`
+	Parent ledger.AccountID `json:"parent"`
+}
+
+// handleRegisterVirtualAccount implements POST /virtual-accounts:
+// registers (or re-registers) a van -> parent mapping (see
+// ledger.RegisterVirtualAccount). Strict JSON, size-limited body (see
+// decodeJSONBody). A validation failure is a 400; re-registering an
+// identical mapping is an idempotent no-op. The response carries the
+// mapping and the mapping version counter.
+func (s *server) handleRegisterVirtualAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req registerVirtualAccountRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	l := s.ledgerFor(r)
+	if err := l.RegisterVirtualAccount(req.VAN, req.Parent); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	parent, _ := l.VirtualAccountParent(req.VAN)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"van":     string(req.VAN),
+		"parent":  string(parent),
+		"version": l.VirtualAccountVersion(),
+	})
+}
+
+// handleListVirtualAccounts implements GET /virtual-accounts: every
+// van -> parent mapping, sorted by VAN, plus the mapping version
+// counter.
+func (s *server) handleListVirtualAccounts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	l := s.ledgerFor(r)
+	mappings := l.ListVirtualAccounts()
+	rows := make([]map[string]string, 0, len(mappings))
+	for _, m := range mappings {
+		rows = append(rows, map[string]string{"van": string(m.VAN), "parent": string(m.Parent)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"virtual_accounts": rows,
+		"version":          l.VirtualAccountVersion(),
+	})
+}
+
+// handleUnregisterVirtualAccount implements DELETE
+// /virtual-accounts/{van}: removes the mapping (see
+// ledger.UnregisterVirtualAccount). Unregistering an unknown VAN is an
+// idempotent no-op reporting deleted=false, like unfreezing a
+// never-frozen account.
+func (s *server) handleUnregisterVirtualAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	van := r.PathValue("van")
+	if van == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "van required"})
+		return
+	}
+	l := s.ledgerFor(r)
+	_, had := l.VirtualAccountParent(ledger.AccountID(van))
+	if err := l.UnregisterVirtualAccount(ledger.AccountID(van)); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"van":     van,
+		"deleted": had,
+		"version": l.VirtualAccountVersion(),
+	})
+}
+
 // handleCloseAccount implements POST /accounts/{id}/close: the
 // terminal account lifecycle state (see ledger.CloseAccount). A closed
 // account rejects every new POST /entries, POST /transfers, hold,
@@ -4250,6 +4340,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
+	mux.HandleFunc("POST /virtual-accounts", s.handleRegisterVirtualAccount)
+	mux.HandleFunc("GET /virtual-accounts", s.handleListVirtualAccounts)
+	mux.HandleFunc("DELETE /virtual-accounts/{van}", s.handleUnregisterVirtualAccount)
 	mux.HandleFunc("POST /accounts/{id}/close", s.handleCloseAccount)
 	mux.HandleFunc("PUT /rules/{id}", s.handleSetJournalRule)
 	mux.HandleFunc("DELETE /rules/{id}", s.handleDeleteJournalRule)
@@ -4296,6 +4389,7 @@ func (s *server) handler() http.Handler {
 		// reports exactly what it always did.
 		var auditWritten, auditDropped, outboxWritten, outboxDropped uint64
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
+		var vanAttributions uint64
 		var fxStaleAlerts, fxExpiredAlerts, fxOverridden uint64
 		var fxRefreshes, fxMoves, fxProviderFails uint64
 		var fxInconsistent uint64
@@ -4313,6 +4407,7 @@ func (s *server) handler() http.Handler {
 			}
 			breaches += l.BalanceWatchBreachCount()
 			ruleLegs += l.RuleLegsCommitted()
+			vanAttributions += l.VANAttributionCount()
 			freezeReleases += l.FrozenAutoReleases()
 			healthViolations += l.HealthViolationCount()
 			fxStaleAlerts += l.FXRateStaleAlertCount()
@@ -4337,6 +4432,10 @@ func (s *server) handler() http.Handler {
 		// The rules-engine leg counter likewise lives in the ledger: the
 		// legs commit inside Post, not in a handler.
 		s.metrics.JournalRuleLegsTotal.Store(ruleLegs)
+		// The VAN attribution counter likewise lives in the ledger:
+		// attributions apply inside Post/Transfer/..., not in a
+		// handler.
+		s.metrics.VANAttributionsTotal.Store(vanAttributions)
 		// The freeze auto-release counter lives in the ledger too:
 		// releases happen inside the write path and the background
 		// sweeper, not in a handler.

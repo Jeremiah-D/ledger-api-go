@@ -364,6 +364,25 @@ func (l *Ledger) postTransferSplitLocked(t Transfer, chunkSize int64, now time.T
 		}
 	}
 
+	// Virtual-account attribution (see virtual_account.go): after the
+	// idempotency replay check — a replay returns the original receipt
+	// instead of failing on a VAN registered after the original posting
+	// — and before every account risk gate below, so frozen/overdraft/
+	// daily-limit checks see the real (parent) accounts. The payer leg
+	// rejects on a VAN (ErrVANNoDebit); the payee and fee legs resolve
+	// to their parents, with one attribution record per booked
+	// chunk/fee leg created once the entries are built below.
+	if err := l.vanDebitRejectedLocked(t.From); err != nil {
+		return SplitTransferReceipt{}, err
+	}
+	var toVAN, feeVAN AccountID
+	if parent, ok := l.vanParentLocked(t.To); ok {
+		toVAN, t.To = t.To, parent
+	}
+	if parent, ok := l.vanParentLocked(fee.account); ok {
+		feeVAN, fee.account = fee.account, parent
+	}
+
 	// Entry-ID conflicts: every chunk and fee entry ID must be free, and
 	// the bare transfer ID must not be taken by a plain transfer — one
 	// identity, one transfer.
@@ -497,6 +516,50 @@ func (l *Ledger) postTransferSplitLocked(t Transfer, chunkSize int64, now time.T
 		}
 	}
 
+	// Virtual-account attribution records, one per booked chunk/fee leg
+	// (see virtual_account.go), plus the journal memo marker. Split
+	// transfers never route through dual-control review (see
+	// ErrSplitTransferNeedsReview above), so every attributed leg
+	// commits here.
+	var vanAttrs []*vanAttribution
+	if toVAN != "" {
+		for i, amt := range chunks {
+			vanAttrs = append(vanAttrs, &vanAttribution{
+				VAN:         toVAN,
+				Parent:      t.To,
+				AmountCents: amt,
+				Currency:    t.Currency,
+				EntryID:     splitChunkEntryID(t.ID, i),
+			})
+		}
+	}
+	if feeVAN != "" {
+		if fee.perChunk {
+			for i := range chunks {
+				if fee.chunkFees[i] > 0 {
+					vanAttrs = append(vanAttrs, &vanAttribution{
+						VAN:         feeVAN,
+						Parent:      fee.account,
+						AmountCents: fee.chunkFees[i],
+						Currency:    t.Currency,
+						EntryID:     splitChunkEntryID(t.ID, i) + "/fee",
+					})
+				}
+			}
+		} else if fee.total > 0 {
+			vanAttrs = append(vanAttrs, &vanAttribution{
+				VAN:         feeVAN,
+				Parent:      fee.account,
+				AmountCents: fee.total,
+				Currency:    t.Currency,
+				EntryID:     t.ID + "/fee",
+			})
+		}
+	}
+	if err := annotateVANMemos(entries, vanAttrs); err != nil {
+		return SplitTransferReceipt{}, err
+	}
+
 	l.commitSplitLocked(t, entries, outflows, fee.total, now, map[string]any{
 		"amount_cents":     t.AmountCents,
 		"currency":         t.Currency,
@@ -507,6 +570,11 @@ func (l *Ledger) postTransferSplitLocked(t Transfer, chunkSize int64, now time.T
 		"fee_tier_index":   fee.tierIndex,
 		"fee_rate_bps":     fee.rateBps,
 	}, map[string]any{"split": true, "chunk_count": len(chunks)})
+
+	// Virtual-account attributions ride their own audit events (see
+	// virtual_account.go), after the transfer_split event commitSplitLocked
+	// emitted above.
+	l.emitVANAttributionsLocked(vanAttrs, t.ID, "PostTransferSplit")
 
 	// Every same-currency chunk is its own debtor-to-creditor payment:
 	// register each chunk principal for pain.001 export (see

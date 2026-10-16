@@ -129,6 +129,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		mergeKeys:            make(map[string]string, len(l.mergeKeys)),
 		painTransfers:        make(map[string]PainTransfer, len(l.painTransfers)),
 		accountIBANs:         make(map[AccountID]AccountIBAN, len(l.accountIBANs)),
+		virtualAccounts:      make(map[AccountID]AccountID, len(l.virtualAccounts)),
 		creditLines:          make(map[creditLineKey]CreditLine, len(l.creditLines)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
 		closedPeriods:        make(map[string]bool, len(l.closedPeriods)),
@@ -233,6 +234,12 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	for k, v := range l.accountIBANs {
 		c.accountIBANs[k] = v
 	}
+	for k, v := range l.virtualAccounts {
+		c.virtualAccounts[k] = v
+	}
+	// The VAN mapping version travels with the twin: a dry run
+	// simulates against the live mapping generation.
+	c.virtualAccountVersion = l.virtualAccountVersion
 	c.feeTiers = append([]FeeTier(nil), l.feeTiers...)
 	c.feeRevenueAccount = l.feeRevenueAccount
 	for k, v := range l.fxRates {

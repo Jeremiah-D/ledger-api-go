@@ -678,6 +678,18 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		}
 	}
 
+	// Virtual-account attribution (see virtual_account.go): a VAN payer
+	// is rejected (ErrVANNoDebit); a VAN payee, fee account, or
+	// fee-split recipient attributes to its parent. Runs after the
+	// idempotency replay check — a replay returns the original receipt
+	// instead of failing on a VAN registered after the original posting
+	// — and before every account risk gate below, so frozen/overdraft/
+	// daily-limit checks see the real (parent) accounts.
+	var vanAttrs []*vanAttribution
+	if t, feeAccount, feeSplits, vanAttrs, err = l.resolveTransferVANsLocked(t, feeCents, feeAccount, feeSplits); err != nil {
+		return TransferReceipt{}, err
+	}
+
 	feeEntryIDs := feeLegIDs(t.ID, feeCents, feeSplits)
 	if _, exists := l.entries[t.ID]; exists {
 		return TransferReceipt{}, ErrTransferIDConflict
@@ -836,6 +848,12 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		Currency:    t.Currency,
 		CreatedAt:   principal.CreatedAt,
 	})
+	// The journal memo marker for attributed legs (see
+	// virtual_account.go): applied before the review gate so
+	// review-frozen rows carry it too.
+	if err := annotateVANMemos(entries, vanAttrs); err != nil {
+		return TransferReceipt{}, err
+	}
 	if receipt, reviewed, err := l.maybeReviewTransferLocked(t, entries, feeCents, tierIndex, rateBps, nil, totalOutflow, now); reviewed || err != nil {
 		return receipt, err
 	}
@@ -899,6 +917,10 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		Accounts:      []AccountID{t.From, t.To},
 		Details:       transferDetails,
 	})
+	// Virtual-account attributions ride their own audit events (see
+	// virtual_account.go), after the transfer's own event. Review-routed
+	// transfers return above, so only settled transfers attribute here.
+	l.emitVANAttributionsLocked(vanAttrs, t.ID, "PostTransfer")
 	// Domain outbox: entry_posted per leg, then the transfer_posted
 	// envelope. Pending-review transfers never reach here (they return
 	// from maybeReviewTransferLocked above); their legs emit at

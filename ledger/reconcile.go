@@ -221,6 +221,12 @@ type ReconciliationReport struct {
 	// journaled rows. The amounts are the books' own record — the sum
 	// of a dividend's legs always equals its declared total.
 	Dividends []DividendReceipt `json:"dividends"`
+	// VirtualAccounts lists the van -> parent mappings (see
+	// RegisterVirtualAccount), sorted by VAN, and VirtualAccountVersion
+	// is the mapping mutation counter. Risk tooling reads this to know
+	// which identifiers attribute to which real accounts.
+	VirtualAccounts       []VirtualAccount `json:"virtual_accounts"`
+	VirtualAccountVersion uint64           `json:"virtual_account_version"`
 	// ClosedPeriods lists the currently locked accounting periods
 	// ("YYYY-MM", UTC months; see ClosePeriod), sorted: no journal entry
 	// may be booked with a timestamp in one of these months, so the
@@ -623,6 +629,8 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// carry, so the section can never disagree with the books.
 		FXSpreadPNL:             l.fxSpreadPNLLocked(),
 		Dividends:               l.dividendsLocked(),
+		VirtualAccounts:         l.virtualAccountsLocked(),
+		VirtualAccountVersion:   l.virtualAccountVersion,
 		ClosedPeriods:           l.closedPeriodsLocked(),
 		ActiveTransferSchedules: l.activeScheduleCountLocked(),
 		PendingReviews:          l.pendingTransferReviewsLocked(now),
