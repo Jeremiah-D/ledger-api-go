@@ -672,6 +672,17 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 	r.Status = ReviewStatusApproved
 	r.ReviewedBy = reviewer
 	r.ReviewedAt = now
+
+	entryIDs := make([]string, 0, len(r.Entries))
+	for _, e := range r.Entries {
+		entryIDs = append(entryIDs, e.ID)
+	}
+	// Settlement cutoff evaluation (see settlement_cutoff.go): the money
+	// becomes effective at approval time, so the cutoff is evaluated
+	// against the approval instant — the booking is never blocked, only
+	// the settlement window is decided.
+	approvalSettlementStatus, approvalSettlementWindow := l.deferSettlementIfPastCutoffLocked(
+		r.Transfer.Currency, now, r.TransferID, entryIDs, []AccountID{r.Transfer.From, r.Transfer.To})
 	receipt := TransferReceipt{
 		TransferID:   r.TransferID,
 		Entries:      append([]JournalEntry(nil), r.Entries...),
@@ -683,15 +694,13 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 		ReviewStatus: ReviewStatusApproved,
 		// The fee-split breakdown rebuilds from the settled legs'
 		// memos, like an idempotent replay (see fee_split.go).
-		FeeSplits: feeSplitSharesFromLegs(r.TransferID, r.Entries),
+		FeeSplits:        feeSplitSharesFromLegs(r.TransferID, r.Entries),
+		SettlementStatus: approvalSettlementStatus,
+		SettlementWindow: approvalSettlementWindow,
 	}
 	r.ApprovedReceipt = &receipt
 	l.reviews[transferID] = r
 
-	entryIDs := make([]string, 0, len(r.Entries))
-	for _, e := range r.Entries {
-		entryIDs = append(entryIDs, e.ID)
-	}
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
 	l.evaluateBalanceWatchesLocked(touchedAccounts(r.Entries), r.TransferID, "ApproveTransferReview")

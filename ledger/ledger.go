@@ -386,6 +386,28 @@ type Ledger struct {
 	// clearing a mapping does not bump the ledger version and survives
 	// disaster-recovery snapshots.
 	settlementChannels map[AccountID]string
+	// settlementCutoffs maps a currency code to its settlement cutoff
+	// window (see settlement_cutoff.go): transfers posted after the
+	// cutoff wait for the next window instead of settling in the
+	// current one. Structural config, like settlementChannels: setting
+	// or clearing a cutoff does not bump the ledger version and survives
+	// disaster-recovery snapshots. Currencies with no row behave exactly
+	// as before cutoffs existed.
+	settlementCutoffs map[string]SettlementCutoff
+	// settlementDeferrals tracks transfers booked after their currency's
+	// cutoff, awaiting the next settlement window (see
+	// settlement_cutoff.go): scheduled -> pending -> settled.
+	// Settlement bookkeeping, not accounting: deferral transitions never
+	// bump the journal version, and the records round-trip through
+	// snapshots so a restore keeps the in-flight settlement trail.
+	settlementDeferrals map[string]*SettlementDeferral
+	// settlementDeferred counts transfers deferred to the next settlement
+	// window since the ledger started (see settlement_cutoff.go).
+	// Operational metric, surfaced on GET /metrics as
+	// ledger_settlement_deferred_total; not books, so it does not
+	// round-trip through snapshots (the audit log's
+	// "transfer_settlement_deferred" events are the durable record).
+	settlementDeferred atomic.Uint64
 	// balanceWatchBreachCount counts balance-threshold breach alerts the
 	// ledger has emitted since it started (see balance_watch.go). The
 	// counter resets on restart — alert history lives in the structured
@@ -865,6 +887,8 @@ func New(opts ...Option) *Ledger {
 		liquidityThresholds:  make(map[liquidityThresholdKey]LiquidityAlertThreshold),
 		liquidityBreached:    make(map[liquidityThresholdKey]bool),
 		settlementChannels:   make(map[AccountID]string),
+		settlementCutoffs:    make(map[string]SettlementCutoff),
+		settlementDeferrals:  make(map[string]*SettlementDeferral),
 		parents:              make(map[AccountID]AccountID),
 		transferKeys:         make(map[string][]string),
 		reviews:              make(map[string]*TransferReview),

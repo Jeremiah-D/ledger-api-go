@@ -258,6 +258,16 @@ type ReconciliationReport struct {
 	// ledger-wide threshold is not listed here — it applies to every
 	// account without a per-account row.
 	ReviewThresholds []ReviewThreshold `json:"review_thresholds"`
+	// SettlementCutoffs lists every configured per-currency settlement
+	// cutoff (see settlement_cutoff.go), sorted by currency. Treasury
+	// tooling reads this to know which currencies settle on windows and
+	// at what wall-clock time.
+	SettlementCutoffs []SettlementCutoff `json:"settlement_cutoffs,omitempty"`
+	// SettlementDeferrals lists every transfer currently deferred to a
+	// settlement window (see settlement_cutoff.go), sorted by (window,
+	// transfer ID), including settled history: the full settlement
+	// trail the operator's window runs leave behind.
+	SettlementDeferrals []SettlementDeferral `json:"settlement_deferrals,omitempty"`
 	// RevaluationAccount is the configured P&L account for unrealized FX
 	// gains/losses (see SetRevaluationAccount); empty when FX
 	// revaluation is not configured.
@@ -653,11 +663,16 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		ActiveTransferSchedules: l.activeScheduleCountLocked(),
 		PendingReviews:          l.pendingTransferReviewsLocked(now),
 		ReviewThresholds:        l.reviewThresholdsLocked(),
-		RevaluationAccount:      l.revalAccount,
-		RevaluationImpact:       l.revaluationPositionsLocked(),
-		AccountTags:             l.accountTagsLocked(),
-		TermDeposits:            l.termDepositReportsLocked(),
-		CreditLines:             l.creditLineReportsLocked(),
+		// LG-101: the report discloses the settlement-window config and
+		// every deferred transfer, so the reconciliation record shows
+		// which money settles in which window.
+		SettlementCutoffs:   l.settlementCutoffsLocked(),
+		SettlementDeferrals: l.deferredSettlementsLocked(),
+		RevaluationAccount:  l.revalAccount,
+		RevaluationImpact:   l.revaluationPositionsLocked(),
+		AccountTags:         l.accountTagsLocked(),
+		TermDeposits:        l.termDepositReportsLocked(),
+		CreditLines:         l.creditLineReportsLocked(),
 		// LG-98: the report discloses the day's intraday liquidity
 		// position table — the same read-only forecast the
 		// /liquidity/intraday endpoint serves, so the reconciliation

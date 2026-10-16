@@ -4326,6 +4326,152 @@ func (s *server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleSettlementNextWindow implements GET /settlement/next-window
+// (LG-101): the operator's "when does this currency settle next" query.
+//
+// Query parameters:
+//
+//	currency   required: the ISO 4217 code whose settlement window to
+//	           query. The currency must have a configured settlement
+//	           cutoff.
+//
+// The response is the next settlement window (RFC3339, in the cutoff's
+// timezone), the cutoff it closes, and whether it is today's still-open
+// window. A currency with no configured cutoff is 404: the caller asked
+// about a window that does not exist.
+func (s *server) handleSettlementNextWindow(w http.ResponseWriter, r *http.Request) {
+	s.metrics.SettlementNextWindowQueries.Add(1)
+	currency := r.URL.Query().Get("currency")
+	if currency == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "currency query parameter required"})
+		return
+	}
+	win, err := s.ledgerFor(r).NextSettlementWindow(currency, time.Now())
+	if err != nil {
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrNoSettlementCutoff) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		log.Printf("ledger-api-go: GET /settlement/next-window: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "next settlement window failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, win)
+}
+
+// handleListSettlementDeferrals implements GET /settlement/deferred
+// (LG-101): lists the transfers deferred to settlement windows, sorted
+// by (window, transfer ID). The ?status= query parameter filters to one
+// of scheduled, pending, or settled; absent, it lists everything,
+// including settled history.
+func (s *server) handleListSettlementDeferrals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var statuses []ledger.SettlementDeferralStatus
+	if raw := r.URL.Query().Get("status"); raw != "" {
+		status := ledger.SettlementDeferralStatus(raw)
+		switch status {
+		case ledger.DeferralScheduled, ledger.DeferralPending, ledger.DeferralSettled:
+			statuses = append(statuses, status)
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": `status must be one of "scheduled", "pending", "settled"`})
+			return
+		}
+	}
+	deferrals := s.ledgerFor(r).DeferredSettlements(statuses...)
+	if deferrals == nil {
+		deferrals = []ledger.SettlementDeferral{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deferrals": deferrals})
+}
+
+// settlementAdvanceRequest is the body of POST /settlement/advance: the
+// optional RFC3339 instant the window-open tick is evaluated against.
+// Empty means now.
+type settlementAdvanceRequest struct {
+	Now string `json:"now"`
+}
+
+// handleAdvanceSettlementWindows implements POST /settlement/advance
+// (LG-101): the operator's window-open tick. Every scheduled deferral
+// whose window has opened moves to pending — the transfer is now in the
+// current settlement run. The operation is idempotent: deferrals whose
+// window is still in the future, or which already advanced, are
+// untouched. The operator identity comes from the x-ledger-actor
+// header, like the other operator actions.
+func (s *server) handleAdvanceSettlementWindows(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req settlementAdvanceRequest
+	if r.ContentLength != 0 {
+		if !s.decodeJSONBody(w, r, &req) {
+			return
+		}
+	}
+	now := time.Now()
+	if req.Now != "" {
+		var err error
+		now, err = time.Parse(time.RFC3339, req.Now)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "now must be RFC3339"})
+			return
+		}
+	}
+	advanced := s.ledgerFor(r).AdvanceSettlementWindows(now)
+	if advanced == nil {
+		advanced = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"advanced":       advanced,
+		"advanced_count": len(advanced),
+		"evaluated_at":   now.Format(time.RFC3339),
+	})
+}
+
+// handleSettleDeferredTransfer implements
+// POST /settlement/deferred/{id}/settle (LG-101): the operator's
+// confirmation that the settlement run processed the transfer. Only a
+// pending deferral settles — a scheduled one must be advanced first
+// (see POST /settlement/advance). The operator identity comes from the
+// x-ledger-actor header and is recorded on the audit event.
+func (s *server) handleSettleDeferredTransfer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "deferral transfer id required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	if err := s.ledgerFor(r).SettleDeferredTransfer(id, ledger.ActorFromContext(actx)); err != nil {
+		if errors.Is(err, ledger.ErrDeferralNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDeferralBadTransition) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		log.Printf("ledger-api-go: POST /settlement/deferred settle: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "settle deferred transfer failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"transfer_id": id, "status": string(ledger.DeferralSettled)})
+}
+
 // handleAging implements GET /aging, the operator-facing AR aging view
 // (LG-50): per-(account, currency) outstanding receivables decomposed by
 // age bucket (0-30 / 31-60 / 61-90 / 90+ days), FIFO-attributed from each
@@ -4462,6 +4608,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
 	mux.HandleFunc("POST /compliance/large-tx-reports", s.handleLargeTxReports)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
+	mux.HandleFunc("GET /settlement/next-window", s.handleSettlementNextWindow)
+	mux.HandleFunc("GET /settlement/deferred", s.handleListSettlementDeferrals)
+	mux.HandleFunc("POST /settlement/advance", s.handleAdvanceSettlementWindows)
+	mux.HandleFunc("POST /settlement/deferred/{id}/settle", s.handleSettleDeferredTransfer)
 	mux.HandleFunc("GET /aging", s.handleAging)
 	mux.HandleFunc("GET /liquidity/intraday", s.handleIntradayLiquidity)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
@@ -4537,6 +4687,7 @@ func (s *server) handler() http.Handler {
 		// reports exactly what it always did.
 		var auditWritten, auditDropped, outboxWritten, outboxDropped uint64
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
+		var deferredSettlements uint64
 		var lowLiqAlerts uint64
 		var vanAttributions uint64
 		var fxStaleAlerts, fxExpiredAlerts, fxOverridden uint64
@@ -4559,6 +4710,11 @@ func (s *server) handler() http.Handler {
 			ruleLegs += l.RuleLegsCommitted()
 			vanAttributions += l.VANAttributionCount()
 			freezeReleases += l.FrozenAutoReleases()
+		// The settlement-deferral counter likewise lives in the
+		// ledger: deferrals are decided inside the PostTransfer
+		// commit paths, not in a handler (see
+		// ledger/settlement_cutoff.go, LG-101).
+		deferredSettlements += l.SettlementDeferredCount()
 			healthViolations += l.HealthViolationCount()
 			fxStaleAlerts += l.FXRateStaleAlertCount()
 			fxExpiredAlerts += l.FXRateExpiredAlertCount()
@@ -4593,6 +4749,9 @@ func (s *server) handler() http.Handler {
 		// releases happen inside the write path and the background
 		// sweeper, not in a handler.
 		s.metrics.FreezeAutoReleasesTotal.Store(freezeReleases)
+		// The settlement-deferral counter is mirrored like the other
+		// ledger-sourced counters above.
+		s.metrics.SettlementDeferredTotal.Store(deferredSettlements)
 		// The balance-health violation counter lives in the ledger too:
 		// violations are detected by the background watchdog inside the
 		// ledger package, not in a handler.

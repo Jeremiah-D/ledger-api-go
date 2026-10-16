@@ -98,6 +98,15 @@ type Metrics struct {
 	// by the write-path lazy check, the background freeze sweeper, or an
 	// explicit ledger.ExpireFrozenAccounts call.
 	FreezeAutoReleasesTotal atomic.Uint64
+	// SettlementDeferredTotal counts transfers deferred to the next
+	// settlement window since start (see ledger.SettlementDeferral):
+	// transfers posted after their currency's cutoff. Mirrored from
+	// the ledgers on every GET /metrics scrape, like the freeze
+	// auto-release counter.
+	SettlementDeferredTotal atomic.Uint64
+	// SettlementNextWindowQueries counts GET /settlement/next-window
+	// requests served.
+	SettlementNextWindowQueries atomic.Uint64
 	// AuditSinkSentTotal counts outbox domain events the audit-sink
 	// webhook forwarder delivered (HTTP 2xx). Mirrored from the sink on
 	// GET /metrics; zero when the sink is disabled.
@@ -734,6 +743,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_freeze_auto_releases_total",
 		"Total automatic account unfreezes: timed freezes whose deadline passed, released by the write-path lazy check, the background freeze sweeper, or an explicit ExpireFrozenAccounts call.",
 		m.FreezeAutoReleasesTotal.Load())
+	writeCounter(&sb, "ledger_settlement_deferred_total",
+		"Total transfers deferred to the next settlement window: transfers posted after their currency's settlement cutoff (see the per-currency cutoff config).",
+		m.SettlementDeferredTotal.Load())
+	writeCounter(&sb, "ledger_settlement_next_window_queries_total",
+		"Total GET /settlement/next-window requests served.",
+		m.SettlementNextWindowQueries.Load())
 	writeCounter(&sb, "ledger_audit_sink_sent_total",
 		"Total outbox domain events the audit-sink webhook forwarder delivered (HTTP 2xx).",
 		m.AuditSinkSentTotal.Load())

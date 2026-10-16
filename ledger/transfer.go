@@ -204,6 +204,20 @@ type TransferReceipt struct {
 	// was no fee). Idempotent replays rebuild the same breakdown from
 	// the journaled legs' memos.
 	FeeSplits []FeeSplitShare `json:"fee_splits,omitempty"`
+	// SettlementStatus discloses the transfer's settlement-window
+	// outcome (see settlement_cutoff.go): "settled" when the transfer
+	// booked in its currency's current settlement window, "scheduled"
+	// when it posted after the cutoff and waits for the next window
+	// (see SettlementWindow for the window). Empty when the transfer's
+	// currency has no cutoff configured — zero behavior change — or
+	// when the transfer was routed into dual-control review (its
+	// settlement is the operator's concern at approval).
+	SettlementStatus string `json:"settlement_status,omitempty"`
+	// SettlementWindow is the settlement window the transfer settles
+	// in: today's still-open cutoff when SettlementStatus is
+	// "settled", the next window when it is "scheduled". Zero when the
+	// currency has no cutoff configured.
+	SettlementWindow time.Time `json:"settlement_window,omitempty"`
 }
 
 // FeeTier is one band of the tiered transfer fee schedule: transfers of
@@ -917,6 +931,11 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		Accounts:      []AccountID{t.From, t.To},
 		Details:       transferDetails,
 	})
+	// Settlement cutoff evaluation (see settlement_cutoff.go): runs
+	// after the atomic commit, so the booking is never blocked by the
+	// cutoff — the money is journaled first, the settlement flag second.
+	settlementStatus, settlementWindow := l.deferSettlementIfPastCutoffLocked(
+		t.Currency, principal.CreatedAt, t.ID, entryIDs, []AccountID{t.From, t.To})
 	// Virtual-account attributions ride their own audit events (see
 	// virtual_account.go), after the transfer's own event. Review-routed
 	// transfers return above, so only settled transfers attribute here.
@@ -931,13 +950,15 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	l.fireBalanceHooksLocked(hookTouched, hookOld, t.ID)
 
 	return TransferReceipt{
-		TransferID:   t.ID,
-		Entries:      entries,
-		FeeCents:     feeCents,
-		FeeTierIndex: tierIndex,
-		FeeRateBps:   rateBps,
-		Duplicate:    false,
-		FeeSplits:    feeSplits,
+		TransferID:       t.ID,
+		Entries:          entries,
+		FeeCents:         feeCents,
+		FeeTierIndex:     tierIndex,
+		FeeRateBps:       rateBps,
+		Duplicate:        false,
+		FeeSplits:        feeSplits,
+		SettlementStatus: settlementStatus,
+		SettlementWindow: settlementWindow,
 	}, nil
 }
 

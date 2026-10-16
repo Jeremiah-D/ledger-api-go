@@ -327,6 +327,20 @@ type snapshotConfigLine struct {
 	// daily limits, so a disaster-recovery restore keeps the channel
 	// dimension instead of silently flattening every row to "".
 	SettlementChannels []SettlementChannel `json:"settlement_channels,omitempty"`
+	// SettlementCutoffs carries the per-currency settlement cutoff
+	// config (see SetSettlementCutoff); absent in snapshots written
+	// before LG-101. The rows are re-validated on import (currency,
+	// "HH:MM", loadable timezone), and the locations resolve again at
+	// restore, so a restored ledger keeps the exact windows the
+	// original ran on.
+	SettlementCutoffs []SettlementCutoff `json:"settlement_cutoffs,omitempty"`
+	// SettlementDeferrals carries the in-flight settlement deferrals
+	// (see settlement_cutoff.go); absent in snapshots written before
+	// LG-101. Rows are validated on import (non-empty transfer ID,
+	// known status); the window and submitted times ride verbatim, so
+	// a restore keeps the exact settlement trail — scheduled deferrals
+	// still wait for their window after a disaster recovery.
+	SettlementDeferrals []SettlementDeferral `json:"settlement_deferrals,omitempty"`
 	// JournalRules carries the opt-in automatic journaling rules (see
 	// SetJournalRule); absent in snapshots written before journal rules
 	// existed. JournalRuleVersion is the rule-set mutation counter: every
@@ -901,6 +915,11 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		ReviewThresholds:      l.reviewThresholdsLocked(),
 		ReviewThresholdCents:  l.reviewThreshold,
 		SettlementChannels:    l.settlementChannelsLocked(),
+		// LG-101: the cutoff config and the in-flight deferrals
+		// round-trip, so a restored ledger keeps the exact settlement
+		// windows and the exact settlement trail.
+		SettlementCutoffs:   l.settlementCutoffsSnapshotLocked(),
+		SettlementDeferrals: l.settlementDeferralsSnapshotLocked(),
 		JournalRules:          l.journalRulesLocked(),
 		JournalRuleVersion:    l.journalRuleVersion,
 		AllocationRules:       l.allocationRulesLocked(),
@@ -1897,6 +1916,25 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 	}
 
+	// LG-101: settlement cutoff rows are re-validated like every other
+	// config row — a bad currency, a malformed "HH:MM", or an unloadable
+	// timezone fails the import instead of silently dropping the
+	// currency's window. Deferral rows need a transfer ID and a known
+	// status; the window rides verbatim.
+	validatedCutoffs := make([]SettlementCutoff, 0, len(cfg.SettlementCutoffs))
+	for i, sc := range cfg.SettlementCutoffs {
+		vc, err := validateSettlementCutoffSnapshot(sc)
+		if err != nil {
+			return bad("settlement cutoff %d: %v", i, err)
+		}
+		validatedCutoffs = append(validatedCutoffs, vc)
+	}
+	for i, d := range cfg.SettlementDeferrals {
+		if err := validateSettlementDeferralSnapshot(d); err != nil {
+			return bad("settlement deferral %d: %v", i, err)
+		}
+	}
+
 	// Journal rules are validated like every other config row: an illegal
 	// rule in the snapshot fails the import instead of silently installing
 	// a rule that could never have been created through SetJournalRule.
@@ -2092,6 +2130,19 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// Settlement channel mappings: restore the channel dimension.
 	for _, sc := range cfg.SettlementChannels {
 		l.settlementChannels[sc.Account] = sc.Channel
+	}
+	// LG-101: settlement cutoff config and in-flight deferrals restore
+	// like the other structural config — the validated rows, so the
+	// restored ledger keeps the exact windows and settlement trail.
+	// The in-memory maps are fresh on a restore target (New zeroes
+	// them), so a plain install is correct.
+	for _, vc := range validatedCutoffs {
+		l.settlementCutoffs[vc.Currency] = vc
+	}
+	for i := range cfg.SettlementDeferrals {
+		d := cfg.SettlementDeferrals[i]
+		dc := d
+		l.settlementDeferrals[d.TransferID] = &dc
 	}
 	// Journal rules restore like the other structural config: the rule
 	// set and its mutation counter round-trip together, so the restored

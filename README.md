@@ -2689,6 +2689,63 @@ Malformed `day` (`YYYY-MM-DD` required), `format`, `expected`, or
 `expected`/`tolerance` are validated by the ledger when the report runs
 (`abs_cents >= 0`, `0 <= bps <= 10000`).
 
+### Settlement cutoff windows
+
+Per-currency settlement cutoff windows (LG-101): the payment-rail reality
+behind the settlement view — a currency settles on windows, not
+continuously. Configure a wall-clock cutoff per currency (`HH:MM` plus an
+IANA timezone, default UTC); a transfer submitted after its currency's
+cutoff misses the day's settlement run and is automatically booked for the
+next window. The booking is never blocked — the journal commits exactly as
+before — only the settlement flag is decided after the commit.
+
+- **Configuration** (Go): `ledger.WithSettlementCutoff("USD", "17:00",
+  "America/New_York")` at construction, or
+  `SetSettlementCutoff("USD", "17:00", "America/New_York")` at runtime.
+  `HH:MM` is strict (`9:05` and `24:00` are rejected) and the timezone
+  must load (`time.LoadLocation`) — construction panics on invalid input,
+  the setter returns an error, and both paths fail fast like the fee
+  schedule. `ClearSettlementCutoff("USD")` removes a currency's window;
+  currencies with no cutoff behave exactly as before (zero behavior
+  change). Cutoffs are structural config: audited, no journal version
+  bump, and they survive disaster-recovery snapshots.
+- **Deferral**: a transfer posted strictly after the cutoff is recorded
+  with `settlement_status: "scheduled"` on its receipt (before the
+  cutoff: `"settled"`), the window it waits for in `settlement_window`,
+  and a `transfer_settlement_deferred` audit event (`reason:
+  settlement_cutoff`, the cutoff, the window). The cutoff instant itself
+  still belongs to the current window.
+- **Business-day windows**: windows only land on business days — the LG-95
+  holiday calendar (weekend + custom holiday table) is consulted on the
+  cutoff date, so a Friday-evening transfer waits for Monday's window and
+  a configured holiday pushes it past the holiday. The cutoff clock is
+  per-currency wall time; the holiday table is UTC-based by design.
+- **Operator flow**: `GET /settlement/next-window?currency=USD` answers
+  "when does this currency settle next" (the window in RFC3339, the
+  timezone, and `is_today` — whether it is today's still-open cutoff;
+  `404` when the currency has no cutoff). `GET /settlement/deferred`
+  lists deferred transfers (`?status=scheduled|pending|settled`);
+  `POST /settlement/advance` is the window-open tick (moves every
+  scheduled deferral whose window opened to `pending`; idempotent);
+  `POST /settlement/deferred/{id}/settle` confirms the run processed the
+  transfer (`pending` → `settled`; `409` on a bad transition). The
+  lifecycle is strict: `scheduled → pending → settled`, mirroring the
+  dual-control review transitions, and every step is a hash-chained audit
+  event.
+- **Observability**: `ledger_settlement_deferred_total` counts deferred
+  transfers; the reconcile report discloses the cutoff config
+  (`settlement_cutoffs`) and every deferral (`settlement_deferrals`).
+
+```bash
+# When does USD settle next?
+curl -s 'localhost:8080/settlement/next-window?currency=USD'
+# {"currency":"USD","next_window":"2026-10-19T17:00:00-04:00","timezone":"America/New_York","cutoff":"17:00","is_today":false}
+
+# Window-open tick, then confirm one transfer settled
+curl -s -X POST localhost:8080/settlement/advance
+curl -s -X POST -H 'x-ledger-actor: ops-chen' localhost:8080/settlement/deferred/tx-cut-1/settle
+```
+
 ### `GET /aging`
 
 The AR aging view (LG-50): the collections question a payments operator
@@ -3428,6 +3485,11 @@ curl -s localhost:8080/metrics
   requests served successfully (balance Merkle inclusion proofs).
 - `ledger_settlement_runs_total` — `GET /settlement` requests served
   (all formats: `json`, `csv`, `sql`).
+- `ledger_settlement_deferred_total` — transfers deferred to the next
+  settlement window: transfers posted after their currency's settlement
+  cutoff (LG-101).
+- `ledger_settlement_next_window_queries_total` — `GET
+  /settlement/next-window` requests served.
 - `ledger_settlement_alerts_total` — settlement mismatch alerts across
   served settlement reports: the day-end breaks an operator works
   through, not posting rejections.

@@ -1292,6 +1292,12 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		Accounts:      []AccountID{t.From, t.To},
 		Details:       fxDetails,
 	})
+	// Settlement cutoff evaluation (see settlement_cutoff.go): the
+	// booking is never blocked — the journal commits first, the
+	// settlement flag second. The cutoff is evaluated on the
+	// transfer's own (source) currency.
+	settlementStatus, settlementWindow := l.deferSettlementIfPastCutoffLocked(
+		t.Currency, t.CreatedAt, t.ID, fxEntryIDs, []AccountID{t.From, t.To})
 	// Virtual-account attributions ride their own audit events (see
 	// virtual_account.go), after the transfer's own event. Review-routed
 	// transfers return above, so only settled transfers attribute here.
@@ -1315,13 +1321,15 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	l.fireBalanceHooksLocked(hookTouched, hookOld, t.ID)
 
 	return TransferReceipt{
-		TransferID:   t.ID,
-		Entries:      entries,
-		FeeCents:     feeCents,
-		FeeTierIndex: tierIndex,
-		FeeRateBps:   rateBps,
-		Duplicate:    false,
-		FX:           fxConv,
-		FeeSplits:    feeSplits,
+		TransferID:       t.ID,
+		Entries:          entries,
+		FeeCents:         feeCents,
+		FeeTierIndex:     tierIndex,
+		FeeRateBps:       rateBps,
+		Duplicate:        false,
+		FX:               fxConv,
+		FeeSplits:        feeSplits,
+		SettlementStatus: settlementStatus,
+		SettlementWindow: settlementWindow,
 	}, nil
 }
