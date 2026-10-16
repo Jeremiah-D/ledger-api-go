@@ -309,6 +309,14 @@ type ReconciliationReport struct {
 	// tooling reads this to know which accounts the day's committed
 	// and forecast flows leave thin on cash.
 	IntradayLiquidity []LiquidityPosition `json:"intraday_liquidity"`
+	// Pain001Pending lists every pain.001 payment instruction that has
+	// not reached the terminal settled state (see
+	// Pain001PendingInstruction in pain001_status.go), sorted by
+	// msg_id: the operator's reconcile-confirmation worklist. A
+	// rejected instruction is disclosed, not hidden — its transfers
+	// never settled, and the operator needs to see it to fix the
+	// cause and re-export.
+	Pain001Pending []Pain001PendingInstruction `json:"pain001_pending"`
 }
 
 // TermDepositReport is one term deposit's Reconcile disclosure: the
@@ -605,6 +613,7 @@ func (l *Ledger) ReconcileWithOptions(now time.Time, opts ReconcileOptions) (Rec
 			"merges":                 len(report.Merges),
 			"dividends":              len(report.Dividends),
 			"fx_applied":             report.FXApplied,
+			"pain001_pending":        len(report.Pain001Pending),
 		},
 	})
 	return report, nil
@@ -654,6 +663,11 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// /liquidity/intraday endpoint serves, so the reconciliation
 		// record carries the day's cash-position view.
 		IntradayLiquidity: l.intradayLiquidityLocked(now).Positions,
+		// LG-99: the report discloses every unsettled pain.001
+		// payment instruction — the operator's
+		// reconcile-confirmation worklist (see
+		// SettlePain001Instruction in pain001_status.go).
+		Pain001Pending: l.pain001PendingLocked(),
 	}
 	report.ECLExposures, report.ECLCoverage = l.eclReportsLocked()
 

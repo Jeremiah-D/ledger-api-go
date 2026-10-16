@@ -2687,6 +2687,132 @@ func (s *server) handlePain001Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// pain001ReceiptRequest is one bank receipt in the POST
+// /exports/pain001/{msgid}/receipts body: the pain.002-style per-tx
+// status report. Unknown JSON fields fail fast, like every other POST
+// endpoint.
+type pain001ReceiptRequest struct {
+	TxID   string `json:"tx_id"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// pain001ReceiptsRequest is the POST
+// /exports/pain001/{msgid}/receipts body: the batch of bank receipts
+// for one instruction, applied atomically (see
+// ledger.RecordPain001Receipts).
+type pain001ReceiptsRequest struct {
+	Receipts []pain001ReceiptRequest `json:"receipts"`
+}
+
+// handlePain001Status implements GET /exports/pain001/{msgid}/status
+// (LG-99): the payment instruction's lifecycle record — msg_id, state,
+// exported_at, tx_count, ctrl_sum_cents, currency, and the per-tx
+// states. An instruction the ledger never exported is a 404: receipts
+// and transitions are keyed by the deterministic export MsgId, so an
+// unknown name is a client error, not an empty report.
+func (s *server) handlePain001Status(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain001StatusQueries.Add(1)
+	msgID := r.PathValue("msgid")
+	if msgID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "msg_id required"})
+		return
+	}
+	rec, ok := s.ledgerFor(r).PainInstruction(msgID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown pain.001 payment instruction"})
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+// handlePain001Receipts implements POST
+// /exports/pain001/{msgid}/receipts (LG-99): records a batch of
+// pain.002-style bank receipts for the instruction's transfers. The
+// batch is applied atomically — one bad receipt (unknown transfer,
+// unknown status, illegal transition) refuses the whole batch, so the
+// record can never half-absorb a bank file. Replaying a receipt for a
+// transfer already in that state is a no-op (idempotent), so
+// re-delivered bank files are safe. Error mapping: unknown msg_id is a
+// 404; an empty batch is a 400; an unknown tx_id, an unknown status,
+// or an illegal transition is a 422 (the request is well-formed but the
+// state machine cannot apply it). The operator identity comes from the
+// x-ledger-actor header, like the other operator actions — the actor
+// lands in the hash-chained pain001_status audit events.
+func (s *server) handlePain001Receipts(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain001Receipts.Add(1)
+	msgID := r.PathValue("msgid")
+	if msgID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "msg_id required"})
+		return
+	}
+	var req pain001ReceiptsRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	receipts := make([]ledger.Pain001Receipt, 0, len(req.Receipts))
+	for _, pr := range req.Receipts {
+		receipts = append(receipts, ledger.Pain001Receipt{TxID: pr.TxID, Status: pr.Status, Reason: pr.Reason})
+	}
+	rec, err := s.ledgerFor(r).RecordPain001Receipts(msgID, receipts, ledger.ActorFromContext(actx))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrUnknownPainInstruction):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrEmptyPain001Receipts):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrUnknownPain001Tx),
+			errors.Is(err, ledger.ErrInvalidPain001ReceiptStatus),
+			errors.Is(err, ledger.ErrIllegalPain001Transition):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain001/%s/receipts: %v", msgID, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "recording receipts failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+// handlePain001Settle implements POST /exports/pain001/{msgid}/settle
+// (LG-99): the operator's reconcile confirmation for a payment
+// instruction. Every transfer the bank accepted advances to settled;
+// unreceipted (exported) transfers stay exported and rejected ones
+// stay rejected — the operator cannot mark money settled the bank never
+// confirmed. This is deliberately an explicit operator action, not a
+// side effect of the automatic POST /reconcile scan: settlement
+// confirmation is an attestation, and the reconcile report instead
+// discloses unsettled instructions (pain001_pending) so the operator
+// knows which ones still await this confirmation. The operator identity
+// comes from the x-ledger-actor header.
+func (s *server) handlePain001Settle(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain001Settlements.Add(1)
+	msgID := r.PathValue("msgid")
+	if msgID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "msg_id required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	rec, err := s.ledgerFor(r).SettlePain001Instruction(msgID, ledger.ActorFromContext(actx))
+	if err != nil {
+		if errors.Is(err, ledger.ErrUnknownPainInstruction) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		log.Printf("ledger-api-go: POST /exports/pain001/%s/settle: %v", msgID, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "settle confirmation failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
 // handleStatement implements GET /accounts/{id}/statement: a JSON
 // account statement for the half-open window [from, to) (see
 // ledger.GenerateStatement). Query parameters: from / to (optional
@@ -4388,6 +4514,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/ofx", s.handleOFXExport)
 	mux.HandleFunc("GET /exports/pain001", s.handlePain001Export)
+	mux.HandleFunc("GET /exports/pain001/{msgid}/status", s.handlePain001Status)
+	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
+	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("GET /accounts/{id}/statement", s.handleStatement)
 	mux.HandleFunc("POST /ofx/import", s.handleOFXImport)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)

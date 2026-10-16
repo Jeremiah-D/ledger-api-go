@@ -2052,6 +2052,75 @@ A malformed timestamp, an inverted window, or an invalid currency is a
 `400`, fail-fast. `GET /metrics` counts exports as
 `ledger_pain001_exports_total`.
 
+### pain.001 付款指令状态机（LG-99）
+
+每次 `GET /exports/pain001` 导出都会在账本内注册一条付款指令
+（`PainInstruction`），以确定性的 `MsgId` 为键。同一参数、同一内容
+的重复导出是幂等的：返回已有记录，不产生新的注册、不写审计事件。
+
+**指令级状态**：`registered` → `exported` → `accepted` / `rejected` →
+`settled`。其中 `rejected` 与 `settled` 为终态——被银行拒绝或已结算
+的指令不会复用同一 `MsgId` 重发，修正原因后重新导出会得到新的
+`MsgId`。
+
+**逐笔（per-tx）状态**（合法转移表）：
+
+| 当前状态 | 银行回执 / 操作 | 新状态 |
+|---|---|---|
+| `exported` | `accepted` | `accepted` |
+| `exported` | `rejected`（可带 `reason`，原文保存） | `rejected` |
+| `accepted` | 对账确认（`POST .../settle`） | `settled` |
+
+- 同一状态的回执重放是 no-op（幂等），不产生转移、不写审计事件。
+- 非法转移（如 `accepted` → `rejected`、`settled` 之后再收回执）整批
+  拒绝，返回 `422`，记录保持原样（回执按整批原子应用）。
+- 指令级状态由逐笔状态汇总得出：全部 `settled` → `settled`；全部
+  `accepted`/`settled` → `accepted`；全部 `rejected` → `rejected`；
+  其余（有未回执或混合）保持 `exported`。
+- `POST .../settle` 只把银行已 `accepted` 的笔推进到 `settled`，
+  **绝不替银行接受**：未回执（`exported`）的笔保持不动，被拒绝的笔
+  保持拒绝。这是刻意设计——结算是操作员的确认动作（attestation），
+  而不是自动对账扫描的副作用。
+
+**新增端点**：
+
+- `GET /exports/pain001/{msgid}/status` — 指令记录：`msg_id`、`state`、
+  `exported_at`、`tx_count`、`ctrl_sum_cents`、`currency` 与逐笔状态。
+  未知 `msg_id` → `404`。
+- `POST /exports/pain001/{msgid}/receipts` — 录入银行回执（pain.002
+  风格），body 为 `{"receipts":[{"tx_id":"…","status":"accepted|rejected","reason":"…"}]}`。
+  空批量 → `400`；未知 `msg_id` → `404`；未知 `tx_id`、未知状态、非法
+  转移 → `422`。操作员身份来自 `x-ledger-actor` 请求头。
+- `POST /exports/pain001/{msgid}/settle` — 操作员对账确认，把已接受
+  的笔推进到 `settled`。未知 `msg_id` → `404`。
+
+**审计**：每次状态转移（逐笔与指令级）都会写一条哈希链审计事件，
+`op` 为 `pain001_status`，`details` 包含 `msg_id` / `tx_id` / `from` /
+`to`（银行给出的 `reason` 一并记录），`trace_id` 为 `msg_id`。
+
+**对账报告**：`POST /reconcile` 的报告新增 `pain001_pending` 小节，
+列出所有未达到 `settled` 终态的指令（含被拒绝的——它的钱从未结算，
+操作员需要看到它去修正重发），即操作员的对账确认工作清单。
+
+**快照**：指令注册表随快照配置 round-trip（按 `msg_id` 确定性排序），
+恢复后的账本保留每条指令的回执/结算位置，可继续转移；损坏的快照
+记录（未知状态、重复 `msg_id`/`tx_id`）在导入时直接拒绝。
+
+`GET /metrics` 新增 `ledger_pain001_status_queries_total`、
+`ledger_pain001_receipts_total`、`ledger_pain001_settlements_total`。
+
+```bash
+# 查状态
+curl -s localhost:8080/exports/pain001/<msgid>/status | jq .state
+# 录银行回执
+curl -s -X POST localhost:8080/exports/pain001/<msgid>/receipts \
+  -H 'Content-Type: application/json' \
+  -d '{"receipts":[{"tx_id":"st1","status":"accepted"},{"tx_id":"st2","status":"rejected","reason":"AC03"}]}'
+# 对账确认（结算）
+curl -s -X POST localhost:8080/exports/pain001/<msgid>/settle \
+  -H 'x-ledger-actor: night-ops'
+```
+
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
 The inverse of the export above: it parses an OFX 2.x bank statement

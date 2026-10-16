@@ -736,6 +736,13 @@ type Ledger struct {
 	// idempotency indexes — it survives snapshots, because a restore
 	// that dropped it would silently un-export pre-restore transfers.
 	painTransfers map[string]PainTransfer
+	// painInstructions is the pain.001 payment-instruction lifecycle
+	// registry (see pain001_status.go): deterministic export MsgId ->
+	// the instruction's lifecycle record. Structural state like the
+	// idempotency indexes — it survives snapshots, because a restore
+	// that dropped it would lose every instruction's receipt/settlement
+	// position and the audit trail's from/to chain would restart.
+	painInstructions map[string]*PainInstruction
 	// accountIBANs is the opt-in IBAN registry (see SetAccountIBAN in
 	// pain001.go): the debtor/creditor identifiers pain.001 payment
 	// instructions name. Structural config like the account tags — it
@@ -900,6 +907,7 @@ func New(opts ...Option) *Ledger {
 		revalBaselines:              make(map[revalKey]revalBaseline),
 		ofxImports:                  make(map[string]*OFXImportReport),
 		painTransfers:               make(map[string]PainTransfer),
+		painInstructions:            make(map[string]*PainInstruction),
 		accountIBANs:                make(map[AccountID]AccountIBAN),
 		virtualAccounts:           make(map[AccountID]AccountID),
 		pruneInterval:               defaultKeyPruneInterval,

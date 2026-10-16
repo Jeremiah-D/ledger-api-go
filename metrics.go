@@ -33,6 +33,15 @@ type Metrics struct {
 	OFXImports atomic.Uint64
 	// Pain001Exports counts GET /exports/pain001 requests served.
 	Pain001Exports atomic.Uint64
+	// Pain001StatusQueries counts GET /exports/pain001/{msgid}/status
+	// requests served (LG-99).
+	Pain001StatusQueries atomic.Uint64
+	// Pain001Receipts counts POST /exports/pain001/{msgid}/receipts
+	// requests served, including rejected batches (LG-99).
+	Pain001Receipts atomic.Uint64
+	// Pain001Settlements counts POST /exports/pain001/{msgid}/settle
+	// reconcile-confirmation requests served (LG-99).
+	Pain001Settlements atomic.Uint64
 	// VerifyRequests counts GET /entries/verify requests served.
 	VerifyRequests atomic.Uint64
 	// AnchorsTotal counts POST /entries/anchor requests that signed a
@@ -470,6 +479,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /ofx/import OFX statement pre-posting imports served, including duplicates and rejected payloads.", m.OFXImports.Load())
 	writeCounter(&sb, "ledger_pain001_exports_total",
 		"Total GET /exports/pain001 ISO 20022 pain.001 payment instruction exports served.", m.Pain001Exports.Load())
+	writeCounter(&sb, "ledger_pain001_status_queries_total",
+		"Total GET /exports/pain001/{msgid}/status payment-instruction status queries served.", m.Pain001StatusQueries.Load())
+	writeCounter(&sb, "ledger_pain001_receipts_total",
+		"Total POST /exports/pain001/{msgid}/receipts bank-receipt batches served, including rejected batches.", m.Pain001Receipts.Load())
+	writeCounter(&sb, "ledger_pain001_settlements_total",
+		"Total POST /exports/pain001/{msgid}/settle reconcile-confirmation requests served.", m.Pain001Settlements.Load())
 	writeCounter(&sb, "ledger_verify_requests_total",
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
 	writeCounter(&sb, "ledger_anchors_total",

@@ -426,6 +426,15 @@ type snapshotConfigLine struct {
 	// turn previously exportable payments into fail-closed refusals
 	// with no explanation, so it round-trips like the account tags.
 	AccountIBANs []AccountIBAN `json:"account_ibans,omitempty"`
+	// PainInstructions carries the pain.001 payment-instruction
+	// lifecycle registry (see pain001_status.go), sorted by MsgId;
+	// absent in snapshots written before the lifecycle tracker
+	// existed. A restore that dropped it would lose every
+	// instruction's receipt/settlement position — the ledger would
+	// re-register old instructions as freshly exported and the audit
+	// trail's from/to chain would restart — so the registry
+	// round-trips like the idempotency indexes.
+	PainInstructions []PainInstruction `json:"pain_instructions,omitempty"`
 	// VirtualAccounts carries the van -> parent mappings (see
 	// RegisterVirtualAccount in virtual_account.go), sorted by VAN, and
 	// VirtualAccountVersion the mapping mutation counter; absent in
@@ -910,6 +919,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		ECLExposures:          l.eclExposureRecordsLocked(),
 		PainTransfers:         l.painTransfersLocked(),
 		AccountIBANs:          l.accountIBANsLocked(),
+		PainInstructions:      l.painInstructionsLocked(),
 		VirtualAccounts:       l.virtualAccountsLocked(),
 		VirtualAccountVersion: l.virtualAccountVersion,
 	}
@@ -1769,6 +1779,50 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("pain transfer %q with invalid currency %q", pt.TransferID, pt.Currency)
 		}
 	}
+	// The pain.001 payment-instruction lifecycle registry (see
+	// pain001_status.go): every record must name a non-empty MsgId, a
+	// known lifecycle state, non-negative totals, and a per-transfer
+	// table of unique transfer IDs in known states — a corrupt
+	// snapshot must not install an instruction whose states the
+	// transition map cannot move, because receipts against it would
+	// then fail against history the bank already confirmed.
+	seenPainMsgIDs := make(map[string]bool, len(cfg.PainInstructions))
+	for _, ins := range cfg.PainInstructions {
+		if ins.MsgID == "" {
+			return bad("pain instruction record with empty msg_id")
+		}
+		if seenPainMsgIDs[ins.MsgID] {
+			return bad("duplicate pain instruction record for %q", ins.MsgID)
+		}
+		seenPainMsgIDs[ins.MsgID] = true
+		if !pain001ValidState(ins.State) {
+			return bad("pain instruction %q with unknown state %q", ins.MsgID, ins.State)
+		}
+		if ins.TxCount < 0 || ins.CtrlSum < 0 {
+			return bad("pain instruction %q with negative tx_count/ctrl_sum", ins.MsgID)
+		}
+		seenTxIDs := make(map[string]bool, len(ins.Txs))
+		for _, tx := range ins.Txs {
+			if tx.TxID == "" {
+				return bad("pain instruction %q with empty tx_id", ins.MsgID)
+			}
+			if seenTxIDs[tx.TxID] {
+				return bad("pain instruction %q with duplicate tx_id %q", ins.MsgID, tx.TxID)
+			}
+			seenTxIDs[tx.TxID] = true
+			if !pain001ValidState(tx.State) {
+				return bad("pain instruction %q tx %q with unknown state %q", ins.MsgID, tx.TxID, tx.State)
+			}
+			if tx.AmountCents < 0 {
+				return bad("pain instruction %q tx %q with negative amount", ins.MsgID, tx.TxID)
+			}
+			if tx.Currency != "" {
+				if _, err := normalizeCurrency(tx.Currency); err != nil {
+					return bad("pain instruction %q tx %q with invalid currency %q", ins.MsgID, tx.TxID, tx.Currency)
+				}
+			}
+		}
+	}
 	// IBAN registry (see SetAccountIBAN in pain001.go): every record
 	// must name an account and carry a valid IBAN and BIC — a corrupt
 	// snapshot must not install an identifier the export would then
@@ -2248,6 +2302,20 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		reg.IBAN = normalizeIBAN(reg.IBAN)
 		reg.BIC = strings.ToUpper(reg.BIC)
 		l.accountIBANs[reg.Account] = reg
+	}
+	// The pain.001 payment-instruction lifecycle registry restores
+	// like the idempotency indexes: validated above, installed
+	// verbatim with the per-transfer states as the snapshot carried
+	// them, so a restored ledger keeps every instruction's
+	// receipt/settlement position. Snapshots written before the
+	// lifecycle tracker existed carry no records, which restores as
+	// an empty registry.
+	l.painInstructions = make(map[string]*PainInstruction, len(cfg.PainInstructions))
+	for _, ins := range cfg.PainInstructions {
+		rec := ins
+		rec.Txs = make([]Pain001TxState, len(ins.Txs))
+		copy(rec.Txs, ins.Txs)
+		l.painInstructions[ins.MsgID] = &rec
 	}
 	// The VAN mappings restore like the frozen-account list: validated
 	// above, installed verbatim, with the mapping version counter so a

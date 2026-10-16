@@ -281,7 +281,6 @@ func (l *Ledger) ExportPain001(opts Pain001ExportOptions) ([]byte, error) {
 	}
 
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 
 	var payments []pain001Payment
 	for _, pt := range l.painTransfersLocked() {
@@ -308,10 +307,12 @@ func (l *Ledger) ExportPain001(opts Pain001ExportOptions) ([]byte, error) {
 		}
 		debtorIBAN, ok := l.accountIBANs[pt.From]
 		if !ok {
+			l.mu.RUnlock()
 			return nil, fmt.Errorf("%w: debtor %q", ErrMissingAccountIBAN, pt.From)
 		}
 		creditorIBAN, ok := l.accountIBANs[pt.To]
 		if !ok {
+			l.mu.RUnlock()
 			return nil, fmt.Errorf("%w: creditor %q", ErrMissingAccountIBAN, pt.To)
 		}
 		payments = append(payments, pain001Payment{
@@ -323,6 +324,7 @@ func (l *Ledger) ExportPain001(opts Pain001ExportOptions) ([]byte, error) {
 
 	doc, msgID, txCount, ctrlSum, err := renderPain001(payments, opts, currency)
 	if err != nil {
+		l.mu.RUnlock()
 		return nil, err
 	}
 	details := map[string]any{
@@ -349,6 +351,16 @@ func (l *Ledger) ExportPain001(opts Pain001ExportOptions) ([]byte, error) {
 		Accounts:      pain001Accounts(payments),
 		Details:       details,
 	})
+	l.mu.RUnlock()
+	// Register the instruction's lifecycle record (see
+	// registerPainInstructionLocked in pain001_status.go): the write
+	// lock is taken here, after the read-only render, because the
+	// record write is the export's only mutation. Registration is
+	// idempotent in MsgId — a duplicate export re-derives the same
+	// MsgId and returns the existing record.
+	l.mu.Lock()
+	l.registerPainInstructionLocked(msgID, payments, txCount, ctrlSum, pain001DetailsCurrency(payments, currency))
+	l.mu.Unlock()
 	return doc, nil
 }
 
