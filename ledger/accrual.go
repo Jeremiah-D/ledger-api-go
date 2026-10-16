@@ -206,6 +206,12 @@ func (l *Ledger) accrue(kind string, expense, payable AccountID, amountCents, ca
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// LG-95: with business-day-only accruals, a non-business-day asof
+	// books nothing — interest accrues per business day, not per
+	// calendar day.
+	if err := l.accrualBusinessDayGateLocked(asof); err != nil {
+		return JournalEntry{}, false, err
+	}
 	if capCents > 0 {
 		total, err := l.accruedTotalLocked(expense, payable, kind, time.Time{}, asof)
 		if err != nil {

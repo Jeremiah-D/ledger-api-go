@@ -142,8 +142,13 @@ type TermDeposit struct {
 	TermDays       int64     `json:"term_days"`
 	OpenedAt       time.Time `json:"opened_at"`
 	MaturesAt      time.Time `json:"matures_at"`
-	IdempotencyKey string    `json:"idempotency_key,omitempty"`
-	Status         string    `json:"status"`
+	// BusinessDayMaturity opts into business-day settlement (LG-95): when
+	// true and MaturesAt lands on a non-business day, OpenTermDeposit
+	// moves it to the next business day. The stored MaturesAt is the
+	// contractual date — MatureTermDeposit needs no special case.
+	BusinessDayMaturity bool      `json:"business_day_maturity,omitempty"`
+	IdempotencyKey      string    `json:"idempotency_key,omitempty"`
+	Status              string    `json:"status"`
 }
 
 // TermDepositWithdrawal is the receipt of an early withdrawal: the
@@ -264,6 +269,13 @@ func (l *Ledger) OpenTermDeposit(t TermDeposit) (TermDeposit, bool, error) {
 		t.OpenedAt = now
 	}
 	t.MaturesAt = t.OpenedAt.Add(time.Duration(t.TermDays) * 24 * time.Hour)
+	// LG-95: with business-day settlement, a maturity landing on a
+	// non-business day settles on the next business day. The adjusted
+	// date is stored as the contractual MaturesAt, so maturity checks,
+	// interest accrual, and snapshots all see one consistent date.
+	if t.BusinessDayMaturity && !l.businessCalendar.IsBusinessDay(t.MaturesAt) {
+		t.MaturesAt = l.businessCalendar.NextBusinessDay(t.MaturesAt)
+	}
 	t.Status = TermDepositActive
 
 	l.maybePruneIdempotencyKeys(now)
@@ -382,6 +394,12 @@ func (l *Ledger) AccrueTermInterest(id string, asof time.Time) (JournalEntry, bo
 	}
 	if asof.IsZero() {
 		asof = time.Now()
+	}
+	// LG-95: with business-day-only accruals, term-deposit interest
+	// follows the same rule as AccrueInterest — no booking on
+	// non-business days.
+	if err := l.accrualBusinessDayGateLocked(asof); err != nil {
+		return JournalEntry{}, false, err
 	}
 	if asof.After(td.MaturesAt) {
 		return JournalEntry{}, false, ErrTermDepositMatured

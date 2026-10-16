@@ -126,6 +126,12 @@ type TransferSchedule struct {
 	// Interval is the fixed cadence between runs. Serialized as a Go
 	// duration string ("24h") — see MarshalJSON.
 	Interval time.Duration `json:"interval"`
+	// BusinessDayCadence opts into business-day settlement (LG-95): after
+	// firing, NextRunAt advances T+N business days — N is the interval in
+	// whole days (sub-day intervals advance one business day) — instead of
+	// a fixed duration, so runs never land on a holiday. Missed runs are
+	// still skipped, not caught up (see the package doc).
+	BusinessDayCadence bool `json:"business_day_cadence,omitempty"`
 	// NextRunAt is the nominal due time of the next run. A schedule
 	// created with a past NextRunAt fires on the first sweep.
 	NextRunAt time.Time `json:"next_run_at"`
@@ -408,6 +414,9 @@ func (l *Ledger) CreateTransferSchedule(s TransferSchedule) (TransferSchedule, b
 		IdempotencyKey: s.IdempotencyKey,
 		Status:         s.Status,
 		CreatedAt:      s.CreatedAt,
+		// LG-95: business-day cadence rides the schedule record so
+		// snapshots and replays keep firing on business days.
+		BusinessDayCadence: s.BusinessDayCadence,
 	}
 	l.schedules[s.ID] = rec
 	if s.IdempotencyKey != "" {
@@ -660,13 +669,34 @@ func (l *Ledger) fireSchedule(s TransferSchedule, now time.Time) ScheduleRun {
 	// before this point leaves RunSeq naming the unfinalized run, and
 	// the next sweep retries it under the same idempotency key.
 	sched.RunSeq = s.RunSeq
-	// Advance NextRunAt past now arithmetically (no spin when far
-	// behind): the next run lands one interval after the last missed
-	// nominal run, and every nominal run in between counts as skipped.
-	elapsed := now.Sub(sched.NextRunAt) // >= 0: the schedule was due
-	whole := elapsed / s.Interval        // missed nominal runs, >= 0
-	run.SkippedRuns = int64(whole)
-	sched.NextRunAt = now.Add(s.Interval - elapsed%s.Interval)
+	if s.BusinessDayCadence {
+		// LG-95: advance T+N business days from the nominal due time.
+		// N is the interval in whole days; a sub-day interval advances
+		// one business day. Missed nominals are skipped exactly like
+		// the fixed-cadence path below — the loop walks nominal to
+		// nominal, so a far-behind schedule cannot spin: each step
+		// moves at least one business day forward.
+		days := int(s.Interval.Hours() / 24)
+		if days < 1 {
+			days = 1
+		}
+		next := sched.NextRunAt
+		whole := 0
+		for !next.After(now) {
+			next = l.businessCalendar.AddBusinessDays(next, days)
+			whole++
+		}
+		run.SkippedRuns = int64(whole) - 1
+		sched.NextRunAt = next
+	} else {
+		// Advance NextRunAt past now arithmetically (no spin when far
+		// behind): the next run lands one interval after the last missed
+		// nominal run, and every nominal run in between counts as skipped.
+		elapsed := now.Sub(sched.NextRunAt) // >= 0: the schedule was due
+		whole := elapsed / s.Interval        // missed nominal runs, >= 0
+		run.SkippedRuns = int64(whole)
+		sched.NextRunAt = now.Add(s.Interval - elapsed%s.Interval)
+	}
 	if !sched.EndsAt.IsZero() && sched.NextRunAt.After(sched.EndsAt) {
 		sched.Status = ScheduleCompleted
 	}

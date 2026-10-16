@@ -311,6 +311,17 @@ type Ledger struct {
 	// currency; structural config, like frozen and noOverdraft.
 	dailyLimits  map[dailyLimitKey]int64
 	dailyOutflow map[dailyLimitKey]int64
+	// businessCalendar is the ledger's holiday calendar (see
+	// businessday.go): weekend days plus the custom holiday table, with
+	// a version counter bumped on every change. Structural config, like
+	// dailyLimits — calendar changes do not bump the journal version and
+	// survive disaster-recovery snapshots.
+	businessCalendar BusinessDayCalendar
+	// accrualBusinessDaysOnly restricts interest and fee accruals to
+	// business days when true (see SetAccrualBusinessDaysOnly): a
+	// non-business-day asof is rejected with ErrNotBusinessDay. Off by
+	// default. Structural config, like businessCalendar.
+	accrualBusinessDaysOnly bool
 	// largeTxThresholds maps an ISO 4217 currency to the daily
 	// large-transaction reporting threshold in that currency's cents (see
 	// ctr.go): an account's UTC-day inflow or outflow in that currency
@@ -799,6 +810,7 @@ func New(opts ...Option) *Ledger {
 		largeTxThresholds:    make(map[string]int64),
 		largeTxReportCurrency: DefaultCurrency,
 		largeTxReports:       make(map[largeTxReportKey]LargeTxReport),
+		businessCalendar:    DefaultBusinessDayCalendar(),
 		budgets:              make(map[budgetKey]int64),
 		monthlySpend:         make(map[monthlySpendKey]int64),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch),

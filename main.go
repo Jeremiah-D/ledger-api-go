@@ -1368,6 +1368,10 @@ type createTransferScheduleRequest struct {
 	// EndsAt is RFC3339, optional: the plan completes once the next run
 	// would fall after it.
 	EndsAt         string `json:"ends_at"`
+	// BusinessDayCadence opts into business-day settlement (LG-95):
+	// after firing, NextRunAt advances T+N business days instead of a
+	// fixed duration.
+	BusinessDayCadence bool `json:"business_day_cadence"`
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
@@ -1429,6 +1433,7 @@ func (s *server) handleCreateTransferSchedule(w http.ResponseWriter, r *http.Req
 		NextRunAt:      nextRunAt,
 		EndsAt:         endsAt,
 		IdempotencyKey: req.IdempotencyKey,
+		BusinessDayCadence: req.BusinessDayCadence,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -1826,6 +1831,10 @@ type openTermDepositRequest struct {
 	TermDays       int64            `json:"term_days"`
 	RateBps        int64            `json:"rate_bps"`
 	IdempotencyKey string           `json:"idempotency_key"`
+	// BusinessDayMaturity opts into business-day settlement (LG-95): a
+	// MaturesAt landing on a non-business day moves to the next
+	// business day.
+	BusinessDayMaturity bool `json:"business_day_maturity"`
 }
 
 // handleOpenTermDeposit implements POST /term-deposits: locks
@@ -1857,13 +1866,14 @@ func (s *server) handleOpenTermDeposit(w http.ResponseWriter, r *http.Request) {
 		id = newID()
 	}
 	td, duplicate, err := s.ledgerFor(r).OpenTermDeposit(ledger.TermDeposit{
-		ID:             id,
-		Account:        req.Account,
-		AmountCents:    req.AmountCents,
-		Currency:       req.Currency,
-		TermDays:       req.TermDays,
-		RateBps:        req.RateBps,
-		IdempotencyKey: req.IdempotencyKey,
+		ID:                id,
+		Account:           req.Account,
+		AmountCents:       req.AmountCents,
+		Currency:          req.Currency,
+		TermDays:          req.TermDays,
+		RateBps:           req.RateBps,
+		IdempotencyKey:    req.IdempotencyKey,
+		BusinessDayMaturity: req.BusinessDayMaturity,
 	})
 	if err != nil {
 		if errors.Is(err, ledger.ErrAccountClosed) {
@@ -4727,6 +4737,37 @@ func main() {
 	if raw := os.Getenv("LEDGER_LARGE_TX_REPORT_CURRENCY"); raw != "" {
 		opts = append(opts, ledger.WithLargeTxReportCurrency(raw))
 		log.Printf("ledger-api-go: large-transaction report currency = %s", raw)
+	}
+
+	// LEDGER_BUSINESS_DAY_WEEKEND and LEDGER_BUSINESS_DAY_HOLIDAYS
+	// configure the business-day calendar (see
+	// ledger.ParseBusinessDayWeekend / ParseBusinessDayHolidays, e.g.
+	// WEEKEND="Fri,Sat" HOLIDAYS="2026-01-01,2026-10-01"): the weekly
+	// rest days plus extra non-business dates. Unset means the default
+	// Saturday/Sunday calendar with no custom holidays. Invalid values
+	// fail the startup fast (log.Fatal), like every other calendar
+	// input — interest accrual and schedule settlement must never run
+	// on a silently wrong calendar.
+	if rawW := os.Getenv("LEDGER_BUSINESS_DAY_WEEKEND"); rawW != "" || os.Getenv("LEDGER_BUSINESS_DAY_HOLIDAYS") != "" {
+		weekend, err := ledger.ParseBusinessDayWeekend(rawW)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		holidays, err := ledger.ParseBusinessDayHolidays(os.Getenv("LEDGER_BUSINESS_DAY_HOLIDAYS"))
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		opts = append(opts, ledger.WithBusinessDayCalendar(weekend, holidays))
+		log.Printf("ledger-api-go: business-day calendar configured (weekend=%q holidays=%d)", rawW, len(holidays))
+	}
+
+	// LEDGER_ACCRUAL_BUSINESS_DAYS_ONLY makes interest and fee accruals
+	// business-day-only ("1"/"true"): a non-business-day asof is
+	// rejected instead of booked. Unset (or anything else) means
+	// calendar-day accruals, the historical behavior.
+	if raw := strings.ToLower(strings.TrimSpace(os.Getenv("LEDGER_ACCRUAL_BUSINESS_DAYS_ONLY"))); raw == "1" || raw == "true" {
+		opts = append(opts, ledger.WithAccrualBusinessDaysOnly(true))
+		log.Printf("ledger-api-go: accruals restricted to business days")
 	}
 
 	// LEDGER_REVIEW_EXPIRY bounds how long a pending review may wait for

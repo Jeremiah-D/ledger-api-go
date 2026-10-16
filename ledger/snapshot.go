@@ -231,6 +231,15 @@ type snapshotConfigLine struct {
 	// SetLargeTxReportCurrency); absent in snapshots written before it
 	// existed, which import as the default (USD).
 	LargeTxReportCurrency string `json:"large_tx_report_currency,omitempty"`
+	// BusinessDayCalendar carries the holiday calendar and its version
+	// (see SetBusinessDayCalendar); absent in snapshots written before
+	// business-day support existed, which import as the default
+	// Saturday/Sunday calendar.
+	BusinessDayCalendar *BusinessDayCalendar `json:"business_day_calendar,omitempty"`
+	// AccrualBusinessDaysOnly carries the business-day-only accrual flag
+	// (see SetAccrualBusinessDaysOnly); absent in snapshots written
+	// before business-day support existed (defaults to false).
+	AccrualBusinessDaysOnly bool `json:"accrual_business_days_only,omitempty"`
 	// Budgets carries the monthly spend budgets (see SetAccountBudget);
 	// absent in snapshots written before budgets existed. Like the daily
 	// limits, the accumulated per-month spend counters are deliberately
@@ -838,6 +847,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		DailyLimits:           l.dailyLimitsLocked(),
 		LargeTxThresholds:     l.largeTxThresholdsLocked(),
 		LargeTxReportCurrency: l.largeTxReportCurrency,
+		BusinessDayCalendar:   l.businessCalendarSnapshotLocked(),
+		AccrualBusinessDaysOnly: l.accrualBusinessDaysOnly,
 		Budgets:               l.budgetsLocked(),
 		Denylist:              l.denylistLocked(),
 		FXRates:               l.fxRatesLocked(),
@@ -1882,6 +1893,17 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		l.largeTxThresholds[vt.currency] = vt.threshold
 	}
 	l.largeTxReportCurrency = reportCurrency
+	// The business-day calendar restores verbatim — table and version —
+	// so a restored ledger runs the exact holidays the original did.
+	// Absent in snapshots written before business-day support existed,
+	// which keep the default Saturday/Sunday calendar.
+	if cfg.BusinessDayCalendar != nil {
+		if err := validateBusinessDayCalendarSnapshot(cfg.BusinessDayCalendar); err != nil {
+			return bad("invalid business-day calendar: %v", err)
+		}
+		l.businessCalendar = *cfg.BusinessDayCalendar
+		l.accrualBusinessDaysOnly = cfg.AccrualBusinessDaysOnly
+	}
 	// Monthly spend budgets restore like the daily outflow limits: the
 	// accumulated per-month spend counters are deliberately not
 	// restored (fail-open for the remainder of the month), only the
