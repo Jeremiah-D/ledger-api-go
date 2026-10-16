@@ -1282,6 +1282,35 @@ curl -s localhost:8080/metrics | grep balance_watch
 # ledger_balance_watch_breaches_total 1
 ```
 
+### Intraday liquidity positions (`GET /liquidity/intraday`)
+
+Per-(account, currency) read-only forecast of one UTC day's net cash
+position, for treasury / liquidity operations: the day's journaled
+inflows and outflows (debit/credit legs), the outflow reserved by
+authorization holds still outstanding at the end of the day, the nominal
+transfer-schedule runs firing that day (an overdue schedule contributes
+its one catch-up run, never a backfill of the missed gap), and the
+principal plus accrued interest of term deposits maturing that day. The
+report is strictly read-only — no journal rows, no version bump, no
+balance changes. Query with `?date=YYYY-MM-DD` (defaults to today); the
+`POST /reconcile` report carries the same table as `intraday_liquidity`
+for the report's day.
+
+A per-(account, currency) low-liquidity floor is configured with the
+`ledger.SetLiquidityAlertThreshold` / `ClearLiquidityAlertThreshold` Go
+API (structural config, like balance watches: no version bump, snapshot
+round-tripped, CRUD audited). `ledger.EvaluateLiquidityAlerts` compares
+each configured floor against the day's net position and emits one
+structured `low_liquidity_alert` audit event per breach through the same
+alert channel as the balance watches — advisory, never a rejection,
+edge-triggered with silent re-arm on recovery — and bumps
+`ledger_low_liquidity_alerts_total`.
+
+```bash
+curl -s "localhost:8080/liquidity/intraday?date=2026-10-15" | head -c 400
+# {"date":"2026-10-15","generated_at":"...","positions":[{"account":"cust", ...
+```
+
 ### Balance-change notification hooks
 
 Opt-in per-account balance-change callbacks for downstream fintech

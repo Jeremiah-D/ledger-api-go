@@ -361,6 +361,18 @@ type Ledger struct {
 	// dailyLimits.
 	balanceWatches       map[balanceWatchKey]BalanceWatch
 	balanceWatchBreached map[balanceWatchKey]watchBreachState
+	// liquidityThresholds maps (account, currency) to the account's
+	// low-liquidity alert floor for the day's net position (see
+	// liquidity.go): an opt-in threshold in cents. liquidityBreached
+	// marks the (account, currency) pairs currently in breach (silenced
+	// until the net position recovers at or above the floor). An
+	// evaluation that finds a position below the floor emits one
+	// low_liquidity_alert audit event and bumps liquidityAlertCount.
+	// Advisory only — never a rejection. Opt-in per account and
+	// currency; structural config, like balanceWatches.
+	liquidityThresholds map[liquidityThresholdKey]LiquidityAlertThreshold
+	liquidityBreached   map[liquidityThresholdKey]bool
+	liquidityAlertCount uint64
 	// tenantID is the tenant namespace this ledger belongs to (see
 	// tenant.go): the empty string is the default tenant. It is stamped
 	// onto every audit-log and outbox event the ledger emits, so the
@@ -843,6 +855,8 @@ func New(opts ...Option) *Ledger {
 		monthlySpend:         make(map[monthlySpendKey]int64),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch),
 		balanceWatchBreached: make(map[balanceWatchKey]watchBreachState),
+		liquidityThresholds:  make(map[liquidityThresholdKey]LiquidityAlertThreshold),
+		liquidityBreached:    make(map[liquidityThresholdKey]bool),
 		settlementChannels:   make(map[AccountID]string),
 		parents:              make(map[AccountID]AccountID),
 		transferKeys:         make(map[string][]string),

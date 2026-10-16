@@ -317,6 +317,12 @@ type Metrics struct {
 	// the ledger package. The alert is advisory — it never rejects a
 	// posting — so this counter measures alert volume, not rejections.
 	BalanceWatchBreaches atomic.Uint64
+	// LowLiquidityAlerts counts low-liquidity alert events emitted by
+	// the ledger (see ledger.EvaluateLiquidityAlerts). It is synced from
+	// the ledger on every GET /metrics scrape, like the audit-log
+	// counters. The alert is advisory — it never rejects a posting —
+	// so this counter measures alert volume, not rejections.
+	LowLiquidityAlerts atomic.Uint64
 	// TenantsTotal reports how many tenant ledgers are provisioned in
 	// the process (see ledger.TenantStore), synced on every GET /metrics
 	// scrape. A single-tenant deployment reports 1 (the default tenant).
@@ -595,6 +601,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_balance_watch_breaches_total",
 		"Total balance-threshold alert events emitted (advisory; never a rejection).",
 		m.BalanceWatchBreaches.Load())
+	writeCounter(&sb, "ledger_low_liquidity_alerts_total",
+		"Total low-liquidity alert events emitted (advisory; never a rejection).",
+		m.LowLiquidityAlerts.Load())
 	writeCounter(&sb, "ledger_tenants_total",
 		"Number of provisioned tenant ledgers in the process (1 for a single-tenant deployment).",
 		m.TenantsTotal.Load())

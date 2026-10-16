@@ -4257,6 +4257,24 @@ func (s *server) handleAging(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleIntradayLiquidity serves the read-only intraday liquidity
+// forecast (see ledger.IntradayLiquidity) for one UTC day:
+// GET /liquidity/intraday?date=YYYY-MM-DD. An absent date defaults to
+// today. A malformed date is a 400.
+func (s *server) handleIntradayLiquidity(w http.ResponseWriter, r *http.Request) {
+	dateStr := r.URL.Query().Get("date")
+	date := time.Now()
+	if dateStr != "" {
+		d, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": `date must be "YYYY-MM-DD"`})
+			return
+		}
+		date = d
+	}
+	writeJSON(w, http.StatusOK, s.ledgerFor(r).IntradayLiquidity(date))
+}
+
 func newRouter(l *ledger.Ledger) http.Handler {
 	return newServer(l).handler()
 }
@@ -4319,6 +4337,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /compliance/large-tx-reports", s.handleLargeTxReports)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
 	mux.HandleFunc("GET /aging", s.handleAging)
+	mux.HandleFunc("GET /liquidity/intraday", s.handleIntradayLiquidity)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
 	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)
 	mux.HandleFunc("POST /term-deposits", s.handleOpenTermDeposit)
@@ -4389,6 +4408,7 @@ func (s *server) handler() http.Handler {
 		// reports exactly what it always did.
 		var auditWritten, auditDropped, outboxWritten, outboxDropped uint64
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
+		var lowLiqAlerts uint64
 		var vanAttributions uint64
 		var fxStaleAlerts, fxExpiredAlerts, fxOverridden uint64
 		var fxRefreshes, fxMoves, fxProviderFails uint64
@@ -4406,6 +4426,7 @@ func (s *server) handler() http.Handler {
 				outboxDropped += dropped
 			}
 			breaches += l.BalanceWatchBreachCount()
+			lowLiqAlerts += l.LiquidityAlertCount()
 			ruleLegs += l.RuleLegsCommitted()
 			vanAttributions += l.VANAttributionCount()
 			freezeReleases += l.FrozenAutoReleases()
@@ -4429,6 +4450,9 @@ func (s *server) handler() http.Handler {
 		// The balance-watch breach counter lives in the ledger too (the
 		// alert fires inside Post/Transfer/..., not in a handler).
 		s.metrics.BalanceWatchBreaches.Store(breaches)
+		// The low-liquidity alert counter likewise lives in the ledger:
+		// alerts fire inside EvaluateLiquidityAlerts, not in a handler.
+		s.metrics.LowLiquidityAlerts.Store(lowLiqAlerts)
 		// The rules-engine leg counter likewise lives in the ledger: the
 		// legs commit inside Post, not in a handler.
 		s.metrics.JournalRuleLegsTotal.Store(ruleLegs)

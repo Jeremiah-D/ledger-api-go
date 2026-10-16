@@ -300,6 +300,15 @@ type ReconciliationReport struct {
 	// provision-coverage metric risk tooling watches. Currencies are
 	// never summed together — each currency's coverage is its own row.
 	ECLCoverage []ECLCoverageRow `json:"ecl_coverage"`
+	// IntradayLiquidity lists every (account, currency) intraday
+	// liquidity position for the report's UTC day (see
+	// IntradayLiquidity), sorted by (account, currency): the day's
+	// booked flows, the outflow reserved by outstanding holds, the
+	// nominal transfer-schedule firings, the term-deposit maturities,
+	// the net position, and the low-liquidity threshold state. Risk
+	// tooling reads this to know which accounts the day's committed
+	// and forecast flows leave thin on cash.
+	IntradayLiquidity []LiquidityPosition `json:"intraday_liquidity"`
 }
 
 // TermDepositReport is one term deposit's Reconcile disclosure: the
@@ -640,6 +649,11 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		AccountTags:             l.accountTagsLocked(),
 		TermDeposits:            l.termDepositReportsLocked(),
 		CreditLines:             l.creditLineReportsLocked(),
+		// LG-98: the report discloses the day's intraday liquidity
+		// position table — the same read-only forecast the
+		// /liquidity/intraday endpoint serves, so the reconciliation
+		// record carries the day's cash-position view.
+		IntradayLiquidity: l.intradayLiquidityLocked(now).Positions,
 	}
 	report.ECLExposures, report.ECLCoverage = l.eclReportsLocked()
 

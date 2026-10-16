@@ -304,6 +304,12 @@ type snapshotConfigLine struct {
 	// older snapshots restore their low-side alerts, but exports never
 	// write it anymore.
 	LowBalanceThresholds []LowBalanceThreshold `json:"low_balance_thresholds,omitempty"`
+	// LiquidityAlertThresholds carries the low-liquidity alert floors
+	// (see SetLiquidityAlertThreshold); absent in snapshots written
+	// before LG-98. The alert state (breach flags) is re-derived from
+	// the restored ledger on import — a restore must not backfire
+	// stale alerts.
+	LiquidityAlertThresholds []LiquidityAlertThreshold `json:"liquidity_alert_thresholds,omitempty"`
 	// ReviewThresholds carries the per-account review thresholds (see
 	// SetReviewThreshold); absent in snapshots written before LG-42.
 	ReviewThresholds []ReviewThreshold `json:"review_thresholds,omitempty"`
@@ -882,6 +888,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FXRateTableSnapshots:  l.fxRateTableSnapshotsLocked(),
 		ClosedPeriods:         l.closedPeriodsLocked(),
 		BalanceWatches:        l.balanceWatchesLocked(),
+		LiquidityAlertThresholds: l.liquidityThresholdsLocked(),
 		ReviewThresholds:      l.reviewThresholdsLocked(),
 		ReviewThresholdCents:  l.reviewThreshold,
 		SettlementChannels:    l.settlementChannelsLocked(),
@@ -2257,6 +2264,26 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// so the first posting after the restore does not backfire a stale
 	// alert. Silent — a restore emits no events and bumps no counters.
 	l.recomputeBalanceWatchBreachesLocked()
+	// Re-derive the low-liquidity breach state the same way: an
+	// (account, currency) whose restored net position for today is
+	// already below its floor counts as breached, so the first
+	// evaluation after the restore does not backfire a stale alert.
+	// Thresholds written before LG-98 are absent and restore as empty.
+	for _, th := range cfg.LiquidityAlertThresholds {
+		if th.Account == "" {
+			return bad("liquidity alert threshold with empty account")
+		}
+		cur, err := normalizeCurrency(th.Currency)
+		if err != nil {
+			return bad("bad liquidity alert threshold currency %q: %v", th.Currency, err)
+		}
+		l.liquidityThresholds[liquidityThresholdKey{account: th.Account, currency: cur}] = LiquidityAlertThreshold{
+			Account:        th.Account,
+			Currency:       cur,
+			ThresholdCents: th.ThresholdCents,
+		}
+	}
+	l.recomputeLiquidityBreachesLocked()
 	return nil
 }
 
