@@ -904,6 +904,30 @@ reversals debit the liability, which a strict chart rejects with
 route through a dedicated contra account; accounts that book reversals
 stay unregistered.
 
+#### Interest capitalization (Go API: `CapitalizeInterest`)
+
+The compound-interest step: moves the outstanding accrued interest for
+an `(interest, expense, payable)` triple into the principal account —
+debit the interest payable, credit the principal — so the next accrual
+round prices off the larger principal. The entry is an ordinary journal
+row (own audit-chain link, version bump, full `Post` gates, no rules
+cascade, no dual-control — like accruals) and emits an
+`interest_capitalized` audit event. The entry ID is deterministic —
+`accrual-capitalization/interest/<expense>/<payable>/<principal>/<YYYY-MM-DD>` —
+so re-running the day's capitalization is idempotent. `AccruedTotal`
+nets out capitalized amounts: after capitalization the triple's
+outstanding total is zero, and capitalizing frees cap room for new
+accruals. Reversing a capitalization (`ReverseAccrual` accepts
+capitalization IDs) restores the payable and the total. Capitalizing a
+triple with zero outstanding accrual is rejected with
+`ErrNothingToCapitalize`; unlike the daily accruals, capitalization is
+not subject to the business-day gate — it is a period-end adjustment.
+
+```go
+// Move 3 days of accrued interest into the loan principal.
+l.CapitalizeInterest("interest-expense", "interest-payable", "loan-principal", asof)
+```
+
 ### Business-day calendar (LG-95)
 
 A configurable holiday calendar for interest accrual and settlement

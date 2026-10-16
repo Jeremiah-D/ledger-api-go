@@ -125,7 +125,10 @@ func checkAccrualAccounts(expense, payable AccountID) error {
 // capCents caps the cumulative net accrual for the (interest, expense,
 // payable) triple: when the already-accrued total plus this run would
 // exceed it, nothing is booked and ErrAccrualCapExceeded is returned.
-// Zero disables capping; negative is rejected with ErrInvalidAccrualCap.
+// The total is net of reversals and capitalizations (see
+// CapitalizeInterest): capitalizing accrued interest into principal
+// frees cap room for new accruals. Zero disables capping; negative is
+// rejected with ErrInvalidAccrualCap.
 //
 // The call is idempotent per calendar day: re-running the same day
 // returns the original entry with duplicate == true. The entry runs the
@@ -237,10 +240,13 @@ func (l *Ledger) accrue(kind string, expense, payable AccountID, amountCents, ca
 
 // AccruedTotal returns the cumulative net accrual for one (kind,
 // expense, payable) triple over [since, until): the sum of every
-// accrual entry in the window minus the reversals of those accruals.
-// A zero since includes all history. Amounts are int64 cents in the
-// default currency; the sum is overflow-checked — a total that does not
-// fit int64 is a data error, not a wrappable number.
+// accrual entry in the window, minus the reversals of those accruals,
+// minus the amounts capitalized into principal (see
+// CapitalizeInterest in capitalize.go — after a capitalization the
+// outstanding total for the triple is zero). A zero since includes all
+// history. Amounts are int64 cents in the default currency; the sum is
+// overflow-checked — a total that does not fit int64 is a data error,
+// not a wrappable number.
 func (l *Ledger) AccruedTotal(expense, payable AccountID, kind string, since, until time.Time) (int64, error) {
 	if !validAccrualKind(kind) {
 		return 0, ErrInvalidAccrualKind
@@ -283,6 +289,31 @@ func (l *Ledger) accruedTotalLocked(expense, payable AccountID, kind string, sin
 			}
 		}
 	}
+	// A capitalization of this triple (see CapitalizeInterest in
+	// capitalize.go) moves the accrued amount into principal: it nets
+	// out of the outstanding total exactly like a reversal. Only the
+	// interest kind can be capitalized, so this loop is a no-op for
+	// fees. A reversed capitalization restores the payable balance —
+	// the mirror entry cancels the capitalization, so a capitalization
+	// with a reversal row is skipped here.
+	if kind == AccrualKindInterest {
+		for id, e := range l.entries {
+			exp, pay, _, ok := parseCapitalizationID(id)
+			if !ok || exp != expense || pay != payable {
+				continue
+			}
+			if e.CreatedAt.Before(since) || !e.CreatedAt.Before(until) {
+				continue
+			}
+			if _, reversed := l.entries[id+"/reversal"]; reversed {
+				continue
+			}
+			total, ok = addCents(total, -e.AmountCents)
+			if !ok {
+				return 0, errors.New("ledger: accrued total overflows int64")
+			}
+		}
+	}
 	return total, nil
 }
 
@@ -293,6 +324,11 @@ func (l *Ledger) accruedTotalLocked(expense, payable AccountID, kind string, sin
 // existing reversal with duplicate == true. asof sets the reversal's
 // timestamp; a zero asof means now.
 //
+// It also reverses an interest capitalization (see CapitalizeInterest
+// in capitalize.go — capitalization IDs share the "accrual" prefix
+// family): the mirror entry debits the principal and credits the
+// payable, restoring the outstanding accrued total.
+//
 // The reversal runs the full Post gate order and, like every accrual,
 // never fires journal rules and never enters dual-control review. Note
 // the chart-of-accounts interaction: the reversal debits the payable
@@ -301,7 +337,7 @@ func (l *Ledger) accruedTotalLocked(expense, payable AccountID, kind string, sin
 // against a strictly-typed chart must route through a dedicated contra
 // account instead.
 func (l *Ledger) ReverseAccrual(accrualID string, asof time.Time) (JournalEntry, bool, error) {
-	if !strings.HasPrefix(accrualID, "accrual/") {
+	if !strings.HasPrefix(accrualID, "accrual/") && !strings.HasPrefix(accrualID, "accrual-capitalization/") {
 		return JournalEntry{}, false, ErrAccrualNotFound
 	}
 	if strings.HasSuffix(accrualID, "/reversal") {
