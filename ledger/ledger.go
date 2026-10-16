@@ -757,6 +757,12 @@ type Ledger struct {
 	// survives snapshots, because a restore that dropped it would
 	// re-import the same statement as new.
 	ofxImports      map[string]*OFXImportReport
+	// camt053Imports is the ISO 20022 camt.053 statement import registry
+	// (see camt053.go): document SHA-256 (hex) -> import report, for
+	// duplicate-import idempotency. Structural state like the OFX
+	// index — it survives snapshots, because a restore that dropped it
+	// would re-import the same statement as new.
+	camt053Imports   map[string]*CAMT053ImportReport
 	// painTransfers is the ISO 20022 pain.001 export registry (see
 	// pain001.go): transfer ID -> transfer principal for every
 	// same-currency transfer (plain and split chunks), in booking order
@@ -936,6 +942,7 @@ func New(opts ...Option) *Ledger {
 		journalRules:                make(map[string]JournalRule),
 		revalBaselines:              make(map[revalKey]revalBaseline),
 		ofxImports:                  make(map[string]*OFXImportReport),
+		camt053Imports:              make(map[string]*CAMT053ImportReport),
 		painTransfers:               make(map[string]PainTransfer),
 		painInstructions:            make(map[string]*PainInstruction),
 		accountIBANs:                make(map[AccountID]AccountIBAN),

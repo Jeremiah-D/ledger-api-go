@@ -2165,6 +2165,49 @@ Semantics, stated so operators can trust them:
   `400`. There is no special auth, like the export endpoint.
   `GET /metrics` counts imports as `ledger_ofx_imports_total`.
 
+### `POST /camt053/import` — ISO 20022 camt.053 statement import
+
+The camt.053 counterpart of the OFX import above: it parses an ISO
+20022 `BankToCustomerStatement` document (any `camt.053.001.xx`
+namespace version) and returns the same kind of **pre-posting
+report** — every `Ntry` entry as a `DraftEntry` the operator reviews,
+matched against the account's journaled rows with the same rule (one
+matcher serves both formats). Go: `ledger.ParseCAMT053` /
+`ledger.ImportCAMT053`.
+
+```bash
+curl -s -X POST localhost:8080/camt053/import \
+  -H 'Content-Type: application/json' \
+  -d '{"account":"DE89370400440532013000","camt053":"<Document>...</Document>"}'
+# 200 {"document_sha256":"…","account":"DE89370400440532013000",
+#      "items":[{"transaction":{...,"direction":"in","amount_cents":25000,...},
+#                "draft":{"id":"camt053/STMT-2026-10/1","debit_account":"DE89370400440532013000",...},
+#                "status":"matched","matched_entry_id":"e1"}, ...],
+#      "matched":1,"mismatched":0,"unmatched":2,"duplicate":false}
+```
+
+Semantics:
+
+- **Nothing is posted.** Same draft-only contract as the OFX import —
+  no journal rows, no hash chain, no version bump.
+- **Direction** comes from `CdtDbtInd`: `CRDT` means the account was the
+  debit leg — money in (`"direction":"in"`); `DBIT` means it was the
+  credit leg — money out. Amounts parse as exact decimals to cents, no
+  floats; the booking date reads `BookgDt/Dt` (else `BookgDt/DtTm`,
+  else the value date), normalized to UTC. Multi-currency statements
+  match per entry currency — the matcher isolates currencies, it never
+  converts.
+- **Matching** — same rule as OFX: effective rows only, same currency,
+  equal `|amount|`, `CreatedAt` within ±24h of the booking date.
+- **Idempotency** — the ledger keeps every import report keyed by the
+  document's SHA-256; a re-upload returns the original report with
+  `duplicate:true`. The registry survives disaster-recovery snapshots.
+- A statement naming a different account than the import target, an
+  entry missing its amount/currency/booking date, a malformed
+  document, a missing account, or an empty document is a `400`. There
+  is no special auth, like the export endpoint.
+  `GET /metrics` counts imports as `ledger_camt053_imports_total`.
+
 ### `GET /accounts/{id}/statement` — JSON account statement
 
 A bank-style account statement for one account over the half-open
@@ -3419,6 +3462,9 @@ curl -s localhost:8080/metrics
 - `ledger_ofx_imports_total` — `POST /ofx/import` OFX statement
   pre-posting imports served, including duplicates and rejected
   payloads.
+- `ledger_camt053_imports_total` — `POST /camt053/import` camt.053
+  statement pre-posting imports served, including duplicates and
+  rejected payloads.
 - `ledger_statement_queries_total` — `GET /accounts/{id}/statement`
   JSON account statement requests served.
 - `ledger_audit_sink_sent_total` — outbox domain events the audit-sink

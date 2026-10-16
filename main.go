@@ -2905,6 +2905,44 @@ func (s *server) handleOFXImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
+// camt053ImportRequest is the POST /camt053/import body: the ledger
+// account the statement belongs to, and the raw camt.053 XML document.
+type camt053ImportRequest struct {
+	Account ledger.AccountID `json:"account"`
+	CAMT053 string           `json:"camt053"`
+}
+
+// handleCAMT053Import implements POST /camt053/import: it parses an
+// ISO 20022 camt.053 bank statement and returns a pre-posting (draft)
+// import report (see ledger.ImportCAMT053). Nothing is posted, no
+// version is bumped: the response tells the operator what the
+// statement claims and what the ledger already has. Re-importing the
+// same document returns the original report with duplicate=true. A
+// missing account, an empty document, a malformed document, or a
+// statement naming a different account is a 400. There is no special
+// auth, like the /ofx/import endpoint.
+func (s *server) handleCAMT053Import(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT053Imports.Add(1)
+	var req camt053ImportRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.Account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account is required"})
+		return
+	}
+	if strings.TrimSpace(req.CAMT053) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "camt053 document is required"})
+		return
+	}
+	report, err := s.ledgerFor(r).ImportCAMT053(req.Account, []byte(req.CAMT053), ledger.CAMT053ImportOptions{})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // handleBalanceHistory implements GET /balance-history: the balance time
 // series the background recorder samples (see ledger/balance_history.go),
 // for reconciliation dashboards and fintech reporting. Query parameters:
@@ -4720,6 +4758,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("GET /accounts/{id}/statement", s.handleStatement)
 	mux.HandleFunc("POST /ofx/import", s.handleOFXImport)
+	mux.HandleFunc("POST /camt053/import", s.handleCAMT053Import)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
 	mux.HandleFunc("PUT /accounts/{id}/tags", s.handleSetAccountTags)

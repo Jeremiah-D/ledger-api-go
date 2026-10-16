@@ -612,32 +612,12 @@ func (l *Ledger) ImportOFX(account AccountID, data []byte, opts OFXImportOptions
 	return report, nil
 }
 
-// ofxMatchCandidatesLocked returns the IDs of effective journaled rows
-// for (account, currency) whose |amount| equals the statement line's
-// and whose CreatedAt falls within ±window of the line's DTPOSTED.
-// Callers must hold l.mu (either lock suffices).
+// ofxMatchCandidatesLocked delegates to the shared statement matcher
+// (see matchStatementCandidatesLocked in camt053.go): one rule for the
+// OFX and camt.053 imports. Callers must hold l.mu (either lock
+// suffices).
 func (l *Ledger) ofxMatchCandidatesLocked(account AccountID, t OFXTransaction, window time.Duration) []string {
-	var out []string
-	lo := t.PostedAt.Add(-window)
-	hi := t.PostedAt.Add(window)
-	for _, id := range l.byAccount[account] {
-		e := l.entries[id]
-		if e.PendingReview || e.Currency != t.Currency {
-			continue
-		}
-		amt := e.AmountCents
-		if amt < 0 {
-			amt = -amt
-		}
-		if amt != t.AmountCents {
-			continue
-		}
-		if e.CreatedAt.Before(lo) || e.CreatedAt.After(hi) {
-			continue
-		}
-		out = append(out, id)
-	}
-	return out
+	return l.matchStatementCandidatesLocked(account, t.Currency, t.AmountCents, t.PostedAt, window)
 }
 
 // ofxImportsLocked renders the OFX import registry as sorted snapshot

@@ -389,6 +389,13 @@ type snapshotConfigLine struct {
 	// imported statement as new, so the registry round-trips like the
 	// idempotency indexes.
 	OFXImportRegistry []OFXImportRecord `json:"ofx_import_registry,omitempty"`
+	// CAMT053ImportRegistry carries the camt.053 statement-import
+	// registry (see ImportCAMT053 in camt053.go): document SHA-256 ->
+	// import report, sorted by SHA-256; absent in snapshots written
+	// before camt.053 import existed. A restore that dropped it would
+	// re-import an already imported statement as new, so the registry
+	// round-trips like the idempotency indexes.
+	CAMT053ImportRegistry []CAMT053ImportRecord `json:"camt053_import_registry,omitempty"`
 	// TdInterestExpense carries the ledger-wide term-deposit
 	// interest-expense account (see SetTermDepositInterestExpense);
 	// absent in snapshots written before term deposits existed. A
@@ -930,6 +937,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		AccountTags:           l.accountTagsLocked(),
 		ClosedAccounts:        l.closedCopyLocked(),
 		OFXImportRegistry:     l.ofxImportsLocked(),
+		CAMT053ImportRegistry: l.camt053ImportsLocked(),
 		TdInterestExpense:     l.tdInterestExpense,
 		CreditInterestIncome:  l.creditInterestIncome,
 		CreditLines:           l.creditLinesLocked(),
@@ -1775,6 +1783,24 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("ofx import record sha mismatch for %q", rec.DocumentSHA256)
 		}
 	}
+	// camt.053 import registry (LG-103): every record must carry its
+	// document SHA-256, and the report inside must agree with it —
+	// the same idempotency invariant as the OFX registry. Reports are
+	// validated structurally only: the SHA-256 is the identity, and
+	// the report is opaque history.
+	seenCAMT053Shas := make(map[string]bool, len(cfg.CAMT053ImportRegistry))
+	for _, rec := range cfg.CAMT053ImportRegistry {
+		if rec.DocumentSHA256 == "" {
+			return bad("camt053 import record with empty document_sha256")
+		}
+		if seenCAMT053Shas[rec.DocumentSHA256] {
+			return bad("duplicate camt053 import record for sha %q", rec.DocumentSHA256)
+		}
+		seenCAMT053Shas[rec.DocumentSHA256] = true
+		if rec.Report.DocumentSHA256 != rec.DocumentSHA256 {
+			return bad("camt053 import record sha mismatch for %q", rec.DocumentSHA256)
+		}
+	}
 	// Pain.001 export registry (see pain001.go): every record must name
 	// a non-empty transfer ID, non-empty payer/payee, a positive
 	// amount, and a valid currency — the registry is the payment
@@ -2338,6 +2364,15 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		rep := rec.Report
 		l.ofxImports[rec.DocumentSHA256] = &rep
 	}
+	// The camt.053 import registry restores like the OFX one: a restore
+	// that dropped it would re-import an already imported statement as
+	// new. Snapshots written before camt.053 import existed carry no
+	// records, which restores as an empty registry.
+	l.camt053Imports = make(map[string]*CAMT053ImportReport, len(cfg.CAMT053ImportRegistry))
+	for _, rec := range cfg.CAMT053ImportRegistry {
+		rep := rec.Report
+		l.camt053Imports[rec.DocumentSHA256] = &rep
+	}
 	// The pain.001 export registry restores like the idempotency
 	// indexes: a restore that dropped it would silently un-export
 	// pre-restore transfers. Validated above; installed verbatim.
@@ -2755,6 +2790,11 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// duplicate-import idempotency, and a restore that dropped it would
 	// re-import an already imported statement as new.
 	if !reflect.DeepEqual(a.ofxImports, b.ofxImports) {
+		return false
+	}
+	// The camt.053 import registry round-trips like the OFX one
+	// (LG-103): same idempotency, same restore invariant.
+	if !reflect.DeepEqual(a.camt053Imports, b.camt053Imports) {
 		return false
 	}
 	if a.idempotencyTTL != b.idempotencyTTL {
