@@ -863,9 +863,24 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// the rate was live still returns the original receipt.
 	side := fxSideOf(t)
 	pair := fxPair{from: t.Currency, to: toCurrency}
-	commitEff, err := l.effectiveFXRateLocked(pair, side, now)
-	if err != nil {
-		return TransferReceipt{}, err
+	// LG-110: a forward-locked settlement (see forward.go) prices at the
+	// contract's locked rate without consulting the live rate table: the
+	// rate is contractually fixed, so the table is irrelevant — the
+	// transfer settles even when the pair has no configured rate, and a
+	// later SetFXRate can never re-price it. The locked price is the
+	// whole quote (mid = bid = ask = locked, a single agreed price has
+	// no spread), and slippage is zero by construction — the customer
+	// never faced the live price, so there is no drift to measure.
+	locked := t.forwardLocked != nil
+	var commitEff effectiveFXRate
+	if locked {
+		commitEff = forwardLockedEffectiveRate(t.forwardLocked, t.Currency, toCurrency)
+	} else {
+		var err error
+		commitEff, err = l.effectiveFXRateLocked(pair, side, now)
+		if err != nil {
+			return TransferReceipt{}, err
+		}
 	}
 	rate := commitEff.Rate // the market-table entry, for provenance disclosure
 	effNum, effDen := commitEff.Num, commitEff.Den
@@ -884,7 +899,17 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// currencies (or a zero quote) means commit-time semantics.
 	var admitted *FXRateQuote
 	var slippageBps int64
-	if quote.From != "" && quote.From == t.Currency && quote.To == toCurrency {
+	switch {
+	case locked:
+		// The locked price is the quote: admitted == committed ==
+		// locked, slippage zero by construction (see the note
+		// above). The admission provenance (admitted_at, the
+		// rate-table snapshot version) comes from the contract's
+		// booking, not from a live admission — a forward has no
+		// admission window, only the bilateral agreement.
+		q := t.forwardLocked.quote(t.Currency, toCurrency)
+		admitted = &q
+	case quote.From != "" && quote.From == t.Currency && quote.To == toCurrency:
 		slippageBps = fxSlippageBps(commitEff.Num, commitEff.Den, quote.Num, quote.Den)
 		if t.MaxSlippageBps > 0 && slippageBps > t.MaxSlippageBps {
 			return TransferReceipt{}, ErrFXSlippageExceeded
@@ -1116,7 +1141,13 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		RateExpiresAt:    effExpiresAt,
 		// LG-45: pin the conversion to the current snapshot version —
 		// the receipt stays reproducible after the rate changes.
+		// LG-110: a forward settlement pins the contract's booking-time
+		// snapshot version instead (see forward.go) — the market table
+		// the agreement was priced against, not the live one.
 		RateSnapshotVersion: l.fxSnapshotVersion,
+	}
+	if locked {
+		fxConv.RateSnapshotVersion = t.forwardLocked.RateSnapshotVersion
 	}
 	if admitted != nil {
 		// LG-86: disclose the admission quote the transfer settled
@@ -1263,6 +1294,13 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		fxDetails["slippage_bps"] = slippageBps
 		if t.MaxSlippageBps > 0 {
 			fxDetails["max_slippage_bps"] = t.MaxSlippageBps
+		}
+		if locked {
+			// LG-110: bind the settlement transfer to its forward
+			// contract. admitted_rate == committed_rate == the
+			// locked rate here (see the locked case above), and
+			// slippage_bps is 0 by construction.
+			fxDetails["forward_id"] = t.forwardLocked.ForwardID
 		}
 	}
 	if len(feeSplits) > 0 {

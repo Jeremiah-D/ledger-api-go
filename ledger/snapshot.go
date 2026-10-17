@@ -274,6 +274,10 @@ type snapshotConfigLine struct {
 	// version 0 with a populated table.
 	FXSnapshotVersion    uint64                `json:"fx_snapshot_version,omitempty"`
 	FXRateTableSnapshots []FXRateTableSnapshot `json:"fx_rate_table_snapshots,omitempty"`
+	// FXForwards carries the FX forward contracts (LG-110, see
+	// forward.go), sorted by ID; absent in snapshots written before
+	// forward support existed (restores as empty).
+	FXForwards []FXForward `json:"fx_forwards,omitempty"`
 	// ClosedPeriods carries the locked accounting periods ("YYYY-MM",
 	// see ClosePeriod); absent in snapshots written before period locks
 	// existed. A restore that dropped the locks would reopen closed
@@ -932,6 +936,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FXIncomeAccount:       l.fxIncomeAccount,
 		FXSnapshotVersion:     l.fxSnapshotVersion,
 		FXRateTableSnapshots:  l.fxRateTableSnapshotsLocked(),
+		FXForwards:            l.fxForwardsSnapshotLocked(),
 		ClosedPeriods:         l.closedPeriodsLocked(),
 		BalanceWatches:        l.balanceWatchesLocked(),
 		LiquidityAlertThresholds: l.liquidityThresholdsLocked(),
@@ -1761,6 +1766,41 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			}
 		}
 	}
+	// FX forward contracts (LG-110): each must carry a unique non-empty
+	// ID, a known lifecycle state, a valid currency pair, a positive
+	// rate and notional, and a non-negative cap — a corrupt contract
+	// row fails the import instead of restoring a lie.
+	seenForwardIDs := make(map[string]bool, len(cfg.FXForwards))
+	for i := range cfg.FXForwards {
+		f := &cfg.FXForwards[i]
+		if f.ID == "" {
+			return bad("fx forward with empty ID")
+		}
+		if seenForwardIDs[f.ID] {
+			return bad("duplicate fx forward ID %q", f.ID)
+		}
+		seenForwardIDs[f.ID] = true
+		switch f.Status {
+		case ForwardBooked, ForwardSettled, ForwardCancelled:
+		default:
+			return bad("fx forward %q has unknown status %q", f.ID, f.Status)
+		}
+		if f.FromCurrency == "" || f.ToCurrency == "" || f.FromCurrency == f.ToCurrency {
+			return bad("fx forward %q has bad currency pair %q->%q", f.ID, f.FromCurrency, f.ToCurrency)
+		}
+		if f.RateNum <= 0 || f.RateDen <= 0 {
+			return bad("fx forward %q has non-positive rate %d/%d", f.ID, f.RateNum, f.RateDen)
+		}
+		if f.NotionalCents <= 0 {
+			return bad("fx forward %q has non-positive notional", f.ID)
+		}
+		if f.NotionalCapCents < 0 {
+			return bad("fx forward %q has negative notional cap", f.ID)
+		}
+		if f.SettleAt.IsZero() {
+			return bad("fx forward %q has zero settle_at", f.ID)
+		}
+	}
 	// Closed periods are validated like every other config row: a
 	// malformed period ID in the snapshot fails the import instead of
 	// silently unlocking a month.
@@ -2341,6 +2381,15 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		snap.Rates = rates
 		l.fxRateSnapshots[snap.Version] = snap
 	}
+	// FX forward contracts (LG-110): restore the registry as stored.
+	// The import validated every row above, so this is a plain copy —
+	// a restore that dropped the book would silently void booked
+	// agreements, the same reason the rate table itself round-trips.
+	l.forwards = make(map[string]*FXForward, len(cfg.FXForwards))
+	for i := range cfg.FXForwards {
+		f := cfg.FXForwards[i]
+		l.forwards[f.ID] = f.copy()
+	}
 	if len(cfg.FXRateTableSnapshots) == 0 && len(fx) > 0 {
 		rates := make([]ExchangeRate, 0, len(fx))
 		for _, r := range fx {
@@ -2869,6 +2918,11 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// FX snapshot history must round-trip too (LG-45): same version
 	// counter, same per-version tables.
 	if !fxSnapshotsEqualLocked(a, b) {
+		return false
+	}
+	// FX forward contracts must round-trip too (LG-110): a restore
+	// that dropped the book would silently void booked agreements.
+	if !forwardsEqualLocked(a, b) {
 		return false
 	}
 	// The OFX import registry must round-trip (LG-66): it is the

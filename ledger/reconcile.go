@@ -202,6 +202,13 @@ type ReconciliationReport struct {
 	// snapshot history was lost — the current table still converts, but
 	// some historical transfer's table is no longer reproducible.
 	FXRateVersions FXRateVersionReport `json:"fx_rate_versions"`
+	// ForwardBook reports the FX forward-contract book (LG-110, see
+	// forward.go): how many contracts are booked, settled, expired, or
+	// cancelled, with a per-pair breakdown. Expiry is lazy: a booked
+	// contract past its settlement grace period counts as expired even
+	// before the ExpireForwards sweep persists the transition — the
+	// same lazy-expiry convention as the hold totals.
+	ForwardBook FXForwardBookReport `json:"forward_book"`
 	// Merges lists every committed account merge (see PostMerge), sorted
 	// by merge ID: which source account was consolidated into which
 	// target, the per-currency legs, and when. Merged sources stay
@@ -641,6 +648,7 @@ func (l *Ledger) ReconcileWithOptions(now time.Time, opts ReconcileOptions) (Rec
 			"fx_applied":             report.FXApplied,
 			"pain001_pending":        len(report.Pain001Pending),
 			"ftp_totals":             len(report.FtpTotals),
+			"fx_forward_contracts":   report.ForwardBook.Total,
 		},
 	})
 	return report, nil
@@ -667,6 +675,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		HeldTotals:                 l.heldTotalsLocked(now),
 		FXRates:                    l.fxRatesLocked(),
 		FXRateVersions:             l.fxRateVersionReportLocked(),
+		ForwardBook:                l.forwardBookReportLocked(now),
 		Merges:                     l.mergesLocked(),
 		// LG-93: the spread P&L is derived from the journal's
 		// "<transfer ID>/spread" legs (see fxSpreadPNLLocked) — the

@@ -164,6 +164,13 @@ type Transfer struct {
 	// transfers — a non-FX transfer carrying it is neither rejected nor
 	// gated.
 	MaxSlippageBps int64 `json:"max_slippage_bps,omitempty"`
+	// forwardLocked pins this transfer's FX conversion to a
+	// contractually agreed price (LG-110, see forward.go): it is set
+	// only by SettleForward, never by callers — an ordinary transfer
+	// cannot smuggle a locked price past the rate table. Unexported,
+	// so it stays out of the JSON API and snapshots; it lives only for
+	// the duration of the settlement call.
+	forwardLocked *forwardLockedRate
 }
 
 // TransferReceipt reports what PostTransfer committed.

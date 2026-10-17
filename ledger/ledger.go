@@ -472,6 +472,11 @@ type Ledger struct {
 	// populated.
 	fxSnapshotVersion uint64
 	fxRateSnapshots   map[uint64]FXRateTableSnapshot
+	// forwards is the FX forward-contract registry (LG-110, see
+	// forward.go), keyed by forward ID (the booking idempotency key).
+	// Structural state — like the rate table — and it survives
+	// snapshots.
+	forwards map[string]*FXForward
 	// ftpCurves is the per-currency FTP rate-curve registry (see
 	// ftp.go), keyed by normalized currency code. Each SetFtpCurve
 	// bumps the currency's version. ftpAccounts names the internal
@@ -962,6 +967,7 @@ func New(opts ...Option) *Ledger {
 		reportScheduleFiring: make(map[string]bool),
 		fxRates:              make(map[fxPair]ExchangeRate),
 		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
+		forwards:             make(map[string]*FXForward),
 		rateOverrides:        make(map[fxPair]*RateOverride),
 		// LG-69 defaults: one-hour override lifetime, 10% deviation
 		// cap. Both are construction-time config (see
