@@ -780,6 +780,17 @@ type Ledger struct {
 	// index — it survives snapshots, because a restore that dropped it
 	// would re-import the same statement as new.
 	camt053Imports   map[string]*CAMT053ImportReport
+	// statementMatches is the statement-line match registry (see
+	// statement_match.go, LG-107): statement line ID
+	// ("ofx/<FITID>" / "camt053/<stmtID>/<seq>", see DraftEntry.ID) ->
+	// match record. A line matched once replays its recorded entry on
+	// re-import — the same statement file can never double-match — and
+	// Reconcile surfaces still-unmatched lines as
+	// TrialBalanceDiscrepancy rows. Operational index, not books: it
+	// does not round-trip through snapshots (like freezeEvents); the
+	// structured audit log ("statement_match" events) remains the
+	// durable record.
+	statementMatches map[string]*statementMatchRecord
 	// painTransfers is the ISO 20022 pain.001 export registry (see
 	// pain001.go): transfer ID -> transfer principal for every
 	// same-currency transfer (plain and split chunks), in booking order
@@ -963,6 +974,7 @@ func New(opts ...Option) *Ledger {
 		revalBaselines:              make(map[revalKey]revalBaseline),
 		ofxImports:                  make(map[string]*OFXImportReport),
 		camt053Imports:              make(map[string]*CAMT053ImportReport),
+		statementMatches:            make(map[string]*statementMatchRecord),
 		painTransfers:               make(map[string]PainTransfer),
 		painInstructions:            make(map[string]*PainInstruction),
 		accountIBANs:                make(map[AccountID]AccountIBAN),

@@ -146,6 +146,10 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		// outbox intentionally nil: the dry run emits no domain events
 		// either — the twin's simulated commits must not pollute the
 		// live outbox stream.
+		// statementMatches: the twin never runs MatchStatement, but the
+		// registry is copied so a simulated match would see the same
+		// recorded lines as the live ledger.
+		statementMatches: make(map[string]*statementMatchRecord, len(l.statementMatches)),
 	}
 	for k, v := range l.balances {
 		c.balances[k] = v
@@ -185,6 +189,10 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	// within-line dry-run would wrongly report a rejection.
 	for k, v := range l.creditLines {
 		c.creditLines[k] = v
+	}
+	for k, v := range l.statementMatches {
+		cp := *v
+		c.statementMatches[k] = &cp
 	}
 	for k, v := range l.dailyLimits {
 		c.dailyLimits[k] = v

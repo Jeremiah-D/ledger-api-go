@@ -776,6 +776,38 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 	}
 	report.AccountingEquationOK = report.AccountingError == ""
 
+	// LG-107: bank-statement lines that never matched a journaled row
+	// surface as the same TrialBalanceDiscrepancy rows the equation
+	// check above produces — one mechanism for every reconciliation
+	// break, and the base-currency summary converts them like any other
+	// row. A statement row is recognizable: the books balance internally
+	// (NetBalance == TotalDebits - TotalCredits), while DifferenceCents
+	// is the statement line's signed amount — the bank's claim on the
+	// account's balance that the books do not carry — and
+	// ExpectedNetCents is the balance the books would show if the line
+	// were real and booked. Statement rows never move the accounting
+	// equation flag: the equation is about the books' internal
+	// consistency, and the books are consistent here — the bank and the
+	// books disagree.
+	for _, rec := range l.unmatchedStatementMatchesLocked() {
+		signed := rec.line.SignedAmountCents()
+		var debits, credits, net int64
+		for _, row := range l.trialBalanceLocked(rec.line.Account).ByCurrency {
+			if row.Currency == rec.line.Currency {
+				debits, credits, net = row.TotalDebits, row.TotalCredits, row.NetBalance
+			}
+		}
+		report.Discrepancies = append(report.Discrepancies, TrialBalanceDiscrepancy{
+			Account:           rec.line.Account,
+			Currency:          rec.line.Currency,
+			TotalDebitsCents:  debits,
+			TotalCreditsCents: credits,
+			NetBalanceCents:   net,
+			ExpectedNetCents:  net + signed,
+			DifferenceCents:   signed,
+		})
+	}
+
 	// Idempotency-key index health. Expired-eligible means the entry was
 	// posted more than the TTL ago — exactly the set a key sweep would
 	// evict, mirroring pruneIdempotencyKeysLocked's cutoff.
