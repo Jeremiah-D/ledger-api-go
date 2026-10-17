@@ -928,6 +928,33 @@ not subject to the business-day gate — it is a period-end adjustment.
 l.CapitalizeInterest("interest-expense", "interest-payable", "loan-principal", asof)
 ```
 
+#### Overdraft interest (Go API: `AccrueOverdraftInterest`)
+
+Prices a negative balance: one entry per (account, currency, UTC calendar
+day) — debit the interest expense account, credit the interest payable
+account — for `floor(principal * rateBps / 10000 / 365)` cents, where
+`principal` is the day's overdrawn amount. The charged account is not a
+journal leg (accrual convention); its negative balance is only read to
+size the charge. The entry ID is deterministic —
+`accrual/overdraft-interest/<account>/<currency>/<YYYY-MM-DD>` — so the
+idempotency key is (account, currency, day): re-running the day returns
+the original entry.
+
+```go
+// 10%/yr on a -$10,000 USD balance: floor(1000000*1000/10000/365) = 273c.
+// compound=true adds previously accrued (unreversed) interest to the
+// principal: end-of-day compounding without a capitalization entry.
+l.AccrueOverdraftInterest("borrower", "od-interest-expense", "od-interest-payable", "USD", 1000, false, asof)
+```
+
+A non-negative balance is rejected with `ErrAccountNotOverdrawn`; a dust
+charge that rounds to zero books nothing (`ErrNonPositiveAmount`).
+Overdraft protection does not block the charge — protection guards the
+account's own postings, and this entry never touches it. The entry is an
+ordinary journal row (own audit-chain link, version bump, full `Post`
+gates, no rules cascade, no dual-control, dormant stop skipped) with the
+memo `accrual:overdraft-interest`, reversible via `ReverseAccrual`.
+
 #### Funds transfer pricing (Go API: `SetFtpCurve` / `FtpRateBps` / `FtpPreview` / `ChargeFtp`)
 
 Internal funding priced like a market: business units with a funding
