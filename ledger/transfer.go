@@ -789,6 +789,21 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		}
 	}
 
+	// Transfer beneficiary allowlist (see allowlist.go): after the
+	// frozen gate — an allowlist never un-freezes a stopped payer —
+	// and before the overdraft gate, so the check order stays
+	// validation → idempotency replay → ID conflict → frozen →
+	// allowlist → overdraft → commit. Only the principal leg's payee
+	// is screened: the fee leg's recipient is the operator's own
+	// revenue account, not a business beneficiary, so it is exempt
+	// (the same carve-out the sanctions/denylist screening makes for
+	// the operator's accounts). A hit records nothing and emits no
+	// audit event, like the frozen and overdraft gates; an idempotent
+	// replay above returns the original receipt instead of failing.
+	if l.allowlistRejectedLocked(t.From, t.To) {
+		return TransferReceipt{}, l.allowlistRejectionLocked(t.From, t.To)
+	}
+
 	// Overdraft protection guards the payer's total outflow (amount + fee),
 	// not just the principal: a transfer whose fee alone would overdraw a
 	// protected payer is rejected. The check runs against the payer's

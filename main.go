@@ -372,8 +372,11 @@ type createTransferRequest struct {
 // with a receipt carrying review_status "pending_review" — its legs are
 // journaled but marked pending and the payer's funds are frozen — and an
 // operator settles or releases it with POST /transfers/{id}/approve or
-// POST /transfers/{id}/reject. A cross-currency transfer (to_currency set and
-// different from currency) converts at the configured rate for the pair
+// POST /transfers/{id}/reject. A transfer whose payer has a transfer
+// beneficiary allowlist installed and names a payee not on it is
+// rejected with 403 (see PUT /accounts/{id}/allowlist). A cross-currency
+// transfer (to_currency set and different from currency) converts at the
+// configured rate for the pair
 // (see LEDGER_FX_RATES): the payee settles in to_currency, the payer pays
 // in currency, and the receipt discloses the conversion in its fx field;
 // a pair with no configured rate is rejected with 422. The currency field is
@@ -447,6 +450,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrBeneficiaryNotAllowed) {
+			s.metrics.AllowlistRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -770,6 +778,11 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrBeneficiaryNotAllowed) {
+			s.metrics.AllowlistRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -787,6 +800,11 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrBudgetExceeded) {
 			s.metrics.BudgetRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountDenied) {
+			s.metrics.DenylistRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -3426,6 +3444,91 @@ func (s *server) handleSetAlias(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": string(account), "alias": alias})
 }
 
+// handleGetTransferAllowlist implements GET /accounts/{id}/allowlist:
+// returns the payer's transfer beneficiary allowlist (see
+// ledger.TransferAllowlistOf). A payer with no list installed has the
+// gate disabled: the response carries allowlist_enabled false and an
+// empty beneficiaries array.
+func (s *server) handleGetTransferAllowlist(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	beneficiaries, enabled := s.ledgerFor(r).TransferAllowlistOf(ledger.AccountID(id))
+	if beneficiaries == nil {
+		beneficiaries = []ledger.AccountID{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":           id,
+		"allowlist_enabled": enabled,
+		"beneficiaries":     beneficiaries,
+	})
+}
+
+type setTransferAllowlistRequest struct {
+	// Beneficiaries is the payer's allowed payee set: while installed,
+	// POST /transfers from the payer only books transfers whose
+	// to_account is in this set (see ledger.SetTransferAllowlist). An
+	// empty or missing set disables the gate — it is equivalent to
+	// clearing the list.
+	Beneficiaries []ledger.AccountID `json:"beneficiaries"`
+}
+
+// handleSetTransferAllowlist implements PUT /accounts/{id}/allowlist:
+// installs (or replaces) the payer's transfer beneficiary allowlist
+// (see ledger.SetTransferAllowlist). An empty beneficiaries set
+// disables the gate. The body is strict JSON — unknown fields are 400.
+// Structural config: no journal version bump. An empty beneficiary
+// entry is 400.
+func (s *server) handleSetTransferAllowlist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	defer r.Body.Close()
+
+	// Same transport contract as the other /accounts/{id} config
+	// endpoints: bounded body, strict decoding, no trailing garbage.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req setTransferAllowlistRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	l := s.ledgerFor(r)
+	if err := l.SetTransferAllowlist(ledger.AccountID(id), req.Beneficiaries); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	beneficiaries, enabled := l.TransferAllowlistOf(ledger.AccountID(id))
+	if beneficiaries == nil {
+		beneficiaries = []ledger.AccountID{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":           id,
+		"allowlist_enabled": enabled,
+		"beneficiaries":     beneficiaries,
+	})
+}
+
 // handleGetAlias implements GET /accounts/{id}/alias: returns the
 // account's current alias (see ledger.AliasOf). {id} is an account
 // reference, so the alias can be looked up by the account ID or by the
@@ -5003,6 +5106,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PUT /accounts/{id}/tags", s.handleSetAccountTags)
 	mux.HandleFunc("PUT /accounts/{id}/alias", s.handleSetAlias)
 	mux.HandleFunc("GET /accounts/{id}/alias", s.handleGetAlias)
+	mux.HandleFunc("GET /accounts/{id}/allowlist", s.handleGetTransferAllowlist)
+	mux.HandleFunc("PUT /accounts/{id}/allowlist", s.handleSetTransferAllowlist)
 	mux.HandleFunc("PUT /sweep-reserves", s.handleSetSweepReserve)
 	mux.HandleFunc("GET /sweep-reserves", s.handleListSweepReserves)
 	mux.HandleFunc("DELETE /sweep-reserves", s.handleClearSweepReserve)

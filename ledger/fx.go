@@ -1064,6 +1064,13 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 			return TransferReceipt{}, ErrAccountFrozen
 		}
 	}
+	// Transfer beneficiary allowlist (see allowlist.go): after the
+	// frozen gate and before the overdraft gate, like the non-FX path
+	// (transfer.go) — only the principal leg's payee is screened, and
+	// the fee leg's recipient is exempt.
+	if l.allowlistRejectedLocked(t.From, t.To) {
+		return TransferReceipt{}, l.allowlistRejectionLocked(t.From, t.To)
+	}
 	if l.noOverdraft[t.From] &&
 		l.balances[accountCurrency{account: t.From, currency: t.Currency}] < totalOutflow {
 		return TransferReceipt{}, ErrAccountOverdraft

@@ -383,6 +383,14 @@ type Ledger struct {
 	// per account and currency; structural config, like dailyLimits —
 	// setting or clearing a reserve does not bump the journal version.
 	sweepReserves map[accountCurrency]int64
+	// transferAllowlist maps a payer account to its installed transfer
+	// beneficiary allowlist (see allowlist.go, LG-113): when a payer has
+	// an entry here, PostTransfer only books transfers whose payee is
+	// in the set. Opt-in per payer account; structural config, like
+	// sweepReserves — setting or clearing a list does not bump the
+	// journal version, and the lists round-trip through the snapshot
+	// config record.
+	transferAllowlist map[AccountID]map[AccountID]bool
 	// businessCalendar is the ledger's holiday calendar (see
 	// businessday.go): weekend days plus the custom holiday table, with
 	// a version counter bumped on every change. Structural config, like
@@ -986,6 +994,7 @@ func New(opts ...Option) *Ledger {
 		dailyLimits:          make(map[dailyLimitKey]int64),
 		dailyOutflow:         make(map[dailyLimitKey]int64),
 		sweepReserves:        make(map[accountCurrency]int64),
+		transferAllowlist:    make(map[AccountID]map[AccountID]bool),
 		largeTxThresholds:    make(map[string]int64),
 		largeTxReportCurrency: DefaultCurrency,
 		largeTxReports:       make(map[largeTxReportKey]LargeTxReport),

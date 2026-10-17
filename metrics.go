@@ -157,6 +157,14 @@ type Metrics struct {
 	// before the idempotency replay check, so denied replays count here
 	// too — the compliance trail must show the attempt.
 	DenylistRejections atomic.Uint64
+	// AllowlistRejections counts POST /transfers requests rejected with
+	// 403 because the payer has a transfer beneficiary allowlist
+	// installed and the payee is not on it (see
+	// ledger.SetTransferAllowlist). The allowlist gate runs after the
+	// idempotency replay check, like the frozen gate, so replayed keys
+	// do not count here — a replay returns the original receipt
+	// instead of failing.
+	AllowlistRejections atomic.Uint64
 	// CurrencyRejections counts POST /entries, POST /entries/batch, and
 	// POST /transfers requests rejected for currency reasons: a malformed
 	// currency code (400), a cross-currency transfer (422), or an expired
@@ -663,6 +671,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_denylist_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, and POST /holds/{id}/capture requests rejected because a leg of the posting named an account on the sanctions/denylist.",
 		m.DenylistRejections.Load())
+	writeCounter(&sb, "ledger_allowlist_rejections_total",
+		"Total POST /transfers requests rejected with 403 because the payer has a transfer beneficiary allowlist installed and the payee is not on it (see ledger.SetTransferAllowlist).",
+		m.AllowlistRejections.Load())
 	writeCounter(&sb, "ledger_currency_rejections_total",
 		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected for currency reasons: malformed currency code, cross-currency transfer, or expired FX rate.",
 		m.CurrencyRejections.Load())

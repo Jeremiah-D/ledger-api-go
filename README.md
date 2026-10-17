@@ -172,7 +172,9 @@ curl -s -X POST localhost:8080/transfers \
 - Either leg names a **frozen** account → `403`; the payer is
   **overdraft-protected** and the transfer would take it below zero →
   `422`, as is a transfer that would take the payer's daily outflow above
-  its **daily outflow limit**. All are counted in the shared
+  its **daily outflow limit**. The payer has a **transfer beneficiary
+  allowlist** installed and the payee is not on it → `403` (see
+  `PUT /accounts/{id}/allowlist`). All are counted in the shared
   `ledger_frozen_rejections_total` / `ledger_overdraft_rejections_total` /
   `ledger_daily_limit_rejections_total` counters.
 - `memo` (optional, ≤ 255 UTF-8 characters) is carried onto the principal
@@ -1362,6 +1364,47 @@ curl -s -X POST localhost:8080/denylist \
 curl -s -X POST localhost:8080/entries \
   -d '{"debit_account":"ofac-sdn-123","credit_account":"equity","amount_cents":100}'
 # 422 {"error":"ledger: account is on the sanctions/denylist: account \"ofac-sdn-123\" matched denylist entry \"ofac-sdn-*\""}
+```
+
+### Transfer beneficiary allowlists (`PUT /accounts/{id}/allowlist`)
+
+Opt-in per-payer gate on the beneficiary of a transfer: while a payer has
+a list installed, `POST /transfers` only books transfers whose payee is on
+the payer's list. The payment-domain shape is merchant payout control — a
+marketplace's settlement account pays out only to its registered
+sub-merchants, so a compromised payout service cannot exfiltrate funds to
+an attacker's account. Orthogonal to the denylist above: the denylist
+screens accounts money may never move through in either direction
+(compliance), the allowlist limits who one payer may pay (risk control).
+
+Manage with `PUT /accounts/{id}/allowlist`
+(`{"beneficiaries": ["sub-merchant-a", "sub-merchant-b"]}`) and
+`GET /accounts/{id}/allowlist`. An empty set disables the gate — a payer
+with no list installed may pay anyone, exactly as before allowlists
+existed. The gate runs between the frozen and overdraft checks of the
+transfer check order (field validation → idempotency replay → ID conflict
+→ frozen → allowlist → overdraft → commit), so an idempotent replay still
+returns the original receipt and the frozen gate always runs first. Only
+the principal leg's payee is screened — the fee leg's recipient is the
+operator's own revenue account, not a business beneficiary, and is exempt.
+
+A transfer to an unlisted payee is rejected with
+`403 {"error":"ledger: transfer beneficiary is not on the payer's transfer
+allowlist: payer \"...\" is not allowlisted to pay \"...\""}` and records
+nothing: no journal rows, no chain links, no version bump. List changes are
+structural (no version bump) and round-trip through disaster-recovery
+snapshots — a restore never silently re-enables payouts to unlisted
+beneficiaries. Rejections are counted in
+`ledger_allowlist_rejections_total`.
+
+```bash
+curl -s -X PUT localhost:8080/accounts/settle-corp/allowlist \
+  -H 'x-ledger-actor: ops-chen' -d '{"beneficiaries":["sub-merchant-a","sub-merchant-b"]}'
+curl -s localhost:8080/accounts/settle-corp/allowlist
+# 200 {"account":"settle-corp","allowlist_enabled":true,"beneficiaries":["sub-merchant-a","sub-merchant-b"]}
+curl -s -X POST localhost:8080/transfers \
+  -d '{"transfer_id":"payout-1","from_account":"settle-corp","to_account":"attacker","amount_cents":100}'
+# 403 {"error":"ledger: transfer beneficiary is not on the payer's transfer allowlist: ..."}
 ```
 
 ### Large-transfer auto-split (Go API: `PostTransferSplit`)

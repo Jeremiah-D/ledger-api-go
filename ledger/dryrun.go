@@ -121,6 +121,10 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		dailyLimits:          make(map[dailyLimitKey]int64, len(l.dailyLimits)),
 		dailyOutflow:         make(map[dailyLimitKey]int64, len(l.dailyOutflow)),
 		sweepReserves:        make(map[accountCurrency]int64, len(l.sweepReserves)),
+		// The transfer beneficiary allowlists travel with the twin: the
+		// dry-run's allowlist gate must see the same lists the real
+		// PostTransfer applies (see the deep copy below).
+		transferAllowlist:    make(map[AccountID]map[AccountID]bool, len(l.transferAllowlist)),
 		budgets:              make(map[budgetKey]int64, len(l.budgets)),
 		monthlySpend:         make(map[monthlySpendKey]int64, len(l.monthlySpend)),
 		parents:              make(map[AccountID]AccountID, len(l.parents)),
@@ -208,6 +212,18 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	}
 	for k, v := range l.sweepReserves {
 		c.sweepReserves[k] = v
+	}
+	// The transfer beneficiary allowlists travel with the twin: the
+	// dry-run's allowlist gate must see the same lists the real
+	// PostTransfer applies, or a blocked dry-run would wrongly report
+	// success. Sets are deep-copied so the twin's install (if any)
+	// cannot alias the live ledger's rows.
+	for k, v := range l.transferAllowlist {
+		set := make(map[AccountID]bool, len(v))
+		for b := range v {
+			set[b] = true
+		}
+		c.transferAllowlist[k] = set
 	}
 	for k, v := range l.budgets {
 		c.budgets[k] = v

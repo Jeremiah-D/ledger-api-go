@@ -227,6 +227,15 @@ type snapshotConfigLine struct {
 	// been installed fails the import instead of silently capping a
 	// sweep.
 	SweepReserves []SweepReserve `json:"sweep_reserves,omitempty"`
+	// Allowlists carries the per-payer transfer beneficiary allowlists
+	// (see SetTransferAllowlist, LG-113); absent in snapshots written
+	// before allowlists existed, which import with the gate disabled.
+	// A restore that dropped a list would silently re-enable payouts
+	// to unlisted beneficiaries, so the lists round-trip like the
+	// frozen-account list. Rows are re-validated on import — an empty
+	// payer account or an empty beneficiary fails the import instead
+	// of installing a list that could never have been created.
+	Allowlists []TransferAllowlistRow `json:"allowlists,omitempty"`
 	// LargeTxThresholds carries the large-transaction reporting
 	// thresholds (see SetLargeTxThreshold); absent in snapshots written
 	// before large-transaction reporting existed. The generated report
@@ -933,6 +942,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		IdempotencyTTL:        l.idempotencyTTL.String(),
 		DailyLimits:           l.dailyLimitsLocked(),
 		SweepReserves:         l.sweepReservesLocked(),
+		Allowlists:            l.allowlistSnapshotLocked(),
 		LargeTxThresholds:     l.largeTxThresholdsLocked(),
 		LargeTxReportCurrency: l.largeTxReportCurrency,
 		BusinessDayCalendar:   l.businessCalendarSnapshotLocked(),
@@ -1714,6 +1724,39 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		reserves = append(reserves, validatedReserve{accountCurrency{account: sr.Account, currency: cur}, sr.FloorCents})
 	}
+	// Transfer allowlists restore like the sweep reserve floors: an
+	// empty payer account, an empty beneficiary, or a payer listed
+	// twice fails the import instead of installing a list that could
+	// never have been created (SetTransferAllowlist rejects those).
+	// An empty beneficiary set means the gate is disabled, so it has
+	// no representation — the row is skipped. Absent in legacy
+	// snapshots, which restore with the gate disabled.
+	type validatedAllowlist struct {
+		account AccountID
+		set     map[AccountID]bool
+	}
+	var allowlists []validatedAllowlist
+	seenAllowlistPayers := make(map[AccountID]bool, len(cfg.Allowlists))
+	for _, row := range cfg.Allowlists {
+		if row.Account == "" {
+			return bad("transfer allowlist with empty payer account")
+		}
+		if seenAllowlistPayers[row.Account] {
+			return bad("duplicate transfer allowlist for payer %q", row.Account)
+		}
+		seenAllowlistPayers[row.Account] = true
+		set := make(map[AccountID]bool, len(row.Beneficiaries))
+		for _, b := range row.Beneficiaries {
+			if b == "" {
+				return bad("transfer allowlist for payer %q names an empty beneficiary", row.Account)
+			}
+			set[b] = true
+		}
+		if len(set) == 0 {
+			continue
+		}
+		allowlists = append(allowlists, validatedAllowlist{account: row.Account, set: set})
+	}
 	type validatedLargeTxThreshold struct {
 		currency  string
 		threshold int64
@@ -2244,6 +2287,13 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	for _, vr := range reserves {
 		l.sweepReserves[vr.key] = vr.floor
+	}
+	// Transfer allowlists restore like the sweep reserve floors: the
+	// gate re-enables on the restored ledger with exactly the rows the
+	// original ran on — a restore that dropped a list would silently
+	// re-enable payouts to unlisted beneficiaries.
+	for _, va := range allowlists {
+		l.transferAllowlist[va.account] = va.set
 	}
 	// Large-transaction reporting thresholds restore like the daily
 	// outflow limits. Generated report rows are deliberately not
@@ -2858,6 +2908,12 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.budgets, b.budgets) {
+		return false
+	}
+	// Transfer beneficiary allowlists are structural config like the
+	// daily limits: they must round-trip exactly, or a restored ledger
+	// would silently re-enable payouts to unlisted beneficiaries.
+	if !reflect.DeepEqual(a.transferAllowlist, b.transferAllowlist) {
 		return false
 	}
 	// Balance threshold watches must round-trip; the breach flags are
