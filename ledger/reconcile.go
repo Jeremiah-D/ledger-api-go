@@ -221,6 +221,12 @@ type ReconciliationReport struct {
 	// journaled rows. The amounts are the books' own record — the sum
 	// of a dividend's legs always equals its declared total.
 	Dividends []DividendReceipt `json:"dividends"`
+	// Escheats lists every escheat sweep (see EscheatDormant), sorted by
+	// (account, currency, entry): the dormant account, the currency,
+	// the amount swept to the escheat account, and whether the sweep was
+	// later reversed. Recovered from the journaled rows — the journal is
+	// the truth, so the disclosure can never disagree with the books.
+	Escheats []EscheatRecord `json:"escheats"`
 	// VirtualAccounts lists the van -> parent mappings (see
 	// RegisterVirtualAccount), sorted by VAN, and VirtualAccountVersion
 	// is the mapping mutation counter. Risk tooling reads this to know
@@ -631,6 +637,7 @@ func (l *Ledger) ReconcileWithOptions(now time.Time, opts ReconcileOptions) (Rec
 			"discrepancies":          len(report.Discrepancies),
 			"merges":                 len(report.Merges),
 			"dividends":              len(report.Dividends),
+			"escheats":               len(report.Escheats),
 			"fx_applied":             report.FXApplied,
 			"pain001_pending":        len(report.Pain001Pending),
 			"ftp_totals":             len(report.FtpTotals),
@@ -667,6 +674,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// carry, so the section can never disagree with the books.
 		FXSpreadPNL:             l.fxSpreadPNLLocked(),
 		Dividends:               l.dividendsLocked(),
+		Escheats:                l.escheatsLocked(),
 		VirtualAccounts:         l.virtualAccountsLocked(),
 		VirtualAccountVersion:   l.virtualAccountVersion,
 		ClosedPeriods:           l.closedPeriodsLocked(),

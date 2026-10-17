@@ -719,6 +719,37 @@ stop itself — the fee exists to charge dormant accounts — posting
 through the same system path as accruals and dividends, which likewise
 keep posting through dormant accounts.
 
+#### Escheatment (Go API: `EscheatDormant` / `ReverseEscheatment`)
+
+The compliance end of the dormancy lifecycle: unclaimed-property sweep.
+`EscheatDormant(thresholdDays, escheatAccount)` scans the dormant set
+(`DetectDormant` must have run first — unmarked accounts are never
+swept) and, for every dormant account whose last activity is strictly
+older than `thresholdDays` days, books one entry per (account, currency)
+with a positive balance — credit the dormant account, debit the escheat
+account — for the full balance, then freezes the swept account so no
+further writes land on it.
+
+```go
+// Sweep every account dormant 365+ days into the unclaimed-property account.
+report, err := l.EscheatDormant(365, "unclaimed-property")
+// report.Escheated: [{account, currency, amount_cents, entry_id, ...}]
+// report.Skipped: positive balances that could not be swept, with reasons
+// (frozen account, gate rejection). Zero/negative balances are out of scope.
+```
+
+Entry IDs are deterministic —
+`escheat/<account>/<currency>/<YYYY-MM-DD>` — so the idempotency key is
+(account, currency, day). Each entry is a full journal row (own
+audit-chain link, version bump, memo `escheat`), each swept account gets
+an `escheat` audit event plus the `freeze` audit, and `Reconcile`
+discloses every sweep in `escheats` (recovered from the journaled rows,
+with a `reversed` flag). A mistaken sweep is undone with
+`ReverseEscheatment(escheatID, asof)`: it books the mirror entry under
+`<escheat ID>/reversal` and unfreezes the account — the original entry
+is never deleted, the audit chain stays append-only, and the dormant
+mark stays (the money is back but the account is still quiet).
+
 ### Period close (`POST /periods/{id}/close` / `POST /periods/{id}/reopen`)
 
 Accounting-period lock for month-end close (fintech compliance). A period
