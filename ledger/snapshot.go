@@ -220,6 +220,13 @@ type snapshotConfigLine struct {
 	// zero, which fail-opens for the remainder of that day — operators
 	// should treat a restore as a risk-control reset event.
 	DailyLimits []DailyLimit `json:"daily_limits,omitempty"`
+	// SweepReserves carries the sweep reserve floors (see
+	// SetSweepReserve); absent in snapshots written before sweep
+	// reserves existed, which import as unreserved. The floor is
+	// re-validated on import — a snapshot row that could never have
+	// been installed fails the import instead of silently capping a
+	// sweep.
+	SweepReserves []SweepReserve `json:"sweep_reserves,omitempty"`
 	// LargeTxThresholds carries the large-transaction reporting
 	// thresholds (see SetLargeTxThreshold); absent in snapshots written
 	// before large-transaction reporting existed. The generated report
@@ -925,6 +932,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		SplitFeePerChunk:      l.splitFeePerChunk,
 		IdempotencyTTL:        l.idempotencyTTL.String(),
 		DailyLimits:           l.dailyLimitsLocked(),
+		SweepReserves:         l.sweepReservesLocked(),
 		LargeTxThresholds:     l.largeTxThresholdsLocked(),
 		LargeTxReportCurrency: l.largeTxReportCurrency,
 		BusinessDayCalendar:   l.businessCalendarSnapshotLocked(),
@@ -1668,6 +1676,29 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		limits = append(limits, validatedLimit{dailyLimitKey{account: dl.Account, currency: cur}, dl.LimitCents})
 	}
+	// Sweep reserve floors restore like the daily outflow limits: an
+	// empty account, a bad currency, or a non-positive floor fails the
+	// import instead of installing a floor that could never have been
+	// created (SetSweepReserve rejects those). Absent in legacy
+	// snapshots, which restore as unreserved.
+	type validatedReserve struct {
+		key   accountCurrency
+		floor int64
+	}
+	var reserves []validatedReserve
+	for _, sr := range cfg.SweepReserves {
+		if sr.Account == "" {
+			return bad("sweep reserve with empty account")
+		}
+		cur, err := normalizeCurrency(sr.Currency)
+		if err != nil {
+			return bad("bad sweep reserve currency %q: %v", sr.Currency, err)
+		}
+		if sr.FloorCents <= 0 {
+			return bad("non-positive sweep reserve floor for account %q (%s)", sr.Account, sr.Currency)
+		}
+		reserves = append(reserves, validatedReserve{accountCurrency{account: sr.Account, currency: cur}, sr.FloorCents})
+	}
 	type validatedLargeTxThreshold struct {
 		currency  string
 		threshold int64
@@ -2195,6 +2226,9 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	for _, vl := range limits {
 		l.dailyLimits[vl.key] = vl.limit
+	}
+	for _, vr := range reserves {
+		l.sweepReserves[vr.key] = vr.floor
 	}
 	// Large-transaction reporting thresholds restore like the daily
 	// outflow limits. Generated report rows are deliberately not

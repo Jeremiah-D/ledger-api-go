@@ -454,6 +454,35 @@ with the receipt; a duplicate idempotency key returns `200` with the
 original receipt (its own key namespace, expiring with the TTL); invalid
 sweeps return `400`; a sweep touching a frozen account returns `403`.
 
+#### Sweep reserve floors (`PUT/GET/DELETE /sweep-reserves`)
+
+An opt-in per-`(account, currency)` minimum balance that sweeps leave
+behind: only the excess over the floor moves to the target. The shape is
+a merchant's sub-merchant keeping its settlement float for next-day
+refunds while the surplus still rolls up at day end. A floor that meets
+or exceeds the balance drops the leg entirely — the sweep still succeeds
+with an empty receipt.
+
+```bash
+curl -X PUT localhost:8080/sweep-reserves -d '{
+  "account": "sub-merchant-1", "currency": "USD", "floor_cents": 300000
+}'
+# 200 {"account":"sub-merchant-1","currency":"USD","floor_cents":300000}
+
+curl localhost:8080/sweep-reserves
+# 200 {"sweep_reserves":[{"account":"sub-merchant-1","currency":"USD","floor_cents":300000}]}
+
+curl -X DELETE 'localhost:8080/sweep-reserves?account=sub-merchant-1&currency=USD'
+# 200 {"status":"cleared"}
+```
+
+The floor must be positive (use `DELETE` to clear; a zero or negative
+floor is `400`); reserve changes are structural — they never bump the
+journal version — and are audited as `sweep_reserve_set` /
+`sweep_reserve_changed` / `sweep_reserve_cleared`. Reserves survive
+disaster-recovery snapshots and are disclosed on the reconcile report
+(`sweep_reserves`).
+
 ### `POST /merges`
 
 Account merge: atomically moves **every** currency balance of the source

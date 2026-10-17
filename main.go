@@ -3435,6 +3435,110 @@ func (s *server) handleGetAlias(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": string(account), "alias": alias})
 }
 
+type setSweepReserveRequest struct {
+	Account    ledger.AccountID `json:"account"`
+	Currency   string           `json:"currency"`
+	FloorCents int64            `json:"floor_cents"`
+}
+
+// handleSetSweepReserve implements PUT /sweep-reserves: configures the
+// sweep reserve floor for one account in one currency (see
+// ledger.SetSweepReserve). PostSweep moves only the balance in excess of
+// the floor to the target; the floor stays behind as the account's
+// operating float. The floor must be positive (clear via DELETE); a
+// non-positive floor or a malformed currency is 400
+// (ledger.ErrInvalidSweepReserve). The body is strict JSON — unknown
+// fields fail fast, like every other write endpoint. Reserve changes
+// are structural: they do not bump the ledger version and are audited
+// as sweep_reserve_set/sweep_reserve_changed.
+func (s *server) handleSetSweepReserve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req setSweepReserveRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.Account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account required"})
+		return
+	}
+
+	account, _ := s.resolveAccountRef(r, string(req.Account))
+	if err := s.ledgerFor(r).SetSweepReserve(account, req.Currency, req.FloorCents); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	floor, _ := s.ledgerFor(r).SweepReserve(account, req.Currency)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":     string(account),
+		"currency":    normalizedReserveCurrency(req.Currency),
+		"floor_cents": floor,
+	})
+}
+
+// handleListSweepReserves implements GET /sweep-reserves: lists the
+// configured sweep reserve floors (see ledger.SetSweepReserve), sorted
+// by (account, currency). Optional ?account= and ?currency= filter the
+// list. An empty list means no reserves are configured.
+func (s *server) handleListSweepReserves(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	q := r.URL.Query()
+	wantAccount := q.Get("account")
+	wantCurrency := q.Get("currency")
+
+	out := make([]ledger.SweepReserve, 0)
+	for _, row := range s.ledgerFor(r).SweepReserves() {
+		if wantAccount != "" && string(row.Account) != wantAccount {
+			continue
+		}
+		if wantCurrency != "" && row.Currency != wantCurrency {
+			continue
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sweep_reserves": out})
+}
+
+// handleClearSweepReserve implements DELETE /sweep-reserves: removes the
+// sweep reserve floor for one account in one currency (see
+// ledger.ClearSweepReserve). ?account= is required; ?currency=
+// defaults to the ledger's default currency. Clearing a reserve that
+// was never set is a silent no-op, returning 200.
+func (s *server) handleClearSweepReserve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	q := r.URL.Query()
+	account := q.Get("account")
+	if account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account query parameter required"})
+		return
+	}
+	if err := s.ledgerFor(r).ClearSweepReserve(ledger.AccountID(account), q.Get("currency")); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
+}
+
+// normalizedReserveCurrency echoes the effective currency of a sweep
+// reserve: the request's currency when given, the ledger default
+// otherwise. SetSweepReserve already normalized it — this is only the
+// response echo, kept in one place.
+func normalizedReserveCurrency(currency string) string {
+	if currency == "" {
+		return ledger.DefaultCurrency
+	}
+	return currency
+}
+
 // handleTagRollup implements GET /rollup?tag=k:v: the balance rollup of
 // every account carrying the (key, value) tag pair, per currency (see
 // ledger.TagRollupByTag) — the tag dimension across the whole ledger,
@@ -4888,6 +4992,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PUT /accounts/{id}/tags", s.handleSetAccountTags)
 	mux.HandleFunc("PUT /accounts/{id}/alias", s.handleSetAlias)
 	mux.HandleFunc("GET /accounts/{id}/alias", s.handleGetAlias)
+	mux.HandleFunc("PUT /sweep-reserves", s.handleSetSweepReserve)
+	mux.HandleFunc("GET /sweep-reserves", s.handleListSweepReserves)
+	mux.HandleFunc("DELETE /sweep-reserves", s.handleClearSweepReserve)
 	mux.HandleFunc("GET /rollup", s.handleTagRollup)
 	mux.HandleFunc("GET /balance-history", s.handleBalanceHistory)
 	mux.HandleFunc("GET /snapshots/diff", s.handleSnapshotDiff)

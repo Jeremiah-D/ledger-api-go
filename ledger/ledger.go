@@ -321,6 +321,12 @@ type Ledger struct {
 	// currency; structural config, like frozen and noOverdraft.
 	dailyLimits  map[dailyLimitKey]int64
 	dailyOutflow map[dailyLimitKey]int64
+	// sweepReserves maps (account, currency) to the account's sweep
+	// reserve floor in cents (see sweep_reserve.go): PostSweep moves
+	// only the balance in excess of the floor to the target. Opt-in
+	// per account and currency; structural config, like dailyLimits —
+	// setting or clearing a reserve does not bump the journal version.
+	sweepReserves map[accountCurrency]int64
 	// businessCalendar is the ledger's holiday calendar (see
 	// businessday.go): weekend days plus the custom holiday table, with
 	// a version counter bumped on every change. Structural config, like
@@ -923,6 +929,7 @@ func New(opts ...Option) *Ledger {
 		deniedPrefixes:       make(map[string]DenylistEntry),
 		dailyLimits:          make(map[dailyLimitKey]int64),
 		dailyOutflow:         make(map[dailyLimitKey]int64),
+		sweepReserves:        make(map[accountCurrency]int64),
 		largeTxThresholds:    make(map[string]int64),
 		largeTxReportCurrency: DefaultCurrency,
 		largeTxReports:       make(map[largeTxReportKey]LargeTxReport),

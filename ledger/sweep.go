@@ -37,6 +37,13 @@ var (
 // balances of the source accounts are moved to the target account, one
 // journal entry per (source, currency).
 //
+// A source's (account, currency) may carry an opt-in sweep reserve floor
+// (see SetSweepReserve): then only the balance in excess of the floor
+// moves, and the floor stays behind as the account's operating float. A
+// floor that meets or exceeds the balance drops the leg entirely — the
+// sweep still succeeds, with the receipt's leg list simply shorter — so
+// reserves never sweep an account into debt.
+//
 // It is the treasury view of the payment domain: a merchant sweeping its
 // sub-merchants' settlement balances (see Rollup) into the master
 // account at the end of the day. Internally each leg reuses transfer
@@ -201,6 +208,16 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 			return SweepReceipt{}, ErrAccountFrozen
 		}
 	}
+
+	// Sweep reserve floors (see sweep_reserve.go) shrink the planned legs
+	// after the frozen checks and before the budget checks: a leg whose
+	// (source, currency) carries a reserve moves only the balance in
+	// excess of the floor, and a leg the floor consumes entirely
+	// contributes no journal row. The reserve calculation runs here — not
+	// in sweepLegsLocked — so a frozen source rejects first: a frozen
+	// account never silently sweeps a reduced amount, and a zero-leg
+	// sweep still succeeds with an empty receipt.
+	legs = l.applySweepReservesLocked(legs)
 
 	// The sweep's effective post time is finalized before the budget and
 	// period checks: spend is booked against the sweep's own UTC calendar

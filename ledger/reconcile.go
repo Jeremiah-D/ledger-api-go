@@ -150,6 +150,11 @@ type ReconciliationReport struct {
 	// this to know which accounts are capped on daily outflow and at
 	// what level.
 	DailyLimits []DailyLimit `json:"daily_limits"`
+	// SweepReserves lists every configured sweep reserve floor (see
+	// SetSweepReserve), sorted by (account, currency). Risk tooling
+	// reads this to know which accounts keep an operating float that
+	// sweeps leave untouched.
+	SweepReserves []SweepReserve `json:"sweep_reserves"`
 	// SubtreeLimitUtilization lists every configured daily outflow
 	// limit with its subtree's already-booked outflow for the report's
 	// UTC day (LG-80), sorted by (account, currency). A parent's limit
@@ -667,6 +672,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FrozenAccountAutoUnfreeze:  l.frozenUntilCopyLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
+		SweepReserves:              l.sweepReservesLocked(),
 		SubtreeLimitUtilization:    l.subtreeLimitUtilizationLocked(now),
 		LargeTxReports:             l.largeTxReportsForDayLocked(utcDay(now)),
 		BudgetUtilization:          l.budgetUtilizationLocked(now),

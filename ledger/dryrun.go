@@ -115,6 +115,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		noOverdraft:          make(map[AccountID]bool, len(l.noOverdraft)),
 		dailyLimits:          make(map[dailyLimitKey]int64, len(l.dailyLimits)),
 		dailyOutflow:         make(map[dailyLimitKey]int64, len(l.dailyOutflow)),
+		sweepReserves:        make(map[accountCurrency]int64, len(l.sweepReserves)),
 		budgets:              make(map[budgetKey]int64, len(l.budgets)),
 		monthlySpend:         make(map[monthlySpendKey]int64, len(l.monthlySpend)),
 		parents:              make(map[AccountID]AccountID, len(l.parents)),
@@ -199,6 +200,9 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	}
 	for k, v := range l.dailyOutflow {
 		c.dailyOutflow[k] = v
+	}
+	for k, v := range l.sweepReserves {
+		c.sweepReserves[k] = v
 	}
 	for k, v := range l.budgets {
 		c.budgets[k] = v
