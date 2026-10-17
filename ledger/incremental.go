@@ -174,6 +174,7 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	holdKeys := map[string]string{}
 	termDepositKeys := map[string]string{}
 	captureKeys := map[string]CaptureReceipt{}
+	partialCaptureKeys := map[string]PartialCaptureReceipt{}
 	sweepKeys := map[string]sweepRecord{}
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
@@ -360,6 +361,14 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
 				}
 				captureKeys[il.Key] = *il.Receipt
+			case snapshotNSPartialCap:
+				if il.PartialReceipt == nil {
+					return fail("line %d: partial_capture-namespace record without receipt", lineNo)
+				}
+				if _, dup := partialCaptureKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				partialCaptureKeys[il.Key] = *il.PartialReceipt
 			case snapshotNSSweep:
 				if il.Sweep == nil {
 					return fail("line %d: sweep-namespace record without sweep", lineNo)
@@ -661,6 +670,24 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 			}
 		}
 	}
+	// Partial-capture receipts merge like full-capture ones: same
+	// rows merge, conflicting rows refuse the import.
+	for k, rc := range partialCaptureKeys {
+		if !holdVisible(rc.HoldID) {
+			return fail("partial capture idempotency key %q references missing hold %q", k, rc.HoldID)
+		}
+		if _, ok := entryVisible(rc.Entry.ID); !ok {
+			return fail("partial capture idempotency key %q references missing entry %q", k, rc.Entry.ID)
+		}
+		if existing, ok := l.partialCaptureKeys[k]; ok {
+			if existing.CaptureID != rc.CaptureID || existing.HoldID != rc.HoldID ||
+				existing.CaptureSeq != rc.CaptureSeq || existing.CapturedCents != rc.CapturedCents ||
+				existing.TotalCapturedCents != rc.TotalCapturedCents || existing.RemainingCents != rc.RemainingCents ||
+				existing.Duplicate != rc.Duplicate || !journalEntriesEqual(existing.Entry, rc.Entry) {
+				return fail("partial capture idempotency key %q conflicts with the ledger's registry: refusing merge", k)
+			}
+		}
+	}
 	for k, rec := range sweepKeys {
 		for _, id := range rec.entryIDs {
 			if _, ok := entryVisible(id); !ok {
@@ -787,6 +814,11 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	for k, rc := range captureKeys {
 		if _, ok := l.captureKeys[k]; !ok {
 			l.captureKeys[k] = rc
+		}
+	}
+	for k, rc := range partialCaptureKeys {
+		if _, ok := l.partialCaptureKeys[k]; !ok {
+			l.partialCaptureKeys[k] = rc
 		}
 	}
 	for k, rec := range sweepKeys {

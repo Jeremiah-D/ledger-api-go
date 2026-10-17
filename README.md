@@ -1639,6 +1639,41 @@ Status codes: `201` first booking / `200` idempotent replay or release;
 `422` insufficient available funds, capture exceeding the hold, or
 capture on a non-active/expired hold.
 
+#### Partial captures
+
+E-commerce and hotel pre-authorizations settle in pieces — a $500 hold
+settles as a $320 room charge on day 3 and a $95 minibar charge on day
+5. `POST /holds/{id}/capture/partial` is that flow: it settles
+`amount_cents` (bounded by the hold's *remaining* cents) as an ordinary
+double-entry posting from the held account to the payee, and the hold
+stays active with its remainder still reserving available funds until
+the cumulative captures reach the original hold amount.
+
+```bash
+curl -s -X POST localhost:8080/holds/<id>/capture/partial \
+  -d '{"capture_seq":1,"to_account":"hotel","amount_cents":32000}'
+# 201 {"capture_id":"<id>/capture/1","hold_id":"<id>","capture_seq":1,
+#      "captured_cents":32000,"total_captured_cents":32000,
+#      "remaining_cents":18000,...}
+curl -s -X POST localhost:8080/holds/<id>/capture/partial \
+  -d '{"capture_seq":2,"to_account":"hotel","amount_cents":9500}'
+# 201 {"remaining_cents":8500,...}  # hold still active
+```
+
+The `(holdID, captureSeq)` pair is the operation's identity:
+`capture_seq` is caller-allocated (1-based, need not be consecutive),
+the journal entry is booked under the deterministic
+`<holdID>/capture/<seq>` ID, and replaying the same pair returns the
+original receipt with `duplicate: true` — the same logical partial
+capture can never double-book. Each partial capture runs the same risk
+checks as a full capture (denylist, frozen, overdraft, budget, period)
+and bumps the version with one audit-chain link; the hold's
+`CapturedCents` accumulates on the hold row, `Available` counts only
+the un-settled remainder, and `Reconcile` reports per-hold
+`partial_captures` (held / captured / remaining cents, capture count,
+status). Every `POST /holds/{id}/capture/partial` is counted by
+`ledger_partial_captures_total`.
+
 ### Term deposits (定存)
 
 A bank-style time deposit: `POST /term-deposits` locks a principal for a
@@ -3863,6 +3898,8 @@ curl -s localhost:8080/metrics
 - `ledger_capture_idempotency_hits_total` — captures that replayed an
   existing idempotency key (returned the original receipt, booked
   nothing).
+- `ledger_partial_captures_total` — every
+  `POST /holds/{id}/capture/partial` request received.
 - `ledger_releases_total` — `POST /holds/{id}/release` requests received.
 - `ledger_hold_sweeps_total` — hold-expiry sweeps: `POST /holds/expire`
   requests received plus background hold-sweeper ticks (see

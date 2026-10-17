@@ -217,6 +217,10 @@ type Metrics struct {
 	// that replayed an already-settled capture idempotency key and
 	// returned the original receipt.
 	CaptureIdempotencyHits atomic.Uint64
+	// PartialCapturesTotal counts POST /holds/{id}/capture/partial
+	// requests received (all attempts, including duplicates and
+	// rejected payloads).
+	PartialCapturesTotal atomic.Uint64
 	// ReleasesTotal counts POST /holds/{id}/release requests received.
 	ReleasesTotal atomic.Uint64
 	// HoldSweeps counts hold-expiry sweeps: POST /holds/expire requests
@@ -566,6 +570,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_capture_idempotency_hits_total",
 		"Total POST /holds/{id}/capture requests that replayed an existing capture idempotency key.",
 		m.CaptureIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_partial_captures_total",
+		"Total POST /holds/{id}/capture/partial requests received.",
+		m.PartialCapturesTotal.Load())
 	writeCounter(&sb, "ledger_releases_total",
 		"Total POST /holds/{id}/release requests received.", m.ReleasesTotal.Load())
 	writeCounter(&sb, "ledger_hold_sweeps_total",

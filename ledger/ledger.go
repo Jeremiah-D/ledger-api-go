@@ -618,8 +618,12 @@ type Ledger struct {
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the
 	// entry/transfer key namespaces; all of them expire with the TTL.
-	holdKeys    map[string]string
-	captureKeys map[string]CaptureReceipt
+	// partialCaptureKeys is the same shape for partial captures (see
+	// hold_partial.go): the key is the deterministic "<holdID>/capture/
+	// <seq>" entry ID, the (holdID, captureSeq) identity.
+	holdKeys           map[string]string
+	captureKeys        map[string]CaptureReceipt
+	partialCaptureKeys map[string]PartialCaptureReceipt
 	// termDeposits maps term-deposit IDs to their records (see
 	// termdeposit.go): time-bound principal locks that reserve available
 	// funds off-journal, like authorization holds. termDepositKeys maps
@@ -1022,6 +1026,7 @@ func New(opts ...Option) *Ledger {
 		holdsByAccount:       make(map[AccountID][]string),
 		holdKeys:             make(map[string]string),
 		captureKeys:          make(map[string]CaptureReceipt),
+		partialCaptureKeys:   make(map[string]PartialCaptureReceipt),
 		termDeposits:         make(map[string]TermDeposit),
 		termDepositKeys:      make(map[string]string),
 		ftpCurves:            make(map[string]*FtpCurve),

@@ -126,6 +126,14 @@ type Hold struct {
 	CreatedAt      time.Time `json:"created_at"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 	Status         string    `json:"status"`
+	// CapturedCents tracks the cumulative cents settled out of the hold
+	// by partial captures (see CapturePartial in hold_partial.go). A
+	// hold whose CapturedCents reaches AmountCents is fully settled and
+	// moves to the captured state; below that it stays active with the
+	// remainder still reserving available funds. Zero for holds created
+	// before partial captures existed — every legacy hold behaves
+	// exactly as before.
+	CapturedCents int64 `json:"captured_cents,omitempty"`
 }
 
 // Capture settles part of an authorization hold as a real money movement:
@@ -303,6 +311,15 @@ func activeHoldLocked(h Hold, now time.Time) bool {
 	return h.Status == HoldStatusActive && now.Before(h.ExpiresAt)
 }
 
+// heldRemainingLocked reports the cents a hold still reserves from
+// available funds: the original hold amount minus whatever partial
+// captures already settled (see hold_partial.go). Holds created before
+// partial captures existed carry CapturedCents == 0, so their remaining
+// is the full amount. Callers must hold l.mu.
+func heldRemainingLocked(h Hold) int64 {
+	return h.AmountCents - h.CapturedCents
+}
+
 // heldLocked sums the active holds on (account, currency) at now.
 // Callers must hold l.mu; the read lock suffices because nothing is
 // mutated.
@@ -310,7 +327,11 @@ func (l *Ledger) heldLocked(a AccountID, currency string, now time.Time) int64 {
 	var total int64
 	for _, id := range l.holdsByAccount[a] {
 		if h := l.holds[id]; h.Currency == currency && activeHoldLocked(h, now) {
-			total += h.AmountCents
+			// Only the un-settled remainder still reserves funds:
+			// a partial capture already moved its cents through the
+			// journal, so counting the full hold amount would
+			// double-count the reservation.
+			total += heldRemainingLocked(h)
 		}
 	}
 	return total
@@ -536,8 +557,7 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		return CaptureReceipt{}, ErrHoldNotFound
 	}
 
-	// Sanctions/denylist screening (see denylist.go): the hold's account
-	// (payer) and the capture target (payee) are screened before the
+	// Sanctions/denylist screening (see denylist.go): the hold's account	// (payer) and the capture target (payee) are screened before the
 	// idempotency replay check — a hit rejects the capture and the
 	// attempt is audited as "denylist_rejected".
 	if acct, entry, denied := l.denylistRejectedLocked(h.Account, c.To); denied {
@@ -561,7 +581,12 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	if c.To == h.Account {
 		return CaptureReceipt{}, ErrCaptureSameAccount
 	}
-	if c.AmountCents > h.AmountCents {
+	// The capture amount is bounded by the hold's *remaining* cents,
+	// not the original hold amount: a full capture after partial
+	// captures (see hold_partial.go) may only settle what is left.
+	// Holds without partial captures carry CapturedCents == 0, so this
+	// is exactly the old check for them.
+	if c.AmountCents > heldRemainingLocked(h) {
 		return CaptureReceipt{}, ErrCaptureExceedsHold
 	}
 	if _, exists := l.entries[c.ID]; exists {
@@ -640,7 +665,10 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		HoldID:        c.HoldID,
 		Entry:         entry,
 		CapturedCents: c.AmountCents,
-		ReleasedCents: h.AmountCents - c.AmountCents,
+		// The released remainder is what the hold still reserved
+		// before this capture: with partial captures on the hold that
+		// is the post-partial remainder, not the original hold amount.
+		ReleasedCents: heldRemainingLocked(h) - c.AmountCents,
 	}
 	if c.IdempotencyKey != "" {
 		l.captureKeys[c.IdempotencyKey] = receipt
@@ -706,6 +734,15 @@ func (l *Ledger) pruneHoldKeysLocked(now time.Time) int {
 	for key, r := range l.captureKeys {
 		if r.Entry.CreatedAt.Before(cutoff) {
 			delete(l.captureKeys, key)
+			removed++
+		}
+	}
+	// Partial-capture idempotency keys expire like the full-capture
+	// ones: after the TTL, reposting the same (holdID, captureSeq)
+	// books a brand-new partial capture.
+	for key, r := range l.partialCaptureKeys {
+		if r.Entry.CreatedAt.Before(cutoff) {
+			delete(l.partialCaptureKeys, key)
 			removed++
 		}
 	}

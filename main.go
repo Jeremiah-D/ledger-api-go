@@ -1821,6 +1821,116 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, receipt)
 }
 
+// partialCaptureHoldRequest is the body of POST
+// /holds/{id}/capture/partial: settle one slice of an authorization
+// hold as a real money movement. capture_seq is the caller-allocated
+// 1-based sequence number of this partial capture: together with the
+// hold ID it is the operation's idempotency identity, and the journal
+// entry is booked under the deterministic "<holdID>/capture/<seq>" ID.
+type partialCaptureHoldRequest struct {
+	CaptureSeq    int               `json:"capture_seq"`
+	ToAccount     ledger.AccountID  `json:"to_account"`
+	AmountCents   int64             `json:"amount_cents"`
+	ExternalRef   string            `json:"external_ref"`
+	Attachments   []string          `json:"attachments"`
+	Metadata      map[string]string `json:"metadata"`
+}
+
+// handlePartialCaptureHold implements POST /holds/{id}/capture/partial,
+// the e-commerce / hotel slice of the auth/capture flow: it posts
+// amount_cents (which must not exceed the hold's remaining cents) as a
+// double-entry journal entry from the held account to to_account, in the
+// hold's currency, under the deterministic "<holdID>/capture/<seq>"
+// entry ID. The hold stays active for further partial captures until the
+// cumulative captures reach the original hold amount.
+//
+// A first-time partial capture returns 201 with the receipt; a replay of
+// the same (holdID, captureSeq) returns 200 with the original receipt;
+// an unknown hold returns 404; a partial capture on a frozen account
+// returns 403; a partial capture that exceeds the hold's remaining
+// cents, targets a captured/released hold, targets an expired hold, or
+// would overdraw an overdraft-protected held account returns 422.
+func (s *server) handlePartialCaptureHold(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hold id required"})
+		return
+	}
+	s.metrics.PartialCapturesTotal.Add(1)
+	var req partialCaptureHoldRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	receipt, err := s.ledgerFor(r).CapturePartial(ledger.PartialCapture{
+		HoldID:       id,
+		To:           req.ToAccount,
+		CaptureSeq:   req.CaptureSeq,
+		AmountCents:  req.AmountCents,
+		ExternalRef:  req.ExternalRef,
+		Attachments:  req.Attachments,
+		Metadata:     req.Metadata,
+		CreatedAt:    time.Now(),
+	})
+	if err != nil {
+		if errors.Is(err, ledger.ErrHoldNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		}
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountDenied) {
+			s.metrics.DenylistRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrCaptureExceedsHold) ||
+			errors.Is(err, ledger.ErrHoldNotActive) ||
+			errors.Is(err, ledger.ErrHoldExpired) {
+			s.metrics.HoldRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if receipt.Duplicate {
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
 // handleReleaseHold implements POST /holds/{id}/release: drops the hold
 // without settling anything, returning its reserved funds to available.
 // Release is idempotent — releasing an already-released or expired hold
@@ -5062,6 +5172,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /ecl/provisions", s.handleBookECLProvision)
 	mux.HandleFunc("POST /ecl/config", s.handleSetECLStageConfig)
 	mux.HandleFunc("POST /holds/{id}/capture", s.handleCaptureHold)
+	mux.HandleFunc("POST /holds/{id}/capture/partial", s.handlePartialCaptureHold)
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)

@@ -105,6 +105,21 @@ type CurrencyHoldTotals struct {
 	ActiveHolds int    `json:"active_holds"`
 }
 
+// PartialCaptureSummary is one authorization hold that has been
+// partially captured (see hold_partial.go): how much of the original
+// hold has settled, how much is still reserved, and how many partial
+// captures landed. Rows are sorted by hold ID.
+type PartialCaptureSummary struct {
+	HoldID         string    `json:"hold_id"`
+	Account        AccountID `json:"account"`
+	Currency       string    `json:"currency"`
+	HeldCents      int64     `json:"held_cents"`
+	CapturedCents  int64     `json:"captured_cents"`
+	RemainingCents int64     `json:"remaining_cents"`
+	Captures       int       `json:"captures"`
+	Status         string    `json:"status"`
+}
+
 // ReconciliationReport is the end-of-day reconciliation: one consistent,
 // read-only snapshot of the whole ledger's health. It answers, in one
 // pass, the questions a settlement operator asks at day end: do the books
@@ -193,7 +208,13 @@ type ReconciliationReport struct {
 	// holds (see hold.go) at report time, sorted by currency code: the
 	// cents currently reserved from available balances. Expired holds
 	// count as inactive even before the ExpireHolds sweep.
-	HeldTotals      []CurrencyHoldTotals `json:"held_totals"`
+	HeldTotals []CurrencyHoldTotals `json:"held_totals"`
+	// PartialCaptures lists every authorization hold with at least
+	// one partial capture (see hold_partial.go), sorted by hold ID:
+	// the settled, still-reserved, and original cents per hold, so an
+	// operator can see which authorizations still have open settlement
+	// capacity.
+	PartialCaptures []PartialCaptureSummary `json:"partial_captures"`
 	IdempotencyKeys IdempotencyKeyHealth `json:"idempotency_keys"`
 	AuditChain      AuditChainHealth     `json:"audit_chain"`
 	// FXRates lists the configured FX conversion rates (see SetFXRate),
@@ -679,6 +700,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		BalanceWatches:             l.balanceWatchesLocked(),
 		AccountTypeTotals:          l.accountTypeTotalsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
+		PartialCaptures:            l.partialCaptureSummaryLocked(),
 		FXRates:                    l.fxRatesLocked(),
 		FXRateVersions:             l.fxRateVersionReportLocked(),
 		ForwardBook:                l.forwardBookReportLocked(now),
@@ -866,7 +888,10 @@ func (l *Ledger) heldTotalsLocked(now time.Time) []CurrencyHoldTotals {
 			row = &CurrencyHoldTotals{Currency: h.Currency}
 			byCurrency[h.Currency] = row
 		}
-		row.HeldCents += h.AmountCents
+		// Only the un-settled remainder still reserves funds (see
+		// heldLocked in hold.go): partial captures already moved
+		// their cents through the journal.
+		row.HeldCents += heldRemainingLocked(h)
 		row.ActiveHolds++
 	}
 	currencies := make([]string, 0, len(byCurrency))

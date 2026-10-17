@@ -156,6 +156,7 @@ const (
 	snapshotNSTransfer    = "transfer"     // key -> []entry IDs (transferKeys)
 	snapshotNSHold        = "hold"         // key -> hold ID (holdKeys)
 	snapshotNSCapture     = "capture"      // key -> CaptureReceipt (captureKeys)
+	snapshotNSPartialCap  = "partial_capture" // key -> PartialCaptureReceipt (partialCaptureKeys)
 	snapshotNSSweep       = "sweep"        // key -> snapshotSweep (sweepKeys)
 	snapshotNSMergeKey    = "merge_key"    // key -> merge ID (mergeKeys)
 	snapshotNSBatch       = "batch"        // key -> snapshotBatch (batchKeys)
@@ -173,6 +174,9 @@ type snapshotIdempotencyLine struct {
 	EntryIDs  []string        `json:"entry_ids,omitempty"`
 	HoldID    string          `json:"hold_id,omitempty"`
 	Receipt   *CaptureReceipt `json:"receipt,omitempty"`
+	// PartialReceipt carries the partial-capture receipt row for the
+	// "partial_capture" namespace (see hold_partial.go).
+	PartialReceipt *PartialCaptureReceipt `json:"partial_receipt,omitempty"`
 	Sweep     *snapshotSweep  `json:"sweep,omitempty"`
 	MergeID   string          `json:"merge_id,omitempty"`
 	Batch     *snapshotBatch  `json:"batch,omitempty"`
@@ -852,6 +856,21 @@ func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
+	// Partial-capture idempotency keys round-trip like the full-capture
+	// ones: a restore must replay a retried partial capture instead of
+	// double-booking it.
+	partialCaptureKeyList := make([]string, 0, len(l.partialCaptureKeys))
+	for k := range l.partialCaptureKeys {
+		partialCaptureKeyList = append(partialCaptureKeyList, k)
+	}
+	for _, k := range sortedKeys(partialCaptureKeyList) {
+		r := l.partialCaptureKeys[k]
+		if err := enc.Encode(snapshotIdempotencyLine{
+			Record: "idempotency", Namespace: snapshotNSPartialCap, Key: k, PartialReceipt: &r,
+		}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
 	sweepKeyList := make([]string, 0, len(l.sweepKeys))
 	for k := range l.sweepKeys {
 		sweepKeyList = append(sweepKeyList, k)
@@ -1130,6 +1149,7 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	holdKeys := map[string]string{}
 	termDepositKeys := map[string]string{}
 	captureKeys := map[string]CaptureReceipt{}
+	partialCaptureKeys := map[string]PartialCaptureReceipt{}
 	sweepKeys := map[string]sweepRecord{}
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
@@ -1310,6 +1330,14 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
 				}
 				captureKeys[il.Key] = *il.Receipt
+			case snapshotNSPartialCap:
+				if il.PartialReceipt == nil {
+					return fail("line %d: partial_capture-namespace record without receipt", lineNo)
+				}
+				if _, dup := partialCaptureKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				partialCaptureKeys[il.Key] = *il.PartialReceipt
 			case snapshotNSSweep:
 				if il.Sweep == nil {
 					return fail("line %d: sweep-namespace record without sweep", lineNo)
@@ -1607,6 +1635,23 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 			return fail("capture idempotency key %q references missing entry %q", k, rc.Entry.ID)
 		}
 		l.captureKeys[k] = rc
+	}
+	// Partial-capture receipts reference their hold and their journal
+	// row like full captures: a receipt pointing at a journal row that
+	// does not exist (or at a journal row it no longer matches) is
+	// corruption, not a warning.
+	for k, rc := range partialCaptureKeys {
+		if _, ok := l.holds[rc.HoldID]; !ok {
+			return fail("partial capture idempotency key %q references missing hold %q", k, rc.HoldID)
+		}
+		j, ok := l.entries[rc.Entry.ID]
+		if !ok {
+			return fail("partial capture idempotency key %q references missing entry %q", k, rc.Entry.ID)
+		}
+		if !journalEntriesEqual(j, rc.Entry) {
+			return fail("partial capture idempotency key %q registry entry differs from journal entry %q", k, rc.Entry.ID)
+		}
+		l.partialCaptureKeys[k] = rc
 	}
 	for k, rec := range sweepKeys {
 		for _, id := range rec.entryIDs {
@@ -2720,6 +2765,7 @@ func holdsEqual(a, b Hold) bool {
 	return a.ID == b.ID &&
 		a.Account == b.Account &&
 		a.AmountCents == b.AmountCents &&
+		a.CapturedCents == b.CapturedCents &&
 		a.Currency == b.Currency &&
 		a.ExpiresAt.UnixNano() == b.ExpiresAt.UnixNano() &&
 		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano() &&
@@ -2853,6 +2899,20 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		rb, ok := b.captureKeys[k]
 		if !ok || ra.CaptureID != rb.CaptureID || ra.HoldID != rb.HoldID ||
 			ra.CapturedCents != rb.CapturedCents || ra.ReleasedCents != rb.ReleasedCents ||
+			ra.Duplicate != rb.Duplicate || !journalEntriesEqual(ra.Entry, rb.Entry) {
+			return false
+		}
+	}
+	// Partial-capture receipts must round-trip too: a restore that
+	// dropped them would double-book a retried partial capture.
+	if len(a.partialCaptureKeys) != len(b.partialCaptureKeys) {
+		return false
+	}
+	for k, ra := range a.partialCaptureKeys {
+		rb, ok := b.partialCaptureKeys[k]
+		if !ok || ra.CaptureID != rb.CaptureID || ra.HoldID != rb.HoldID ||
+			ra.CaptureSeq != rb.CaptureSeq || ra.CapturedCents != rb.CapturedCents ||
+			ra.TotalCapturedCents != rb.TotalCapturedCents || ra.RemainingCents != rb.RemainingCents ||
 			ra.Duplicate != rb.Duplicate || !journalEntriesEqual(ra.Entry, rb.Entry) {
 			return false
 		}
