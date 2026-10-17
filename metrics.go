@@ -467,6 +467,11 @@ type Metrics struct {
 	// LEDGER_BALANCE_HISTORY_DIR): one per tick that wrote rows, not per
 	// row — it measures that the time series is alive, not its volume.
 	BalanceHistorySnapshots atomic.Uint64
+	// AliasSetsTotal counts PUT /accounts/{id}/alias requests served
+	// successfully (see ledger.SetAlias): bindings, rebinds, and clears
+	// alike. Rejected requests (bad alias, conflicting alias) are not
+	// counted.
+	AliasSetsTotal atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -773,6 +778,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_webhook_failures_total",
 		"Total outbound webhook deliveries that exhausted their retries (one event x endpoint pair the dispatcher gave up on). A rising count means a downstream webhook consumer is down or rejecting; delivery failures never block the posting path.",
 		m.WebhookFailuresTotal.Load())
+	writeCounter(&sb, "ledger_alias_sets_total",
+		"Total PUT /accounts/{id}/alias requests served successfully (alias bindings, rebinds, and clears).",
+		m.AliasSetsTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

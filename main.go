@@ -2447,6 +2447,26 @@ func (s *server) handleSetECLStageConfig(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, s.ledgerFor(r).ECLStageConfig())
 }
 
+// resolveAccountRef resolves an account reference carried by a path or
+// query parameter: a registered alias maps to the account it names, and
+// anything else is used as the account ID verbatim (see
+// ledger.ResolveAccount). The second return value is the account's
+// current alias ("" when the account has none), echoed on the
+// balance/snapshot/trial-balance responses (LG-31).
+//
+// Alias resolution applies to the account-scope read endpoints
+// (balance, snapshot, trial-balance, balance-at, entries, statement,
+// merkle-proof, rollup, ofx, balance-history, and the alias endpoints
+// themselves). Write endpoints (parent, tags, close, freeze, alias
+// management aside) keep taking canonical account IDs: writes are
+// audited against the canonical ID, and resolving aliases on the write
+// path would let a rebound alias silently retarget in-flight
+// automation. Reads are where human operators paste aliases, so reads
+// resolve and writes do not.
+func (s *server) resolveAccountRef(r *http.Request, ref string) (ledger.AccountID, string) {
+	return s.ledgerFor(r).ResolveAccount(ref)
+}
+
 // handleBalance implements GET /accounts/{id}/balance.
 //
 // available_cents is the account's spendable funds: net balance minus
@@ -2462,12 +2482,18 @@ func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"account":         id,
-		"balance_cents":   s.ledgerFor(r).Balance(ledger.AccountID(id)),
-		"available_cents": s.ledgerFor(r).Available(ledger.AccountID(id)),
-		"frozen":          s.ledgerFor(r).IsFrozen(ledger.AccountID(id)),
-	})
+	account, alias := s.resolveAccountRef(r, id)
+	l := s.ledgerFor(r)
+	resp := map[string]any{
+		"account":         string(account),
+		"balance_cents":   l.Balance(account),
+		"available_cents": l.Available(account),
+		"frozen":          l.IsFrozen(account),
+	}
+	if alias != "" {
+		resp["alias"] = alias
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleSnapshot implements GET /accounts/{id}/snapshot.
@@ -2480,13 +2506,19 @@ func (s *server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	balance, version := s.ledgerFor(r).Snapshot(ledger.AccountID(id))
-	writeJSON(w, http.StatusOK, map[string]any{
-		"account":       id,
+	account, alias := s.resolveAccountRef(r, id)
+	l := s.ledgerFor(r)
+	balance, version := l.Snapshot(account)
+	resp := map[string]any{
+		"account":       string(account),
 		"balance_cents": balance,
 		"version":       version,
-		"frozen":        s.ledgerFor(r).IsFrozen(ledger.AccountID(id)),
-	})
+		"frozen":        l.IsFrozen(account),
+	}
+	if alias != "" {
+		resp["alias"] = alias
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleMerkleProof implements GET /accounts/{id}/merkle-proof[?currency=XXX]
@@ -2505,8 +2537,9 @@ func (s *server) handleMerkleProof(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
+	account, _ := s.resolveAccountRef(r, id)
 	currency := r.URL.Query().Get("currency")
-	proof, rootHex, version, err := s.ledgerFor(r).MerkleProofFor(ledger.AccountID(id), currency)
+	proof, rootHex, version, err := s.ledgerFor(r).MerkleProofFor(account, currency)
 	if err != nil {
 		switch {
 		case errors.Is(err, ledger.ErrMerkleLeafNotFound):
@@ -2528,7 +2561,7 @@ func (s *server) handleMerkleProof(w http.ResponseWriter, r *http.Request) {
 	}
 	s.metrics.MerkleProofQueries.Add(1)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"account":       id,
+		"account":       string(account),
 		"currency":      currency,
 		"balance_cents": proof.Leaf.BalanceCents,
 		"version":       version,
@@ -2560,6 +2593,7 @@ func (s *server) handleBalanceAt(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
+	account, _ := s.resolveAccountRef(r, id)
 	version, err := strconv.ParseUint(r.URL.Query().Get("version"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "version query parameter is required as a non-negative integer"})
@@ -2569,7 +2603,7 @@ func (s *server) handleBalanceAt(w http.ResponseWriter, r *http.Request) {
 	if currency == "" {
 		currency = ledger.DefaultCurrency
 	}
-	balance, err := s.ledgerFor(r).BalanceAt(ledger.AccountID(id), currency, version)
+	balance, err := s.ledgerFor(r).BalanceAt(account, currency, version)
 	if err != nil {
 		if errors.Is(err, ledger.ErrVersionInFuture) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -2579,7 +2613,7 @@ func (s *server) handleBalanceAt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"account":       id,
+		"account":       string(account),
 		"currency":      currency,
 		"version":       version,
 		"balance_cents": balance,
@@ -2602,6 +2636,7 @@ func (s *server) handleOFXExport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
+	account, _ := s.resolveAccountRef(r, id)
 	q := r.URL.Query()
 	var since, until time.Time
 	if raw := q.Get("since"); raw != "" {
@@ -2621,7 +2656,7 @@ func (s *server) handleOFXExport(w http.ResponseWriter, r *http.Request) {
 		until = t
 	}
 	doc, checkpoint, err := s.ledgerFor(r).ExportOFX(ledger.OFXExportOptions{
-		Account:      ledger.AccountID(id),
+		Account:      account,
 		Currency:     q.Get("currency"),
 		Since:        since,
 		Until:        until,
@@ -2841,6 +2876,7 @@ func (s *server) handleStatement(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
+	account, _ := s.resolveAccountRef(r, id)
 	q := r.URL.Query()
 	var from, to time.Time
 	if raw := q.Get("from"); raw != "" {
@@ -2859,7 +2895,7 @@ func (s *server) handleStatement(w http.ResponseWriter, r *http.Request) {
 		}
 		to = t
 	}
-	stmt, err := s.ledgerFor(r).GenerateStatement(ledger.AccountID(id), from, to)
+	stmt, err := s.ledgerFor(r).GenerateStatement(account, from, to)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -2960,6 +2996,7 @@ func (s *server) handleBalanceHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account query parameter is required"})
 		return
 	}
+	acct, _ := s.resolveAccountRef(r, account)
 	currency := q.Get("currency")
 	if currency == "" {
 		currency = ledger.DefaultCurrency
@@ -2981,7 +3018,7 @@ func (s *server) handleBalanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		until = t
 	}
-	points, err := ledger.QueryBalanceHistory(s.balanceHistoryDir, ledger.AccountID(account), currency, since, until)
+	points, err := ledger.QueryBalanceHistory(s.balanceHistoryDir, acct, currency, since, until)
 	if err != nil {
 		if errors.Is(err, ledger.ErrInvalidCurrency) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -3063,7 +3100,8 @@ func (s *server) handleTrialBalance(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.ledgerFor(r).TrialBalance(ledger.AccountID(id)))
+	account, _ := s.resolveAccountRef(r, id)
+	writeJSON(w, http.StatusOK, s.ledgerFor(r).TrialBalance(account))
 }
 
 // setParentRequest is the body of POST /accounts/{id}/parent. An empty
@@ -3259,7 +3297,8 @@ func (s *server) handleRollup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.ledgerFor(r).Rollup(ledger.AccountID(id)))
+	account, _ := s.resolveAccountRef(r, id)
+	writeJSON(w, http.StatusOK, s.ledgerFor(r).Rollup(account))
 }
 
 type setAccountTagsRequest struct {
@@ -3309,6 +3348,91 @@ func (s *server) handleSetAccountTags(w http.ResponseWriter, r *http.Request) {
 	}
 	tags, _ := l.AccountTagsOf(ledger.AccountID(id))
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "tags": tags})
+}
+
+// setAliasRequest is the body of PUT /accounts/{id}/alias: the alias to
+// bind to the account. An empty or missing alias clears the account's
+// alias (see ledger.ClearAlias).
+type setAliasRequest struct {
+	Alias string `json:"alias"`
+}
+
+// handleSetAlias implements PUT /accounts/{id}/alias: binds a
+// human-readable alias to the account (see ledger.SetAlias). The alias
+// must be 1-64 characters of [A-Za-z0-9._-]; an empty or missing alias
+// clears the account's alias. Binding an alias that already names a
+// different account is 409 (ledger.ErrAliasConflict); a malformed alias
+// is 400. {id} is an account reference, so an existing alias can be
+// rebound through the account it names. Alias changes are structural —
+// they do not bump the ledger version — and are audited as
+// alias_set/alias_changed/alias_removed.
+func (s *server) handleSetAlias(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req setAliasRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	l := s.ledgerFor(r)
+	account, _ := s.resolveAccountRef(r, id)
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	if err := l.SetAliasCtx(actx, account, req.Alias); err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrAliasConflict):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	s.metrics.AliasSetsTotal.Add(1)
+	alias, _ := l.AliasOf(account)
+	writeJSON(w, http.StatusOK, map[string]any{"account": string(account), "alias": alias})
+}
+
+// handleGetAlias implements GET /accounts/{id}/alias: returns the
+// account's current alias (see ledger.AliasOf). {id} is an account
+// reference, so the alias can be looked up by the account ID or by the
+// alias itself. An account with no alias is 404
+// (ledger.ErrAliasNotSet).
+func (s *server) handleGetAlias(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	account, _ := s.resolveAccountRef(r, id)
+	alias, ok := s.ledgerFor(r).AliasOf(account)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrAliasNotSet.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"account": string(account), "alias": alias})
 }
 
 // handleTagRollup implements GET /rollup?tag=k:v: the balance rollup of
@@ -4762,6 +4886,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)
 	mux.HandleFunc("PUT /accounts/{id}/tags", s.handleSetAccountTags)
+	mux.HandleFunc("PUT /accounts/{id}/alias", s.handleSetAlias)
+	mux.HandleFunc("GET /accounts/{id}/alias", s.handleGetAlias)
 	mux.HandleFunc("GET /rollup", s.handleTagRollup)
 	mux.HandleFunc("GET /balance-history", s.handleBalanceHistory)
 	mux.HandleFunc("GET /snapshots/diff", s.handleSnapshotDiff)
@@ -5030,12 +5156,13 @@ func (s *server) handleListAccountEntries(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
 		return
 	}
+	account, _ := s.resolveAccountRef(r, id)
 	since, until, limit, err := parseEntryListQuery(r.URL.Query())
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	page, next, err := s.ledgerFor(r).ListAccountEntries(ledger.AccountID(id), since, until, r.URL.Query().Get("cursor"), limit)
+	page, next, err := s.ledgerFor(r).ListAccountEntries(account, since, until, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

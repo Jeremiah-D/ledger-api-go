@@ -1932,6 +1932,16 @@ curl -s localhost:8080/accounts/cash/balance
 amount — net minus active authorization holds (see Authorization holds
 above). With no holds outstanding the two are equal.
 
+`{id}` is an account reference: a registered alias resolves to the
+account it names, anything else is used as the account ID verbatim (see
+Account aliases below). When the account has an alias, the response
+echoes it as `alias` (omitted when the account has none):
+
+```bash
+curl -s localhost:8080/accounts/ops_cash/balance
+# {"account":"cash","balance_cents":1000,"available_cents":1000,"frozen":false,"alias":"ops_cash"}
+```
+
 ### `GET /accounts/{id}/snapshot`
 
 Balance plus the ledger version at read time. The version bumps on every
@@ -1943,6 +1953,9 @@ balance — a cheap change detector for reconciliation jobs.
 curl -s localhost:8080/accounts/cash/snapshot
 # {"account":"cash","balance_cents":1000,"version":3,"frozen":false}
 ```
+
+Like `/balance`, `{id}` accepts an alias, and the response echoes the
+account's alias as `alias` when one is bound (omitted otherwise).
 
 ### `GET /accounts/{id}/balance-at?version=N[&currency=XXX]`
 
@@ -2340,7 +2353,9 @@ curl -s localhost:8080/accounts/cash/trial-balance
 The response also carries `frozen`, `closed`, `overdraft_protected`,
 `daily_limit_cents`, and `low_balance_threshold_cents` for the default
 currency (`0` means the corresponding control is not configured there;
-per-currency levels live in the reconcile report).
+per-currency levels live in the reconcile report). Like `/balance` and
+`/snapshot`, `{id}` accepts an alias, and the response echoes the
+account's alias as `alias` (omitted when the account has none).
 
 ### `POST /accounts/{id}/parent` and `GET /accounts/{id}/rollup`
 
@@ -2449,6 +2464,57 @@ curl -s "localhost:8080/rollup?tag=line:retail"
 - The trial balance of a tagged account carries its `tags`, and the
   `POST /reconcile` report lists every tagged account (`account_tags`),
   so downstream reporting can group the same rows by tag dimension.
+
+### Account aliases (`PUT /accounts/{id}/alias`, `GET /accounts/{id}/alias`)
+
+Aliases are human-readable, ledger-unique labels for accounts —
+`ops_cash`, `stripe.payouts`, `acme-corp` — so operators, dashboards,
+and payment ops tooling can address accounts without pasting opaque
+account IDs. One alias names exactly one account, and one account
+carries at most one alias. Aliasing is structural, like tags: it does
+not bump the ledger version, bindings round-trip through the
+disaster-recovery snapshot, and every change is recorded in the
+structured audit log (`alias_set` / `alias_changed` / `alias_removed`,
+with `account`, `old_alias`, and `new_alias` — aliases are
+operator-chosen labels and carry no sensitive information).
+
+```bash
+curl -s -X PUT localhost:8080/accounts/cash/alias \
+  -H 'Content-Type: application/json' -d '{"alias":"ops_cash"}'
+# 200 {"account":"cash","alias":"ops_cash"}
+
+curl -s localhost:8080/accounts/ops_cash/balance
+# {"account":"cash","balance_cents":1000,"available_cents":1000,"frozen":false,"alias":"ops_cash"}
+```
+
+- Aliases are 1–64 characters of `[A-Za-z0-9._-]` (URL-safe by
+  construction); anything else → `400`. An empty or missing alias in
+  the `PUT` body clears the account's alias.
+- Binding an alias that already names a *different* account → `409`
+  (`ledger: alias already bound to another account`); the failed bind
+  changes nothing. Rebinding an account's own alias unbinds the old one
+  atomically. Setting the account's current alias again is a silent
+  no-op (no audit event), so idempotent retries stay quiet in the
+  compliance trail.
+- Binding an alias identical to the account ID is allowed but a no-op
+  in effect — it resolves exactly like the plain ID.
+- `GET /accounts/{id}/alias` returns the account's current alias; an
+  account with no alias → `404`.
+- Resolution rule on the account-scope **read** endpoints (`balance`,
+  `snapshot`, `trial-balance`, `balance-at`, `entries`, `statement`,
+  `merkle-proof`, `rollup`, `ofx`, `balance-history?account=`, and the
+  alias endpoints themselves): a registered alias wins over a literal
+  account ID; anything else is used as the account ID verbatim, so
+  unknown accounts keep their historical zero-balance behavior. The
+  `balance`, `snapshot`, and `trial-balance` responses echo the
+  account's alias as `alias` (omitted when the account has none), and
+  `account` always carries the canonical account ID.
+- Write endpoints (`parent`, `tags`, `close`, `freeze`, …) keep taking
+  canonical account IDs: writes are audited against the canonical ID,
+  and resolving aliases on the write path would let a rebound alias
+  silently retarget in-flight automation.
+- `GET /metrics` counts successful alias writes as
+  `ledger_alias_sets_total` (bindings, rebinds, and clears).
 
 ### `GET /entries`
 
@@ -3599,6 +3665,9 @@ curl -s localhost:8080/metrics
   ticks completed by the background recorder (see
   `LEDGER_BALANCE_HISTORY_DIR` below). One per tick, not per row — it
   measures that the time series is alive, not its volume.
+- `ledger_alias_sets_total` — `PUT /accounts/{id}/alias` requests served
+  successfully (alias bindings, rebinds, and clears; rejected binds are
+  not counted).
 - `ledger_holds_total` — every `POST /holds` request received.
 - `ledger_hold_idempotency_hits_total` — holds that replayed an existing
   idempotency key (returned the original hold, reserved nothing).
@@ -3989,6 +4058,9 @@ go test -run=NONE -bench=BenchmarkPost -benchtime=3s ./ledger/
 │   ├── tags.go                # account tags (classification labels) + tag-dimension balance rollup
 │   ├── ledger_tags_test.go    # tag validation/set/clear/copy isolation, tag rollup, snapshot round-trip, audit trail
 │   ├── main_tags_test.go      # PUT /accounts/{id}/tags + GET /rollup?tag=k:v endpoints
+│   ├── alias.go               # human-readable account aliases (unique, audited) + alias resolution
+│   ├── ledger_alias_test.go   # alias set/rebind/clear/conflict/validation/self-bind, audit events, snapshot round-trip, concurrency
+│   ├── main_alias_test.go     # PUT/GET /accounts/{id}/alias + alias resolution/echo on account-scope reads
 │   ├── ledger_hierarchy_test.go# parent assignment, cycle rejection, rollup aggregation, concurrency
 │   ├── ledger_idempotency_ttl_test.go# TTL eviction, lazy prune, interval guard
 │   ├── ledger_snapshot_test.go# versioned snapshot semantics

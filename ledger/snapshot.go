@@ -293,6 +293,13 @@ type snapshotConfigLine struct {
 	// reclassify every tagged account, so tags are part of the
 	// operational config like the chart-of-accounts registrations.
 	AccountTags []AccountTag `json:"account_tags,omitempty"`
+	// AccountAliases carries the account alias bindings (see
+	// SetAlias), sorted by account; absent in snapshots written before
+	// account aliases existed. A restore that dropped them would
+	// silently unlabel every aliased account — dashboards and payment
+	// ops tooling address accounts by alias — so aliases are part of
+	// the operational config like the account tags.
+	AccountAliases []AccountAlias `json:"account_aliases,omitempty"`
 	// BalanceWatches carries the balance threshold watches (see
 	// SetBalanceWatch); absent in snapshots written before balance
 	// watches existed. The alert state (breach flags) is re-derived from
@@ -944,6 +951,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		RevalBaselines:        l.revaluationPositionsLocked(),
 		AccountTypes:          l.accountTypesLocked(),
 		AccountTags:           l.accountTagsLocked(),
+		AccountAliases:        l.accountAliasesLocked(),
 		ClosedAccounts:        l.closedCopyLocked(),
 		OFXImportRegistry:     l.ofxImportsLocked(),
 		CAMT053ImportRegistry: l.camt053ImportsLocked(),
@@ -2123,6 +2131,24 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			continue
 		}
 		l.tags[row.Account] = row.Tags
+	}
+	// Account aliases restore like the account tags: an empty account
+	// or a malformed alias fails the import, and a snapshot that binds
+	// one alias to two accounts fails the import too — silently
+	// installing a conflicting mapping would break the bijective
+	// invariant SetAlias enforces at write time.
+	for _, row := range cfg.AccountAliases {
+		if row.Account == "" {
+			return bad("account alias with empty account")
+		}
+		if err := checkAlias(row.Alias); err != nil {
+			return bad("account alias for %s: %v", row.Account, err)
+		}
+		if owner, ok := l.aliases[row.Alias]; ok && owner != row.Account {
+			return bad("account alias %q bound to both %s and %s", row.Alias, owner, row.Account)
+		}
+		l.aliases[row.Alias] = row.Account
+		l.accountAliases[row.Account] = row.Alias
 	}
 	for c, p := range cfg.Parents {
 		l.parents[c] = p

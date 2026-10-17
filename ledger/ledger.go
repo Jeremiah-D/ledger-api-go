@@ -284,6 +284,16 @@ type Ledger struct {
 	// like frozen and noOverdraft: registering or clearing a type does
 	// not bump the journal version and survives snapshots.
 	chart map[AccountID]AccountType
+	// aliases maps a human-readable alias to the account it names, and
+	// accountAliases is the reverse index (see alias.go). The mapping
+	// is bijective: one alias names exactly one account, one account
+	// carries at most one alias. Structural config, like tags and
+	// chart: binding, rebinding, or clearing an alias does not bump the
+	// journal version, changes are audited (alias_set/alias_changed/
+	// alias_removed), and both indexes round-trip through
+	// disaster-recovery snapshots.
+	aliases        map[string]AccountID
+	accountAliases map[AccountID]string
 	// tags maps an account to its tag set (see tags.go): (key, value)
 	// classification labels for tag-dimension reporting. Structural
 	// config, like chart: setting or clearing tags does not bump the
@@ -890,6 +900,8 @@ func New(opts ...Option) *Ledger {
 		dormant:              make(map[AccountID]DormancyRecord),
 		chart:                make(map[AccountID]AccountType),
 		tags:                 make(map[AccountID]map[string]string),
+		aliases:               make(map[string]AccountID),
+		accountAliases:        make(map[AccountID]string),
 		noOverdraft:          make(map[AccountID]bool),
 		deniedExact:          make(map[AccountID]DenylistEntry),
 		deniedPrefixes:       make(map[string]DenylistEntry),
@@ -1512,7 +1524,11 @@ func (l *Ledger) Snapshot(a AccountID) (balance int64, version uint64) {
 // holds exactly one row, mirroring the top-level totals.
 type TrialBalance struct {
 	Account      AccountID `json:"account"`
-	Currency     string    `json:"currency"`
+	// Alias is the account's human-readable alias (see SetAlias),
+	// echoed so reporting consumers can label rows without a second
+	// lookup. It is omitted when the account has no alias.
+	Alias        string `json:"alias,omitempty"`
+	Currency     string `json:"currency"`
 	TotalDebits  int64     `json:"total_debits_cents"`
 	TotalCredits int64     `json:"total_credits_cents"`
 	NetBalance   int64     `json:"net_balance_cents"`
@@ -1592,6 +1608,7 @@ func (l *Ledger) TrialBalance(a AccountID) TrialBalance {
 func (l *Ledger) trialBalanceLocked(a AccountID) TrialBalance {
 	tb := TrialBalance{
 		Account:                   a,
+		Alias:                     l.accountAliases[a],
 		Currency:                  DefaultCurrency,
 		Version:                   l.version,
 		Frozen:                    l.frozen[a],
