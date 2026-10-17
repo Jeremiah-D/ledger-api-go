@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"sort"
 )
 
 // chainLink is one link in the ledger's tamper-evident audit chain. Every
@@ -37,7 +38,10 @@ type chainLink struct {
 // journaled evidence reference breaks the chain exactly like rewriting
 // an amount — the attachment count is hashed first so an empty list and
 // a missing list hash identically, then each URI length-prefixed. The
-// pending-review marker is covered
+// metadata is covered like the memo (see LG-112): keys in sorted order,
+// then each key and value length-prefixed; entries without metadata skip
+// the section entirely so their encoding stays byte-identical to the
+// pre-metadata chain. The pending-review marker is covered
 // as a single fixed byte: flipping a frozen row to effective (or vice
 // versa) outside the approve path breaks the chain exactly like rewriting
 // an amount (see LG-42). All inputs come from the standard library — no
@@ -67,6 +71,24 @@ func hashChainLink(prevHash [32]byte, e JournalEntry) [32]byte {
 	writeInt(int64(len(e.Attachments)))
 	for _, a := range e.Attachments {
 		writeString(a)
+	}
+	// The metadata is covered like the memo (see LG-112): rewriting a
+	// journaled reconciliation tag breaks the chain exactly like
+	// rewriting an amount. Keys are hashed in sorted order so map
+	// iteration order cannot change the digest. Entries without metadata
+	// hash exactly as before — the section is skipped entirely, so the
+	// encoding stays byte-identical to the pre-metadata chain.
+	if len(e.Metadata) > 0 {
+		keys := make([]string, 0, len(e.Metadata))
+		for k := range e.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		writeInt(int64(len(keys)))
+		for _, k := range keys {
+			writeString(k)
+			writeString(e.Metadata[k])
+		}
 	}
 	if e.PendingReview {
 		h.Write([]byte{1})

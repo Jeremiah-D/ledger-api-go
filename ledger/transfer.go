@@ -151,6 +151,13 @@ type Transfer struct {
 	// memo. On cross-currency transfers they ride the source-currency
 	// leg (the /fx leg), mirroring the memo.
 	Attachments []string `json:"attachments,omitempty"`
+	// Metadata is caller-supplied structured metadata for the transfer
+	// (see JournalEntry.Metadata): it is stamped on the principal
+	// journal entry (the fee leg, the FX conversion legs, and the
+	// spread leg carry none), mirroring the memo and the attachments.
+	// On cross-currency transfers it rides the source-currency leg
+	// (the /fx leg), mirroring the memo.
+	Metadata map[string]string `json:"metadata,omitempty"`
 	// MaxSlippageBps is the opt-in LG-86 slippage cap for
 	// cross-currency transfers, in basis points: the request's FX rate
 	// is locked at admission (see FXRateQuote), and when the effective
@@ -569,6 +576,13 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 	if err := checkAttachments(t.Attachments); err != nil {
 		return t, "", err
 	}
+	// Metadata is field validation, like the attachments: more than
+	// maxMetadataPairs pairs, a key outside the tag-segment charset,
+	// or a value longer than maxMetadataValueRunes UTF-8 characters is
+	// rejected before anything is recorded, on both paths.
+	if err := checkMetadata(t.Metadata); err != nil {
+		return t, "", err
+	}
 	// The slippage cap (see Transfer.MaxSlippageBps) is field
 	// validation, like the fee config: a negative cap is a caller bug,
 	// rejected before any risk check. A positive cap on a
@@ -827,6 +841,7 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		Memo:           t.Memo,
 		ExternalRef:    t.ExternalRef,
 		Attachments:    t.Attachments,
+		Metadata:       t.Metadata,
 		CreatedAt:      t.CreatedAt,
 	}
 	if principal.CreatedAt.IsZero() {

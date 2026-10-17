@@ -83,6 +83,22 @@ type JournalEntry struct {
 	// on the settlement entry. Holds are off-journal reservations and
 	// carry no attachments.
 	Attachments []string `json:"attachments,omitempty"`
+	// Metadata is caller-supplied structured metadata for the entry:
+	// downstream reconciliation tags like channel=alipay or
+	// risk_score=12. At most maxMetadataPairs pairs; keys are 1-64
+	// characters of [A-Za-z0-9._-], values at most
+	// maxMetadataValueRunes UTF-8 characters (see ErrInvalidMetadata);
+	// violations are rejected with a 400 before anything is recorded.
+	// It is part of the journaled record: the audit-chain hash covers
+	// it (sorted keys, deterministic encoding; entries without metadata
+	// hash exactly as before), snapshots carry it, GET /entries echoes
+	// it and GET /entries?meta.<key>=<value> filters on it, and
+	// idempotent replays return it with the original entry. Transfers,
+	// batch items, reversals, and captures stamp the caller's metadata
+	// on the principal/settlement entry; fee legs, FX conversion legs,
+	// journal-rule derived legs, and other internal/system postings
+	// carry no metadata — it is never inherited, only explicitly set.
+	Metadata map[string]string `json:"metadata,omitempty"`
 	// PendingReview marks a journal row frozen by the large-transfer
 	// dual-control review (see review.go): the row is booked but not
 	// effective — balances, debit/credit totals, the ledger version,
@@ -123,6 +139,11 @@ var (
 	// maxAttachments entries, a non-https URI, or a URI longer than
 	// maxAttachmentRunes UTF-8 characters.
 	ErrInvalidAttachment = errors.New("ledger: attachments must be at most 8 https URIs of at most 512 characters each")
+	// ErrInvalidMetadata is returned when a journal entry's metadata
+	// violates the metadata contract: more than maxMetadataPairs
+	// pairs, a key outside the 1-64 character [A-Za-z0-9._-] charset,
+	// or a value longer than maxMetadataValueRunes UTF-8 characters.
+	ErrInvalidMetadata = errors.New("ledger: metadata must be at most 16 pairs with keys of 1-64 characters [A-Za-z0-9._-] and values of at most 256 UTF-8 characters")
 )
 
 // maxMemoRunes caps a journal entry's memo at 255 UTF-8 characters. Long
@@ -185,6 +206,41 @@ func checkAttachments(atts []string) error {
 		u, err := url.Parse(a)
 		if err != nil || u.Scheme != "https" || u.Host == "" {
 			return ErrInvalidAttachment
+		}
+	}
+	return nil
+}
+
+// maxMetadataPairs caps a journal entry's structured metadata at 16
+// pairs: enough for channel, risk score, and a handful of routing tags,
+// few enough to keep journal rows and the audit chain bounded.
+const maxMetadataPairs = 16
+
+// maxMetadataValueRunes caps one metadata value at 256 UTF-8
+// characters: enough for an order ID plus a sub-merchant path, short
+// enough to keep the journal and the audit chain bounded. Keys reuse the
+// tag-segment charset (see checkTagSegment): 1-64 characters of
+// [A-Za-z0-9._-], so metadata keys stay safe in URLs and JSON without
+// escaping rules.
+const maxMetadataValueRunes = 256
+
+// checkMetadata enforces the metadata contract: at most
+// maxMetadataPairs pairs, each key 1-64 characters of [A-Za-z0-9._-]
+// (via the shared tag-segment validator, reusing the alias/tag charset),
+// each value at most maxMetadataValueRunes UTF-8 characters. Callers:
+// validateJournalEntry (Post and PostBatch entries), PostTransfer
+// (transfer-level metadata), Capture (capture-level metadata), and
+// ReverseEntryWithMetadata (reversal-level metadata).
+func checkMetadata(meta map[string]string) error {
+	if len(meta) > maxMetadataPairs {
+		return fmt.Errorf("%w: %d pairs, at most %d", ErrInvalidMetadata, len(meta), maxMetadataPairs)
+	}
+	for k, v := range meta {
+		if err := checkTagSegment(k, ErrInvalidMetadata); err != nil {
+			return err
+		}
+		if utf8.RuneCountInString(v) > maxMetadataValueRunes {
+			return fmt.Errorf("%w: value for key %q exceeds %d UTF-8 characters", ErrInvalidMetadata, k, maxMetadataValueRunes)
 		}
 	}
 	return nil
@@ -1053,6 +1109,13 @@ func validateJournalEntry(e *JournalEntry) error {
 	if err := checkAttachments(e.Attachments); err != nil {
 		return err
 	}
+	// Metadata is field validation like the memo and the attachments:
+	// more than maxMetadataPairs pairs, a key outside the tag-segment
+	// charset, or a value longer than maxMetadataValueRunes UTF-8
+	// characters is rejected before anything is recorded.
+	if err := checkMetadata(e.Metadata); err != nil {
+		return err
+	}
 	// Currency is field validation, like the legs and the amount: an
 	// empty code normalizes to the default currency, anything else must
 	// be a 3-letter uppercase ISO 4217 code. Normalization happens here,
@@ -1763,6 +1826,16 @@ func (l *Ledger) ListEntries(since, until time.Time, cursor string, limit int) (
 // matters); the ref match is an exact equality, because references are a
 // uniqueness domain.
 func (l *Ledger) ListEntriesFiltered(since, until time.Time, cursor string, limit int, memo, ref string) (page []JournalEntry, nextCursor string, err error) {
+	return l.ListEntriesMetadataFiltered(since, until, cursor, limit, memo, ref, nil)
+}
+
+// ListEntriesMetadataFiltered is ListEntriesFiltered with an additional
+// structured-metadata filter (see JournalEntry.Metadata): when meta is
+// non-empty, only entries carrying every (key, value) pair are returned.
+// The metadata match is an exact equality per pair, like the ref filter.
+// It composes with the memo and ref filters, the time window, and the
+// cursor pagination, exactly like the other filters.
+func (l *Ledger) ListEntriesMetadataFiltered(since, until time.Time, cursor string, limit int, memo, ref string, meta map[string]string) (page []JournalEntry, nextCursor string, err error) {
 	if limit < 1 || limit > maxPageSize {
 		return nil, "", ErrInvalidLimit
 	}
@@ -1786,9 +1859,24 @@ func (l *Ledger) ListEntriesFiltered(since, until time.Time, cursor string, limi
 		if ref != "" && e.ExternalRef != ref {
 			continue
 		}
+		if len(meta) > 0 && !metadataMatch(e.Metadata, meta) {
+			continue
+		}
 		filtered = append(filtered, e)
 	}
 	l.mu.RUnlock()
 
 	return paginateSortedEntries(filtered, afterID, limit)
+}
+
+// metadataMatch reports whether entry carries every (key, value) pair of
+// want. An entry with no metadata matches only an empty want — callers
+// pass a non-empty want, so the loop body decides.
+func metadataMatch(entry, want map[string]string) bool {
+	for k, v := range want {
+		if ev, ok := entry[k]; !ok || ev != v {
+			return false
+		}
+	}
+	return true
 }

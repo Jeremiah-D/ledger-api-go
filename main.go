@@ -62,14 +62,15 @@ type server struct {
 }
 
 type createEntryRequest struct {
-	DebitAccount   ledger.AccountID `json:"debit_account"`
-	CreditAccount  ledger.AccountID `json:"credit_account"`
-	AmountCents    int64            `json:"amount_cents"`
-	Currency       string           `json:"currency"`
-	IdempotencyKey string           `json:"idempotency_key"`
-	Memo           string           `json:"memo"`
-	ExternalRef    string           `json:"external_ref"`
-	Attachments    []string         `json:"attachments"`
+	DebitAccount   ledger.AccountID  `json:"debit_account"`
+	CreditAccount  ledger.AccountID  `json:"credit_account"`
+	AmountCents    int64             `json:"amount_cents"`
+	Currency       string            `json:"currency"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	Memo           string            `json:"memo"`
+	ExternalRef    string            `json:"external_ref"`
+	Attachments    []string          `json:"attachments"`
+	Metadata       map[string]string `json:"metadata"`
 }
 
 func newID() string {
@@ -138,6 +139,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		Memo:           req.Memo,
 		ExternalRef:    req.ExternalRef,
 		Attachments:    req.Attachments,
+		Metadata:       req.Metadata,
 		CreatedAt:      time.Now(),
 	}
 
@@ -254,6 +256,7 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		Memo:           req.Memo,
 		ExternalRef:    req.ExternalRef,
 		Attachments:    req.Attachments,
+		Metadata:       req.Metadata,
 		CreatedAt:      time.Now(),
 	}
 
@@ -331,6 +334,7 @@ type createTransferRequest struct {
 	Memo           string            `json:"memo"`
 	ExternalRef    string            `json:"external_ref"`
 	Attachments    []string          `json:"attachments"`
+	Metadata       map[string]string `json:"metadata"`
 	// MaxSlippageBps is the opt-in LG-86 slippage cap for
 	// cross-currency transfers, in basis points (see
 	// ledger.Transfer.MaxSlippageBps). It is plumbed through to both
@@ -425,6 +429,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		Memo:            req.Memo,
 		ExternalRef:     req.ExternalRef,
 		Attachments:     req.Attachments,
+		Metadata:        req.Metadata,
 		MaxSlippageBps:  req.MaxSlippageBps,
 		FXSide:          req.FXSide,
 		FXIncomeAccount: req.FXIncomeAccount,
@@ -746,6 +751,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		Memo:            req.Memo,
 		ExternalRef:     req.ExternalRef,
 		Attachments:     req.Attachments,
+		Metadata:        req.Metadata,
 		MaxSlippageBps:  req.MaxSlippageBps,
 		FXSide:          req.FXSide,
 		FXIncomeAccount: req.FXIncomeAccount,
@@ -831,15 +837,16 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 }
 
 type batchEntryRequest struct {
-	EntryID        string           `json:"entry_id"`
-	DebitAccount   ledger.AccountID `json:"debit_account"`
-	CreditAccount  ledger.AccountID `json:"credit_account"`
-	AmountCents    int64            `json:"amount_cents"`
-	Currency       string           `json:"currency"`
-	IdempotencyKey string           `json:"idempotency_key"`
-	Memo           string           `json:"memo"`
-	ExternalRef    string           `json:"external_ref"`
-	Attachments    []string         `json:"attachments"`
+	EntryID        string            `json:"entry_id"`
+	DebitAccount   ledger.AccountID  `json:"debit_account"`
+	CreditAccount  ledger.AccountID  `json:"credit_account"`
+	AmountCents    int64             `json:"amount_cents"`
+	Currency       string            `json:"currency"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	Memo           string            `json:"memo"`
+	ExternalRef    string            `json:"external_ref"`
+	Attachments    []string          `json:"attachments"`
+	Metadata       map[string]string `json:"metadata"`
 }
 
 type createBatchRequest struct {
@@ -912,6 +919,7 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			Memo:           re.Memo,
 			ExternalRef:    re.ExternalRef,
 			Attachments:    re.Attachments,
+			Metadata:       re.Metadata,
 			CreatedAt:      time.Now(),
 		})
 	}
@@ -1212,7 +1220,8 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 // existing reversal with 200. A *new* key on an already-reversed entry
 // signals a distinct reversal intent and is rejected with 409.
 type createReversalRequest struct {
-	IdempotencyKey string `json:"idempotency_key"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	Metadata       map[string]string `json:"metadata"`
 }
 
 // handleReverseEntry implements POST /entries/{id}/reverse, the
@@ -1242,7 +1251,7 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entryID := r.PathValue("id")
-	reversal, duplicate, err := s.ledgerFor(r).ReverseEntry(entryID, req.IdempotencyKey)
+	reversal, duplicate, err := s.ledgerFor(r).ReverseEntryWithMetadata(entryID, req.IdempotencyKey, req.Metadata)
 	if err != nil {
 		if errors.Is(err, ledger.ErrEntryNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -1685,12 +1694,13 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 }
 
 type captureHoldRequest struct {
-	CaptureID      string           `json:"capture_id"`
-	ToAccount      ledger.AccountID `json:"to_account"`
-	AmountCents    int64            `json:"amount_cents"`
-	IdempotencyKey string           `json:"idempotency_key"`
-	ExternalRef    string           `json:"external_ref"`
-	Attachments    []string         `json:"attachments"`
+	CaptureID      string            `json:"capture_id"`
+	ToAccount      ledger.AccountID  `json:"to_account"`
+	AmountCents    int64             `json:"amount_cents"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	ExternalRef    string            `json:"external_ref"`
+	Attachments    []string          `json:"attachments"`
+	Metadata       map[string]string `json:"metadata"`
 }
 
 // handleCaptureHold implements POST /holds/{id}/capture, the settlement
@@ -1733,6 +1743,7 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: req.IdempotencyKey,
 		ExternalRef:    req.ExternalRef,
 		Attachments:    req.Attachments,
+		Metadata:       req.Metadata,
 		CreatedAt:      time.Now(),
 	})
 	if err != nil {
@@ -5292,8 +5303,10 @@ func (s *server) handleListAccountEntries(w http.ResponseWriter, r *http.Request
 // page. Malformed timestamps, cursors, or limits return 400. An optional
 // ?memo= keyword filters to entries whose memo note contains it as a
 // case-sensitive substring; an optional ?ref= filters to the single entry
-// whose external_ref equals it exactly. Both filters compose with the time
-// window and cursor pagination (see ListEntriesFiltered).
+// whose external_ref equals it exactly; optional ?meta.<key>=<value>
+// parameters filter to entries carrying every given metadata pair (see
+// JournalEntry.Metadata). All filters compose with the time window and
+// cursor pagination (see ListEntriesMetadataFiltered).
 func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	since, until, limit, err := parseEntryListQuery(r.URL.Query())
 	if err != nil {
@@ -5301,7 +5314,20 @@ func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, next, err := s.ledgerFor(r).ListEntriesFiltered(since, until, r.URL.Query().Get("cursor"), limit, r.URL.Query().Get("memo"), r.URL.Query().Get("ref"))
+	q := r.URL.Query()
+	var meta map[string]string
+	for name, values := range q {
+		key, ok := strings.CutPrefix(name, "meta.")
+		if !ok || key == "" || len(values) == 0 {
+			continue
+		}
+		if meta == nil {
+			meta = make(map[string]string)
+		}
+		meta[key] = values[0]
+	}
+
+	page, next, err := s.ledgerFor(r).ListEntriesMetadataFiltered(since, until, q.Get("cursor"), limit, q.Get("memo"), q.Get("ref"), meta)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

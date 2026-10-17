@@ -41,6 +41,11 @@ type DryRunLeg struct {
 	// Memo echoes the entry's business note (see JournalEntry.Memo), so
 	// a dry run shows exactly what the real call would journal.
 	Memo string `json:"memo,omitempty"`
+	// Metadata echoes the entry's structured metadata (see
+	// JournalEntry.Metadata): the simulation runs the exact production
+	// code path on a deep copy of the ledger, so the metadata a dry run
+	// reports is the metadata the real call would journal.
+	Metadata map[string]string `json:"metadata,omitempty"`
 	// DebitBalanceBefore/After (and the credit pair) are the account's net
 	// balance in the leg's currency around the simulated posting. Legs
 	// apply sequentially in commit order, so a leg's "before" already
@@ -322,6 +327,7 @@ func (l *Ledger) dryRunLegsLocked(entries []JournalEntry, apply bool) []DryRunLe
 			AmountCents:         e.AmountCents,
 			Currency:            e.Currency,
 			Memo:                e.Memo,
+			Metadata:            e.Metadata,
 			DebitBalanceBefore:  balance(e.DebitAccount, e.Currency),
 			CreditBalanceBefore: balance(e.CreditAccount, e.Currency),
 		}

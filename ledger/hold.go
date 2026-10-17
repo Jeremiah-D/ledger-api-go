@@ -149,6 +149,10 @@ type Capture struct {
 	// capture (see JournalEntry.Attachments): they are stamped on the
 	// settlement journal entry, like the external reference.
 	Attachments []string  `json:"attachments,omitempty"`
+	// Metadata is caller-supplied structured metadata for the capture
+	// (see JournalEntry.Metadata): it is stamped on the settlement
+	// journal entry, like the external reference and the attachments.
+	Metadata    map[string]string `json:"metadata,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -513,6 +517,13 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	if err := checkAttachments(c.Attachments); err != nil {
 		return CaptureReceipt{}, err
 	}
+	// Metadata is field validation, like the attachments: more than
+	// maxMetadataPairs pairs, a key outside the tag-segment charset, or
+	// a value longer than maxMetadataValueRunes UTF-8 characters is
+	// rejected before anything is recorded.
+	if err := checkMetadata(c.Metadata); err != nil {
+		return CaptureReceipt{}, err
+	}
 
 	// The hold is looked up before the idempotency replay check: the
 	// sanctions/denylist screen below needs the hold's account (the
@@ -580,6 +591,7 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		Currency:      h.Currency,
 		ExternalRef:   c.ExternalRef,
 		Attachments:   c.Attachments,
+		Metadata:      c.Metadata,
 		CreatedAt:     c.CreatedAt,
 	}
 	if entry.CreatedAt.IsZero() {

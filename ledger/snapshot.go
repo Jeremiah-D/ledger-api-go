@@ -1048,8 +1048,23 @@ func journalEntriesEqual(a, b JournalEntry) bool {
 		a.Memo == b.Memo &&
 		a.ExternalRef == b.ExternalRef &&
 		attachmentsEqual(a.Attachments, b.Attachments) &&
+		metadataEqual(a.Metadata, b.Metadata) &&
 		a.PendingReview == b.PendingReview &&
 		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano()
+}
+
+// metadataEqual compares two metadata maps: nil and empty are equal —
+// both mean "no metadata" — and otherwise every pair must match.
+func metadataEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 // attachmentsEqual compares two attachment lists element-wise: a nil list

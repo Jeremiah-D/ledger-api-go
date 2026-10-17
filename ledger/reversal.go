@@ -132,7 +132,9 @@ func isGenuineReversalOf(e JournalEntry, entryID string) bool {
 // ReverseEntry appends a reversing journal entry for the journal entry
 // with the given ID: same amount and currency, debit and credit legs
 // swapped, memo "reversal_of:<entry ID>". The reversal ID is deterministic
-// ("<entry ID>/reversal"), so the operation is idempotent.
+// ("<entry ID>/reversal"), so the operation is idempotent. The reversal
+// carries no metadata; see ReverseEntryWithMetadata for caller-supplied
+// structured metadata on the reversal entry.
 //
 // The check order mirrors Post: the original entry must exist
 // (ErrEntryNotFound); a pending-review entry cannot be reversed
@@ -156,8 +158,31 @@ func isGenuineReversalOf(e JournalEntry, entryID string) bool {
 // comment). A zero CreatedAt is not a parameter — the reversal is always
 // timestamped at post time.
 func (l *Ledger) ReverseEntry(entryID string, idempotencyKey string) (reversal JournalEntry, duplicate bool, err error) {
+	return l.ReverseEntryWithMetadata(entryID, idempotencyKey, nil)
+}
+
+// ReverseEntryWithMetadata is ReverseEntry with caller-supplied
+// structured metadata (see JournalEntry.Metadata): the metadata is
+// stamped on the reversal journal entry, like the inherited external
+// reference. The original entry's metadata is not inherited — only the
+// metadata given here is journaled. Invalid metadata rejects the
+// reversal with ErrInvalidMetadata before anything is recorded.
+func (l *Ledger) ReverseEntryWithMetadata(entryID string, idempotencyKey string, metadata map[string]string) (reversal JournalEntry, duplicate bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.reverseEntryLocked(entryID, idempotencyKey, metadata)
+}
+
+// reverseEntryLocked is the shared implementation of ReverseEntry and
+// ReverseEntryWithMetadata. Callers must hold l.mu (the write lock).
+func (l *Ledger) reverseEntryLocked(entryID string, idempotencyKey string, metadata map[string]string) (reversal JournalEntry, duplicate bool, err error) {
+	// Metadata is field validation, like the legs and the amount: an
+	// invalid map is rejected before the entry lookup or the replay
+	// checks, so a malformed request fails fast regardless of the
+	// ledger's reversal state.
+	if err := checkMetadata(metadata); err != nil {
+		return JournalEntry{}, false, err
+	}
 
 	orig, ok := l.entries[entryID]
 	if !ok {
@@ -206,6 +231,7 @@ func (l *Ledger) ReverseEntry(entryID string, idempotencyKey string) (reversal J
 		Memo:           reversalMemoFor(entryID),
 		ExternalRef:    inheritedRef,
 		Attachments:    append([]string(nil), orig.Attachments...),
+		Metadata:       metadata,
 		CreatedAt:      now,
 	}
 	if err := validateJournalEntry(&reversal); err != nil {

@@ -81,6 +81,25 @@ curl -s -X POST localhost:8080/entries \
   `POST /holds/{id}/capture` stamps the capture's attachments on the
   settlement entry. Anything else — more than 8, a non-`https` URI, or an
   overlong URI — is rejected with `400` before anything is recorded.
+- `metadata`: optional structured metadata for the entry — downstream
+  reconciliation tags like `channel=alipay` or `risk_score=12`. At most 16
+  pairs; keys are 1–64 characters of `[A-Za-z0-9._-]`, values at most 256
+  UTF-8 characters. It is journaled with the entry, covered by the
+  audit-chain hash (keys sorted, deterministic encoding; rewriting a
+  journaled tag breaks the chain exactly like rewriting an amount —
+  entries without metadata hash exactly as before), carried through
+  snapshots and idempotent replays, queryable via
+  `GET /entries?meta.<key>=<value>` (composes with `?memo=`, `?ref=`,
+  the time window, and cursor pagination), and echoed by dry-run legs.
+  `POST /transfers` stamps it on the principal entry (the fee leg, FX
+  conversion legs, and the spread leg carry none — on cross-currency
+  transfers it rides the `/fx` leg, mirroring the memo); each
+  `POST /entries/batch` leg carries its own; `POST /entries/{id}/reverse`
+  takes the caller's metadata (the original's is **not** inherited);
+  `POST /holds/{id}/capture` stamps it on the settlement entry. Internal
+  and system-derived postings (journal-rule legs, accruals, dividends)
+  carry none. Anything else — more than 16 pairs, a malformed key, or an
+  overlong value — is rejected with `400` before anything is recorded.
 
 ### `POST /entries/batch`
 
@@ -2628,6 +2647,11 @@ curl -s 'localhost:8080/entries?since=2026-10-01T00:00:00Z&limit=100'
 - `ref`: optional exact-match filter — only the entry whose `external_ref`
   equals it exactly is returned. It composes with the time window, the
   `memo` filter, and cursor pagination.
+- `meta.<key>`: optional structured-metadata filters — one `meta.<key>=<value>`
+  query parameter per pair; only entries carrying every given pair are
+  returned (exact match per pair). It composes with the time window, the
+  `memo` and `ref` filters, and cursor pagination, so reconciliation
+  tooling can page through every entry of a payment channel.
 - Malformed timestamps, cursors, or limits → `400` with an `{"error": ...}` body.
 
 ### `GET /entries/verify`
