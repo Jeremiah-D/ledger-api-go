@@ -205,6 +205,13 @@ type snapshotConfigLine struct {
 	FeeRateBps        int64            `json:"fee_rate_bps"`
 	FeeTiers          []FeeTier        `json:"fee_tiers,omitempty"`
 	FeeRevenueAccount AccountID        `json:"fee_revenue_account"`
+	// InterestTiers carries the tiered deposit-rate ladder (see
+	// SetInterestTiers); absent in snapshots written before tiered
+	// interest existed, which import as unconfigured (flat-rate
+	// AccrueInterest only). The ladder is re-validated on import — a
+	// snapshot row that could never have been installed fails the
+	// import instead of silently pricing bands wrong.
+	InterestTiers []InterestTier `json:"interest_tiers,omitempty"`
 	// MaxTransferChunkCents carries the opt-in per-transfer chunk cap
 	// for PostTransferSplit (see WithMaxTransferChunkCents); absent
 	// (zero) in snapshots written before chunking existed or when
@@ -937,6 +944,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FeeRateBps:            flatFeeRateBps(l.feeTiers),
 		FeeTiers:              l.feeTiers,
 		FeeRevenueAccount:     l.feeRevenueAccount,
+		InterestTiers:         append([]InterestTier(nil), l.interestTiers...),
 		MaxTransferChunkCents: l.maxTransferChunkCents,
 		SplitFeePerChunk:      l.splitFeePerChunk,
 		IdempotencyTTL:        l.idempotencyTTL.String(),
@@ -1724,6 +1732,13 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		reserves = append(reserves, validatedReserve{accountCurrency{account: sr.Account, currency: cur}, sr.FloorCents})
 	}
+	// Interest tier ladders restore like the fee schedule: a ladder that
+	// could never have been installed (see SetInterestTiers) fails the
+	// import instead of silently pricing deposit bands wrong. Absent in
+	// legacy snapshots, which restore as unconfigured.
+	if err := validateInterestTiers(cfg.InterestTiers); err != nil {
+		return bad("bad interest tier table: %v", err)
+	}
 	// Transfer allowlists restore like the sweep reserve floors: an
 	// empty payer account, an empty beneficiary, or a payer listed
 	// twice fails the import instead of installing a list that could
@@ -2288,6 +2303,9 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, vr := range reserves {
 		l.sweepReserves[vr.key] = vr.floor
 	}
+	// The tier ladder installs verbatim (already validated above):
+	// a restore must price deposit bands exactly like the original.
+	l.interestTiers = append([]InterestTier(nil), cfg.InterestTiers...)
 	// Transfer allowlists restore like the sweep reserve floors: the
 	// gate re-enables on the restored ledger with exactly the rows the
 	// original ran on — a restore that dropped a list would silently
@@ -2925,6 +2943,11 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.feeTiers, b.feeTiers) || a.feeRevenueAccount != b.feeRevenueAccount {
+		return false
+	}
+	// The interest tier ladder must round-trip: a restore that dropped
+	// it would price deposit bands wrong.
+	if !reflect.DeepEqual(a.interestTiers, b.interestTiers) {
 		return false
 	}
 	// Term deposits must round-trip: the deposit records, their

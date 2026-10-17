@@ -96,7 +96,8 @@ func accrualEntryPrefix(kind string, expense, payable AccountID) string {
 
 // validAccrualKind reports whether kind is a known accrual kind.
 func validAccrualKind(kind string) bool {
-	return kind == AccrualKindInterest || kind == AccrualKindFee
+	return kind == AccrualKindInterest || kind == AccrualKindFee ||
+		kind == AccrualKindInterestTiered
 }
 
 // checkAccrualAccounts rejects empty or indistinguishable accrual legs
@@ -184,6 +185,16 @@ func (l *Ledger) AccrueFee(expense, payable AccountID, amountCents int64, asof t
 // same triple cannot both clear the cap check and then both book past
 // it, because both run under the same write lock.
 func (l *Ledger) accrue(kind string, expense, payable AccountID, amountCents, capCents int64, asof time.Time) (JournalEntry, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.accrueLocked(kind, expense, payable, amountCents, capCents, asof)
+}
+
+// accrueLocked is accrue's body. Callers must hold l.mu (the write
+// lock): it evaluates the cap and posts atomically. AccrueInterestTiered
+// (see interest_tiers.go) enters here holding the lock because it needs
+// the tier table read and the post under one critical section.
+func (l *Ledger) accrueLocked(kind string, expense, payable AccountID, amountCents, capCents int64, asof time.Time) (JournalEntry, bool, error) {
 	if !validAccrualKind(kind) {
 		return JournalEntry{}, false, ErrInvalidAccrualKind
 	}
@@ -207,8 +218,7 @@ func (l *Ledger) accrue(kind string, expense, payable AccountID, amountCents, ca
 		CreatedAt:      asof,
 	}
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	// accrueLocked holds l.mu on entry (see accrue above).
 	// LG-95: with business-day-only accruals, a non-business-day asof
 	// books nothing — interest accrues per business day, not per
 	// calendar day.

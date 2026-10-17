@@ -968,6 +968,36 @@ same write lock, so concurrent accruals cannot both slip past it).
 twice returns the existing reversal — and `AccruedTotal` is net of
 reversals.
 
+#### Tiered deposit rates (Go API: `SetInterestTiers` / `AccrueInterestTiered`)
+
+Real deposit products price balance bands differently — the first
+$10,000 at 5.00%/yr, the next at 3.00%/yr. `SetInterestTiers` installs
+that ladder (first band must start at 0, minima strictly ascending,
+rates 1–10000 bps); `AccrueInterestTiered` then books one day's
+interest as the per-band sum of
+`floor(band_principal * rateBps / 10000 / 365)` — overflow-safe integer
+math, no floats anywhere.
+
+```go
+l.SetInterestTiers([]ledger.InterestTier{
+    {MinCents: 0, RateBps: 500},         // 5.00%/yr on the first $10,000
+    {MinCents: 1_000_000, RateBps: 300}, // 3.00%/yr above that
+})
+// $15,000 principal: 136 + 41 = 177 cents for the day.
+l.AccrueInterestTiered("interest-expense", "interest-payable", 1_500_000, asof, capCents)
+```
+
+Tiered accruals are their own accrual kind (`interest-tier`): entry IDs
+`accrual/interest-tier/<expense>/<payable>/<date>`, memo
+`accrual:interest-tier`, queryable via
+`AccruedTotal(..., ledger.AccrualKindInterestTiered)` and reversible
+via `ReverseAccrual`. The table is structural config — setting it does
+not bump the version, every change is audited as `interest_tiers_set`
+/ `interest_tiers_cleared`, and it round-trips through snapshots.
+Clearing the table (empty slice) returns tiered accrual to "not
+configured". Negative principals are rejected — overdraft balances
+price through `AccrueOverdraftInterest`, not deposit bands.
+
 Accruals are ordinary journal entries — own audit-chain link, version
 bump, covered by `VerifyAccountingEquation` and `Reconcile` — with two
 deliberate differences, mirroring the closing-entries design: they never

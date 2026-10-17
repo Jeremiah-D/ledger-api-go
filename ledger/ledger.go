@@ -509,6 +509,12 @@ type Ledger struct {
 	// an empty revenue account) disable the policy.
 	feeTiers          []FeeTier
 	feeRevenueAccount AccountID
+	// interestTiers is the opt-in tiered deposit-rate table for
+	// AccrueInterestTiered (see interest_tiers.go): balance bands earn
+	// different annual rates instead of one flat rateBps. A nil table
+	// means tiered accrual is off and AccrueInterestTiered is rejected.
+	// Structural config — it survives snapshots.
+	interestTiers []InterestTier
 	// maxTransferChunkCents is the opt-in single-transfer cap for
 	// PostTransferSplit (see WithMaxTransferChunkCents in
 	// transfer_split.go): a transfer whose amount exceeds it is split
