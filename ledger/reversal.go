@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -27,6 +28,10 @@ import (
 //             reversal corrects the books as of today, so the period gate
 //             applies to the reversal's timestamp, and a reversal can never
 //             reach back into a closed period.
+//   - link:   a reversal_of entry link (see links.go, LG-123) from the
+//             reversal entry to the original — the tamper-evident twin of
+//             the memo above, declared atomically with the reversal so the
+//             correction and its association can never diverge.
 //
 // The original entry is never modified: the audit chain is append-only, so
 // a reversal only appends a new link. Reversing a transfer reverses one
@@ -311,6 +316,14 @@ func (l *Ledger) reverseEntryLocked(entryID string, idempotencyKey string, metad
 	hookTouched := touchedAccounts([]JournalEntry{reversal})
 	hookOld := l.balanceSnapshotLocked(hookTouched)
 	l.commitEntryLocked(reversal)
+	// The reversal declares its formal entry link (see links.go, LG-123):
+	// reversal_of is the tamper-evident twin of the "reversal_of:<id>"
+	// memo — the memo stays searchable, the link stays verifiable. It
+	// lands inside the same write lock as the reversal's commit, so the
+	// entry and its link are atomic.
+	if _, _, err := l.declareEntryLinkLocked(context.Background(), reversalID, entryID, LinkTypeReversalOf); err != nil {
+		return JournalEntry{}, false, err
+	}
 	l.addDailyOutflowLocked(reversal.CreditAccount, reversal.Currency, reversal.AmountCents, reversal.CreatedAt)
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
@@ -599,6 +612,14 @@ func (l *Ledger) reverseEntryPartialLocked(entryID string, amountCents int64, id
 	hookTouched := touchedAccounts([]JournalEntry{reversal})
 	hookOld := l.balanceSnapshotLocked(hookTouched)
 	l.commitEntryLocked(reversal)
+	// The partial reversal declares its formal entry link (see links.go,
+	// LG-123), like a full reversal: reversal_of is the tamper-evident
+	// twin of the "reversal_of:<id>/partial/<n>" memo. It lands inside
+	// the same write lock as the partial's commit, so the entry and its
+	// link are atomic.
+	if _, _, err := l.declareEntryLinkLocked(context.Background(), reversalID, entryID, LinkTypeReversalOf); err != nil {
+		return JournalEntry{}, false, err
+	}
 	l.addDailyOutflowLocked(reversal.CreditAccount, reversal.Currency, reversal.AmountCents, reversal.CreatedAt)
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.

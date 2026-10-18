@@ -950,6 +950,28 @@ type Ledger struct {
 	// ledger_external_mapping_changes_total; not books, so it does not
 	// round-trip through snapshots.
 	externalMappingChanges atomic.Uint64
+	// entryLinks is the declared entry-link registry (see links.go,
+	// LG-123): explicit directed associations between journal entries —
+	// reversal_of, adjustment_of, fee_of, refund_of — in declaration
+	// order. Append-only: links are never modified or removed. Each
+	// declaration appends to the tamper-evident link chain below, which
+	// VerifyChain recomputes. Structural state like externalMappings:
+	// declarations do not bump the journal version, and the registry
+	// round-trips through snapshots.
+	entryLinks []EntryLink
+	// linkChain is the tamper-evident hash chain over the entry links:
+	// linkChain[i] covers entryLinks[i] (see hashEntryLinkChainLink).
+	// The chain has its own genesis, independent of the entry chain —
+	// link declarations never disturb the entry chain's
+	// links == version invariant.
+	linkChain []entryLinkChainLink
+	// entryLinkChanges counts declared entry links (see
+	// DeclareEntryLink in links.go): new declarations only —
+	// idempotent replays of an identical link are not counted.
+	// Operational metric, surfaced on GET /metrics as
+	// ledger_entry_links_total; not books, so it does not round-trip
+	// through snapshots.
+	entryLinkChanges atomic.Uint64
 	chain                  []chainLink   // audit chain, one link per successful Post, in order
 	version                uint64        // bumped by every successful Post
 	idempotencyTTL         time.Duration // 0 = never expire idempotency keys

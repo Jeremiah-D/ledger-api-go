@@ -287,6 +287,19 @@ type ReconciliationReport struct {
 	// declared. Operations tooling reads this to know which external
 	// identifier each account exports under.
 	ExternalMappings []ExternalAccountMapping `json:"external_mappings"`
+	// EntryLinks lists every declared entry link (see DeclareEntryLink
+	// in links.go), in declaration order: the explicit directed
+	// associations between journal entries — reversals, adjustments,
+	// fees, refunds — that replace fragile memo-text matching.
+	// Operations tooling reads this to know which entries correct,
+	// adjust, or refund which.
+	EntryLinks []EntryLink `json:"entry_links"`
+	// LinkChains expands the reversal_of/adjustment_of links into
+	// per-root adjustment chains (see EntryLinkChain in links.go):
+	// each chain starts at the ultimate original entry and lists every
+	// correction link reachable from it, so the full correction
+	// history of an entry audits end to end. Sorted by root entry ID.
+	LinkChains []EntryLinkChain `json:"link_chains"`
 	// ClosedPeriods lists the currently locked accounting periods
 	// ("YYYY-MM", UTC months; see ClosePeriod), sorted: no journal entry
 	// may be booked with a timestamp in one of these months, so the
@@ -699,6 +712,7 @@ func (l *Ledger) ReconcileWithOptions(now time.Time, opts ReconcileOptions) (Rec
 			"merges":                 len(report.Merges),
 			"dividends":              len(report.Dividends),
 			"escheats":               len(report.Escheats),
+			"entry_links":            len(report.EntryLinks),
 			"fx_applied":             report.FXApplied,
 			"pain001_pending":        len(report.Pain001Pending),
 			"ftp_totals":             len(report.FtpTotals),
@@ -745,6 +759,11 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		VirtualAccounts:         l.virtualAccountsLocked(),
 		VirtualAccountVersion:   l.virtualAccountVersion,
 		ExternalMappings:        l.externalMappingsLocked(),
+		// LG-123: the declared entry links and their per-root
+		// adjustment-chain expansion — the tamper-evident
+		// association record, disclosed like the mapping table.
+		EntryLinks: l.entryLinksLocked(),
+		LinkChains: l.entryLinkChainsLocked(),
 		ClosedPeriods:           l.closedPeriodsLocked(),
 		ActiveTransferSchedules: l.activeScheduleCountLocked(),
 		PendingReviews:          l.pendingTransferReviewsLocked(now),

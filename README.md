@@ -582,7 +582,10 @@ and a reversed entry that carried an `external_ref` passes it on as
 original had none; if the prefixed value would exceed 64 UTF-8
 characters the reversal is rejected with `400` — references are never
 truncated). Reversals are searchable via `GET /entries?memo=reversal_of:`
-and counted by `ledger_reversals_total{kind="full"}`.
+and, formally, via the auto-declared `reversal_of` entry link
+(`GET /entries/{id}/links` — the tamper-evident replacement for memo-text
+matching, see "Entry links" below); both are counted by
+`ledger_reversals_total{kind="full"}`.
 
 ### `POST /entries/{id}/reverse-partial` (partial reversal / 部分冲正)
 
@@ -614,6 +617,45 @@ enter dual-control review, and are counted by
 `ledger_reversals_total{kind="partial"}`. An inherited `external_ref`
 becomes `reversal_of:<original ref>/partial/<n>` (distinct per index,
 so partials never collide in the reference index).
+
+### Entry links (`GET /entries/{id}/links`)
+
+Explicit directed associations between journal entries — the
+tamper-evident replacement for fragile memo-text matching
+(`reversal_of:<id>` in a memo tells you two entries are related; a link
+*proves* it). A link says "entry A is the `reversal_of` / `adjustment_of`
+/ `fee_of` / `refund_of` entry B", declared through
+`ledger.DeclareEntryLink(from, to, linkType)` (both endpoints must already
+be journaled; unknown link types, empty IDs, and self-links are rejected).
+
+`POST /entries/{id}/reverse` and `POST /entries/{id}/reverse-partial`
+declare their `reversal_of` link automatically, atomically with the
+reversal commit — the memo stays searchable, the link stays verifiable.
+`adjustment_of` / `fee_of` / `refund_of` links are declared explicitly
+after the operation (e.g. a refund transfer declares `refund_of` against
+the original payment). Declaring the identical link twice is a silent
+no-op, and declarations never bump the journal version — a link is
+structural config, not money movement.
+
+```bash
+curl -s localhost:8080/entries/<reversal-id>/links
+# 200 {"entry_id":"<reversal-id>","links":[
+#   {"from_entry_id":"<reversal-id>","to_entry_id":"<original-id>",
+#    "link_type":"reversal_of","declared_at":"2026-10-18T07:31:00Z",
+#    "direction":"outgoing"}]}
+```
+
+The query is bidirectional: from the reversal the link reads `outgoing`,
+from the original the same link reads `incoming`. An entry with no links
+returns an empty list (`404` only for an unknown entry ID — entry IDs
+containing `/`, like `<id>/reversal`, must be URL-escaped). Every
+declaration appends to a dedicated tamper-evident link chain, verified by
+`GET /entries/verify` alongside the entry chain: rewriting a declared
+link breaks verification exactly like rewriting a journaled amount. The
+`Reconcile` report discloses every link as `entry_links` plus the
+per-root `link_chains` expansion of the `reversal_of`/`adjustment_of`
+correction history, and declarations are counted by
+`ledger_entry_links_total`.
 
 ### What-if dry-run (`POST /entries/dry-run`, `POST /transfers/dry-run`, `POST /sweeps/dry-run`)
 
@@ -3059,6 +3101,8 @@ Report fields:
 | `idempotency_keys`     | `ttl_configured`, `ttl`, `total_keys`, and `expired_eligible` (keys older than the TTL, i.e. the next sweep's eviction set) |
 | `audit_chain`          | `verify_ok` / `verify_error`, `head`, `links`, plus `head_consistent` — the chain-length == ledger-version check with `consistency_error` when the counters desync |
 | `merges`               | every committed account merge, sorted by merge ID: `merge_id`, `from_account`, `to_account`, the per-currency `legs`, and `created_at`. Merged sources stay frozen — cross-check `from_account` against `frozen_accounts` in the same report |
+| `entry_links`          | every declared entry link (LG-123), in declaration order: `from_entry_id`, `to_entry_id`, `link_type` (`reversal_of` / `adjustment_of` / `fee_of` / `refund_of`), `declared_at`, and `declared_by` — the explicit directed associations between journal entries |
+| `link_chains`          | the `reversal_of`/`adjustment_of` links expanded into per-root adjustment chains, sorted by `root_entry_id`: each chain's `root_entry_id` is the ultimate original entry and `links` lists every correction link reachable from it in declaration order, so the full correction history of an entry audits end to end (`fee_of`/`refund_of` links stay out of the chains — they are associations, not corrections — and are disclosed flat in `entry_links`) |
 | `fx_applied`           | `true` when the report carries the opt-in base-currency summary (see below); `false` on a plain scan |
 | `base_currency_summary` | the base-currency rollup, present only when `fx_applied` is `true`: `base_currency`, base-currency `total_debits_cents`/`total_credits_cents`, per-currency `conversions`, converted `discrepancies`, the `fx_snapshot` of rates used, `missing_rates`, and `fx_incomplete` |
 | `large_tx_reports` | the large-transaction (CTR) reports generated for the report's UTC day (LG-94), sorted by (account, currency, direction): `account`, `day`, `currency`, `direction` (`inflow`/`outflow`), `amount_cents`, `threshold_cents`, `report_currency`, `converted_cents` (+ `conversion_ok`, `rate_version`). Empty when nothing was generated — `POST /reconcile` discloses, it never generates |
@@ -4095,6 +4139,12 @@ curl -s localhost:8080/metrics
 - `ledger_alias_sets_total` — `PUT /accounts/{id}/alias` requests served
   successfully (alias bindings, rebinds, and clears; rejected binds are
   not counted).
+- `ledger_entry_links_total` — entry links declared (see "Entry links"
+  above): explicit directed associations between journal entries
+  (`reversal_of`, `adjustment_of`, `fee_of`, `refund_of`), including the
+  `reversal_of` links `POST /entries/{id}/reverse` and
+  `POST /entries/{id}/reverse-partial` declare automatically. Idempotent
+  replays of an identical link are not counted.
 - `ledger_holds_total` — every `POST /holds` request received.
 - `ledger_hold_idempotency_hits_total` — holds that replayed an existing
   idempotency key (returned the original hold, reserved nothing).

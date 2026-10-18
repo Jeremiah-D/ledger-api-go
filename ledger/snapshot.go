@@ -338,6 +338,14 @@ type snapshotConfigLine struct {
 	// exports to internal account IDs, so mappings are part of the
 	// operational config like the account aliases.
 	ExternalMappings []ExternalAccountMapping `json:"external_mappings,omitempty"`
+	// EntryLinks carries the declared entry links (see DeclareEntryLink),
+	// in declaration order; absent in snapshots written before entry
+	// links existed. A restore that dropped them would silently lose
+	// the tamper-evident association record, so links are part of the
+	// operational config like the external account mappings. The link
+	// chain itself is rebuilt from these rows on import — it is a pure
+	// function of the ordered declarations.
+	EntryLinks []EntryLink `json:"entry_links,omitempty"`
 	// BalanceWatches carries the balance threshold watches (see
 	// SetBalanceWatch); absent in snapshots written before balance
 	// watches existed. The alert state (breach flags) is re-derived from
@@ -1026,6 +1034,11 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		AccountTags:           l.accountTagsLocked(),
 		AccountAliases:        l.accountAliasesLocked(),
 		ExternalMappings:      l.externalMappingsLocked(),
+		// LG-123: the declared entry links round-trip in declaration
+		// order; the link chain rebuilds from them on import, so a
+		// restored ledger keeps the exact tamper-evident association
+		// record.
+		EntryLinks:            l.entryLinksLocked(),
 		ClosedAccounts:        l.closedCopyLocked(),
 		Suspended:             l.suspendedCopyLocked(),
 		OFXImportRegistry:     l.ofxImportsLocked(),
@@ -2425,6 +2438,38 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		l.externalMappings[externalMappingKey{account: row.Account, system: row.System, externalID: row.ExternalID}] = row
 	}
+	// Declared entry links (see links.go, LG-123) restore in declaration
+	// order: the journal rows are already rebuilt above (the batchKeys
+	// check references them), so a link naming a missing entry fails the
+	// import instead of installing an association that could never have
+	// been declared. The link chain rebuilds from the ordered rows —
+	// verifyChainLocked recomputes it after the config applies, so a
+	// snapshot whose rows and chain disagree is rejected. Duplicate rows
+	// install once: declarations are append-only, so the first row wins
+	// and repeats are skipped, exactly as a repeated DeclareEntryLink
+	// would.
+	for _, row := range cfg.EntryLinks {
+		if err := validateEntryLinkFields(row.FromEntryID, row.ToEntryID, row.LinkType); err != nil {
+			return bad("entry link %q -> %q: %v", row.FromEntryID, row.ToEntryID, err)
+		}
+		if _, ok := l.entries[row.FromEntryID]; !ok {
+			return bad("entry link from unknown journal entry %q", row.FromEntryID)
+		}
+		if _, ok := l.entries[row.ToEntryID]; !ok {
+			return bad("entry link to unknown journal entry %q", row.ToEntryID)
+		}
+		duplicate := false
+		for _, existing := range l.entryLinks {
+			if existing.FromEntryID == row.FromEntryID && existing.ToEntryID == row.ToEntryID && existing.LinkType == row.LinkType {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		l.appendEntryLinkLocked(row)
+	}
 	for c, p := range cfg.Parents {
 		l.parents[c] = p
 	}
@@ -3225,6 +3270,14 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// that dropped a row would silently revert that account's file
 	// exports to the internal account ID.
 	if !reflect.DeepEqual(a.externalMappings, b.externalMappings) {
+		return false
+	}
+	// The declared entry links must round-trip exactly, in declaration
+	// order: a restore that dropped or reordered a link would silently
+	// lose the tamper-evident association record (and the rebuilt link
+	// chain would diverge). The link chain itself is a pure function of
+	// these rows, so comparing the rows compares the chain.
+	if !reflect.DeepEqual(a.entryLinks, b.entryLinks) {
 		return false
 	}
 	if a.idempotencyTTL != b.idempotencyTTL {

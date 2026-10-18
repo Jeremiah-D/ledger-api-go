@@ -1474,6 +1474,32 @@ func (s *server) handleReverseEntryPartial(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusCreated, reversal)
 }
 
+// handleEntryLinks implements GET /entries/{id}/links, the bidirectional
+// entry-link query (see ledger.EntryLinks, LG-123): every declared link
+// touching the entry — the reversal_of links the reversal paths declare
+// automatically, plus any adjustment_of/fee_of/refund_of links declared
+// through ledger.DeclareEntryLink — each annotated with the direction
+// the entry was found in ("outgoing" when the entry is the link's From
+// endpoint, "incoming" when it is the To endpoint), in declaration
+// order. An entry with no declared links returns an empty list, not
+// 404; an unknown entry ID returns 404.
+func (s *server) handleEntryLinks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	l := s.ledgerFor(r)
+	if !l.EntryExists(id) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrEntryNotFound.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entry_id": id,
+		"links":    l.EntryLinks(id),
+	})
+}
+
 // createRevaluationRequest is the body of POST /revaluations. AsOf is
 // RFC3339 and optional (default now); it is the measurement time — it
 // timestamps the revaluation entries, keys their deterministic IDs, and
@@ -5538,6 +5564,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
 	mux.HandleFunc("POST /entries/{id}/reverse", s.handleReverseEntry)
 	mux.HandleFunc("POST /entries/{id}/reverse-partial", s.handleReverseEntryPartial)
+	mux.HandleFunc("GET /entries/{id}/links", s.handleEntryLinks)
 	mux.HandleFunc("POST /revaluations", s.handleCreateRevaluation)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
@@ -5650,6 +5677,7 @@ func (s *server) handler() http.Handler {
 		var eclProvisions, eclMigrations uint64
 		var dunningEscalations uint64
 		var extMappingChanges uint64
+		var entryLinkChanges uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -5684,6 +5712,11 @@ func (s *server) handler() http.Handler {
 			eclMigrations += l.ECLStageMigrationCount()
 			dunningEscalations += l.DunningEscalationCount()
 			extMappingChanges += l.ExternalMappingChangeCount()
+			// The entry-link declaration counter likewise lives in the
+			// ledger: links are declared inside DeclareEntryLink and
+			// the reversal paths, not in a handler (see
+			// ledger/links.go, LG-123).
+			entryLinkChanges += l.EntryLinkChangeCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -5752,6 +5785,7 @@ func (s *server) handler() http.Handler {
 		// ledger: mappings are declared inside SetExternalMapping /
 		// RemoveExternalMapping, not in a handler.
 		s.metrics.ExternalMappingChangesTotal.Store(extMappingChanges)
+		s.metrics.EntryLinkChangesTotal.Store(entryLinkChanges)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the

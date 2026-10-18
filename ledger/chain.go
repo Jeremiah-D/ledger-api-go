@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"sort"
 )
 
@@ -24,6 +25,26 @@ type chainLink struct {
 	entryID  string
 	prevHash [32]byte
 	hash     [32]byte
+}
+
+// writeHashString writes s length-prefixed (8-byte big-endian length)
+// into h, so adjacent hashed fields cannot be confused ("a"+"bc" vs
+// "ab"+"c"). Shared by the entry chain (see hashChainLink) and the
+// entry-link chain (see hashEntryLinkChainLink, links.go): the two
+// chains use one canonical field encoding.
+func writeHashString(h hash.Hash, s string) {
+	var lb [8]byte
+	binary.BigEndian.PutUint64(lb[:], uint64(len(s)))
+	h.Write(lb[:])
+	h.Write([]byte(s))
+}
+
+// writeHashInt writes n fixed-width big-endian into h. Shared like
+// writeHashString.
+func writeHashInt(h hash.Hash, n int64) {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], uint64(n))
+	h.Write(b[:])
 }
 
 // hashChainLink computes SHA-256(prevHash || canonical(entry)). Strings are
@@ -49,17 +70,8 @@ type chainLink struct {
 func hashChainLink(prevHash [32]byte, e JournalEntry) [32]byte {
 	h := sha256.New()
 	h.Write(prevHash[:])
-	writeString := func(s string) {
-		var lb [8]byte
-		binary.BigEndian.PutUint64(lb[:], uint64(len(s)))
-		h.Write(lb[:])
-		h.Write([]byte(s))
-	}
-	writeInt := func(n int64) {
-		var b [8]byte
-		binary.BigEndian.PutUint64(b[:], uint64(n))
-		h.Write(b[:])
-	}
+	writeString := func(s string) { writeHashString(h, s) }
+	writeInt := func(n int64) { writeHashInt(h, n) }
 	writeString(e.ID)
 	writeString(string(e.DebitAccount))
 	writeString(string(e.CreditAccount))
@@ -169,6 +181,33 @@ func (l *Ledger) verifyChainLocked() error {
 			return fmt.Errorf("ledger: journal entry %q was modified after posting (hash mismatch)", link.entryID)
 		}
 		prev = link.hash
+	}
+	// The entry-link chain (see links.go, LG-123) verifies like the
+	// entry chain: the declaration order, the endpoints, the type, and
+	// the declaration metadata of every declared link recompute to the
+	// recorded chain, so rewriting a declared link breaks verification
+	// exactly like rewriting a journaled entry. The link chain has its
+	// own genesis — it is independent of the entry chain, whose
+	// links == version invariant link declarations never disturb.
+	if len(l.linkChain) != len(l.entryLinks) {
+		return fmt.Errorf("ledger: entry-link chain has %d links for %d declared entry links",
+			len(l.linkChain), len(l.entryLinks))
+	}
+	var lprev [32]byte
+	for i, lc := range l.linkChain {
+		if want := uint64(i + 1); lc.seq != want {
+			return fmt.Errorf("ledger: entry-link chain link %d carries seq %d, want %d (reordered chain)",
+				i, lc.seq, want)
+		}
+		if lc.prevHash != lprev {
+			return fmt.Errorf("ledger: entry-link chain link %d does not extend the previous link (spliced chain)", i)
+		}
+		link := l.entryLinks[i]
+		if got := hashEntryLinkChainLink(lprev, link); got != lc.hash {
+			return fmt.Errorf("ledger: entry link %q -> %q (%s) was modified after declaration (hash mismatch)",
+				link.FromEntryID, link.ToEntryID, link.LinkType)
+		}
+		lprev = lc.hash
 	}
 	return nil
 }

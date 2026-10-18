@@ -528,6 +528,12 @@ type Metrics struct {
 	// row are not counted. It is synced from the ledger on every GET
 	// /metrics scrape, like the VAN attribution counter.
 	ExternalMappingChangesTotal atomic.Uint64
+	// EntryLinkChangesTotal counts declared entry links (see
+	// ledger.DeclareEntryLink, LG-123): new declarations only —
+	// idempotent replays of an identical link are not counted, across
+	// all tenants (see GET /metrics). It is synced from the ledger on
+	// every GET /metrics scrape, like ExternalMappingChangesTotal.
+	EntryLinkChangesTotal atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -863,6 +869,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_external_mapping_changes_total",
 		"Total external-account mapping changes: rows declared or updated via POST /accounts/{id}/external-mappings and rows removed via DELETE /accounts/{id}/external-mappings. Idempotent replays of an unchanged row are not counted.",
 		m.ExternalMappingChangesTotal.Load())
+	writeCounter(&sb, "ledger_entry_links_total",
+		"Total entry links declared (see ledger.DeclareEntryLink): explicit directed associations between journal entries (reversal_of, adjustment_of, fee_of, refund_of), including the reversal_of links ReverseEntry and ReverseEntryPartial declare automatically. Idempotent replays of an identical link are not counted.",
+		m.EntryLinkChangesTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

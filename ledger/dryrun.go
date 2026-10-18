@@ -140,6 +140,12 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		painTransfers:        make(map[string]PainTransfer, len(l.painTransfers)),
 		accountIBANs:         make(map[AccountID]AccountIBAN, len(l.accountIBANs)),
 		externalMappings:     make(map[externalMappingKey]ExternalAccountMapping, len(l.externalMappings)),
+		// The declared entry links travel with the twin like the other
+		// structural registries, with the link chain rebuilt alongside:
+		// the simulated post sees the same association record, and the
+		// twin's declarations are discarded with the copy.
+		entryLinks:           append([]EntryLink(nil), l.entryLinks...),
+		linkChain:            append([]entryLinkChainLink(nil), l.linkChain...),
 		virtualAccounts:      make(map[AccountID]AccountID, len(l.virtualAccounts)),
 		creditLines:          make(map[creditLineKey]CreditLine, len(l.creditLines)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
@@ -294,6 +300,9 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	// in-memory counters; the twin's increments are discarded with the
 	// copy.
 	c.externalMappingChanges.Store(l.externalMappingChanges.Load())
+	// The entry-link declaration counter travels with the twin like the
+	// mapping-change counter above.
+	c.entryLinkChanges.Store(l.entryLinkChanges.Load())
 	for k, v := range l.closedPeriods {
 		c.closedPeriods[k] = v
 	}
