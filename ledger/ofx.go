@@ -60,6 +60,10 @@ type OFXExportOptions struct {
 //   - Memo carries the journal memo, REFNUM the entry's external
 //     reference (when present), both XML-escaped. The OFX header block is
 //     pure ASCII; the body is UTF-8.
+//   - ACCTID names the account's external identifier when one is mapped
+//     in the "ofx" system (see SetExternalMapping) — the identifier the
+//     importing bank or accounting package expects. An unmapped account
+//     exports with its internal account ID, as before.
 //
 // Resume: the returned checkpoint is the last exported entry's ID (""
 // when nothing was exported). Pass it as AfterEntryID in the next call
@@ -180,6 +184,15 @@ func (l *Ledger) ExportOFX(opts OFXExportOptions) (doc []byte, checkpoint string
 	var b strings.Builder
 	b.WriteString(ofxHeaderBlock)
 	var stmts strings.Builder
+	// The statement names the account by its external identifier when
+	// one is mapped in the "ofx" system (see SetExternalMapping): the
+	// importing bank or accounting package keys on that identifier,
+	// not on the internal account ID. An unmapped account exports with
+	// the internal account ID, as before.
+	acctID := string(opts.Account)
+	if ext, ok := l.externalAccountIDLocked(opts.Account, ExternalSystemOFX); ok {
+		acctID = ext
+	}
 	for _, c := range currencies {
 		var seg []JournalEntry
 		for _, e := range page {
@@ -187,7 +200,7 @@ func (l *Ledger) ExportOFX(opts OFXExportOptions) (doc []byte, checkpoint string
 				seg = append(seg, e)
 			}
 		}
-		stmts.WriteString(ofxStatement(opts.Account, c, seg, l.balanceAtLocked(opts.Account, c, opts.Until), opts, checkpoint))
+		stmts.WriteString(ofxStatement(opts.Account, acctID, c, seg, l.balanceAtLocked(opts.Account, c, opts.Until), opts, checkpoint))
 	}
 	// Zero currencies (unknown account, or an account with no postings
 	// and no currency requested) still yields a valid empty document —
@@ -285,7 +298,11 @@ func ofxAmount(cents int64) string {
 // ofxStatement renders one STMTTRNRS segment for (account, currency).
 // The TRNUID is the export checkpoint, so a re-exported segment carries
 // the same statement identity only when the page content is identical.
-func ofxStatement(account AccountID, currency string, entries []JournalEntry, balanceCents int64, opts OFXExportOptions, trnUID string) string {
+// acctID is the account identifier the statement names in <ACCTID>:
+// the external identifier when one is mapped in the "ofx" system (see
+// ExportOFX), the internal account ID otherwise. The account-centric
+// TRNTYPE/TRNAMT signs still use the ledger account itself.
+func ofxStatement(account AccountID, acctID string, currency string, entries []JournalEntry, balanceCents int64, opts OFXExportOptions, trnUID string) string {
 	var b strings.Builder
 	b.WriteString("<STMTTRNRS>\n")
 	b.WriteString(fmt.Sprintf("<TRNUID>%s</TRNUID>\n", ofxEscape(trnUID)))
@@ -294,7 +311,7 @@ func ofxStatement(account AccountID, currency string, entries []JournalEntry, ba
 	b.WriteString(fmt.Sprintf("<CURDEF>%s</CURDEF>\n", ofxEscape(currency)))
 	b.WriteString("<BANKACCTFROM>\n")
 	b.WriteString("<BANKID>LEDGER</BANKID>\n")
-	b.WriteString(fmt.Sprintf("<ACCTID>%s</ACCTID>\n", ofxEscape(string(account))))
+	b.WriteString(fmt.Sprintf("<ACCTID>%s</ACCTID>\n", ofxEscape(acctID)))
 	b.WriteString("<ACCTTYPE>CHECKING</ACCTTYPE>\n")
 	b.WriteString("</BANKACCTFROM>\n")
 	b.WriteString("<BANKTRANLIST>\n")

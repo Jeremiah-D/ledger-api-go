@@ -3826,6 +3826,119 @@ func (s *server) handleGetAlias(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": string(account), "alias": alias})
 }
 
+// setExternalMappingRequest is the body of POST
+// /accounts/{id}/external-mappings: the external system the account is
+// known to (see ledger.SetExternalMapping), the identifier it carries
+// there, and an optional operator note.
+type setExternalMappingRequest struct {
+	System     string `json:"system"`
+	ExternalID string `json:"external_id"`
+	Note       string `json:"note"`
+}
+
+// handleSetExternalMapping implements POST /accounts/{id}/external-mappings:
+// declares (or updates) one external account mapping for the account
+// (see ledger.SetExternalMapping) — the explicit link between the
+// internal account and the identifier an external system knows it by
+// (a core-banking account number, a PSP merchant number). The body is
+// strict JSON: {"system":"bank","external_id":"...","note":"..."}.
+// Unknown fields are 400, and so are an empty/invalid system, an empty
+// or overlong external ID, or an overlong note. The declaration is
+// structural — it does not bump the ledger version — and is audited as
+// external_mapping_set. {id} is the canonical account ID: writes never
+// resolve aliases, so a rebound alias cannot silently retarget an
+// audited mapping (see resolveAccountRef).
+func (s *server) handleSetExternalMapping(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	var req setExternalMappingRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	account := ledger.AccountID(id)
+	if err := s.ledgerFor(r).SetExternalMappingCtx(actx, account, req.System, req.ExternalID, req.Note); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":     string(account),
+		"system":      req.System,
+		"external_id": req.ExternalID,
+		"note":        req.Note,
+	})
+}
+
+// handleListExternalMappings implements GET /accounts/{id}/external-mappings:
+// lists every external mapping declared for the account (see
+// ledger.ListExternalMappings), sorted by (system, external_id). An
+// account with no declared mappings returns an empty list, like the
+// account reads that report zero rows. The mappings are the identifier
+// links the file exports (OFX statements, payment instructions)
+// resolve external account identifiers from.
+func (s *server) handleListExternalMappings(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	account := ledger.AccountID(id)
+	mappings := s.ledgerFor(r).ListExternalMappings(account)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":  string(account),
+		"mappings": mappings,
+	})
+}
+
+// handleRemoveExternalMapping implements DELETE
+// /accounts/{id}/external-mappings: removes one declared mapping (see
+// ledger.RemoveExternalMapping). The row is named by the ?system= and
+// ?external_id= query parameters. Removing an undeclared row is 404;
+// a removed row is audited as external_mapping_removed. {id} is the
+// canonical account ID, like the POST endpoint above.
+func (s *server) handleRemoveExternalMapping(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	system := r.URL.Query().Get("system")
+	externalID := r.URL.Query().Get("external_id")
+	if system == "" || externalID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query parameters system and external_id are required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	account := ledger.AccountID(id)
+	if !s.ledgerFor(r).RemoveExternalMappingCtx(actx, account, system, externalID) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "external mapping not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":     string(account),
+		"system":      system,
+		"external_id": externalID,
+		"removed":     true,
+	})
+}
+
 type setSweepReserveRequest struct {
 	Account    ledger.AccountID `json:"account"`
 	Currency   string           `json:"currency"`
@@ -5502,6 +5615,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PUT /accounts/{id}/tags", s.handleSetAccountTags)
 	mux.HandleFunc("PUT /accounts/{id}/alias", s.handleSetAlias)
 	mux.HandleFunc("GET /accounts/{id}/alias", s.handleGetAlias)
+	mux.HandleFunc("GET /accounts/{id}/external-mappings", s.handleListExternalMappings)
+	mux.HandleFunc("POST /accounts/{id}/external-mappings", s.handleSetExternalMapping)
+	mux.HandleFunc("DELETE /accounts/{id}/external-mappings", s.handleRemoveExternalMapping)
 	mux.HandleFunc("GET /accounts/{id}/allowlist", s.handleGetTransferAllowlist)
 	mux.HandleFunc("PUT /accounts/{id}/allowlist", s.handleSetTransferAllowlist)
 	mux.HandleFunc("PUT /sweep-reserves", s.handleSetSweepReserve)
@@ -5533,6 +5649,7 @@ func (s *server) handler() http.Handler {
 		var fxSpreadCents int64
 		var eclProvisions, eclMigrations uint64
 		var dunningEscalations uint64
+		var extMappingChanges uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -5566,6 +5683,7 @@ func (s *server) handler() http.Handler {
 			eclProvisions += l.ECLProvisionCount()
 			eclMigrations += l.ECLStageMigrationCount()
 			dunningEscalations += l.DunningEscalationCount()
+			extMappingChanges += l.ExternalMappingChangeCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -5630,6 +5748,10 @@ func (s *server) handler() http.Handler {
 		// The dunning escalation counter likewise lives in the ledger:
 		// escalations fire inside EscalateDunning, not in a handler.
 		s.metrics.DunningEscalationsTotal.Store(dunningEscalations)
+		// The external-mapping change counter likewise lives in the
+		// ledger: mappings are declared inside SetExternalMapping /
+		// RemoveExternalMapping, not in a handler.
+		s.metrics.ExternalMappingChangesTotal.Store(extMappingChanges)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the

@@ -279,6 +279,14 @@ type ReconciliationReport struct {
 	// which identifiers attribute to which real accounts.
 	VirtualAccounts       []VirtualAccount `json:"virtual_accounts"`
 	VirtualAccountVersion uint64           `json:"virtual_account_version"`
+	// ExternalMappings lists every declared external account mapping
+	// (see SetExternalMapping), sorted by (account, system,
+	// external ID): the explicit internal <-> external-system
+	// identifier links the file exports resolve external account
+	// identifiers from (see ExportOFX). Empty when no mappings are
+	// declared. Operations tooling reads this to know which external
+	// identifier each account exports under.
+	ExternalMappings []ExternalAccountMapping `json:"external_mappings"`
 	// ClosedPeriods lists the currently locked accounting periods
 	// ("YYYY-MM", UTC months; see ClosePeriod), sorted: no journal entry
 	// may be booked with a timestamp in one of these months, so the
@@ -736,6 +744,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		Escheats:                l.escheatsLocked(),
 		VirtualAccounts:         l.virtualAccountsLocked(),
 		VirtualAccountVersion:   l.virtualAccountVersion,
+		ExternalMappings:        l.externalMappingsLocked(),
 		ClosedPeriods:           l.closedPeriodsLocked(),
 		ActiveTransferSchedules: l.activeScheduleCountLocked(),
 		PendingReviews:          l.pendingTransferReviewsLocked(now),

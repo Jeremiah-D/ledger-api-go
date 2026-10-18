@@ -139,6 +139,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		mergeKeys:            make(map[string]string, len(l.mergeKeys)),
 		painTransfers:        make(map[string]PainTransfer, len(l.painTransfers)),
 		accountIBANs:         make(map[AccountID]AccountIBAN, len(l.accountIBANs)),
+		externalMappings:     make(map[externalMappingKey]ExternalAccountMapping, len(l.externalMappings)),
 		virtualAccounts:      make(map[AccountID]AccountID, len(l.virtualAccounts)),
 		creditLines:          make(map[creditLineKey]CreditLine, len(l.creditLines)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
@@ -267,6 +268,9 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	for k, v := range l.accountIBANs {
 		c.accountIBANs[k] = v
 	}
+	for k, v := range l.externalMappings {
+		c.externalMappings[k] = v
+	}
 	for k, v := range l.virtualAccounts {
 		c.virtualAccounts[k] = v
 	}
@@ -286,6 +290,10 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	// with the copy.
 	c.fxSpreadBookings = l.fxSpreadBookings
 	c.fxSpreadCentsTotal = l.fxSpreadCentsTotal
+	// The mapping-change counter travels with the twin like the other
+	// in-memory counters; the twin's increments are discarded with the
+	// copy.
+	c.externalMappingChanges.Store(l.externalMappingChanges.Load())
 	for k, v := range l.closedPeriods {
 		c.closedPeriods[k] = v
 	}

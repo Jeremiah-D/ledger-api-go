@@ -331,6 +331,13 @@ type snapshotConfigLine struct {
 	// ops tooling address accounts by alias — so aliases are part of
 	// the operational config like the account tags.
 	AccountAliases []AccountAlias `json:"account_aliases,omitempty"`
+	// ExternalMappings carries the external account mappings (see
+	// SetExternalMapping), sorted by (account, system, external_id);
+	// absent in snapshots written before external account mappings
+	// existed. A restore that dropped them would silently revert file
+	// exports to internal account IDs, so mappings are part of the
+	// operational config like the account aliases.
+	ExternalMappings []ExternalAccountMapping `json:"external_mappings,omitempty"`
 	// BalanceWatches carries the balance threshold watches (see
 	// SetBalanceWatch); absent in snapshots written before balance
 	// watches existed. The alert state (breach flags) is re-derived from
@@ -1018,6 +1025,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		AccountTypes:          l.accountTypesLocked(),
 		AccountTags:           l.accountTagsLocked(),
 		AccountAliases:        l.accountAliasesLocked(),
+		ExternalMappings:      l.externalMappingsLocked(),
 		ClosedAccounts:        l.closedCopyLocked(),
 		Suspended:             l.suspendedCopyLocked(),
 		OFXImportRegistry:     l.ofxImportsLocked(),
@@ -2403,6 +2411,20 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		l.aliases[row.Alias] = row.Account
 		l.accountAliases[row.Account] = row.Alias
 	}
+	// External account mappings restore like the account aliases: an
+	// empty account, a malformed system name, an empty or overlong
+	// external ID, or an overlong note fails the import instead of
+	// installing a row that could never have been created. The
+	// (account, system, externalID) triple is the storage key, so a
+	// snapshot that repeats a row installs it once — rows are the
+	// registry's own deduped form, and the last write wins exactly as
+	// a repeated SetExternalMapping would.
+	for _, row := range cfg.ExternalMappings {
+		if err := validateExternalMapping(row.Account, row.System, row.ExternalID, row.Note); err != nil {
+			return bad("external account mapping for %s: %v", row.Account, err)
+		}
+		l.externalMappings[externalMappingKey{account: row.Account, system: row.System, externalID: row.ExternalID}] = row
+	}
 	for c, p := range cfg.Parents {
 		l.parents[c] = p
 	}
@@ -3197,6 +3219,12 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// The camt.053 import registry round-trips like the OFX one
 	// (LG-103): same idempotency, same restore invariant.
 	if !reflect.DeepEqual(a.camt053Imports, b.camt053Imports) {
+		return false
+	}
+	// The external account mappings must round-trip exactly: a restore
+	// that dropped a row would silently revert that account's file
+	// exports to the internal account ID.
+	if !reflect.DeepEqual(a.externalMappings, b.externalMappings) {
 		return false
 	}
 	if a.idempotencyTTL != b.idempotencyTTL {

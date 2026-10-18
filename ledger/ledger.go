@@ -934,14 +934,29 @@ type Ledger struct {
 	// pain001.go): the debtor/creditor identifiers pain.001 payment
 	// instructions name. Structural config like the account tags — it
 	// round-trips through snapshots.
-	accountIBANs     map[AccountID]AccountIBAN
-	chain           []chainLink   // audit chain, one link per successful Post, in order
-	version         uint64        // bumped by every successful Post
-	idempotencyTTL  time.Duration // 0 = never expire idempotency keys
-	pruneInterval   time.Duration // min gap between lazy key sweeps
-	lastKeyPrune    time.Time
-	lastDailyPrune  time.Time // last run of the daily-outflow bucket sweep
-	lastBudgetPrune time.Time // last run of the monthly-spend bucket sweep
+	accountIBANs map[AccountID]AccountIBAN
+	// externalMappings is the external account mapping (see
+	// external_mapping.go, LG-122): (account, system, externalID) ->
+	// the mapping row. One internal account maps to many external
+	// identifiers — a core-banking account number, a PSP merchant
+	// number — each tagged with the external system that knows the
+	// account by it. Structural config like accountIBANs: it does not
+	// bump the journal version and it round-trips through snapshots.
+	externalMappings map[externalMappingKey]ExternalAccountMapping
+	// externalMappingChanges counts external account mapping changes
+	// (see SetExternalMapping/RemoveExternalMapping in
+	// external_mapping.go): rows declared or updated plus rows removed.
+	// Operational metric, surfaced on GET /metrics as
+	// ledger_external_mapping_changes_total; not books, so it does not
+	// round-trip through snapshots.
+	externalMappingChanges atomic.Uint64
+	chain                  []chainLink   // audit chain, one link per successful Post, in order
+	version                uint64        // bumped by every successful Post
+	idempotencyTTL         time.Duration // 0 = never expire idempotency keys
+	pruneInterval          time.Duration // min gap between lazy key sweeps
+	lastKeyPrune           time.Time
+	lastDailyPrune         time.Time // last run of the daily-outflow bucket sweep
+	lastBudgetPrune        time.Time // last run of the monthly-spend bucket sweep
 	// anchor holds the external audit-chain anchoring state (LG-44):
 	// the configured Ed25519 key and the loaded checkpoints. See
 	// anchor.go for the lock-order contract.
@@ -1112,6 +1127,7 @@ func New(opts ...Option) *Ledger {
 		painTransfers:               make(map[string]PainTransfer),
 		painInstructions:            make(map[string]*PainInstruction),
 		accountIBANs:                make(map[AccountID]AccountIBAN),
+		externalMappings:            make(map[externalMappingKey]ExternalAccountMapping),
 		virtualAccounts:           make(map[AccountID]AccountID),
 		pruneInterval:               defaultKeyPruneInterval,
 	}

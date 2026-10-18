@@ -521,6 +521,13 @@ type Metrics struct {
 	// alike. Rejected requests (bad alias, conflicting alias) are not
 	// counted.
 	AliasSetsTotal atomic.Uint64
+	// ExternalMappingChangesTotal counts external-account mapping
+	// changes (see ledger.SetExternalMapping/RemoveExternalMapping,
+	// LG-122): rows declared or updated plus rows removed, across all
+	// tenants (see GET /metrics). Idempotent replays of an unchanged
+	// row are not counted. It is synced from the ledger on every GET
+	// /metrics scrape, like the VAN attribution counter.
+	ExternalMappingChangesTotal atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -853,6 +860,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_alias_sets_total",
 		"Total PUT /accounts/{id}/alias requests served successfully (alias bindings, rebinds, and clears).",
 		m.AliasSetsTotal.Load())
+	writeCounter(&sb, "ledger_external_mapping_changes_total",
+		"Total external-account mapping changes: rows declared or updated via POST /accounts/{id}/external-mappings and rows removed via DELETE /accounts/{id}/external-mappings. Idempotent replays of an unchanged row are not counted.",
+		m.ExternalMappingChangesTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

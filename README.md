@@ -2379,6 +2379,10 @@ Semantics, stated so importers can trust them:
   bookkeeping, so `CREDIT` always adds.
 - `MEMO` carries the journal memo, `REFNUM` the entry's external
   reference, both XML-escaped.
+- `ACCTID` names the account's external identifier when one is mapped in
+  the `ofx` system (see External account mappings below) — the identifier
+  the importing bank or accounting package expects for the account. An
+  unmapped account exports with its internal account ID, as before.
 - `LEDGERBAL` is the account's true ledger state at `DTEND`: the balance
   folded from every effective journal row with `CreatedAt < until` —
   not just the exported page. Pending-review rows never touched balances
@@ -2835,6 +2839,68 @@ curl -s localhost:8080/accounts/ops_cash/balance
   silently retarget in-flight automation.
 - `GET /metrics` counts successful alias writes as
   `ledger_alias_sets_total` (bindings, rebinds, and clears).
+
+### External account mappings (`POST` / `GET` / `DELETE /accounts/{id}/external-mappings`)
+
+External account mappings are the explicit links between one internal
+ledger account and the identifiers external systems know it by — a
+core-banking account number, a PSP merchant number. One internal account
+maps to **many** external identifiers: the mapping is keyed by the
+(`account`, `system`, `external_id`) triple, so the same account can be
+known to `bank` under a settlement account number and to `psp` under a
+merchant number, and one system can hold several identifiers for it.
+System names are 1–64 characters of `[A-Za-z0-9._-]` (the alias/tag
+charset, URL-safe by construction). Well-known systems: `bank`
+(core-banking / settlement account number), `psp` (PSP merchant number),
+`ofx` (the identifier OFX statement exports name in `<ACCTID>`).
+
+Mapping is structural, like aliases: it does not bump the ledger
+version, rows round-trip through the disaster-recovery snapshot
+(including the incremental config line), and every change is recorded in
+the structured audit log (`external_mapping_set` /
+`external_mapping_removed`, with `system`, `external_id`, and `note` —
+mappings are operator-chosen routing data and carry no sensitive
+information).
+
+```bash
+curl -s -X POST localhost:8080/accounts/cash/external-mappings \
+  -H 'Content-Type: application/json' \
+  -d '{"system":"bank","external_id":"DE89370400440532013000","note":"primary settlement"}'
+# 200 {"account":"cash","system":"bank","external_id":"DE89370400440532013000","note":"primary settlement"}
+
+curl -s localhost:8080/accounts/cash/external-mappings
+# 200 {"account":"cash","mappings":[{"account":"cash","system":"bank","external_id":"...","note":"..."}]}
+
+curl -s -X DELETE 'localhost:8080/accounts/cash/external-mappings?system=bank&external_id=DE89370400440532013000'
+# 200 {"account":"cash","system":"bank","external_id":"...","removed":true}
+```
+
+- Declaring a row that already exists with the identical note is a silent
+  no-op (no audit event), so idempotent retries stay quiet in the
+  compliance trail; updating the note re-audits. Removing an undeclared
+  row → `404`.
+- An empty/invalid `system`, an empty or overlong `external_id`, or an
+  overlong `note` → `400`. Unknown JSON fields → `400` (strict body, like
+  every write endpoint). Like aliases, `{id}` is the canonical account ID
+  on writes: no alias resolution, so a rebound alias cannot retarget an
+  audited mapping.
+- The `Reconcile` report discloses every mapping as `external_mappings`
+  (sorted by account, system, external ID), and `GET /metrics` counts
+  mapping changes as `ledger_external_mapping_changes_total` (sets plus
+  removals; idempotent replays not counted).
+- **File-export resolution**: an export that must name exactly one external
+  identifier for an account in a system resolves the deterministic first
+  row — the smallest `external_id` in that system — and falls back to the
+  internal account ID when the account has no mapping in the system. OFX
+  statements (`GET /accounts/{id}/ofx`) use the `ofx` system's mapping for
+  `<ACCTID>`; the identifier is XML-escaped like the internal ID was.
+- **pain.001 stays fail-closed on IBANs**: `GET /exports/pain001` keeps
+  requiring registered, ISO-validated IBANs (`ledger.SetAccountIBAN`) for
+  debtor and creditor and refuses the export without them. A generic
+  external mapping is not an IBAN — substituting a PSP merchant number
+  for a debtor account identifier would emit an invalid payment
+  instruction — so the mapping registry deliberately does not feed the
+  pain.001 export.
 
 ### `GET /entries`
 
