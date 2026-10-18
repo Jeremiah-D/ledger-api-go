@@ -157,6 +157,11 @@ type TransferReview struct {
 	// re-approving returns the identical receipt idempotently. Nil
 	// unless Status is approved.
 	ApprovedReceipt *TransferReceipt `json:"approved_receipt,omitempty"`
+	// ChainProgress is the review's position in the sequential
+	// approval chain (see review_chain.go): the current stage, its
+	// start, and the per-stage named votes. Nil when the review was
+	// decided (or is being decided) outside a chain.
+	ChainProgress *ReviewChainProgress `json:"chain_progress,omitempty"`
 }
 
 // WithReviewThreshold sets the ledger-wide large-transfer review
@@ -326,9 +331,13 @@ func reviewExpiredLocked(r *TransferReview, now time.Time) bool {
 }
 
 // reviewActiveLocked reports whether the review currently freezes funds:
-// pending and not lapsed. Callers must hold l.mu.
-func reviewActiveLocked(r *TransferReview, now time.Time) bool {
-	return r.Status == ReviewStatusPending && !reviewExpiredLocked(r, now)
+// pending, not lapsed, and — under an approval chain — its current
+// stage not timed out. A timed-out stage is lazy like review-level
+// expiry: the funds are already released for available-balance purposes
+// even before ExpireReviews sweeps the review. Callers must hold l.mu
+// (either lock suffices).
+func (l *Ledger) reviewActiveLocked(r *TransferReview, now time.Time) bool {
+	return r.Status == ReviewStatusPending && !reviewExpiredLocked(r, now) && !l.chainStageTimedOut(r, now)
 }
 
 // reviewHeldLocked sums the frozen funds of active reviews on
@@ -338,7 +347,7 @@ func reviewActiveLocked(r *TransferReview, now time.Time) bool {
 func (l *Ledger) reviewHeldLocked(a AccountID, currency string, now time.Time) int64 {
 	var total int64
 	for _, r := range l.reviews {
-		if r.Transfer.From == a && r.Transfer.Currency == currency && reviewActiveLocked(r, now) {
+		if r.Transfer.From == a && r.Transfer.Currency == currency && l.reviewActiveLocked(r, now) {
 			total += r.TotalOutflowCents
 		}
 	}
@@ -459,6 +468,19 @@ func (l *Ledger) maybeReviewTransferLocked(t Transfer, entries []JournalEntry, f
 	if l.reviewExpiry > 0 {
 		review.ExpiresAt = now.Add(l.reviewExpiry)
 	}
+	// LG-126: while an approval chain is active, the review is born at
+	// stage 0 of the chain: the stage timeout (if any) runs from
+	// creation, and the pending-review listings disclose the stage
+	// before any vote is cast. Reviews created before the chain was
+	// installed bind their progress on the first vote instead (see
+	// bindChainProgressLocked).
+	if ac := l.approvalChain; ac != nil {
+		review.ChainProgress = &ReviewChainProgress{
+			Stage:          0,
+			StageStartedAt: now,
+			Votes:          make([]ChainStageVotes, len(ac.Stages)),
+		}
+	}
 	l.reviews[t.ID] = review
 
 	entryIDs := make([]string, 0, len(entries))
@@ -524,7 +546,9 @@ func (l *Ledger) GetTransferReview(transferID string) (TransferReview, bool) {
 	if !ok {
 		return TransferReview{}, false
 	}
-	return *r, true
+	out := *r
+	out.ChainProgress = copyChainProgress(r.ChainProgress)
+	return out, true
 }
 
 // PendingTransferReviews lists every review currently awaiting an
@@ -543,7 +567,7 @@ func (l *Ledger) PendingTransferReviews() []TransferReview {
 func (l *Ledger) pendingTransferReviewsLocked(now time.Time) []TransferReview {
 	var out []TransferReview
 	for _, r := range l.reviews {
-		if reviewActiveLocked(r, now) {
+		if l.reviewActiveLocked(r, now) {
 			out = append(out, *r)
 		}
 	}
@@ -633,6 +657,13 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 		reviewer = defaultReviewOperator
 	}
 
+	// LG-126: while an approval chain is active, the approval is a
+	// named vote on the review's current stage (see review_chain.go).
+	// The chain supersedes the flat quorum policy while configured: a
+	// review is decided by one voting scheme at a time.
+	if ac := l.approvalChain; ac != nil {
+		return l.castChainApproveVoteLocked(ctx, r, reviewer, ac, now)
+	}
 	// LG-124: while a quorum policy is active, the approval is a named
 	// vote (see review_quorum.go) instead of an immediate settlement.
 	if qp := l.reviewQuorum; qp != nil {
@@ -840,6 +871,12 @@ func (l *Ledger) RejectTransferReviewCtx(ctx context.Context, transferID, review
 	if reviewer == "" {
 		reviewer = defaultReviewOperator
 	}
+	// LG-126: while an approval chain is active, the rejection is a
+	// named vote on the review's current stage — decisive at every
+	// stage (see review_chain.go).
+	if ac := l.approvalChain; ac != nil {
+		return l.castChainRejectVoteLocked(ctx, r, reviewer, reason, ac, time.Now())
+	}
 	// LG-124: while a quorum policy is active, the rejection is a named
 	// vote (see review_quorum.go) instead of an immediate rejection.
 	if qp := l.reviewQuorum; qp != nil {
@@ -990,6 +1027,14 @@ func (l *Ledger) ExpireReviewsAtCtx(ctx context.Context, now time.Time) int {
 				},
 			})
 		}
+	}
+	// LG-126: chain stage timeouts auto-reject their reviews — the
+	// batched audit event above keeps the two sweeps distinguishable.
+	// A review already expired in the loop above is no longer pending,
+	// so the two sweeps never double-handle a review. The returned
+	// count keeps its LG-42 meaning: review-level expiries only.
+	if timedOut, ids := l.expireChainStagesLocked(now); timedOut > 0 {
+		l.emitChainStageTimeoutAuditLocked(timedOut, ids)
 	}
 	return marked
 }

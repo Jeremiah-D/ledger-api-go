@@ -368,6 +368,26 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   `ledger_review_quorum_votes_total{approver,vote,outcome}`. The policy is
   structural config (no version bump) and round-trips through
   disaster-recovery snapshots.
+- **Sequential approval chain (tiered maker → checker → controller):**
+  `SetApprovalChain` installs an opt-in ordered list of stages, each
+  stage its own approver set (M) and threshold (N). The review advances
+  stage by stage — the same `approve`/`reject` endpoints become
+  per-stage vote entry points: an approve vote that reaches the stage
+  threshold advances the review (`200`, `review_status:
+  "pending_review"`, the live `chain_tally` with outcome `advanced`),
+  and the last stage's threshold settles through the normal approval
+  path. A **reject vote is decisive at every stage**: it closes the
+  review immediately through the normal rejection path (the recorded
+  vote stays on the review). Only current-stage members may vote
+  (`403`); re-voting the same way is idempotent, voting the opposite
+  way returns `400`. Every vote lands in the structured audit chain
+  with its stage number (`transfer_review_chain_vote`), and each
+  review's stage plus per-stage votes ride the review record, the
+  `Reconcile` report (`approval_chain`), and disaster-recovery
+  snapshots. Stages may carry an opt-in `Timeout`: a stage that waits
+  longer auto-rejects the review (lazy by predicate, swept by the same
+  expiry worker), so funds can never strand on a silent approver.
+  While a chain is configured it supersedes the flat N-of-M policy.
 
 ### Scheduled transfers (`POST /transfer-schedules`)
 

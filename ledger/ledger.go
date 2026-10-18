@@ -645,6 +645,13 @@ type Ledger struct {
 	// thresholds it is structural config — it does not bump the ledger
 	// version — and it survives snapshots.
 	reviewQuorum *QuorumPolicy
+	// approvalChain is the opt-in sequential approval-chain policy
+	// for dual-control reviews (see review_chain.go): nil disables it.
+	// While configured it supersedes the flat quorum policy above — a
+	// review is decided by one voting scheme at a time. Structural
+	// config like the quorum policy: no version bump, survives
+	// snapshots.
+	approvalChain *ApprovalChain
 	// holds maps hold IDs to authorization holds (see hold.go). Holds are
 	// off-journal reservations: they never appear in entries, the audit
 	// chain, or the version counter. holdsByAccount indexes them per

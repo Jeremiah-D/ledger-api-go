@@ -390,6 +390,12 @@ type snapshotConfigLine struct {
 	// it would silently weaken the four-eyes control, so the policy
 	// round-trips like the review thresholds.
 	ReviewQuorum *QuorumPolicy `json:"review_quorum,omitempty"`
+	// ApprovalChain carries the sequential review approval-chain
+	// policy (see SetApprovalChain); absent in snapshots written
+	// before LG-126 or when no chain is configured. A restore that
+	// dropped it would silently weaken the tiered-approval control, so
+	// it round-trips like the quorum policy.
+	ApprovalChain *ApprovalChain `json:"approval_chain,omitempty"`
 	// DunningConfigs carries the opt-in collections escalation policies
 	// (see SetDunningConfig) and DunningStates the current escalation
 	// level per (account, currency); absent in snapshots written before
@@ -707,6 +713,10 @@ func reviewsEqual(a, b *TransferReview) bool {
 		// silently lose the "who voted what" trail.
 		!equalQuorumVotes(a.ApproveVotes, b.ApproveVotes) ||
 		!equalQuorumVotes(a.RejectVotes, b.RejectVotes) ||
+		// LG-126: the chain progress is part of the review record —
+		// a restore that dropped the stage or the per-stage votes
+		// would silently lose the tiered-approval trail.
+		!chainProgressEqual(a.ChainProgress, b.ChainProgress) ||
 		a.CreatedAt.UnixNano() != b.CreatedAt.UnixNano() ||
 		a.ExpiresAt.UnixNano() != b.ExpiresAt.UnixNano() ||
 		a.ReviewedAt.UnixNano() != b.ReviewedAt.UnixNano() ||
@@ -1102,6 +1112,10 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 	// thresholds — a restore that dropped it would silently weaken the
 	// four-eyes control.
 	cfg.ReviewQuorum = l.reviewQuorumCopyLocked()
+	// LG-126: the approval chain round-trips like the quorum policy —
+	// a restore that dropped it would silently weaken the
+	// tiered-approval control.
+	cfg.ApprovalChain = l.approvalChainCopyLocked()
 	cfg.FrozenAutoUnfreeze = l.frozenAutoUnfreezeLocked()
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -2084,6 +2098,14 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	if err := validateQuorumPolicy(cfg.ReviewQuorum); err != nil {
 		return bad("bad review_quorum: %v", quorumPolicyError(err))
 	}
+	// LG-126: the approval chain restores like the quorum policy — a
+	// chain that could never have been installed fails the import
+	// instead of silently weakening the tiered-approval control.
+	// Absent in legacy snapshots, which restore with the chain
+	// disabled.
+	if err := validateApprovalChain(cfg.ApprovalChain); err != nil {
+		return bad("bad approval_chain: %v", approvalChainError(err))
+	}
 	// OFX import registry (LG-66): every record must carry its document
 	// SHA-256, and the report inside must agree with it — the registry
 	// is the duplicate-import idempotency, and a restore must not
@@ -2847,6 +2869,10 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// control. Validated above; absent (nil) in legacy snapshots, which
 	// restore with quorum disabled.
 	l.reviewQuorum = copyQuorumPolicy(cfg.ReviewQuorum)
+	// LG-126: the approval chain restores like the quorum policy.
+	// Validated above; absent (nil) in legacy snapshots, which restore
+	// with the chain disabled.
+	l.approvalChain = copyApprovalChain(cfg.ApprovalChain)
 	// Dunning policies and escalation states restore like the other
 	// structural config: a restore that dropped them would silently
 	// disarm the collections workflow. Validated above.

@@ -241,6 +241,14 @@ type TransferReceipt struct {
 	// already-settled review (the tally described the settling call,
 	// not the replay).
 	QuorumTally *ReviewQuorumTally `json:"quorum_tally,omitempty"`
+	// ChainTally discloses the live per-stage vote count when the
+	// review decision went through an approval chain (see
+	// review_chain.go): the current stage, the stage's named votes,
+	// and what this vote did. It is set on approve-vote receipts while
+	// the review is pending (including stage advances). Nil for
+	// single-operator and flat-quorum decisions, and for idempotent
+	// replays of an already-settled review.
+	ChainTally *ReviewChainTally `json:"chain_tally,omitempty"`
 }
 
 // FeeTier is one band of the tiered transfer fee schedule: transfers of

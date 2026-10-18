@@ -341,6 +341,11 @@ type ReconciliationReport struct {
 	// SetReviewQuorumPolicy), or nil when reviews settle on a single
 	// operator decision.
 	ReviewQuorum *QuorumPolicy `json:"review_quorum,omitempty"`
+	// ApprovalChain carries the active sequential review approval
+	// chain (see SetApprovalChain), or nil when reviews are decided
+	// outside a chain. The pending reviews above carry each review's
+	// stage and per-stage votes.
+	ApprovalChain *ApprovalChain `json:"approval_chain,omitempty"`
 	// ReviewThresholds lists every configured per-account review
 	// threshold (see SetReviewThreshold), sorted by account. The
 	// ledger-wide threshold is not listed here — it applies to every
@@ -792,6 +797,10 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// policy alongside the pending reviews that carry each
 		// review's named votes.
 		ReviewQuorum:            l.reviewQuorumCopyLocked(),
+		// LG-126: the report discloses the active approval chain
+		// alongside the pending reviews that carry each review's
+		// stage and per-stage votes.
+		ApprovalChain:           l.approvalChainCopyLocked(),
 		DunningStatuses:         l.dunningDisclosuresLocked(),
 		// LG-101: the report discloses the settlement-window config and
 		// every deferred transfer, so the reconciliation record shows
