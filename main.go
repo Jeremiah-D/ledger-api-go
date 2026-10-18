@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -4523,6 +4524,85 @@ func (s *server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
+// handleAuditExport implements GET /audit/export (LG-128): the
+// operator-facing read-only export of the sealed audit chain. It copies
+// the audit files for the ?from=&to= UTC-day range (inclusive,
+// "2006-01-02"; omitted means all) into a temp dir as a read-only
+// snapshot, then streams the snapshot's manifest.json back as the
+// response body:
+//
+//	200 {"format":"audit-chain-export/1","exported_at":"…",
+//	     "files":[{"name":"audit-2026-10-09.jsonl","day":"2026-10-09",
+//	               "sha256":"…","size":1234}],
+//	     "report":{"ok":true,"checked_entries":128,"skipped_lines":0,
+//	               "files_checked":3,"head":"9f2c…"},
+//	     "signed":true,"signature":{"kid":"k1","mac":"…"}}
+//
+// The temp dir is removed after the response: the endpoint is stateless,
+// and the manifest (per-file SHA-256, seal-chain head, verification
+// report) is the compliance evidence. Operators who need a persistent
+// snapshot call ledger.ExportAuditChain directly (a small Go program is
+// enough; see the README). The manifest is HMAC-signed with
+// LEDGER_AUDIT_SIGNING_KEYS when configured, and honestly records
+// signed:false when not.
+//
+// Like GET /audit/verify, an unhealthy finding is still a 200 — the
+// manifest's report carries ok:false with the first break implied by
+// VerifyAuditLog. Bad day formats are 400. Without LEDGER_AUDIT_DIR the
+// endpoint 404s fail-closed.
+func (s *server) handleAuditExport(w http.ResponseWriter, r *http.Request) {
+	dir, ok := s.ledgerFor(r).AuditDir()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "audit log disabled"})
+		return
+	}
+	q := r.URL.Query()
+	var keys []ledger.AuditSigningKey
+	if raw := os.Getenv("LEDGER_AUDIT_SIGNING_KEYS"); raw != "" {
+		ks, err := ledger.ParseAuditSigningKeys(raw)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid LEDGER_AUDIT_SIGNING_KEYS: " + err.Error()})
+			return
+		}
+		keys = ks
+	}
+	tmp, err := os.MkdirTemp("", "ledger-audit-export-*")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "export temp dir: " + err.Error()})
+		return
+	}
+	defer os.RemoveAll(tmp)
+	manifest, err := ledger.ExportAuditChain(dir, ledger.AuditChainExportOptions{
+		FromDay:     q.Get("from"),
+		ToDay:       q.Get("to"),
+		ExportDir:   tmp,
+		SigningKeys: keys,
+	})
+	if err != nil {
+		if ledger.IsAuditExportInputError(err) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	s.metrics.AuditExportTotal.Add(1)
+	if !manifest.Report.Ok {
+		s.metrics.AuditExportBreaks.Add(1)
+	}
+	// Stream the exact manifest.json bytes the snapshot holds, so a
+	// downstream verifier can re-hash and re-verify the MAC against the
+	// same bytes.
+	raw, err := os.ReadFile(filepath.Join(tmp, "manifest.json"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
 // handleOutboxEvents implements GET /events: the operator-facing query
 // API over the domain-event outbox (LG-53).
 //
@@ -5957,6 +6037,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /entries/anchor", s.handleAnchorCheckpoint)
 	mux.HandleFunc("POST /entries/tsa-anchor", s.handleTSAAnchor)
 	mux.HandleFunc("GET /audit/verify", s.handleAuditVerify)
+	mux.HandleFunc("GET /audit/export", s.handleAuditExport)
 	mux.HandleFunc("GET /events", s.handleOutboxEvents)
 	mux.HandleFunc("GET /webhooks/deliveries", s.handleWebhookDeliveries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)

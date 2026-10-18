@@ -372,6 +372,14 @@ type Metrics struct {
 	// response body). Any nonzero value is an integrity incident —
 	// alert on it.
 	AuditVerifyBreaks atomic.Uint64
+	// AuditExportTotal counts GET /audit/export requests that built an
+	// audit-chain export snapshot (LG-128).
+	AuditExportTotal atomic.Uint64
+	// AuditExportBreaks counts audit-chain exports whose verification
+	// report found a broken chain (reported in the manifest, not as an
+	// HTTP error). Any nonzero value is an integrity incident — alert
+	// on it.
+	AuditExportBreaks atomic.Uint64
 	// BalanceWatchBreaches counts balance-threshold alert events emitted
 	// by the ledger (see ledger.SetBalanceWatch). It is synced from the
 	// ledger on every GET /metrics scrape, like the audit-log counters,
@@ -727,6 +735,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_audit_verify_breaks_total",
 		"Total audit-log hash-chain verifications that found a broken chain.",
 		m.AuditVerifyBreaks.Load())
+	writeCounter(&sb, "ledger_audit_export_total",
+		"Total GET /audit/export requests that built an audit-chain export snapshot (LG-128).",
+		m.AuditExportTotal.Load())
+	writeCounter(&sb, "ledger_audit_export_breaks_total",
+		"Total audit-chain exports whose verification report found a broken chain.",
+		m.AuditExportBreaks.Load())
 	writeCounter(&sb, "ledger_balance_watch_breaches_total",
 		"Total balance-threshold alert events emitted (advisory; never a rejection).",
 		m.BalanceWatchBreaches.Load())

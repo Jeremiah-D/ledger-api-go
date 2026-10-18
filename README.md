@@ -4105,6 +4105,65 @@ curl -s localhost:8080/audit/verify
 - Counted by `ledger_audit_verify_total` /
   `ledger_audit_verify_breaks_total` — alert on any nonzero breaks.
 
+### `GET /audit/export`
+
+Builds a read-only snapshot of the sealed audit chain (LG-128): the
+audit files for the `?from=&to=` UTC-day range (inclusive,
+`YYYY-MM-DD`; omitted means all) are copied byte-for-byte into a temp
+dir as `0444` files, and the snapshot's `manifest.json` is streamed
+back as the response body. The temp dir is removed after the response —
+the endpoint is stateless; operators who need a persistent snapshot
+call `ledger.ExportAuditChain` from a small Go program (the ledger
+package function is the CLI-usable entry point: pass the audit dir, an
+`AuditChainExportOptions{FromDay, ToDay, ExportDir, SigningKeys}`, and
+it writes the snapshot plus `manifest.json`).
+
+```bash
+curl -s 'localhost:8080/audit/export?from=2026-10-01&to=2026-10-15'
+# {"format":"audit-chain-export/1","exported_at":"2026-10-18T08:00:00.1Z",
+#  "from_day":"2026-10-01","to_day":"2026-10-15",
+#  "files":[{"name":"audit-2026-10-09.jsonl","day":"2026-10-09",
+#             "sha256":"9f2c…","size":1234}],
+#  "report":{"ok":true,"checked_entries":128,"skipped_lines":0,
+#            "files_checked":3,"head":"9f2c…"},
+#  "signed":true,"signature":{"kid":"k1","mac":"…"}}
+```
+
+Manifest fields:
+
+- `format` — `"audit-chain-export/1"`.
+- `exported_at` — export time, UTC RFC3339Nano (informational; excluded
+  from the signed bytes).
+- `from_day` / `to_day` — the requested range, echoed back.
+- `files[]` — one entry per copied file: `name`, `day`, `sha256` (hex
+  SHA-256 of the copied bytes, so the snapshot verifies byte-for-byte),
+  `size`.
+- `report` — `VerifyAuditLog` replayed over the exported copies:
+  `ok`, `checked_entries`, `skipped_lines`, `files_checked`, and
+  `head` (the seal-chain head hash of the snapshot).
+- `signed` / `signature` — the manifest is HMAC-signed with
+  `LEDGER_AUDIT_SIGNING_KEYS` when configured (`kid` + `mac` over the
+  canonical manifest JSON with `signature` absent and `exported_at`
+  blanked — the same convention as per-line audit signing, LG-65); with
+  no keys it is honestly recorded as `signed:false` with no signature,
+  never a failure.
+
+Semantics worth knowing:
+
+- The export never touches the source audit files — it only reads them.
+  A tampered source exports faithfully and the manifest's report shows
+  `ok:false`; the export still completes.
+- A day range that starts after the log's first day cannot link the
+  genesis marker, so `report.ok` is honestly `false` with the break on
+  the earliest copied entry (`prev_mismatch`). For a fully verifiable
+  export, start the range at the log's first day.
+- `200` with `report.ok:false` is still a `200` — like
+  `GET /audit/verify`, unhealthy findings live in the body. A bad day
+  format is `400`. `404 {"error":"audit log disabled"}` — no
+  `LEDGER_AUDIT_DIR` configured; fail-closed.
+- Counted by `ledger_audit_export_total` /
+  `ledger_audit_export_breaks_total` — alert on any nonzero breaks.
+
 ### `GET /metrics`
 
 Prometheus-format counters, rendered by hand with the standard library
@@ -4171,6 +4230,11 @@ curl -s localhost:8080/metrics
 - `ledger_audit_verify_breaks_total` — verifications that found a broken
   audit-log hash chain. Any nonzero value is an integrity incident —
   alert on it.
+- `ledger_audit_export_total` — `GET /audit/export` requests that built
+  an audit-chain export snapshot (LG-128).
+- `ledger_audit_export_breaks_total` — audit-chain exports whose
+  verification report found a broken chain. Any nonzero value is an
+  integrity incident — alert on it.
 - `ledger_balance_queries_total` — `GET /accounts/{id}/balance` requests
   served. Snapshot reads are not counted.
 - `ledger_balance_at_queries_total` — `GET /accounts/{id}/balance-at`

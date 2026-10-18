@@ -167,6 +167,21 @@ func (s *auditSigner) verifyReason(sig *AuditSig, line []byte, eventTS time.Time
 	return ""
 }
 
+// SignAuditManifest seals the canonical manifest bytes — the manifest's
+// JSON with the signature field absent — under the primary key of the
+// rotation set (LG-128 export signing), following the audit_sign.go
+// convention (LG-65): MAC = HMAC-SHA256(key, kid || 0x00 ||
+// manifestBytes). The returned AuditSig is embedded in the manifest; a
+// verifier strips it, re-marshals, and recomputes the same MAC with the
+// key named by kid. The first non-retired key signs (see newAuditSigner).
+func SignAuditManifest(manifestBytes []byte, keys []AuditSigningKey) (AuditSig, error) {
+	signer, err := newAuditSigner(keys, DefaultAuditSigningGrace)
+	if err != nil {
+		return AuditSig{}, err
+	}
+	return signer.sign(manifestBytes), nil
+}
+
 // AuditSigBadLine pinpoints one line VerifyAuditSignatures rejected.
 // Reason is one of:
 //   - "corrupt": the line is not valid JSON — a torn write, never a
