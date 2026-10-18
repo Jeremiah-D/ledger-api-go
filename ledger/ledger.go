@@ -978,6 +978,24 @@ type Ledger struct {
 	// ledger_entry_links_total; not books, so it does not round-trip
 	// through snapshots.
 	entryLinkChanges atomic.Uint64
+	// mandates is the direct-debit mandate registry (see mandate.go,
+	// LG-125): the standing payer->payee pull authorizations, by
+	// mandate ID. Mandates are append-only: they are created active and
+	// move to suspended/cancelled/expired, never deleted. Structural
+	// state like entryLinks: changes do not bump the journal version,
+	// and the registry round-trips through snapshots.
+	mandates map[string]Mandate
+	// mandateDebits is the mandate -> debit-entry index: mandate ID to
+	// the IDs of the journal entries debited under it, in debit order.
+	// Append-only, like the mandates above; it backs GET
+	// /mandates/{id}/debits and the frequency-window gate.
+	mandateDebits map[string][]string
+	// mandateDebitChanges counts posted mandate debits (see
+	// DebitWithMandate in mandate.go): new debits only — idempotent
+	// replays of a debit key are not counted. Operational metric,
+	// surfaced on GET /metrics as ledger_mandate_debits_total; not
+	// books, so it does not round-trip through snapshots.
+	mandateDebitChanges atomic.Uint64
 	chain                  []chainLink   // audit chain, one link per successful Post, in order
 	version                uint64        // bumped by every successful Post
 	idempotencyTTL         time.Duration // 0 = never expire idempotency keys
@@ -1157,7 +1175,12 @@ func New(opts ...Option) *Ledger {
 		accountIBANs:                make(map[AccountID]AccountIBAN),
 		externalMappings:            make(map[externalMappingKey]ExternalAccountMapping),
 		virtualAccounts:           make(map[AccountID]AccountID),
-		pruneInterval:               defaultKeyPruneInterval,
+		// LG-125: the direct-debit mandate registry and its
+		// mandate -> debit-entry index start empty; mandates are
+		// created through CreateMandate and restored from snapshots.
+		mandates:       make(map[string]Mandate),
+		mandateDebits:  make(map[string][]string),
+		pruneInterval:  defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
 		opt(l)

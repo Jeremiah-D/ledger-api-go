@@ -97,6 +97,96 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // configured limit.
 // The currency field is optional and defaults to USD; when given it must
 // be a 3-letter uppercase ISO 4217 code.
+// writePostError maps a Post-family booking rejection to its HTTP
+// status and rejection metric. It is shared by POST /entries and the
+// mandate-debit endpoint: both book through the same postLocked gate
+// sequence, so a frozen/overdraft/period rejection means the same thing
+// on either. Every recognized booking error is terminal here —
+// including ErrAccountClosed, whose original inline copy in
+// handleCreateEntry was missing its return and fell through to a second
+// (ignored) write.
+func (s *server) writePostError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ledger.ErrAccountClosed) {
+		s.metrics.ClosedRejections.Add(1)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrAccountFrozen) {
+		s.metrics.FrozenRejections.Add(1)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrAccountSuspended) {
+		s.metrics.SuspendedRejections.Add(1)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrAccountOverdraft) {
+		s.metrics.OverdraftRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrVANNoDebit) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrCreditLimitExceeded) {
+		s.metrics.CreditLimitRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrAccountDirectionMismatch) {
+		s.metrics.ChartDirectionRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+		s.metrics.DailyLimitRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrBudgetExceeded) {
+		s.metrics.BudgetRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrAccountDenied) {
+		s.metrics.DenylistRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrPeriodClosed) {
+		s.metrics.PeriodRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrInvalidCurrency) {
+		s.metrics.CurrencyRejections.Add(1)
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+}
+
+// writeMandateError maps a mandate-domain error to its HTTP status: 404
+// for an unknown mandate, 422 for semantic authorization rejections
+// (the request is well-formed, the mandate just does not cover it),
+// and reports whether err was a mandate-domain error at all.
+func writeMandateError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, ledger.ErrMandateNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return true
+	}
+	switch {
+	case errors.Is(err, ledger.ErrMandateNotActive),
+		errors.Is(err, ledger.ErrMandateExpired),
+		errors.Is(err, ledger.ErrMandateAmountExceeded),
+		errors.Is(err, ledger.ErrMandateCurrencyMismatch),
+		errors.Is(err, ledger.ErrMandateFrequencyExceeded):
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return true
+	}
+	return false
+}
+
 func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -145,63 +235,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 
 	posted, duplicate, err := s.ledgerFor(r).Post(entry)
 	if err != nil {
-		if errors.Is(err, ledger.ErrAccountClosed) {
-			s.metrics.ClosedRejections.Add(1)
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-		}
-		if errors.Is(err, ledger.ErrAccountFrozen) {
-			s.metrics.FrozenRejections.Add(1)
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrAccountSuspended) {
-			s.metrics.SuspendedRejections.Add(1)
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrAccountOverdraft) {
-			s.metrics.OverdraftRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrVANNoDebit) {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
-			s.metrics.CreditLimitRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrAccountDirectionMismatch) {
-			s.metrics.ChartDirectionRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
-			s.metrics.DailyLimitRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrBudgetExceeded) {
-			s.metrics.BudgetRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrAccountDenied) {
-			s.metrics.DenylistRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrPeriodClosed) {
-			s.metrics.PeriodRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrInvalidCurrency) {
-			s.metrics.CurrencyRejections.Add(1)
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		s.writePostError(w, err)
 		return
 	}
 	if duplicate {
@@ -1560,6 +1594,235 @@ func (s *server) handleEntryLinks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"entry_id": id,
 		"links":    l.EntryLinks(id),
+	})
+}
+
+// decodeRequestBody decodes a JSON request body into dst with the
+// transport contract the POST handlers share: bounded body, strict
+// decoding (unknown fields fail fast), no trailing garbage. It reports
+// whether decoding succeeded, writing the 400/413 itself on failure.
+func (s *server) decodeRequestBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return false
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return false
+	}
+	return true
+}
+
+// createMandateRequest is the body of POST /mandates: the standing
+// direct-debit authorization for payee to pull from payer, capped per
+// pull at max_amount_cents in currency, at most once per frequency
+// window (per-day, per-week, per-month), between valid_from and
+// valid_until (RFC3339). The id is the mandate's reference — it must be
+// unused as a mandate ID and as a journal entry ID.
+type createMandateRequest struct {
+	ID             string    `json:"id"`
+	Payer          string    `json:"payer"`
+	Payee          string    `json:"payee"`
+	MaxAmountCents int64     `json:"max_amount_cents"`
+	Currency       string    `json:"currency"`
+	Frequency      string    `json:"frequency"`
+	ValidFrom      time.Time `json:"valid_from"`
+	ValidUntil     time.Time `json:"valid_until"`
+}
+
+// mandateDebitRequest is the body of POST /mandates/{id}/debits: one
+// pull under the mandate. The legs come from the mandate itself (debit
+// the payee, credit the payer); currency empty means the mandate's
+// currency. The id is the debit's journal entry ID.
+type mandateDebitRequest struct {
+	ID             string            `json:"id"`
+	AmountCents    int64             `json:"amount_cents"`
+	Currency       string            `json:"currency"`
+	Memo           string            `json:"memo"`
+	ExternalRef    string            `json:"external_ref"`
+	Attachments    []string          `json:"attachments"`
+	Metadata       map[string]string `json:"metadata"`
+	IdempotencyKey string            `json:"idempotency_key"`
+}
+
+// handleCreateMandate implements POST /mandates: installs a
+// direct-debit mandate (see ledger.CreateMandate, LG-125). 201 with the
+// mandate; 400 on field errors or an ID already in use.
+func (s *server) handleCreateMandate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req createMandateRequest
+	if !s.decodeRequestBody(w, r, &req) {
+		return
+	}
+	m, err := s.ledgerFor(r).CreateMandate(ledger.Mandate{
+		ID:             req.ID,
+		Payer:          ledger.AccountID(req.Payer),
+		Payee:          ledger.AccountID(req.Payee),
+		MaxAmountCents: req.MaxAmountCents,
+		Currency:       req.Currency,
+		Frequency:      req.Frequency,
+		ValidFrom:      req.ValidFrom,
+		ValidUntil:     req.ValidUntil,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+// handleGetMandate implements GET /mandates/{id}: the mandate with its
+// effective status (lazy expiry applied). 404 on an unknown mandate.
+func (s *server) handleGetMandate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	m, ok := s.ledgerFor(r).GetMandate(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrMandateNotFound.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleDebitMandate implements POST /mandates/{id}/debits: one pull
+// under the mandate's authorization (see ledger.DebitWithMandate,
+// LG-125). 201 with the receipt (200 with duplicate: true on an
+// idempotent replay); 404 on an unknown mandate; 422 when the mandate
+// does not cover the debit (suspended/cancelled/expired, over the
+// per-debit cap, wrong currency, frequency window used); the booking
+// itself runs the full Post gate sequence, so frozen/overdraft/period
+// rejections map exactly like POST /entries.
+func (s *server) handleDebitMandate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req mandateDebitRequest
+	if !s.decodeRequestBody(w, r, &req) {
+		return
+	}
+	receipt, err := s.ledgerFor(r).DebitWithMandate(r.PathValue("id"), ledger.MandateDebit{
+		ID:             req.ID,
+		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
+		Memo:           req.Memo,
+		ExternalRef:    req.ExternalRef,
+		Attachments:    req.Attachments,
+		Metadata:       req.Metadata,
+		IdempotencyKey: req.IdempotencyKey,
+	})
+	if err != nil {
+		if writeMandateError(w, err) {
+			return
+		}
+		s.writePostError(w, err)
+		return
+	}
+	if receipt.Duplicate {
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
+// handleListMandateDebits implements GET /mandates/{id}/debits: the
+// journal entries debited under the mandate, in debit order — the
+// per-mandate reconciliation query. Pagination follows the entries
+// listing: limit (1..1000, default 100) and cursor (the entry ID the
+// page starts after). 404 on an unknown mandate.
+func (s *server) handleListMandateDebits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	q := r.URL.Query()
+	limit := 100
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 1000 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": ledger.ErrInvalidLimit.Error()})
+			return
+		}
+		limit = n
+	}
+	page, next, err := s.ledgerFor(r).MandateDebits(r.PathValue("id"), q.Get("cursor"), limit)
+	if err != nil {
+		if writeMandateError(w, err) {
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mandate_id":  r.PathValue("id"),
+		"debits":      page,
+		"next_cursor": next,
+	})
+}
+
+// handleSuspendMandate implements POST /mandates/{id}/suspend: pauses
+// the mandate's authorization (see ledger.SuspendMandate). 404 on an
+// unknown mandate; 422 when the mandate is not active or has expired.
+func (s *server) handleSuspendMandate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	m, err := s.ledgerFor(r).SuspendMandate(r.PathValue("id"))
+	if err != nil {
+		if writeMandateError(w, err) {
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleCancelMandate implements POST /mandates/{id}/cancel: terminally
+// cancels the mandate (see ledger.CancelMandate). 404 on an unknown
+// mandate; 422 when the mandate is not active/suspended or has expired.
+func (s *server) handleCancelMandate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	m, err := s.ledgerFor(r).CancelMandate(r.PathValue("id"))
+	if err != nil {
+		if writeMandateError(w, err) {
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleExpireMandates implements POST /mandates/expire: marks every
+// mandate past its ValidUntil as expired (see ledger.ExpireMandates).
+// Expiry is lazy by predicate everywhere else; the sweep exists for
+// observability. Always 200 with the marked count.
+func (s *server) handleExpireMandates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"expired": s.ledgerFor(r).ExpireMandates(),
 	})
 }
 
@@ -5628,6 +5891,15 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /entries/{id}/reverse", s.handleReverseEntry)
 	mux.HandleFunc("POST /entries/{id}/reverse-partial", s.handleReverseEntryPartial)
 	mux.HandleFunc("GET /entries/{id}/links", s.handleEntryLinks)
+	// LG-125: direct-debit mandates — create, debit, per-mandate
+	// reconciliation query, lifecycle, and the expiry sweep.
+	mux.HandleFunc("POST /mandates", s.handleCreateMandate)
+	mux.HandleFunc("POST /mandates/expire", s.handleExpireMandates)
+	mux.HandleFunc("GET /mandates/{id}", s.handleGetMandate)
+	mux.HandleFunc("POST /mandates/{id}/debits", s.handleDebitMandate)
+	mux.HandleFunc("GET /mandates/{id}/debits", s.handleListMandateDebits)
+	mux.HandleFunc("POST /mandates/{id}/suspend", s.handleSuspendMandate)
+	mux.HandleFunc("POST /mandates/{id}/cancel", s.handleCancelMandate)
 	mux.HandleFunc("POST /revaluations", s.handleCreateRevaluation)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
@@ -5741,6 +6013,7 @@ func (s *server) handler() http.Handler {
 		var dunningEscalations uint64
 		var extMappingChanges uint64
 		var entryLinkChanges uint64
+		var mandateDebits uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -5780,6 +6053,10 @@ func (s *server) handler() http.Handler {
 			// the reversal paths, not in a handler (see
 			// ledger/links.go, LG-123).
 			entryLinkChanges += l.EntryLinkChangeCount()
+			// The mandate debit counter likewise lives in the ledger:
+			// debits post inside DebitWithMandate, not in a handler
+			// (see ledger/mandate.go, LG-125).
+			mandateDebits += l.MandateDebitCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -5849,6 +6126,7 @@ func (s *server) handler() http.Handler {
 		// RemoveExternalMapping, not in a handler.
 		s.metrics.ExternalMappingChangesTotal.Store(extMappingChanges)
 		s.metrics.EntryLinkChangesTotal.Store(entryLinkChanges)
+		s.metrics.MandateDebitsTotal.Store(mandateDebits)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the

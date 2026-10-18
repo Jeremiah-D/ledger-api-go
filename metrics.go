@@ -543,6 +543,12 @@ type Metrics struct {
 	// all tenants (see GET /metrics). It is synced from the ledger on
 	// every GET /metrics scrape, like ExternalMappingChangesTotal.
 	EntryLinkChangesTotal atomic.Uint64
+	// MandateDebitsTotal counts posted direct-debit mandate debits (see
+	// ledger.DebitWithMandate, LG-125): new debits only — idempotent
+	// replays of a debit key are not counted, across all tenants (see
+	// GET /metrics). It is synced from the ledger on every GET /metrics
+	// scrape, like EntryLinkChangesTotal.
+	MandateDebitsTotal atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -884,6 +890,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_entry_links_total",
 		"Total entry links declared (see ledger.DeclareEntryLink): explicit directed associations between journal entries (reversal_of, adjustment_of, fee_of, refund_of), including the reversal_of links ReverseEntry and ReverseEntryPartial declare automatically. Idempotent replays of an identical link are not counted.",
 		m.EntryLinkChangesTotal.Load())
+	writeCounter(&sb, "ledger_mandate_debits_total",
+		"Total direct-debit mandate debits posted (see ledger.DebitWithMandate): pulls authorized by a mandate and booked through the full Post validation sequence. Idempotent replays of a debit key are not counted.",
+		m.MandateDebitsTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 

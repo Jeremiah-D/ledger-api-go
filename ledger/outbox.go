@@ -98,6 +98,16 @@ const (
 	OutboxReviewRejected  = "review_rejected"
 	OutboxReviewExpired   = "review_expired"
 	OutboxEntryReversed   = "entry_reversed"
+	// Direct-debit mandate lifecycle (see mandate.go, LG-125): the
+	// mandate is structural config, but its lifecycle moves are domain
+	// facts downstream consumers track — creation, suspension,
+	// cancellation, expiry, and every authorized debit (the debit's
+	// journal row emits the usual entry_posted event too).
+	OutboxMandateCreated   = "mandate_created"
+	OutboxMandateSuspended = "mandate_suspended"
+	OutboxMandateCancelled = "mandate_cancelled"
+	OutboxMandateExpired   = "mandate_expired"
+	OutboxMandateDebited   = "mandate_debited"
 	// Term-deposit lifecycle (see termdeposit.go): opening locks the
 	// principal off-journal, maturing releases it at tenor end, and an
 	// early withdrawal releases it with a penalty. The interest accrual

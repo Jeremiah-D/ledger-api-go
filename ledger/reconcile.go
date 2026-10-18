@@ -300,6 +300,14 @@ type ReconciliationReport struct {
 	// correction link reachable from it, so the full correction
 	// history of an entry audits end to end. Sorted by root entry ID.
 	LinkChains []EntryLinkChain `json:"link_chains"`
+	// Mandates lists every direct-debit mandate (see mandate.go,
+	// LG-125), sorted by ID: the payer/payee pair, the per-debit cap,
+	// the currency and frequency, the validity window, the effective
+	// status (lazy expiry applied), and the debit usage — total debits
+	// ever plus debits in the current frequency window. Treasury and
+	// compliance tooling reads this to reconcile which standing pull
+	// authorizations are live and how far each has been drawn.
+	Mandates []MandateReport `json:"mandates"`
 	// ClosedPeriods lists the currently locked accounting periods
 	// ("YYYY-MM", UTC months; see ClosePeriod), sorted: no journal entry
 	// may be booked with a timestamp in one of these months, so the
@@ -771,6 +779,11 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// association record, disclosed like the mapping table.
 		EntryLinks: l.entryLinksLocked(),
 		LinkChains: l.entryLinkChainsLocked(),
+		// LG-125: the direct-debit mandates table — the standing pull
+		// authorizations with their effective statuses and debit
+		// usage, so the reconciliation record shows which mandates
+		// are live and how far each has been drawn.
+		Mandates: l.mandateReportsLocked(now),
 		ClosedPeriods:           l.closedPeriodsLocked(),
 		ActiveTransferSchedules: l.activeScheduleCountLocked(),
 		PendingReviews:          l.pendingTransferReviewsLocked(now),

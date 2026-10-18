@@ -346,6 +346,16 @@ type snapshotConfigLine struct {
 	// chain itself is rebuilt from these rows on import — it is a pure
 	// function of the ordered declarations.
 	EntryLinks []EntryLink `json:"entry_links,omitempty"`
+	// Mandates carries the direct-debit mandates (see CreateMandate),
+	// in ID order, and MandateDebits the mandate -> debit-entry index;
+	// absent in snapshots written before mandates existed. A restore
+	// that dropped them would silently lose the standing pull
+	// authorizations — and with them the authorization basis of every
+	// debited entry — so mandates are part of the operational config
+	// like the entry links. The mandate debit counter is operational
+	// (see MandateDebitCount) and does not round-trip.
+	Mandates      []Mandate           `json:"mandates,omitempty"`
+	MandateDebits map[string][]string `json:"mandate_debits,omitempty"`
 	// BalanceWatches carries the balance threshold watches (see
 	// SetBalanceWatch); absent in snapshots written before balance
 	// watches existed. The alert state (breach flags) is re-derived from
@@ -1050,6 +1060,11 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		// restored ledger keeps the exact tamper-evident association
 		// record.
 		EntryLinks:            l.entryLinksLocked(),
+		// LG-125: the mandate registry and its debit index round-trip,
+		// so a restored ledger keeps the exact standing pull
+		// authorizations the original ran on.
+		Mandates:      l.mandatesSnapshotLocked(),
+		MandateDebits: l.mandateDebitsSnapshotLocked(),
 		ClosedAccounts:        l.closedCopyLocked(),
 		Suspended:             l.suspendedCopyLocked(),
 		OFXImportRegistry:     l.ofxImportsLocked(),
@@ -1141,6 +1156,33 @@ func journalEntriesEqual(a, b JournalEntry) bool {
 		metadataEqual(a.Metadata, b.Metadata) &&
 		a.PendingReview == b.PendingReview &&
 		a.CreatedAt.UnixNano() == b.CreatedAt.UnixNano()
+}
+
+// mandatesEqual compares two mandate registries field by field,
+// ignoring time.Location representation: JSON round-trips preserve the
+// instant but not the exact Location pointer, so reflect.DeepEqual
+// would report a restored registry as different.
+func mandatesEqual(a, b map[string]Mandate) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok ||
+			va.ID != vb.ID ||
+			va.Payer != vb.Payer ||
+			va.Payee != vb.Payee ||
+			va.MaxAmountCents != vb.MaxAmountCents ||
+			va.Currency != vb.Currency ||
+			va.Frequency != vb.Frequency ||
+			!va.ValidFrom.Equal(vb.ValidFrom) ||
+			!va.ValidUntil.Equal(vb.ValidUntil) ||
+			va.Status != vb.Status ||
+			!va.CreatedAt.Equal(vb.CreatedAt) {
+			return false
+		}
+	}
+	return true
 }
 
 // metadataEqual compares two metadata maps: nil and empty are equal —
@@ -2461,6 +2503,51 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		l.externalMappings[externalMappingKey{account: row.Account, system: row.System, externalID: row.ExternalID}] = row
 	}
+	// Direct-debit mandates (see mandate.go, LG-125) restore before the
+	// entry links: mandate_of links name mandates in their To endpoint,
+	// so the registry must exist before link validation. A mandate that
+	// could never have been created — or one colliding with a journal
+	// entry ID — fails the import instead of installing an
+	// authorization that breaks the mandate/entry namespace split. The
+	// debit index must name existing mandates and journaled entries;
+	// the journal rows are already rebuilt above, so a dangling index
+	// row fails the import.
+	mandateIDs := make(map[string]bool, len(cfg.Mandates))
+	for _, m := range cfg.Mandates {
+		mc := m
+		if err := validateMandateFields(&mc); err != nil {
+			return bad("mandate %q: %v", m.ID, err)
+		}
+		switch m.Status {
+		case MandateStatusActive, MandateStatusSuspended, MandateStatusCancelled, MandateStatusExpired:
+		default:
+			return bad("mandate %q: invalid status %q", m.ID, m.Status)
+		}
+		if mandateIDs[m.ID] {
+			return bad("duplicate mandate %q", m.ID)
+		}
+		mandateIDs[m.ID] = true
+		if _, ok := l.entries[m.ID]; ok {
+			return bad("mandate %q collides with a journal entry ID", m.ID)
+		}
+		l.mandates[m.ID] = mc
+	}
+	for mid, ids := range cfg.MandateDebits {
+		if !mandateIDs[mid] {
+			return bad("mandate debit index for unknown mandate %q", mid)
+		}
+		seen := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			if _, ok := l.entries[id]; !ok {
+				return bad("mandate %q debit index names unknown journal entry %q", mid, id)
+			}
+			if seen[id] {
+				return bad("mandate %q debit index repeats entry %q", mid, id)
+			}
+			seen[id] = true
+		}
+		l.mandateDebits[mid] = append([]string(nil), ids...)
+	}
 	// Declared entry links (see links.go, LG-123) restore in declaration
 	// order: the journal rows are already rebuilt above (the batchKeys
 	// check references them), so a link naming a missing entry fails the
@@ -2478,7 +2565,15 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		if _, ok := l.entries[row.FromEntryID]; !ok {
 			return bad("entry link from unknown journal entry %q", row.FromEntryID)
 		}
-		if _, ok := l.entries[row.ToEntryID]; !ok {
+		// mandate_of links name the mandate's reference record — the
+		// mandate ID — in their To endpoint (see LinkTypeMandateOf):
+		// the mandates restored above, not the journal, are the
+		// authority for it.
+		if row.LinkType == LinkTypeMandateOf {
+			if !mandateIDs[row.ToEntryID] {
+				return bad("entry link to unknown mandate %q", row.ToEntryID)
+			}
+		} else if _, ok := l.entries[row.ToEntryID]; !ok {
 			return bad("entry link to unknown journal entry %q", row.ToEntryID)
 		}
 		duplicate := false
@@ -3306,6 +3401,18 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// chain would diverge). The link chain itself is a pure function of
 	// these rows, so comparing the rows compares the chain.
 	if !reflect.DeepEqual(a.entryLinks, b.entryLinks) {
+		return false
+	}
+	// The mandate registry and its debit-entry index must round-trip
+	// exactly: a restore that dropped a mandate would silently lose a
+	// standing pull authorization, and a dropped index row would orphan
+	// debited entries from their mandate. Times compare by instant —
+	// the Equal helpers below normalize time.Location representation
+	// the same way the journal comparison does.
+	if !mandatesEqual(a.mandates, b.mandates) {
+		return false
+	}
+	if !reflect.DeepEqual(a.mandateDebits, b.mandateDebits) {
 		return false
 	}
 	if a.idempotencyTTL != b.idempotencyTTL {

@@ -676,7 +676,66 @@ link breaks verification exactly like rewriting a journaled amount. The
 `Reconcile` report discloses every link as `entry_links` plus the
 per-root `link_chains` expansion of the `reversal_of`/`adjustment_of`
 correction history, and declarations are counted by
-`ledger_entry_links_total`.
+`ledger_entry_links_total`. `mandate_of` links (see "Direct-debit
+mandates" below) are disclosed flat in `entry_links` like the other
+associations — they never enter `link_chains`, which is reserved for
+corrections.
+
+### Direct-debit mandates (`POST /mandates`, 代扣协议)
+
+Standing pull authorizations — the SEPA-direct-debit / autopay agreement
+behind subscription billing. `POST /mandates` installs a mandate: the
+payer (customer) and payee (merchant), the per-debit cap
+(`max_amount_cents`), one currency, a rate cap (`frequency`:
+`per-day` / `per-week` / `per-month` — at most one debit per UTC day,
+ISO week, or calendar month), and the validity window (`valid_from` /
+`valid_until`, RFC3339).
+
+```bash
+curl -X POST localhost:8080/mandates -d '{
+  "id":"sub-acme","payer":"cust-42","payee":"acme",
+  "max_amount_cents":5000,"currency":"USD","frequency":"per-month",
+  "valid_from":"2026-10-01T00:00:00Z","valid_until":"2027-10-01T00:00:00Z"}'
+# 201 {"id":"sub-acme","status":"active",...}
+```
+
+`POST /mandates/{id}/debits` pulls under the mandate — the only way to
+debit against it. The mandate gates run first (the mandate must exist
+and be active, the debit's booking timestamp must fall in its validity
+window, the amount must not exceed the cap, the currency must match, the
+frequency window must be free — violations are `404`/`422`), then the
+debit posts through the **full** `POST` validation sequence (frozen,
+overdraft, daily limit, budget, period, journal rules), so a mandate
+debit can never dodge a booking control the operator's own `POST` would
+hit. The legs come from the mandate itself — the entry debits the payee
+and credits the payer — so a caller can never pull the wrong pair of
+accounts. Every debit is annotated on two channels, like reversals: the
+memo is stamped `mandate_of:<id>` (appended after any caller memo,
+searchable via `GET /entries?memo=mandate_of:`) and a `mandate_of` entry
+link is declared from the debit entry to the mandate's reference record.
+
+On the link's `To` endpoint, an honest-design note: mandates are
+structural config, not journal rows, so `mandate_of` is the one link type
+whose `To` endpoint is the mandate's reference record (the mandate ID)
+rather than a journal entry — journaling a zero-amount marker entry at
+mandate creation just to give the link an entry-shaped endpoint would
+fabricate money movement. The declaration is validated against the
+mandates registry and hashed into the link chain exactly like the
+entry→entry links.
+
+Lifecycle: `active → suspended | cancelled | expired`
+(`POST /mandates/{id}/suspend`, `POST /mandates/{id}/cancel`; expiry is
+lazy by predicate plus `POST /mandates/expire` for observability).
+`GET /mandates/{id}` reads a mandate with its effective status;
+`GET /mandates/{id}/debits` is the per-mandate reconciliation query —
+the debits in debit order, paged by `limit`/`cursor`. Repeating a debit
+`idempotency_key` returns the original receipt (`200`,
+`duplicate: true`) without re-evaluating mandate state, because a replay
+books nothing new. The `Reconcile` report discloses every mandate as
+`mandates` (payer/payee, cap, currency, frequency, window, effective
+status, total and in-window debit counts), mandates round-trip through
+disaster-recovery snapshots, and `GET /metrics` exposes
+`ledger_mandate_debits_total`.
 
 ### What-if dry-run (`POST /entries/dry-run`, `POST /transfers/dry-run`, `POST /sweeps/dry-run`)
 
@@ -3122,8 +3181,9 @@ Report fields:
 | `idempotency_keys`     | `ttl_configured`, `ttl`, `total_keys`, and `expired_eligible` (keys older than the TTL, i.e. the next sweep's eviction set) |
 | `audit_chain`          | `verify_ok` / `verify_error`, `head`, `links`, plus `head_consistent` — the chain-length == ledger-version check with `consistency_error` when the counters desync |
 | `merges`               | every committed account merge, sorted by merge ID: `merge_id`, `from_account`, `to_account`, the per-currency `legs`, and `created_at`. Merged sources stay frozen — cross-check `from_account` against `frozen_accounts` in the same report |
-| `entry_links`          | every declared entry link (LG-123), in declaration order: `from_entry_id`, `to_entry_id`, `link_type` (`reversal_of` / `adjustment_of` / `fee_of` / `refund_of`), `declared_at`, and `declared_by` — the explicit directed associations between journal entries |
-| `link_chains`          | the `reversal_of`/`adjustment_of` links expanded into per-root adjustment chains, sorted by `root_entry_id`: each chain's `root_entry_id` is the ultimate original entry and `links` lists every correction link reachable from it in declaration order, so the full correction history of an entry audits end to end (`fee_of`/`refund_of` links stay out of the chains — they are associations, not corrections — and are disclosed flat in `entry_links`) |
+| `entry_links`          | every declared entry link (LG-123), in declaration order: `from_entry_id`, `to_entry_id`, `link_type` (`reversal_of` / `adjustment_of` / `fee_of` / `refund_of` / `mandate_of`), `declared_at`, and `declared_by` — the explicit directed associations between journal entries (for `mandate_of` the `to` endpoint is the mandate's reference record, not a journal entry) |
+| `link_chains`          | the `reversal_of`/`adjustment_of` links expanded into per-root adjustment chains, sorted by `root_entry_id`: each chain's `root_entry_id` is the ultimate original entry and `links` lists every correction link reachable from it in declaration order, so the full correction history of an entry audits end to end (`fee_of`/`refund_of`/`mandate_of` links stay out of the chains — they are associations, not corrections — and are disclosed flat in `entry_links`) |
+| `mandates`             | every direct-debit mandate (LG-125), sorted by ID: `payer`, `payee`, `max_amount_cents`, `currency`, `frequency`, validity window, effective `status`, plus `total_debits` and `window_debits` usage — the standing pull authorizations and how far each has been drawn |
 | `fx_applied`           | `true` when the report carries the opt-in base-currency summary (see below); `false` on a plain scan |
 | `base_currency_summary` | the base-currency rollup, present only when `fx_applied` is `true`: `base_currency`, base-currency `total_debits_cents`/`total_credits_cents`, per-currency `conversions`, converted `discrepancies`, the `fx_snapshot` of rates used, `missing_rates`, and `fx_incomplete` |
 | `large_tx_reports` | the large-transaction (CTR) reports generated for the report's UTC day (LG-94), sorted by (account, currency, direction): `account`, `day`, `currency`, `direction` (`inflow`/`outflow`), `amount_cents`, `threshold_cents`, `report_currency`, `converted_cents` (+ `conversion_ok`, `rate_version`). Empty when nothing was generated — `POST /reconcile` discloses, it never generates |
@@ -4164,8 +4224,14 @@ curl -s localhost:8080/metrics
   above): explicit directed associations between journal entries
   (`reversal_of`, `adjustment_of`, `fee_of`, `refund_of`), including the
   `reversal_of` links `POST /entries/{id}/reverse` and
-  `POST /entries/{id}/reverse-partial` declare automatically. Idempotent
-  replays of an identical link are not counted.
+  `POST /entries/{id}/reverse-partial` declare automatically, plus the
+  `mandate_of` links `POST /mandates/{id}/debits` declares (see
+  "Direct-debit mandates" above). Idempotent replays of an identical
+  link are not counted.
+- `ledger_mandate_debits_total` — direct-debit mandate debits posted
+  (see "Direct-debit mandates" above): pulls authorized by a mandate
+  and booked through the full `POST` validation sequence. Idempotent
+  replays of a debit key are not counted.
 - `ledger_holds_total` — every `POST /holds` request received.
 - `ledger_hold_idempotency_hits_total` — holds that replayed an existing
   idempotency key (returned the original hold, reserved nothing).

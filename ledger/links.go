@@ -14,7 +14,7 @@ import (
 //
 // An EntryLink is an explicit directed association between two journal
 // entries: FromEntryID is the dependent entry, ToEntryID the referenced
-// entry, and LinkType names the relationship. The four link types cover
+// entry, and LinkType names the relationship. The five link types cover
 // the correction and money-flow relationships operators otherwise track
 // by fragile memo-text matching:
 //
@@ -27,13 +27,18 @@ import (
 //     "<transfer ID>/fee" leg of the "<transfer ID>" principal).
 //   - refund_of:     From refunds To (a refund transfer of the original
 //     payment).
+//   - mandate_of:    From is a direct-debit journal entry authorized by
+//     To, where To is the mandate's reference record — the mandate ID,
+//     not a journal entry (see LinkTypeMandateOf).
 //
 // Links are declared through DeclareEntryLink (or the Reversal paths,
-// which declare reversal_of themselves). Both endpoint entries must
-// already be journaled, a link never references its own entry, and
-// declaring the identical (from, to, type) triple twice is a silent
-// no-op — idempotent retries record no second audit event, like
-// SetExternalMapping.
+// which declare reversal_of themselves, or DebitWithMandate, which
+// declares mandate_of itself). Both endpoint entries must already be
+// journaled — except mandate_of links, whose To endpoint is the
+// mandate's reference record and must name an existing mandate — a link
+// never references its own entry, and declaring the identical (from,
+// to, type) triple twice is a silent no-op — idempotent retries record
+// no second audit event, like SetExternalMapping.
 //
 // Links are structural, like external account mappings: declaring one
 // does not bump the journal version, it round-trips through snapshots,
@@ -59,6 +64,19 @@ const (
 	LinkTypeFeeOf = "fee_of"
 	// LinkTypeRefundOf marks From as the refund of To.
 	LinkTypeRefundOf = "refund_of"
+	// LinkTypeMandateOf marks From as a direct-debit journal entry
+	// authorized by To, where To is the mandate's reference record —
+	// the mandate ID, not a journal entry (LG-125, see mandate.go).
+	// Mandates are structural config, like external account mappings:
+	// journaling a zero-amount marker entry at mandate creation just to
+	// give the link an entry-shaped To endpoint would fabricate money
+	// movement, so mandate_of is the one link type whose To endpoint
+	// lives in the mandate namespace. The declaration is validated
+	// against the mandates registry (the mandate must exist, like a
+	// journaled To endpoint must exist) and hashed into the link chain
+	// exactly like the entry->entry links. Declared automatically by
+	// DebitWithMandate, alongside the "mandate_of:<id>" memo.
+	LinkTypeMandateOf = "mandate_of"
 )
 
 // Link directions for DirectedEntryLink: whether the queried entry is
@@ -71,8 +89,8 @@ const (
 // Link declaration errors.
 var (
 	// ErrInvalidLinkType is returned by DeclareEntryLink when the link
-	// type is not one of reversal_of, adjustment_of, fee_of, or
-	// refund_of. It is a 400-class error: the caller named a
+	// type is not one of reversal_of, adjustment_of, fee_of, refund_of,
+	// or mandate_of. It is a 400-class error: the caller named a
 	// relationship the ledger does not model.
 	ErrInvalidLinkType = errors.New("ledger: invalid entry link type")
 	// ErrEmptyLinkEntryID is returned by DeclareEntryLink when either
@@ -130,11 +148,11 @@ type entryLinkChainLink struct {
 	hash     [32]byte
 }
 
-// validLinkType reports whether t is one of the four declared link
+// validLinkType reports whether t is one of the five declared link
 // types.
 func validLinkType(t string) bool {
 	switch t {
-	case LinkTypeReversalOf, LinkTypeAdjustmentOf, LinkTypeFeeOf, LinkTypeRefundOf:
+	case LinkTypeReversalOf, LinkTypeAdjustmentOf, LinkTypeFeeOf, LinkTypeRefundOf, LinkTypeMandateOf:
 		return true
 	}
 	return false
@@ -194,8 +212,11 @@ func (l *Ledger) appendEntryLinkLocked(link EntryLink) {
 // DeclareEntryLink declares an explicit directed association between two
 // journaled entries: from is linkType of to (see the link-type
 // constants). Both endpoint entries must already be journaled
-// (ErrEntryNotFound); the link type must be one of the four declared
-// types (ErrInvalidLinkType); a link never references its own entry
+// (ErrEntryNotFound) — except mandate_of links (see LinkTypeMandateOf),
+// whose To endpoint is the mandate's reference record and must name an
+// existing mandate (ErrMandateNotFound); the From endpoint is always a
+// journaled entry. The link type must be one of the five declared types
+// (ErrInvalidLinkType); a link never references its own entry
 // (ErrLinkSelfReference).
 //
 // Declaring the identical (from, to, type) triple twice is a silent
@@ -231,7 +252,16 @@ func (l *Ledger) declareEntryLinkLocked(ctx context.Context, from, to, linkType 
 	if _, ok := l.entries[from]; !ok {
 		return EntryLink{}, false, fmt.Errorf("%w: %q", ErrEntryNotFound, from)
 	}
-	if _, ok := l.entries[to]; !ok {
+	if linkType == LinkTypeMandateOf {
+		// mandate_of is the one link type whose To endpoint is not a
+		// journal entry but the mandate's reference record (see
+		// LinkTypeMandateOf): it must name an existing mandate.
+		// Mandates are never deleted, so a genuine declaration's
+		// mandate is always found, like a genuine entry endpoint.
+		if _, ok := l.mandates[to]; !ok {
+			return EntryLink{}, false, fmt.Errorf("%w: %q", ErrMandateNotFound, to)
+		}
+	} else if _, ok := l.entries[to]; !ok {
 		return EntryLink{}, false, fmt.Errorf("%w: %q", ErrEntryNotFound, to)
 	}
 	for _, existing := range l.entryLinks {
@@ -322,10 +352,10 @@ func (l *Ledger) entryLinksLocked() []EntryLink {
 // per-root adjustment chains (see EntryLinkChain): each chain's root is
 // the ultimate original entry — found by following the From -> To edges
 // to the entry no link points away from — and the chain's links are in
-// declaration order. fee_of/refund_of links are associations, not
-// corrections, so they stay out of the chains; they are still disclosed
-// flat in the report's entry_links. Callers must hold l.mu (either lock
-// suffices).
+// declaration order. fee_of/refund_of/mandate_of links are associations,
+// not corrections, so they stay out of the chains; they are still
+// disclosed flat in the report's entry_links. Callers must hold l.mu
+// (either lock suffices).
 func (l *Ledger) entryLinkChainsLocked() []EntryLinkChain {
 	// The From -> To edge map of the correction link types: the first
 	// declared edge wins for root-finding, so a manually declared
