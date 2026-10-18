@@ -873,6 +873,38 @@ an already-closed period is a no-op. The mapping survives
 disaster-recovery snapshots, and the close is recorded in the audit
 chain (`period_close` with closing details).
 
+#### Close preflight (`POST /periods/{id}/preflight`, `?preflight_clean=true`)
+
+The period lock is cheap and idempotent — which made it easy to
+discover, *after* locking, that the month still had a pending
+dual-control review, an unexpired hold, an unsettled FX forward, or a
+receivable at dunning level L3. The preflight scan answers "what would
+block a clean close?" before anything locks:
+
+- **Blockers** (refuse a gated close): `pending_reviews`,
+  `active_holds`, `booked_forwards`, `dunning_level3`. Lapsed forwards
+  do not count — expiry *is* cancellation.
+- **Warnings** (smells, not refusals): `empty_period` (no journal rows
+  dated in the month), `no_closing_accounts` (a `?closing=true` close
+  would fail).
+
+The scan is pure read — one RLock, no version bump, no journal rows, no
+audit events — so it is safe to run as a readiness probe. With
+`?preflight_clean=true` on the close, any blocker refuses the close with
+`422` (`ErrPeriodPreflightBlocked`): the period stays open and nothing
+is recorded, and the refusal is audit-logged (`period_preflight_blocked`).
+The gate is off by default — `POST /periods/{id}/close` behaves exactly
+as before — and it also applies to the `?closing=true` path (refused
+before booking anything). `ledger_period_preflight_runs_total` counts
+the probe calls.
+
+```bash
+curl -s -X POST localhost:8080/periods/2026-09/preflight
+# {"period":"2026-09","blockers":[...],"warnings":[...],"clean":false}
+curl -s -X POST 'localhost:8080/periods/2026-09/close?preflight_clean=true'
+# 422 {"error":"ledger: period close blocked by preflight findings: 1 blocker(s), first: pending_reviews"}
+```
+
 ### Overdraft protection
 
 Per-account guard against negative balances (fintech risk control —
@@ -4008,6 +4040,9 @@ curl -s localhost:8080/metrics
 - `ledger_dunning_escalations_total` — collections escalations
   (`dunning_escalated` audit events) fired by `EscalateDunning`. Synced
   from the ledger on every scrape.
+- `ledger_period_preflight_runs_total` — every
+  `POST /periods/{id}/preflight` request received, including rejected
+  ones.
 
 ## Running
 

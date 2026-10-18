@@ -4361,7 +4361,28 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.metrics.PeriodClosesTotal.Add(1)
+	requirePreflightClean := r.URL.Query().Get("preflight_clean") == "true"
 	if r.URL.Query().Get("closing") == "true" {
+		if requirePreflightClean {
+			// The closing path has no ledger-level gate variant: run
+			// the scan here and refuse before booking anything. Unlike
+			// the plain path (see ClosePeriodWithPreflight) the
+			// refusal is not audit-logged — the 422 body carries the
+			// blocker codes, and the operator can re-run the scan via
+			// POST /periods/{id}/preflight.
+			rep, perr := s.ledgerFor(r).ClosePeriodPreflight(time.Now().UTC(), id)
+			if perr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": perr.Error()})
+				return
+			}
+			if len(rep.Blockers) > 0 {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+					"error":    ledger.ErrPeriodPreflightBlocked.Error(),
+					"blockers": rep.Blockers,
+				})
+				return
+			}
+		}
 		receipt, err := s.ledgerFor(r).ClosePeriodWithClosing(id)
 		if err != nil {
 			switch {
@@ -4412,11 +4433,43 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.ledgerFor(r).ClosePeriodCtx(actx, id); err != nil {
+	if err := s.ledgerFor(r).ClosePeriodWithPreflight(actx, id, requirePreflightClean); err != nil {
+		if errors.Is(err, ledger.ErrPeriodPreflightBlocked) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"period": id, "closed": true})
+}
+
+// handlePeriodPreflight implements POST /periods/{id}/preflight: the
+// read-only close-readiness check (see ledger.ClosePeriodPreflight). It
+// reports the blockers and warnings that would make a period close
+// unclean, without changing anything: no version bump, no journal rows,
+// no audit events. A malformed period ID fails 400.
+func (s *server) handlePeriodPreflight(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
+		return
+	}
+	s.metrics.PeriodPreflightRunsTotal.Add(1)
+	rep, err := s.ledgerFor(r).ClosePeriodPreflight(time.Now().UTC(), id)
+	if err != nil {
+		if errors.Is(err, ledger.ErrInvalidPeriodID) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
 }
 
 // handleReopenPeriod implements POST /periods/{id}/reopen: unlocks a
@@ -5184,6 +5237,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("DELETE /rules/{id}", s.handleDeleteJournalRule)
 	mux.HandleFunc("GET /rules", s.handleListJournalRules)
 	mux.HandleFunc("POST /periods/{id}/close", s.handleClosePeriod)
+	mux.HandleFunc("POST /periods/{id}/preflight", s.handlePeriodPreflight)
 	mux.HandleFunc("POST /periods/{id}/reopen", s.handleReopenPeriod)
 	mux.HandleFunc("PUT /closing-accounts", s.handleSetClosingAccounts)
 	mux.HandleFunc("GET /closing-accounts", s.handleGetClosingAccounts)
