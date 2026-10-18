@@ -1943,6 +1943,9 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		if f.NotionalCents <= 0 {
 			return bad("fx forward %q has non-positive notional", f.ID)
 		}
+		if f.Rolls < 0 {
+			return bad("fx forward %q has negative roll count", f.ID)
+		}
 		if f.NotionalCapCents < 0 {
 			return bad("fx forward %q has negative notional cap", f.ID)
 		}

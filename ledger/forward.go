@@ -203,6 +203,14 @@ type FXForward struct {
 	// posted. Empty before settlement.
 	SettledTransferID string    `json:"settled_transfer_id,omitempty"`
 	SettledAt         time.Time `json:"settled_at,omitempty"`
+	// Rolls is the roll sequence number (LG-117): 0 for originally
+	// booked contracts, n for the contract created by the n-th
+	// rollover of its lineage. The roll key "roll/<id>/<n>" derives
+	// from it, so a retried roll replays to the same contract.
+	Rolls int `json:"rolls,omitempty"`
+	// RolledFromID names the contract this one was rolled from; empty
+	// for originally booked contracts.
+	RolledFromID string `json:"rolled_from_id,omitempty"`
 }
 
 // copy returns a deep copy: callers can never mutate the ledger's
@@ -445,6 +453,12 @@ func (l *Ledger) bookForwardLocked(b ForwardBooking, now time.Time) (*FXForward,
 // (ErrForwardExpired — the lazy-expiry check runs first, so a lapsed
 // contract can never settle).
 //
+// With auto-rollover enabled (LG-117, see forward_roll.go), a booked
+// contract inside its roll window rolls into a replacement contract at
+// the current market price instead of settling, and the call reports
+// ErrForwardRolled naming the new contract: the obligation was
+// extended, not settled.
+//
 // The settlement is an ordinary cross-currency transfer at the locked
 // price (see the package comment): the frozen/overdraft/daily-limit/
 // budget/period checks run in their usual order before anything books,
@@ -479,9 +493,30 @@ func (l *Ledger) settleForwardLocked(id string, now time.Time) (TransferReceipt,
 		// A contract the lazy sweep just lapsed (or one a previous
 		// sweep lapsed) reports expired, not merely "not booked".
 		if c.CancelReason == ForwardCancelExpired {
+			// ...unless it lapsed because it was rolled: a retried
+			// settlement after a roll replays to the same
+			// replacement (idempotent), instead of failing with
+			// ErrForwardExpired. The RolledFromID check in
+			// rolledReplayLocked keeps genuine expiries on the
+			// expired path.
+			if rolled, ok := l.rolledReplayLocked(id); ok {
+				return TransferReceipt{}, fmt.Errorf("%w: forward %q rolled to %q (settle_at %s)",
+					ErrForwardRolled, id, rolled.ID, rolled.SettleAt.UTC().Format(time.RFC3339))
+			}
 			return TransferReceipt{}, fmt.Errorf("%w: forward %q lapsed at %s", ErrForwardExpired, id, c.SettleAt.UTC().Format(time.RFC3339))
 		}
 		return TransferReceipt{}, fmt.Errorf("%w: forward %q is %s", ErrForwardNotBooked, id, c.Status)
+	}
+	// Opt-in auto-rollover (LG-117): a booked contract inside its roll
+	// window rolls into a replacement at the current market price
+	// instead of settling. A rolled settlement reports ErrForwardRolled
+	// naming the new contract: the obligation was extended, not
+	// settled — settle the replacement when its value date arrives.
+	if newC, rolled, err := l.maybeRollForwardLocked(c, now); err != nil {
+		return TransferReceipt{}, err
+	} else if rolled {
+		return TransferReceipt{}, fmt.Errorf("%w: forward %q rolled to %q (settle_at %s)",
+			ErrForwardRolled, id, newC.ID, newC.SettleAt.UTC().Format(time.RFC3339))
 	}
 	if now.Before(c.SettleAt) {
 		return TransferReceipt{}, fmt.Errorf("%w: forward %q settles at %s", ErrForwardNotSettleable, id, c.SettleAt.UTC().Format(time.RFC3339))
