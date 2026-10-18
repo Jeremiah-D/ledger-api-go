@@ -666,8 +666,40 @@ curl -s -X POST localhost:8080/accounts/cash/freeze \
 # {"account":"cash","frozen":true,"auto_unfreeze_at":"2026-10-12T08:00:00Z"}
 ```
 
+### `POST /accounts/{id}/suspend` and `POST /accounts/{id}/resume`
+
+Reversible operational pause for an account (fintech investigation hold /
+maintenance window). A suspended account rejects every write path that
+would book a new journal entry through it — posts, batches, transfers
+(principal, fee, and split legs), FX transfers, reversals, holds and
+captures, sweeps, merges, closing and revaluation entries, term-deposit
+opens, allocations, rule-derived legs, and the system postings
+(accruals, dividends, dormancy fees) — with `403`, while balance,
+snapshot, trial-balance, per-account entries, chain verification, and
+the end-of-day reconcile keep working. Suspending is idempotent (a
+repeat returns the original record with `already_suspended: true` and
+emits nothing new), never bumps the ledger version, and records a
+`suspend`/`resume` structured audit event plus an
+`account_suspended`/`account_resumed` outbox event.
+
+Suspension is orthogonal to the frozen risk-control stop and the
+terminal close: the three states can stack, and the gate order is
+closed → frozen → suspended, so a frozen-and-suspended account still
+reports the frozen `403` it reported before. New suspensions are
+counted by `ledger_account_suspends_total` on `GET /metrics`;
+suspended rejections by `ledger_suspended_rejections_total`; the
+reconcile report lists them under `suspended_accounts`. Suspension
+records round-trip through snapshots.
+
+```bash
+curl -s -X POST localhost:8080/accounts/cash/suspend
+# {"account":"cash","suspended":true,"already_suspended":false,"suspended_at":"2026-10-18T06:55:00Z"}
+curl -s -X POST localhost:8080/accounts/cash/resume
+# {"account":"cash","suspended":false,"resumed":true}
+```
+
 **Operator attribution (`x-ledger-actor`).** Every operator action —
-freeze/unfreeze, transfer-review approve/reject, account close, period
+freeze/unfreeze, suspend/resume, transfer-review approve/reject, account close, period
 close/reopen — records *who* invoked it in the audit event's `actor`
 field. Send the operator identity as the `x-ledger-actor` request header;
 it defaults to `"system"` when absent (overlong values or control

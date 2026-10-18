@@ -1057,11 +1057,18 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		(incomeAccount != "" && l.frozenLocked(incomeAccount)) {
 		return TransferReceipt{}, ErrAccountFrozen
 	}
+	if l.suspendedLocked(t.From) || l.suspendedLocked(t.To) || l.suspendedLocked(fxAccount) ||
+		(incomeAccount != "" && l.suspendedLocked(incomeAccount)) {
+		return TransferReceipt{}, ErrAccountSuspended
+	}
 	// Every fee recipient walks the same frozen check the single fee
 	// account always walked, like the non-FX path (transfer.go).
 	for _, fa := range feeLegAccounts(feeAccount, feeSplits) {
 		if l.frozenLocked(fa) {
 			return TransferReceipt{}, ErrAccountFrozen
+		}
+		if l.suspendedLocked(fa) {
+			return TransferReceipt{}, ErrAccountSuspended
 		}
 	}
 	// Transfer beneficiary allowlist (see allowlist.go): after the

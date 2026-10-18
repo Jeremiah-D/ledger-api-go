@@ -317,6 +317,9 @@ func (l *Ledger) ClosePeriodWithClosing(id string) (ClosingReceipt, error) {
 		if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 			return ClosingReceipt{}, ErrAccountFrozen
 		}
+		if l.suspendedLocked(e.DebitAccount) || l.suspendedLocked(e.CreditAccount) {
+			return ClosingReceipt{}, ErrAccountSuspended
+		}
 		if err := l.overdraftRejectedLocked(*e); err != nil {
 			return ClosingReceipt{}, err
 		}

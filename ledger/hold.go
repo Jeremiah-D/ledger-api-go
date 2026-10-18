@@ -239,6 +239,9 @@ func (l *Ledger) Hold(h Hold) (held Hold, duplicate bool, err error) {
 	if l.frozenLocked(h.Account) {
 		return Hold{}, false, ErrAccountFrozen
 	}
+	if l.suspendedLocked(h.Account) {
+		return Hold{}, false, ErrAccountSuspended
+	}
 
 	// Holds consume available funds, not raw balance: balance - active
 	// held must cover the amount. For overdraft-protected accounts this
@@ -606,6 +609,9 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	}
 	if l.frozenLocked(h.Account) || l.frozenLocked(c.To) {
 		return CaptureReceipt{}, ErrAccountFrozen
+	}
+	if l.suspendedLocked(h.Account) || l.suspendedLocked(c.To) {
+		return CaptureReceipt{}, ErrAccountSuspended
 	}
 
 	entry := JournalEntry{

@@ -96,6 +96,17 @@ type Metrics struct {
 	// closed an account (idempotent replays are not counted: they close
 	// nothing new).
 	AccountClosesTotal atomic.Uint64
+	// AccountSuspendsTotal counts POST /accounts/{id}/suspend requests
+	// that suspended an account (idempotent replays are not counted:
+	// they suspend nothing new). Resumes are not counted here — the
+	// counter is monotonic, like AccountClosesTotal.
+	AccountSuspendsTotal atomic.Uint64
+	// SuspendedRejections counts journal-writing requests rejected with
+	// 403 because an account involved was suspended (see
+	// ledger.SuspendAccount): the operational pause rejects like the
+	// frozen stop, but is counted separately so operators can tell a
+	// pause apart from a risk-control freeze.
+	SuspendedRejections atomic.Uint64
 	// FreezeAutoReleasesTotal counts automatic account unfreezes: timed
 	// freezes (see ledger.FreezeUntil) whose deadline passed, released
 	// by the write-path lazy check, the background freeze sweeper, or an
@@ -575,6 +586,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		m.ClosedRejections.Load())
 	writeCounter(&sb, "ledger_account_closes_total",
 		"Total POST /accounts/{id}/close requests that closed an account.", m.AccountClosesTotal.Load())
+	writeCounter(&sb, "ledger_account_suspends_total",
+		"Total POST /accounts/{id}/suspend requests that suspended an account (idempotent replays not counted).", m.AccountSuspendsTotal.Load())
+	writeCounter(&sb, "ledger_suspended_rejections_total",
+		"Total journal-writing requests rejected with 403 because an account involved was suspended.",
+		m.SuspendedRejections.Load())
 	writeCounter(&sb, "ledger_holds_total",
 		"Total POST /holds requests received.", m.HoldsTotal.Load())
 	writeCounter(&sb, "ledger_hold_idempotency_hits_total",

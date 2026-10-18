@@ -261,6 +261,9 @@ func (l *Ledger) reverseEntryLocked(entryID string, idempotencyKey string, metad
 	if l.frozenLocked(reversal.DebitAccount) || l.frozenLocked(reversal.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountFrozen
 	}
+	if l.suspendedLocked(reversal.DebitAccount) || l.suspendedLocked(reversal.CreditAccount) {
+		return JournalEntry{}, false, ErrAccountSuspended
+	}
 	if err := l.overdraftRejectedLocked(reversal); err != nil {
 		return JournalEntry{}, false, err
 	}

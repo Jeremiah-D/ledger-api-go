@@ -420,6 +420,10 @@ func (l *Ledger) postTransferSplitLocked(t Transfer, chunkSize int64, now time.T
 		(fee.account != "" && l.frozenLocked(fee.account)) {
 		return SplitTransferReceipt{}, ErrAccountFrozen
 	}
+	if l.suspendedLocked(t.From) || l.suspendedLocked(t.To) ||
+		(fee.account != "" && l.suspendedLocked(fee.account)) {
+		return SplitTransferReceipt{}, ErrAccountSuspended
+	}
 
 	// Overdraft guards the payer's TOTAL outflow: the split commits
 	// atomically, so the payer's balance drops by amount + total fee at
@@ -757,6 +761,11 @@ func (l *Ledger) postTransferSplitFXLocked(t Transfer, toCurrency string, chunkS
 		(fee.account != "" && l.frozenLocked(fee.account)) ||
 		(incomeAccount != "" && l.frozenLocked(incomeAccount)) {
 		return SplitTransferReceipt{}, ErrAccountFrozen
+	}
+	if l.suspendedLocked(t.From) || l.suspendedLocked(t.To) || l.suspendedLocked(fxAccount) ||
+		(fee.account != "" && l.suspendedLocked(fee.account)) ||
+		(incomeAccount != "" && l.suspendedLocked(incomeAccount)) {
+		return SplitTransferReceipt{}, ErrAccountSuspended
 	}
 	if l.noOverdraft[t.From] &&
 		l.balances[accountCurrency{account: t.From, currency: t.Currency}] < totalOutflow {

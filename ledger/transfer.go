@@ -780,12 +780,18 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	if l.frozenLocked(t.From) || l.frozenLocked(t.To) {
 		return TransferReceipt{}, ErrAccountFrozen
 	}
+	if l.suspendedLocked(t.From) || l.suspendedLocked(t.To) {
+		return TransferReceipt{}, ErrAccountSuspended
+	}
 	// Every fee recipient walks the same frozen check the single fee
 	// account always walked: a frozen recipient rejects the transfer
 	// before anything books.
 	for _, fa := range feeLegAccounts(feeAccount, feeSplits) {
 		if l.frozenLocked(fa) {
 			return TransferReceipt{}, ErrAccountFrozen
+		}
+		if l.suspendedLocked(fa) {
+			return TransferReceipt{}, ErrAccountSuspended
 		}
 	}
 

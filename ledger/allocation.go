@@ -453,6 +453,9 @@ func (l *Ledger) allocateCostLocked(ruleID string, amountCents int64, currency s
 		if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 			return AllocationReceipt{}, false, ErrAccountFrozen
 		}
+		if l.suspendedLocked(e.DebitAccount) || l.suspendedLocked(e.CreditAccount) {
+			return AllocationReceipt{}, false, ErrAccountSuspended
+		}
 	}
 
 	// 5. Overdraft simulation in leg order: each leg's credit side (the

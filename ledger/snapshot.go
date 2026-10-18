@@ -428,6 +428,12 @@ type snapshotConfigLine struct {
 	// dropped them would silently reopen closed accounts to new
 	// postings, so closures round-trip like the frozen-account list.
 	ClosedAccounts []AccountClosure `json:"closed_accounts,omitempty"`
+	// Suspended carries the account-suspension records (see
+	// SuspendAccount in suspend.go), sorted by account; absent in
+	// snapshots written before account suspension existed. A restore
+	// that dropped them would silently resume paused accounts, so
+	// suspensions round-trip like the frozen-account list.
+	Suspended []AccountSuspension `json:"suspended,omitempty"`
 	// OFXImportRegistry carries the OFX statement-import registry (see
 	// ImportOFX in ofx_import.go): document SHA-256 -> import report,
 	// sorted by SHA-256; absent in snapshots written before OFX import
@@ -1013,6 +1019,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		AccountTags:           l.accountTagsLocked(),
 		AccountAliases:        l.accountAliasesLocked(),
 		ClosedAccounts:        l.closedCopyLocked(),
+		Suspended:             l.suspendedCopyLocked(),
 		OFXImportRegistry:     l.ofxImportsLocked(),
 		CAMT053ImportRegistry: l.camt053ImportsLocked(),
 		TdInterestExpense:     l.tdInterestExpense,
@@ -2319,6 +2326,17 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("account closure with empty account")
 		}
 		l.closed[c.Account] = c
+	}
+	// Account suspensions restore like the frozen list: an empty
+	// account fails the import instead of installing a suspension that
+	// could never have been created. The record is restored verbatim,
+	// including the original SuspendedAt — a restore must not move an
+	// account's pause timestamp.
+	for _, s := range cfg.Suspended {
+		if s.Account == "" {
+			return bad("account suspension with empty account")
+		}
+		l.suspended[s.Account] = s
 	}
 	// Timed-freeze deadlines restore like the frozen list: an empty
 	// account fails the import instead of installing a deadline that

@@ -622,6 +622,9 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 		if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 			return TransferReceipt{}, ErrAccountFrozen
 		}
+		if l.suspendedLocked(e.DebitAccount) || l.suspendedLocked(e.CreditAccount) {
+			return TransferReceipt{}, ErrAccountSuspended
+		}
 	}
 	// Overdraft protection guards the payer's total outflow, exactly
 	// like PostTransfer: a protected payer whose balance dropped below

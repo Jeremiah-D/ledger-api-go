@@ -317,6 +317,15 @@ type Ledger struct {
 	// the records are structural config — they do not bump the journal
 	// version and they survive snapshots.
 	closed map[AccountID]AccountClosure
+	// suspended maps an account to its suspension record (see
+	// suspend.go): a suspended account rejects every write path that
+	// would book a new journal entry through it with
+	// ErrAccountSuspended. Suspension is a reversible operational
+	// pause, orthogonal to the frozen risk-control stop and the
+	// terminal close above, and the records are structural config —
+	// they do not bump the journal version and they survive
+	// snapshots.
+	suspended map[AccountID]AccountSuspension
 	// dormant maps an account to its dormancy record (see dormancy.go):
 	// a dormant account rejects operator Post and Transfer bookings
 	// with ErrAccountDormant until ReactivateAccount clears the mark.
@@ -1024,6 +1033,7 @@ func New(opts ...Option) *Ledger {
 		frozen:               make(map[AccountID]bool),
 		frozenUntil:          make(map[AccountID]time.Time),
 		closed:               make(map[AccountID]AccountClosure),
+		suspended:            make(map[AccountID]AccountSuspension),
 		dormant:              make(map[AccountID]DormancyRecord),
 		chart:                make(map[AccountID]AccountType),
 		tags:                 make(map[AccountID]map[string]string),
@@ -1373,6 +1383,17 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 	}
 	if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountFrozen
+	}
+	// A suspended account (see suspend.go) is a reversible operational
+	// pause: it rejects every write path, including the system postings
+	// that funnel through here (accruals, dividends, dormancy fees,
+	// ECL, escheat, capitalization, credit-line interest). It runs
+	// after the frozen gate — the frozen stop is the older risk control
+	// and wins on a double-set account — and after the idempotency
+	// replay check above: a replay books nothing new, so it must not
+	// fail on an account suspended after the original posting.
+	if l.suspendedLocked(e.DebitAccount) || l.suspendedLocked(e.CreditAccount) {
+		return JournalEntry{}, false, ErrAccountSuspended
 	}
 
 	// Overdraft protection is a risk control, not bookkeeping validation:

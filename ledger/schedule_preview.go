@@ -114,6 +114,8 @@ func scheduleFailureCode(err error) string {
 	switch {
 	case errors.Is(err, ErrAccountFrozen):
 		return "account_frozen"
+	case errors.Is(err, ErrAccountSuspended):
+		return "account_suspended"
 	case errors.Is(err, ErrAccountClosed):
 		return "account_closed"
 	case errors.Is(err, ErrAccountDenied):

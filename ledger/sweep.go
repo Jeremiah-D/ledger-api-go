@@ -203,9 +203,15 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 	if l.frozenLocked(s.To) {
 		return SweepReceipt{}, ErrAccountFrozen
 	}
+	if l.suspendedLocked(s.To) {
+		return SweepReceipt{}, ErrAccountSuspended
+	}
 	for _, from := range s.From {
 		if l.frozenLocked(from) {
 			return SweepReceipt{}, ErrAccountFrozen
+		}
+		if l.suspendedLocked(from) {
+			return SweepReceipt{}, ErrAccountSuspended
 		}
 	}
 

@@ -151,6 +151,11 @@ type ReconciliationReport struct {
 	// cover them — closing stops new activity, it never rewrites
 	// history.
 	ClosedAccounts []AccountID `json:"closed_accounts"`
+	// SuspendedAccounts lists the accounts currently under an
+	// operational pause (see SuspendAccount): no journal entry may book
+	// through any of them while the suspension holds, but the pause is
+	// reversible — unlike the closed accounts above. Sorted.
+	SuspendedAccounts []AccountID `json:"suspended_accounts"`
 	// FrozenAccountAutoUnfreeze annotates every timed-frozen account
 	// with its scheduled automatic-unfreeze time (see FreezeUntil in
 	// freeze.go); manually frozen accounts are absent from the map.
@@ -705,6 +710,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		Discrepancies:              make([]TrialBalanceDiscrepancy, 0),
 		FrozenAccounts:             l.frozenAccountsLocked(),
 		ClosedAccounts:             l.closedAccountsLocked(),
+		SuspendedAccounts:          l.suspendedAccountsLocked(),
 		FrozenAccountAutoUnfreeze:  l.frozenUntilCopyLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),

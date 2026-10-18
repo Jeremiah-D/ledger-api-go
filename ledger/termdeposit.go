@@ -253,6 +253,9 @@ func (l *Ledger) OpenTermDeposit(t TermDeposit) (TermDeposit, bool, error) {
 	if l.frozenLocked(t.Account) {
 		return TermDeposit{}, false, ErrAccountFrozen
 	}
+	if l.suspendedLocked(t.Account) {
+		return TermDeposit{}, false, ErrAccountSuspended
+	}
 
 	// The principal locks available funds: balance - active holds -
 	// pending-review reservations - other active term deposits must

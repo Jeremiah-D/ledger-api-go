@@ -211,6 +211,9 @@ func (l *Ledger) CapturePartial(pc PartialCapture) (PartialCaptureReceipt, error
 	if l.frozenLocked(h.Account) || l.frozenLocked(pc.To) {
 		return PartialCaptureReceipt{}, ErrAccountFrozen
 	}
+	if l.suspendedLocked(h.Account) || l.suspendedLocked(pc.To) {
+		return PartialCaptureReceipt{}, ErrAccountSuspended
+	}
 
 	entry := JournalEntry{
 		ID:            entryID,

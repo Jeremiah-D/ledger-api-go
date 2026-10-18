@@ -272,6 +272,9 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		if l.frozenLocked(e.DebitAccount) || l.frozenLocked(e.CreditAccount) {
 			return BatchReceipt{}, ErrAccountFrozen
 		}
+		if l.suspendedLocked(e.DebitAccount) || l.suspendedLocked(e.CreditAccount) {
+			return BatchReceipt{}, ErrAccountSuspended
+		}
 	}
 
 	// 6b. Period gate: a batch entry whose final timestamp lands in a

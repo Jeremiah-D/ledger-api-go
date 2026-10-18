@@ -90,6 +90,10 @@ const (
 	OutboxAccountFrozen   = "account_frozen"
 	OutboxAccountUnfrozen = "account_unfrozen"
 	OutboxAccountClosed   = "account_closed"
+	// Account suspension lifecycle (see suspend.go): the operational
+	// pause is reversible, unlike the terminal close above.
+	OutboxAccountSuspended = "account_suspended"
+	OutboxAccountResumed   = "account_resumed"
 	OutboxReviewApproved  = "review_approved"
 	OutboxReviewRejected  = "review_rejected"
 	OutboxReviewExpired   = "review_expired"

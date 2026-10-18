@@ -154,6 +154,11 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -271,6 +276,11 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -453,6 +463,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrBeneficiaryNotAllowed) {
 			s.metrics.AllowlistRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -604,6 +619,11 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -775,6 +795,11 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -959,6 +984,11 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
 			s.metrics.OverdraftRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1065,6 +1095,11 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrBudgetExceeded) {
 			s.metrics.BudgetRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1127,6 +1162,11 @@ func (s *server) handleDryRunSweep(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1203,6 +1243,11 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1285,6 +1330,11 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1692,6 +1742,11 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrInsufficientAvailableFunds) {
 			s.metrics.HoldRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1775,6 +1830,11 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1886,6 +1946,11 @@ func (s *server) handlePartialCaptureHold(w http.ResponseWriter, r *http.Request
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -2034,6 +2099,11 @@ func (s *server) handleOpenTermDeposit(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -4094,6 +4164,64 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
+// handleSuspendAccount implements POST /accounts/{id}/suspend: the
+// operator-facing operational pause. A suspended account rejects every
+// new journal-writing request that names it as either leg with 403,
+// while balance, snapshot, trial-balance, entries, chain verification,
+// and the end-of-day reconcile keep working. Suspending is idempotent
+// and does not bump the ledger version (balances are unchanged by a
+// suspension).
+func (s *server) handleSuspendAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	suspension, alreadySuspended, err := s.ledgerFor(r).SuspendAccountCtx(actx, ledger.AccountID(id))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if !alreadySuspended {
+		s.metrics.AccountSuspendsTotal.Add(1)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":           id,
+		"suspended":         true,
+		"already_suspended": alreadySuspended,
+		"suspended_at":      suspension.SuspendedAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleResumeAccount implements POST /accounts/{id}/resume: lifts a
+// suspension applied with POST /accounts/{id}/suspend. Resuming an
+// account that is not suspended is a no-op.
+func (s *server) handleResumeAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	resumed := s.ledgerFor(r).ResumeAccountCtx(actx, ledger.AccountID(id))
+	writeJSON(w, http.StatusOK, map[string]any{"account": id, "suspended": false, "resumed": resumed})
+}
+
 // registerVirtualAccountRequest is the POST /virtual-accounts body.
 type registerVirtualAccountRequest struct {
 	VAN    ledger.AccountID `json:"van"`
@@ -4398,6 +4526,9 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			case errors.Is(err, ledger.ErrAccountFrozen):
 				s.metrics.FrozenRejections.Add(1)
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrAccountSuspended):
+				s.metrics.SuspendedRejections.Add(1)
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			case errors.Is(err, ledger.ErrAccountOverdraft):
 				s.metrics.OverdraftRejections.Add(1)
@@ -5229,6 +5360,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
+	mux.HandleFunc("POST /accounts/{id}/suspend", s.handleSuspendAccount)
+	mux.HandleFunc("POST /accounts/{id}/resume", s.handleResumeAccount)
 	mux.HandleFunc("POST /virtual-accounts", s.handleRegisterVirtualAccount)
 	mux.HandleFunc("GET /virtual-accounts", s.handleListVirtualAccounts)
 	mux.HandleFunc("DELETE /virtual-accounts/{van}", s.handleUnregisterVirtualAccount)

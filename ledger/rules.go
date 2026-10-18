@@ -466,6 +466,9 @@ func (l *Ledger) derivedRuleLegsLocked(e JournalEntry) (derived []JournalEntry, 
 		if l.frozenLocked(d.DebitAccount) || l.frozenLocked(d.CreditAccount) {
 			return nil, nil, ErrAccountFrozen
 		}
+		if l.suspendedLocked(d.DebitAccount) || l.suspendedLocked(d.CreditAccount) {
+			return nil, nil, ErrAccountSuspended
+		}
 	}
 
 	// Aggregate outflow per (credit account, currency) across the

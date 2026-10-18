@@ -205,6 +205,9 @@ func (l *Ledger) PostMerge(m Merge) (MergeReceipt, error) {
 	if l.frozenLocked(m.From) || l.frozenLocked(m.To) {
 		return MergeReceipt{}, ErrAccountFrozen
 	}
+	if l.suspendedLocked(m.From) || l.suspendedLocked(m.To) {
+		return MergeReceipt{}, ErrAccountSuspended
+	}
 
 	if l.mergeOverdraftRejectedLocked(m.From, m.To) {
 		return MergeReceipt{}, ErrAccountOverdraft
