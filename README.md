@@ -757,6 +757,30 @@ status, total and in-window debit counts), mandates round-trip through
 disaster-recovery snapshots, and `GET /metrics` exposes
 `ledger_mandate_debits_total`.
 
+**Automatic retry for failed debits (autopay recovery):**
+`SetMandateRetryPolicy` installs an opt-in retry policy per mandate —
+`max_retries` plus a `backoff` table. When a debit fails with a
+*retryable* error — insufficient funds (`ErrAccountOverdraft` /
+`ErrInsufficientAvailableFunds`), the daily outflow limit, or the
+monthly spend budget — the failure is recorded as a pending retry
+(`next_retry_at` from the backoff table) instead of dropped; the error
+is still returned to the caller, so the failure is never silent.
+`SweepMandateRetries(now)` is the single entry point that fires due
+retries (the `SweepDue` convention: snapshot under the lock, fire
+without it, per-retry firing flag). Every attempt `n ≥ 1` fires under
+an independent idempotency key — the original key (or the debit ID)
+suffixed `#attempt-<n>` — so attempts never replay each other and a
+crash between commit and finalization replays safely. The full
+mandate-gate and Post validation sequence runs on every attempt.
+Validation and risk-control rejections (sanctions, frozen/suspended
+accounts, mandate gates) are terminal and never retry. Attempt
+outcomes — scheduled, rescheduled, succeeded, exhausted, terminal —
+enter the structured audit chain; when the attempts run out, a
+`mandate_retry_exhausted` outbox event fires so downstream consumers
+can wire it into dunning escalation. Retry policies and pending
+retries are in-memory operational state (like sweeper flags): they do
+not round-trip through snapshots.
+
 ### What-if dry-run (`POST /entries/dry-run`, `POST /transfers/dry-run`, `POST /sweeps/dry-run`)
 
 Answers "what would happen if I submitted this now?" without changing

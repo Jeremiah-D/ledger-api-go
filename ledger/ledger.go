@@ -428,8 +428,8 @@ type Ledger struct {
 	// stored rows instead of double-reporting into the audit chain.
 	// Pruned to the last two UTC days on each generation (see
 	// maybePruneLargeTxReportsLocked).
-	largeTxReports     map[largeTxReportKey]LargeTxReport
-	lastLargeTxPrune   time.Time
+	largeTxReports   map[largeTxReportKey]LargeTxReport
+	lastLargeTxPrune time.Time
 	// budgets maps (account, currency) to the account's monthly spend
 	// budget in cents, and monthlySpend accumulates the spend booked per
 	// (account, currency, UTC month). A posting that would take the
@@ -911,13 +911,13 @@ type Ledger struct {
 	// idempotency. Structural state like the idempotency indexes — it
 	// survives snapshots, because a restore that dropped it would
 	// re-import the same statement as new.
-	ofxImports      map[string]*OFXImportReport
+	ofxImports map[string]*OFXImportReport
 	// camt053Imports is the ISO 20022 camt.053 statement import registry
 	// (see camt053.go): document SHA-256 (hex) -> import report, for
 	// duplicate-import idempotency. Structural state like the OFX
 	// index — it survives snapshots, because a restore that dropped it
 	// would re-import the same statement as new.
-	camt053Imports   map[string]*CAMT053ImportReport
+	camt053Imports map[string]*CAMT053ImportReport
 	// statementMatches is the statement-line match registry (see
 	// statement_match.go, LG-107): statement line ID
 	// ("ofx/<FITID>" / "camt053/<stmtID>/<seq>", see DraftEntry.ID) ->
@@ -1003,13 +1003,27 @@ type Ledger struct {
 	// surfaced on GET /metrics as ledger_mandate_debits_total; not
 	// books, so it does not round-trip through snapshots.
 	mandateDebitChanges atomic.Uint64
-	chain                  []chainLink   // audit chain, one link per successful Post, in order
-	version                uint64        // bumped by every successful Post
-	idempotencyTTL         time.Duration // 0 = never expire idempotency keys
-	pruneInterval          time.Duration // min gap between lazy key sweeps
-	lastKeyPrune           time.Time
-	lastDailyPrune         time.Time // last run of the daily-outflow bucket sweep
-	lastBudgetPrune        time.Time // last run of the monthly-spend bucket sweep
+	// mandateRetryPolicies is the opt-in automatic-retry policy per
+	// mandate (see mandate_retry.go, LG-127): absent means retry
+	// disabled. Operational config, like the sweeper intervals — it
+	// does not bump the journal version and does not round-trip
+	// through snapshots.
+	mandateRetryPolicies map[string]MandateRetryPolicy
+	// mandateRetries is the pending automatic-retry registry, by debit
+	// ID: retries scheduled by failed debits, fired by
+	// SweepMandateRetries. mandateRetryFiring serializes concurrent
+	// sweeps of the same retry (see SweepDue for the convention).
+	// In-memory operational state: a restart drops pending retries —
+	// the debits were never booked, so there is nothing to reconcile.
+	mandateRetries     map[string]*MandateRetry
+	mandateRetryFiring map[string]bool
+	chain              []chainLink   // audit chain, one link per successful Post, in order
+	version            uint64        // bumped by every successful Post
+	idempotencyTTL     time.Duration // 0 = never expire idempotency keys
+	pruneInterval      time.Duration // min gap between lazy key sweeps
+	lastKeyPrune       time.Time
+	lastDailyPrune     time.Time // last run of the daily-outflow bucket sweep
+	lastBudgetPrune    time.Time // last run of the monthly-spend bucket sweep
 	// anchor holds the external audit-chain anchoring state (LG-44):
 	// the configured Ed25519 key and the loaded checkpoints. See
 	// anchor.go for the lock-order contract.
@@ -1091,78 +1105,78 @@ func WithOverdraftProtection(accounts ...AccountID) Option {
 // idempotency keys never expire.
 func New(opts ...Option) *Ledger {
 	l := &Ledger{
-		balances:             make(map[accountCurrency]int64),
-		entries:              make(map[string]JournalEntry),
-		byKey:                make(map[string]JournalEntry),
-		byRef:                make(map[string]string),
-		byAccount:            make(map[AccountID][]string),
-		debitTotals:          make(map[accountCurrency]int64),
-		creditTotals:         make(map[accountCurrency]int64),
-		frozen:               make(map[AccountID]bool),
-		frozenUntil:          make(map[AccountID]time.Time),
-		closed:               make(map[AccountID]AccountClosure),
-		suspended:            make(map[AccountID]AccountSuspension),
-		dormant:              make(map[AccountID]DormancyRecord),
-		chart:                make(map[AccountID]AccountType),
-		tags:                 make(map[AccountID]map[string]string),
+		balances:              make(map[accountCurrency]int64),
+		entries:               make(map[string]JournalEntry),
+		byKey:                 make(map[string]JournalEntry),
+		byRef:                 make(map[string]string),
+		byAccount:             make(map[AccountID][]string),
+		debitTotals:           make(map[accountCurrency]int64),
+		creditTotals:          make(map[accountCurrency]int64),
+		frozen:                make(map[AccountID]bool),
+		frozenUntil:           make(map[AccountID]time.Time),
+		closed:                make(map[AccountID]AccountClosure),
+		suspended:             make(map[AccountID]AccountSuspension),
+		dormant:               make(map[AccountID]DormancyRecord),
+		chart:                 make(map[AccountID]AccountType),
+		tags:                  make(map[AccountID]map[string]string),
 		aliases:               make(map[string]AccountID),
 		accountAliases:        make(map[AccountID]string),
-		noOverdraft:          make(map[AccountID]bool),
-		deniedExact:          make(map[AccountID]DenylistEntry),
-		deniedPrefixes:       make(map[string]DenylistEntry),
-		dailyLimits:          make(map[dailyLimitKey]int64),
-		dailyOutflow:         make(map[dailyLimitKey]int64),
-		sweepReserves:        make(map[accountCurrency]int64),
-		transferAllowlist:    make(map[AccountID]map[AccountID]bool),
-		largeTxThresholds:    make(map[string]int64),
+		noOverdraft:           make(map[AccountID]bool),
+		deniedExact:           make(map[AccountID]DenylistEntry),
+		deniedPrefixes:        make(map[string]DenylistEntry),
+		dailyLimits:           make(map[dailyLimitKey]int64),
+		dailyOutflow:          make(map[dailyLimitKey]int64),
+		sweepReserves:         make(map[accountCurrency]int64),
+		transferAllowlist:     make(map[AccountID]map[AccountID]bool),
+		largeTxThresholds:     make(map[string]int64),
 		largeTxReportCurrency: DefaultCurrency,
-		largeTxReports:       make(map[largeTxReportKey]LargeTxReport),
-		businessCalendar:    DefaultBusinessDayCalendar(),
-		budgets:              make(map[budgetKey]int64),
-		monthlySpend:         make(map[monthlySpendKey]int64),
-		budgetPaceAlertRatio: DefaultBudgetPaceAlertRatio,
-		budgetPaceAlerted:    make(map[monthlySpendKey]bool),
-		balanceWatches:       make(map[balanceWatchKey]BalanceWatch),
-		balanceWatchBreached: make(map[balanceWatchKey]watchBreachState),
-		liquidityThresholds:  make(map[liquidityThresholdKey]LiquidityAlertThreshold),
-		liquidityBreached:    make(map[liquidityThresholdKey]bool),
-		settlementChannels:   make(map[AccountID]string),
-		settlementCutoffs:    make(map[string]SettlementCutoff),
-		settlementDeferrals:  make(map[string]*SettlementDeferral),
-		parents:              make(map[AccountID]AccountID),
-		transferKeys:         make(map[string][]string),
-		reviews:              make(map[string]*TransferReview),
-		reviewThresholds:     make(map[AccountID]int64),
-		holds:                make(map[string]Hold),
-		holdsByAccount:       make(map[AccountID][]string),
-		holdKeys:             make(map[string]string),
-		captureKeys:          make(map[string]CaptureReceipt),
-		partialCaptureKeys:   make(map[string]PartialCaptureReceipt),
-		termDeposits:         make(map[string]TermDeposit),
-		termDepositKeys:      make(map[string]string),
-		ftpCurves:            make(map[string]*FtpCurve),
-		creditLines:          make(map[creditLineKey]CreditLine),
-		eclStageConfig:       DefaultECLStageConfig(),
-		eclExposures:         make(map[eclExposureKey]eclExposureRow),
-		sweepKeys:            make(map[string]sweepRecord),
-		batchKeys:            make(map[string]batchRecord),
-		allocRules:           make(map[string]AllocationRule),
-		allocKeys:            make(map[string]allocRecord),
-		nettingKeys:          make(map[string]nettingRecord),
-		merges:               make(map[string]mergeRecord),
-		mergeKeys:            make(map[string]string),
-		schedules:            make(map[string]*TransferSchedule),
-		scheduleKeys:         make(map[string]string),
-		scheduleRuns:         make(map[string][]ScheduleRun),
-		scheduleFiring:       make(map[string]bool),
-		reportSchedules:      make(map[string]*ReportSchedule),
-		reportScheduleKeys:   make(map[string]string),
-		reportScheduleRuns:   make(map[string][]ReportRun),
-		reportScheduleFiring: make(map[string]bool),
-		fxRates:              make(map[fxPair]ExchangeRate),
-		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
-		forwards:             make(map[string]*FXForward),
-		rateOverrides:        make(map[fxPair]*RateOverride),
+		largeTxReports:        make(map[largeTxReportKey]LargeTxReport),
+		businessCalendar:      DefaultBusinessDayCalendar(),
+		budgets:               make(map[budgetKey]int64),
+		monthlySpend:          make(map[monthlySpendKey]int64),
+		budgetPaceAlertRatio:  DefaultBudgetPaceAlertRatio,
+		budgetPaceAlerted:     make(map[monthlySpendKey]bool),
+		balanceWatches:        make(map[balanceWatchKey]BalanceWatch),
+		balanceWatchBreached:  make(map[balanceWatchKey]watchBreachState),
+		liquidityThresholds:   make(map[liquidityThresholdKey]LiquidityAlertThreshold),
+		liquidityBreached:     make(map[liquidityThresholdKey]bool),
+		settlementChannels:    make(map[AccountID]string),
+		settlementCutoffs:     make(map[string]SettlementCutoff),
+		settlementDeferrals:   make(map[string]*SettlementDeferral),
+		parents:               make(map[AccountID]AccountID),
+		transferKeys:          make(map[string][]string),
+		reviews:               make(map[string]*TransferReview),
+		reviewThresholds:      make(map[AccountID]int64),
+		holds:                 make(map[string]Hold),
+		holdsByAccount:        make(map[AccountID][]string),
+		holdKeys:              make(map[string]string),
+		captureKeys:           make(map[string]CaptureReceipt),
+		partialCaptureKeys:    make(map[string]PartialCaptureReceipt),
+		termDeposits:          make(map[string]TermDeposit),
+		termDepositKeys:       make(map[string]string),
+		ftpCurves:             make(map[string]*FtpCurve),
+		creditLines:           make(map[creditLineKey]CreditLine),
+		eclStageConfig:        DefaultECLStageConfig(),
+		eclExposures:          make(map[eclExposureKey]eclExposureRow),
+		sweepKeys:             make(map[string]sweepRecord),
+		batchKeys:             make(map[string]batchRecord),
+		allocRules:            make(map[string]AllocationRule),
+		allocKeys:             make(map[string]allocRecord),
+		nettingKeys:           make(map[string]nettingRecord),
+		merges:                make(map[string]mergeRecord),
+		mergeKeys:             make(map[string]string),
+		schedules:             make(map[string]*TransferSchedule),
+		scheduleKeys:          make(map[string]string),
+		scheduleRuns:          make(map[string][]ScheduleRun),
+		scheduleFiring:        make(map[string]bool),
+		reportSchedules:       make(map[string]*ReportSchedule),
+		reportScheduleKeys:    make(map[string]string),
+		reportScheduleRuns:    make(map[string][]ReportRun),
+		reportScheduleFiring:  make(map[string]bool),
+		fxRates:               make(map[fxPair]ExchangeRate),
+		fxRateSnapshots:       make(map[uint64]FXRateTableSnapshot),
+		forwards:              make(map[string]*FXForward),
+		rateOverrides:         make(map[fxPair]*RateOverride),
 		// LG-69 defaults: one-hour override lifetime, 10% deviation
 		// cap. Both are construction-time config (see
 		// WithRateOverrideTTL / WithRateOverrideMaxDeviationBps).
@@ -1181,13 +1195,16 @@ func New(opts ...Option) *Ledger {
 		painInstructions:            make(map[string]*PainInstruction),
 		accountIBANs:                make(map[AccountID]AccountIBAN),
 		externalMappings:            make(map[externalMappingKey]ExternalAccountMapping),
-		virtualAccounts:           make(map[AccountID]AccountID),
+		virtualAccounts:             make(map[AccountID]AccountID),
 		// LG-125: the direct-debit mandate registry and its
 		// mandate -> debit-entry index start empty; mandates are
 		// created through CreateMandate and restored from snapshots.
-		mandates:       make(map[string]Mandate),
-		mandateDebits:  make(map[string][]string),
-		pruneInterval:  defaultKeyPruneInterval,
+		mandates:             make(map[string]Mandate),
+		mandateDebits:        make(map[string][]string),
+		mandateRetryPolicies: make(map[string]MandateRetryPolicy),
+		mandateRetries:       make(map[string]*MandateRetry),
+		mandateRetryFiring:   make(map[string]bool),
+		pruneInterval:        defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
 		opt(l)
@@ -1761,15 +1778,15 @@ func (l *Ledger) Snapshot(a AccountID) (balance int64, version uint64) {
 // report every currency they hold. A single-currency account's ByCurrency
 // holds exactly one row, mirroring the top-level totals.
 type TrialBalance struct {
-	Account      AccountID `json:"account"`
+	Account AccountID `json:"account"`
 	// Alias is the account's human-readable alias (see SetAlias),
 	// echoed so reporting consumers can label rows without a second
 	// lookup. It is omitted when the account has no alias.
 	Alias        string `json:"alias,omitempty"`
 	Currency     string `json:"currency"`
-	TotalDebits  int64     `json:"total_debits_cents"`
-	TotalCredits int64     `json:"total_credits_cents"`
-	NetBalance   int64     `json:"net_balance_cents"`
+	TotalDebits  int64  `json:"total_debits_cents"`
+	TotalCredits int64  `json:"total_credits_cents"`
+	NetBalance   int64  `json:"net_balance_cents"`
 	// ByCurrency is the per-currency breakdown of this account, sorted by
 	// currency code. It always covers every currency the account has
 	// postings in, including Currency itself.

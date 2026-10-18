@@ -94,10 +94,10 @@ const (
 	// pause is reversible, unlike the terminal close above.
 	OutboxAccountSuspended = "account_suspended"
 	OutboxAccountResumed   = "account_resumed"
-	OutboxReviewApproved  = "review_approved"
-	OutboxReviewRejected  = "review_rejected"
-	OutboxReviewExpired   = "review_expired"
-	OutboxEntryReversed   = "entry_reversed"
+	OutboxReviewApproved   = "review_approved"
+	OutboxReviewRejected   = "review_rejected"
+	OutboxReviewExpired    = "review_expired"
+	OutboxEntryReversed    = "entry_reversed"
 	// Direct-debit mandate lifecycle (see mandate.go, LG-125): the
 	// mandate is structural config, but its lifecycle moves are domain
 	// facts downstream consumers track — creation, suspension,
@@ -108,6 +108,11 @@ const (
 	OutboxMandateCancelled = "mandate_cancelled"
 	OutboxMandateExpired   = "mandate_expired"
 	OutboxMandateDebited   = "mandate_debited"
+	// OutboxMandateRetryExhausted fires when a mandate's automatic
+	// retry runs out of attempts (see mandate_retry.go, LG-127): the
+	// autopay missed a cycle. Downstream consumers can wire it into
+	// dunning escalation (see EscalateDunning) to chase the payer.
+	OutboxMandateRetryExhausted = "mandate_retry_exhausted"
 	// Term-deposit lifecycle (see termdeposit.go): opening locks the
 	// principal off-journal, maturing releases it at tenor end, and an
 	// early withdrawal releases it with a penalty. The interest accrual
@@ -124,9 +129,9 @@ const (
 
 // OutboxEvent is one domain fact in the outbox stream.
 type OutboxEvent struct {
-	Seq         uint64         `json:"seq"`
-	Type        string         `json:"type"`
-	At          time.Time      `json:"at"`
+	Seq  uint64    `json:"seq"`
+	Type string    `json:"type"`
+	At   time.Time `json:"at"`
 	// Tenant names the tenant namespace the event belongs to (see
 	// tenant.go). Empty for the default tenant — events from a
 	// single-tenant deployment look exactly as before.
@@ -350,12 +355,12 @@ func scanOutboxMaxSeq(dir string) (maxSeq uint64, corrupt int, err error) {
 // either leg of an entry_posted event, AfterSeq resumes after a sequence
 // number (the cursor contract), and Limit caps the page at 1..1000.
 type OutboxQuery struct {
-	Since     time.Time
-	Until     time.Time
-	Types     []string
-	Account   AccountID
-	AfterSeq  uint64
-	Limit     int
+	Since    time.Time
+	Until    time.Time
+	Types    []string
+	Account  AccountID
+	AfterSeq uint64
+	Limit    int
 }
 
 // encodeOutboxCursor renders a seq as the opaque page cursor: base64url

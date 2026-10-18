@@ -634,10 +634,28 @@ func (l *Ledger) ExpireMandatesAt(now time.Time) int {
 // mandate validity window and the frequency window are evaluated at it,
 // consistent with the daily-limit and period gates, which key on the
 // entry's own timestamp.
+//
+// Automatic retry (see mandate_retry.go, LG-127): when the mandate
+// carries an opt-in retry policy and the debit fails with a retryable
+// error (insufficient funds, daily limit, or monthly budget exhausted),
+// the failure is recorded as a pending retry instead of dropped —
+// SweepMandateRetries fires it later under an independent per-attempt
+// idempotency key. Validation and risk-control rejections are terminal
+// and never retry.
 func (l *Ledger) DebitWithMandate(mandateID string, d MandateDebit) (MandateDebitReceipt, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	receipt, _, err := l.debitWithMandateLocked(mandateID, d, 0, time.Now())
+	return receipt, err
+}
 
+// debitMandateCoreLocked is the lock-held debit core shared by
+// DebitWithMandate (attempt 0) and the retry sweep (attempts >= 1, see
+// mandate_retry.go): the mandate gates plus the atomic commit zone. It
+// performs no retry bookkeeping itself — the caller decides what a
+// failure or a success means for the pending-retry registry. Callers
+// must hold the write lock.
+func (l *Ledger) debitMandateCoreLocked(mandateID string, d MandateDebit) (MandateDebitReceipt, error) {
 	m, ok := l.mandates[mandateID]
 	if !ok {
 		return MandateDebitReceipt{}, ErrMandateNotFound
