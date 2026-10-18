@@ -402,6 +402,12 @@ type Metrics struct {
 	// aging reports (LG-50): accounts whose 61-90 + 90+ day overdue
 	// cents exceeded the report's alert threshold.
 	AgingAlertsTotal atomic.Uint64
+	// DunningEscalationsTotal counts collections escalations (LG-118):
+	// every dunning_escalated audit event fired by EscalateDunning. It
+	// is synced from the ledger on every GET /metrics scrape, like the
+	// aging-alert counter's sibling: the escalations fire inside the
+	// ledger package, not in a handler.
+	DunningEscalationsTotal atomic.Uint64
 	// JournalRuleSetsTotal counts PUT /rules requests received (all
 	// attempts, including rejected payloads and illegal rules).
 	JournalRuleSetsTotal atomic.Uint64
@@ -776,6 +782,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_aging_alerts_total",
 		"Total AR aging overdue alerts across served aging reports.",
 		m.AgingAlertsTotal.Load())
+	writeCounter(&sb, "ledger_dunning_escalations_total",
+		"Total collections escalations (dunning_escalated audit events).",
+		m.DunningEscalationsTotal.Load())
 	writeCounter(&sb, "ledger_journal_rule_sets_total",
 		"Total PUT /rules requests received, including rejected payloads and illegal rules.",
 		m.JournalRuleSetsTotal.Load())

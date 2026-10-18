@@ -784,6 +784,15 @@ type Ledger struct {
 	// it survives snapshots.
 	closingPL       map[AccountID]bool
 	closingRetained AccountID
+	// dunningConfigs maps a (account, currency) pair to its opt-in
+	// collections escalation policy (see dunning.go); dunningStates
+	// carries the current escalation level per pair. dunningEscalations
+	// counts every level escalation (the dunning_escalated audit
+	// events fired). Configs and states are structural config and
+	// survive snapshots; the counter is in-memory observability.
+	dunningConfigs     map[dunningKey]DunningConfig
+	dunningStates      map[dunningKey]DunningState
+	dunningEscalations uint64
 	// healthViolations counts balance-health violations found by the
 	// background watchdog (see health_watch.go): the number of
 	// "balance_health_violation" audit events emitted. In-memory only —
@@ -1083,6 +1092,8 @@ func New(opts ...Option) *Ledger {
 		rateOverrideMaxDeviationBps: defaultRateOverrideMaxDeviationBps,
 		closedPeriods:               make(map[string]bool),
 		closingPL:                   make(map[AccountID]bool),
+		dunningConfigs:              make(map[dunningKey]DunningConfig),
+		dunningStates:               make(map[dunningKey]DunningState),
 		journalRules:                make(map[string]JournalRule),
 		revalBaselines:              make(map[revalKey]revalBaseline),
 		ofxImports:                  make(map[string]*OFXImportReport),

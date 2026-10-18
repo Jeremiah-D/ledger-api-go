@@ -3183,6 +3183,42 @@ curl -s 'localhost:8080/aging?account=cust-123'
 Malformed `asof` (RFC3339 required) or `alert_overdue_cents` (integer
 required) are `400`.
 
+### Dunning / collections escalation (LG-118)
+
+The aging view reports; dunning acts. On top of the same FIFO
+attribution, an opt-in per-`(account, currency)` policy escalates an
+overdue receivable through collections levels `L1`/`L2`/`L3` as the
+**oldest outstanding lot's age** crosses configurable day thresholds —
+so a payment retiring the oldest lot drops the age, exactly like the
+aging buckets.
+
+- **Opt-in policy** (Go API: `SetDunningConfig` /
+  `ClearDunningConfig`): `{account, currency, level1_days, level2_days,
+  level3_days}` with `0 < L1 <= L2 <= L3`. No policy, no escalation —
+  the scan iterates only configured pairs.
+- **One-way transitions**: `EscalateDunning(now)` derives each pair's
+  level from the books and escalates only when the derived level is
+  strictly higher than the stored one. A level never moves down — not
+  even when the balance hits zero. The operator closes the file with the
+  explicit `ResetDunning(account, currency)` after the money comes back.
+- **Audit trail**: every escalation emits a `dunning_escalated`
+  structured audit event (`account`, `currency`, `level`, `level_label`,
+  `previous_level`, `days_past_due`, `overdue_cents`); every reset emits
+  `dunning_reset` (with the cleared level); policy changes emit
+  `dunning_config_set` / `dunning_config_cleared`.
+  `ledger_dunning_escalations_total` counts the escalations. The scan
+  itself never bumps the version or writes journal rows.
+- **Disclosure**: the reconcile report lists every escalated position
+  (`dunning_statuses`), and policies + states survive
+  disaster-recovery snapshots like the other structural config.
+
+```go
+l.SetDunningConfig(ledger.DunningConfig{Account: "cust-123", Currency: "USD",
+    Level1Days: 30, Level2Days: 60, Level3Days: 90})
+escalated := l.EscalateDunning(time.Now()) // []DunningEscalation, edge-triggered
+l.ResetDunning("cust-123", "USD")          // after the money comes back
+```
+
 ### Multilateral netting (`ledger/netting.go`)
 
 The clearinghouse view (LG-56): at cut-off time, given a set of
@@ -3969,6 +4005,9 @@ curl -s localhost:8080/metrics
 - `ledger_aging_alerts_total` — AR aging overdue alerts across served
   `GET /aging` reports: accounts whose 61-90 + 90+ day overdue cents
   exceeded the report's alert threshold.
+- `ledger_dunning_escalations_total` — collections escalations
+  (`dunning_escalated` audit events) fired by `EscalateDunning`. Synced
+  from the ledger on every scrape.
 
 ## Running
 

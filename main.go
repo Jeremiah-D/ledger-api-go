@@ -5247,6 +5247,7 @@ func (s *server) handler() http.Handler {
 		var fxSpreadBookings uint64
 		var fxSpreadCents int64
 		var eclProvisions, eclMigrations uint64
+		var dunningEscalations uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -5279,6 +5280,7 @@ func (s *server) handler() http.Handler {
 			fxSpreadCents += l.FXSpreadCentsTotal()
 			eclProvisions += l.ECLProvisionCount()
 			eclMigrations += l.ECLStageMigrationCount()
+			dunningEscalations += l.DunningEscalationCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -5340,6 +5342,9 @@ func (s *server) handler() http.Handler {
 		// migrations record inside the staging paths, not in a handler.
 		s.metrics.ECLProvisionsTotal.Store(eclProvisions)
 		s.metrics.ECLStageMigrationsTotal.Store(eclMigrations)
+		// The dunning escalation counter likewise lives in the ledger:
+		// escalations fire inside EscalateDunning, not in a handler.
+		s.metrics.DunningEscalationsTotal.Store(dunningEscalations)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the

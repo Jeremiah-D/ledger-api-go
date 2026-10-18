@@ -359,6 +359,14 @@ type snapshotConfigLine struct {
 	// WithReviewExpiry) as a duration string; absent when auto-expiry
 	// is disabled.
 	ReviewExpiry string `json:"review_expiry,omitempty"`
+	// DunningConfigs carries the opt-in collections escalation policies
+	// (see SetDunningConfig) and DunningStates the current escalation
+	// level per (account, currency); absent in snapshots written before
+	// dunning existed. A restore that dropped them would silently
+	// disarm the collections workflow, so they round-trip like the
+	// other structural config.
+	DunningConfigs []DunningConfig `json:"dunning_configs,omitempty"`
+	DunningStates  []DunningState  `json:"dunning_states,omitempty"`
 	// SettlementChannels carries the account->channel mappings for the
 	// settlement view (see SetSettlementChannel); absent in snapshots
 	// written before LG-43. The mappings are structural config like
@@ -987,6 +995,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		LiquidityAlertThresholds: l.liquidityThresholdsLocked(),
 		ReviewThresholds:      l.reviewThresholdsLocked(),
 		ReviewThresholdCents:  l.reviewThreshold,
+		DunningConfigs:        l.dunningConfigsLocked(),
+		DunningStates:         l.dunningStatesLocked(),
 		SettlementChannels:    l.settlementChannelsLocked(),
 		// LG-101: the cutoff config and the in-flight deferrals
 		// round-trip, so a restored ledger keeps the exact settlement
@@ -2251,6 +2261,39 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		validatedReval = append(validatedReval, rp)
 	}
 
+	// Dunning policies and escalation states are validated like every
+	// other config row: an illegal policy in the snapshot fails the
+	// import instead of silently installing a policy that could never
+	// have been created through SetDunningConfig. Currencies are
+	// normalized to canonical form, like SetDunningConfig does.
+	validatedDunning := make([]DunningConfig, 0, len(cfg.DunningConfigs))
+	for _, dc := range cfg.DunningConfigs {
+		cur, err := normalizeCurrency(dc.Currency)
+		if err != nil {
+			return bad("bad dunning currency %q: %v", dc.Currency, err)
+		}
+		dc.Currency = cur
+		if err := validateDunningConfig(dc); err != nil {
+			return bad("bad dunning config for %s/%s: %v", dc.Account, cur, err)
+		}
+		validatedDunning = append(validatedDunning, dc)
+	}
+	validatedDunningStates := make([]DunningState, 0, len(cfg.DunningStates))
+	for _, ds := range cfg.DunningStates {
+		cur, err := normalizeCurrency(ds.Currency)
+		if err != nil {
+			return bad("bad dunning state currency %q: %v", ds.Currency, err)
+		}
+		if ds.Account == "" {
+			return bad("dunning state with empty account")
+		}
+		if ds.Level < DunningLevelNone || ds.Level > DunningLevelL3 {
+			return bad("bad dunning level %d for %s/%s", ds.Level, ds.Account, cur)
+		}
+		ds.Currency = cur
+		validatedDunningStates = append(validatedDunningStates, ds)
+	}
+
 	// Apply: every row above checked out.
 	for _, a := range cfg.Frozen {
 		l.frozen[a] = true
@@ -2596,6 +2639,17 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	l.reviewThreshold = cfg.ReviewThresholdCents
 	l.reviewExpiry = reviewExpiry
+	// Dunning policies and escalation states restore like the other
+	// structural config: a restore that dropped them would silently
+	// disarm the collections workflow. Validated above.
+	l.dunningConfigs = make(map[dunningKey]DunningConfig, len(validatedDunning))
+	for _, dc := range validatedDunning {
+		l.dunningConfigs[dunningKey{account: dc.Account, currency: dc.Currency}] = dc
+	}
+	l.dunningStates = make(map[dunningKey]DunningState, len(validatedDunningStates))
+	for _, ds := range validatedDunningStates {
+		l.dunningStates[dunningKey{account: ds.Account, currency: ds.Currency}] = ds
+	}
 	// The revaluation P&L account and baselines restore like the other
 	// structural config: a restore that dropped the baselines would
 	// re-book full carrying values as gains on the next revaluation.

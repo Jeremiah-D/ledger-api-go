@@ -305,6 +305,13 @@ type ReconciliationReport struct {
 	// ledger-wide threshold is not listed here — it applies to every
 	// account without a per-account row.
 	ReviewThresholds []ReviewThreshold `json:"review_thresholds"`
+	// DunningStatuses lists every (account, currency) with an active
+	// collections escalation (see EscalateDunning in dunning.go),
+	// sorted by (account, currency): the escalation level, the overdue
+	// exposure, and when the level was reached. Collections tooling
+	// reads this to know which receivables sit at which collections
+	// level at report time.
+	DunningStatuses []DunningDisclosure `json:"dunning_statuses"`
 	// SettlementCutoffs lists every configured per-currency settlement
 	// cutoff (see settlement_cutoff.go), sorted by currency. Treasury
 	// tooling reads this to know which currencies settle on windows and
@@ -727,6 +734,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		ActiveTransferSchedules: l.activeScheduleCountLocked(),
 		PendingReviews:          l.pendingTransferReviewsLocked(now),
 		ReviewThresholds:        l.reviewThresholdsLocked(),
+		DunningStatuses:         l.dunningDisclosuresLocked(),
 		// LG-101: the report discloses the settlement-window config and
 		// every deferred transfer, so the reconciliation record shows
 		// which money settles in which window.
