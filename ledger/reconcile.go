@@ -192,6 +192,14 @@ type ReconciliationReport struct {
 	// for accounting-period spend pressure; the daily limit is the
 	// rolling outflow window, the budget is the calendar-month control.
 	BudgetUtilization []AccountBudgetUsage `json:"budget_utilization"`
+	// BudgetPace lists every configured monthly spend budget's spend
+	// trajectory (LG-116, see budget_pace.go): the booked month-to-date
+	// spend linearly extrapolated to the UTC month end at the current
+	// run-rate, with the pace-alert flag per row. Sorted like
+	// BudgetUtilization. Read-only disclosure — Reconcile never fires
+	// pace alerts; the explicit BudgetPace call is the alert entry
+	// point.
+	BudgetPace []BudgetPace `json:"budget_pace"`
 	// BalanceWatches lists every configured balance threshold watch
 	// (see SetBalanceWatch), sorted by (account, currency). Operations
 	// tooling reads this to know which accounts alert on balance
@@ -697,6 +705,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		SubtreeLimitUtilization:    l.subtreeLimitUtilizationLocked(now),
 		LargeTxReports:             l.largeTxReportsForDayLocked(utcDay(now)),
 		BudgetUtilization:          l.budgetUtilizationLocked(now),
+		BudgetPace:                 l.budgetPaceLocked(now, false),
 		BalanceWatches:             l.balanceWatchesLocked(),
 		AccountTypeTotals:          l.accountTypeTotalsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),

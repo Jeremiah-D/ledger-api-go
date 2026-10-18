@@ -1303,6 +1303,17 @@ for the report month. Rejections are counted in
 the response's `budget_impact` rows show each affected budget's used
 spend before and after the simulated posting.
 
+Budget pace prediction (`ledger.BudgetPace`) linearly extrapolates each
+budget's booked month-to-date spend over the elapsed share of the UTC
+month and reports the projected month-end spend with a pace-alert flag.
+The alert is advisory — it never blocks a posting — and fires once per
+(account, currency, month) as a `budget_pace_alert` audit event, counted
+in `ledger_budget_pace_alerts_total`; the alert ratio is configurable via
+`SetBudgetPaceAlertRatio` (default 1.0, i.e. alert when the trajectory
+would spend the full budget). The reconcile report's `budget_pace`
+section discloses every budget's pace without firing alerts (Reconcile is
+read-only; the explicit `BudgetPace` call is the alert entry point).
+
 ```bash
 LEDGER_MONTHLY_SPEND_BUDGETS="cust-123:USD:500000" ./ledger-api-go
 curl -s -X POST localhost:8080/entries \

@@ -334,6 +334,7 @@ func (l *Ledger) maybePruneMonthlySpendLocked(now time.Time) {
 			delete(l.monthlySpend, k)
 		}
 	}
+	l.budgetPaceAlertPruneLocked(now)
 }
 
 // budgetsLocked returns every configured monthly spend budget, sorted by

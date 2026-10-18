@@ -5239,6 +5239,7 @@ func (s *server) handler() http.Handler {
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
 		var deferredSettlements uint64
 		var lowLiqAlerts uint64
+		var paceAlerts uint64
 		var vanAttributions uint64
 		var fxStaleAlerts, fxExpiredAlerts, fxOverridden uint64
 		var fxRefreshes, fxMoves, fxProviderFails uint64
@@ -5256,6 +5257,7 @@ func (s *server) handler() http.Handler {
 				outboxDropped += dropped
 			}
 			breaches += l.BalanceWatchBreachCount()
+			paceAlerts += l.BudgetPaceAlertCount()
 			lowLiqAlerts += l.LiquidityAlertCount()
 			ruleLegs += l.RuleLegsCommitted()
 			vanAttributions += l.VANAttributionCount()
@@ -5285,6 +5287,9 @@ func (s *server) handler() http.Handler {
 		// The balance-watch breach counter lives in the ledger too (the
 		// alert fires inside Post/Transfer/..., not in a handler).
 		s.metrics.BalanceWatchBreaches.Store(breaches)
+		// The budget pace alert counter likewise lives in the
+		// ledger: alerts fire inside BudgetPace, not in a handler.
+		s.metrics.BudgetPaceAlertsTotal.Store(paceAlerts)
 		// The low-liquidity alert counter likewise lives in the ledger:
 		// alerts fire inside EvaluateLiquidityAlerts, not in a handler.
 		s.metrics.LowLiquidityAlerts.Store(lowLiqAlerts)

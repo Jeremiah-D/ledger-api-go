@@ -357,6 +357,15 @@ type Metrics struct {
 	// the ledger package. The alert is advisory — it never rejects a
 	// posting — so this counter measures alert volume, not rejections.
 	BalanceWatchBreaches atomic.Uint64
+	// BudgetPaceAlertsTotal counts budget pace alerts fired by the
+	// ledger (see ledger.BudgetPace): a budget's projected month-end
+	// spend exceeded the budget times the configured pace alert ratio.
+	// It is synced from the ledger on every GET /metrics scrape, like
+	// the audit-log counters, so it stays meaningful even though the
+	// alerts are produced inside the ledger package. The alert is
+	// advisory — it never rejects a posting — so this counter measures
+	// alert volume, not rejections.
+	BudgetPaceAlertsTotal atomic.Uint64
 	// LowLiquidityAlerts counts low-liquidity alert events emitted by
 	// the ledger (see ledger.EvaluateLiquidityAlerts). It is synced from
 	// the ledger on every GET /metrics scrape, like the audit-log
@@ -675,6 +684,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_budget_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, POST /sweeps, and POST /holds/{id}/capture requests rejected because they would have taken the account's UTC-calendar-month cumulative spend above its configured monthly spend budget.",
 		m.BudgetRejections.Load())
+	writeCounter(&sb, "ledger_budget_pace_alerts_total",
+		"Total budget pace alerts fired by ledger.BudgetPace: a budget's projected month-end spend (booked month-to-date spend linearly extrapolated over the elapsed share of the UTC calendar month) exceeded the budget times the configured pace alert ratio. The alert is advisory — it never rejects a posting.",
+		m.BudgetPaceAlertsTotal.Load())
 	writeCounter(&sb, "ledger_denylist_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, and POST /holds/{id}/capture requests rejected because a leg of the posting named an account on the sanctions/denylist.",
 		m.DenylistRejections.Load())

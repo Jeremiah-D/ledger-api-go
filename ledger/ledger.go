@@ -430,6 +430,23 @@ type Ledger struct {
 	// clearing a budget does not bump the journal version.
 	budgets      map[budgetKey]int64
 	monthlySpend map[monthlySpendKey]int64
+	// budgetPaceAlertRatio is the opt-in configurable multiplier for the
+	// budget pace alert (LG-116, see budget_pace.go): a pace alert fires
+	// when a budget's projected month-end spend exceeds budget * ratio.
+	// Defaults to 1.0 (alert when the trajectory overshoots the budget);
+	// SetBudgetPaceAlertRatio adjusts it for earlier or later warning.
+	budgetPaceAlertRatio float64
+	// budgetPaceAlerted marks the (account, currency, month) buckets
+	// whose pace alert already fired: the alert is a once-per-month
+	// transition, not a per-call event. Operational state, pruned with
+	// the monthly-spend buckets — not books, so it does not round-trip
+	// through snapshots.
+	budgetPaceAlerted map[monthlySpendKey]bool
+	// budgetPaceAlerts counts fired budget pace alerts: operational
+	// metric, surfaced on GET /metrics as
+	// ledger_budget_pace_alerts_total; not books, so it does not
+	// round-trip through snapshots.
+	budgetPaceAlerts atomic.Uint64
 	// balanceWatches maps (account, currency) to the account's balance
 	// threshold watch (see balance_watch.go): an opt-in low and/or high
 	// alert level in cents. balanceWatchBreached marks the (account,
@@ -553,6 +570,11 @@ type Ledger struct {
 	// Structural state — like the rate table — and it survives
 	// snapshots.
 	forwards map[string]*FXForward
+	// forwardRollover is the opt-in auto-rollover config for FX
+	// forward contracts (LG-117, see forward_roll.go): nil means
+	// disabled. Structural config — like the rate table — setting or
+	// clearing it does not bump the journal version.
+	forwardRollover *ForwardRolloverConfig
 	// ftpCurves is the per-currency FTP rate-curve registry (see
 	// ftp.go), keyed by normalized currency code. Each SetFtpCurve
 	// bumps the currency's version. ftpAccounts names the internal
@@ -1011,6 +1033,8 @@ func New(opts ...Option) *Ledger {
 		businessCalendar:    DefaultBusinessDayCalendar(),
 		budgets:              make(map[budgetKey]int64),
 		monthlySpend:         make(map[monthlySpendKey]int64),
+		budgetPaceAlertRatio: DefaultBudgetPaceAlertRatio,
+		budgetPaceAlerted:    make(map[monthlySpendKey]bool),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch),
 		balanceWatchBreached: make(map[balanceWatchKey]watchBreachState),
 		liquidityThresholds:  make(map[liquidityThresholdKey]LiquidityAlertThreshold),
