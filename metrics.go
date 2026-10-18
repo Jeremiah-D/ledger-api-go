@@ -313,13 +313,21 @@ type Metrics struct {
 	// already-posted merge idempotency key and returned the original
 	// receipt.
 	MergeIdempotencyHits atomic.Uint64
-	// ReversalsTotal counts reversal journal entries committed by
-	// POST /entries/{id}/reverse (see ledger.ReverseEntry). Only
+	// ReversalsFullTotal counts full reversal journal entries committed
+	// by POST /entries/{id}/reverse (see ledger.ReverseEntry). Only
 	// first-time reversals are counted: idempotent replays return the
 	// existing reversal and book nothing new, so they are not counted
 	// twice. Rejected reversals are counted in the frozen/overdraft/
 	// daily-limit/period rejection counters, like the other writers.
-	ReversalsTotal atomic.Uint64
+	// Rendered as ledger_reversals_total{kind="full"} (see
+	// ReversalsPartialTotal for the partial series).
+	ReversalsFullTotal atomic.Uint64
+	// ReversalsPartialTotal counts partial reversal journal entries
+	// committed by POST /entries/{id}/reverse-partial (see
+	// ledger.ReverseEntryPartial): one per committed partial reversal,
+	// idempotent replays not counted twice. Rendered as
+	// ledger_reversals_total{kind="partial"}.
+	ReversalsPartialTotal atomic.Uint64
 	// RevaluationsTotal counts revaluation journal entries committed by
 	// POST /revaluations (see ledger.RevalueBalances): one per
 	// (account, currency) whose base-currency carrying value moved. Runs
@@ -660,9 +668,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_merge_idempotency_hits_total",
 		"Total POST /merges requests that replayed an existing merge idempotency key.",
 		m.MergeIdempotencyHits.Load())
-	writeCounter(&sb, "ledger_reversals_total",
-		"Total reversal journal entries committed by POST /entries/{id}/reverse (idempotent replays not counted twice).",
-		m.ReversalsTotal.Load())
+	writeLabeledCounter(&sb, "ledger_reversals_total",
+		"Total reversal journal entries committed (idempotent replays not counted twice), split by kind: full reversals via POST /entries/{id}/reverse and partial reversals via POST /entries/{id}/reverse-partial.",
+		[]labeledCounterSeries{
+			{labels: `kind="full"`, value: m.ReversalsFullTotal.Load()},
+			{labels: `kind="partial"`, value: m.ReversalsPartialTotal.Load()},
+		})
 	writeCounter(&sb, "ledger_revaluations_total",
 		"Total revaluation journal entries committed by POST /revaluations (one per account/currency whose carrying value moved).",
 		m.RevaluationsTotal.Load())
@@ -849,4 +860,27 @@ func writeCounter(sb *strings.Builder, name, help string, value uint64) {
 	sb.WriteString("# HELP " + name + " " + help + "\n")
 	sb.WriteString("# TYPE " + name + " counter\n")
 	sb.WriteString(name + " " + strconv.FormatUint(value, 10) + "\n")
+}
+
+// labeledCounterSeries is one labeled series of a multi-dimensional
+// counter: labels is the pre-rendered label set (e.g. `kind="full"` —
+// callers pass literal, already-safe label text) and value its count.
+type labeledCounterSeries struct {
+	labels string
+	value  uint64
+}
+
+// writeLabeledCounter renders one Prometheus counter metric with one
+// series per label set, e.g.:
+//
+//	# HELP ledger_reversals_total ...
+//	# TYPE ledger_reversals_total counter
+//	ledger_reversals_total{kind="full"} 3
+//	ledger_reversals_total{kind="partial"} 1
+func writeLabeledCounter(sb *strings.Builder, name, help string, series []labeledCounterSeries) {
+	sb.WriteString("# HELP " + name + " " + help + "\n")
+	sb.WriteString("# TYPE " + name + " counter\n")
+	for _, s := range series {
+		sb.WriteString(name + "{" + s.labels + "} " + strconv.FormatUint(s.value, 10) + "\n")
+	}
 }

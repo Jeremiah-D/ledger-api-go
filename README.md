@@ -582,7 +582,38 @@ and a reversed entry that carried an `external_ref` passes it on as
 original had none; if the prefixed value would exceed 64 UTF-8
 characters the reversal is rejected with `400` — references are never
 truncated). Reversals are searchable via `GET /entries?memo=reversal_of:`
-and counted by `ledger_reversals_total`.
+and counted by `ledger_reversals_total{kind="full"}`.
+
+### `POST /entries/{id}/reverse-partial` (partial reversal / 部分冲正)
+
+Corrects an entry in smaller slices: appends a new entry reversing
+`amount_cents` of the original amount, legs swapped, with the
+deterministic ID `<entry ID>/reversal/<n>` (`n` the 1-based index of
+this entry's n-th partial reversal) and memo
+`reversal_of:<entry ID>/partial/<n>`. The net outstanding correction —
+genuine reversals minus their own reversal-of-reversal corrections —
+can never exceed the original amount: anything over the cap returns
+`409`, as does a full reversal while any correction is outstanding (it
+would over-correct — reverse the partials individually first, which
+re-opens the full path). A *new* idempotency key on an over-cap entry
+also returns `409`; repeating with the same key returns `200` with the
+existing partial. Keyless requests always book the next index, so pass
+an `idempotency_key` for retry safety.
+
+```bash
+curl -X POST localhost:8080/entries/9f2c.../reverse-partial \
+  -d '{"amount_cents":300}'
+# 201 {"id":"9f2c.../reversal/1","debit_account":"bank","credit_account":"alice",
+#      "amount_cents":300,"currency":"USD","memo":"reversal_of:9f2c.../partial/1","duplicate":false}
+```
+
+Partial reversals run the same full `POST` risk gate order as full
+reversals (idempotency replay → closed/frozen/suspended `403` →
+overdraft/daily-limit/period `422`), never trigger journal rules or
+enter dual-control review, and are counted by
+`ledger_reversals_total{kind="partial"}`. An inherited `external_ref`
+becomes `reversal_of:<original ref>/partial/<n>` (distinct per index,
+so partials never collide in the reference index).
 
 ### What-if dry-run (`POST /entries/dry-run`, `POST /transfers/dry-run`, `POST /sweeps/dry-run`)
 

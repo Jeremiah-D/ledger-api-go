@@ -141,10 +141,10 @@ func TestHandleReverseEntryMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read /metrics: %v", err)
 	}
-	if !strings.Contains(string(raw), "ledger_reversals_total 1\n") {
+	if !strings.Contains(string(raw), "ledger_reversals_total{kind=\"full\"} 1\n") {
 		t.Fatalf("/metrics missing ledger_reversals_total 1:\n%s", raw)
 	}
-	if !strings.Contains(string(raw), "ledger_reversals_total 1\n") {
+	if !strings.Contains(string(raw), "ledger_reversals_total{kind=\"full\"} 1\n") {
 		t.Fatalf("/metrics missing ledger_reversals_total 1:\n%s", raw)
 	}
 }

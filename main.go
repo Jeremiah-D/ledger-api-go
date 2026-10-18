@@ -1370,10 +1370,107 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, reversal)
 		return
 	}
-	// ledger_reversals_total counts committed reversal entries, not
-	// requests: idempotent replays book nothing new and are not counted
-	// twice.
-	s.metrics.ReversalsTotal.Add(1)
+	// ledger_reversals_total{kind="full"} counts committed full reversal
+	// entries, not requests: idempotent replays book nothing new and
+	// are not counted twice.
+	s.metrics.ReversalsFullTotal.Add(1)
+	writeJSON(w, http.StatusCreated, reversal)
+}
+
+// createPartialReversalRequest is the body of
+// POST /entries/{id}/reverse-partial. amount_cents is the slice of the
+// original entry's amount to reverse back; the idempotency key is
+// optional, like POST /entries/{id}/reverse.
+type createPartialReversalRequest struct {
+	AmountCents    int64  `json:"amount_cents"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// handleReverseEntryPartial implements POST /entries/{id}/reverse-partial,
+// the partial accounting correction (部分冲正): it appends a new entry
+// reversing amount_cents of the original entry's amount, with the
+// debit/credit legs swapped. The original entry is never modified — the
+// audit chain stays append-only.
+//
+// The partial reversal ID is deterministic ("<entry ID>/reversal/<n>",
+// n the 1-based index of this entry's n-th partial reversal): a
+// first-time partial reversal returns 201 with the reversal entry, and
+// repeating the request with the same idempotency key returns 200 with
+// the originally created reversal. Keyless requests always book the
+// next partial index — the deterministic ID is per-index, so a keyless
+// request cannot identify which partial to replay. The cumulative corrected
+// amount (partial reversals plus a full reversal, which also counts)
+// can never exceed the original amount: anything over the cap returns
+// 409, as does a full reversal once any partial reversal exists (it
+// would over-correct — reverse the partials individually instead).
+//
+// An unknown entry ID returns 404; a non-positive amount_cents returns
+// 400; a pending-review entry returns 409 (approve or reject the review
+// instead); frozen, closed, and suspended accounts return 403;
+// overdraft, daily-limit, and closed-period rejections return 422.
+func (s *server) handleReverseEntryPartial(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req createPartialReversalRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	entryID := r.PathValue("id")
+	reversal, duplicate, err := s.ledgerFor(r).ReverseEntryPartial(entryID, req.AmountCents, req.IdempotencyKey)
+	if err != nil {
+		if errors.Is(err, ledger.ErrEntryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAlreadyReversed) || errors.Is(err, ledger.ErrReversalOfPendingReview) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, reversal)
+		return
+	}
+	// ledger_reversals_total{kind="partial"} counts committed partial
+	// reversal entries, not requests: idempotent replays book nothing
+	// new and are not counted twice.
+	s.metrics.ReversalsPartialTotal.Add(1)
 	writeJSON(w, http.StatusCreated, reversal)
 }
 
@@ -5327,6 +5424,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /sweeps/dry-run", s.handleDryRunSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
 	mux.HandleFunc("POST /entries/{id}/reverse", s.handleReverseEntry)
+	mux.HandleFunc("POST /entries/{id}/reverse-partial", s.handleReverseEntryPartial)
 	mux.HandleFunc("POST /revaluations", s.handleCreateRevaluation)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)

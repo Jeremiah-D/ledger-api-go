@@ -3,6 +3,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -51,6 +52,19 @@ import (
 // entry* carrying a *new* idempotency key — the deterministic ID means a
 // retry (no key, or the same key) returns the existing reversal with
 // duplicate == true instead of failing.
+//
+// Partial reversals (see ReverseEntryPartial) correct an entry in
+// several smaller steps: each books a deterministic
+// "<entry ID>/reversal/<n>" entry for a caller-chosen slice of the
+// original amount. The net outstanding correction — genuine reversals
+// minus their own reversal-of-reversal corrections, so a corrected
+// partial frees its slice again — can never exceed the original
+// amount; anything over the cap is rejected with ErrAlreadyReversed. A
+// full reversal is admitted only when nothing of the entry is currently
+// reversed (it would over-correct otherwise): correct the outstanding
+// partials individually first. Partial reversals run the same full
+// Post risk-gate order as full reversals and are counted separately on
+// GET /metrics (ledger_reversals_total{kind="partial"}).
 
 // Reversal errors.
 var (
@@ -216,6 +230,17 @@ func (l *Ledger) reverseEntryLocked(entryID string, idempotencyKey string, metad
 		return JournalEntry{}, false, ErrAlreadyReversed
 	}
 
+	// A full reversal nets the entry's whole amount, so it is admitted
+	// only when nothing of the entry is currently reversed: a genuine
+	// partial reversal already corrects part of this entry, and a full
+	// reversal on top would over-correct. Reversal-of-reversal
+	// corrections net back (see netReversedLocked), so correcting the
+	// outstanding partials individually re-opens the full reversal
+	// path. Anything outstanding is rejected with ErrAlreadyReversed.
+	if l.netReversedLocked(entryID) != 0 {
+		return JournalEntry{}, false, ErrAlreadyReversed
+	}
+
 	now := time.Now()
 	inheritedRef, err := reversalExternalRefFor(orig.ExternalRef)
 	if err != nil {
@@ -314,6 +339,301 @@ func (l *Ledger) reverseEntryLocked(entryID string, idempotencyKey string, metad
 		AmountCents: reversal.AmountCents,
 		Currency:    reversal.Currency,
 		Details:     map[string]any{"reversed_entry_id": entryID},
+	})
+	// Balance-change notification: strictly after the atomic commit
+	// zone, advisory only — async dispatch, hook failures isolated.
+	l.fireBalanceHooksLocked(hookTouched, hookOld, reversalID)
+
+	return reversal, false, nil
+}
+
+// partialReversalIDFor returns the deterministic journal entry ID of the
+// n-th partial reversal of entryID: "<entry ID>/reversal/<n>". The index
+// makes every partial reversal idempotent on its own, independent of the
+// full reversal's "<entry ID>/reversal" ID.
+func partialReversalIDFor(entryID string, n int) string {
+	return entryID + "/reversal/" + strconv.Itoa(n)
+}
+
+// partialReversalMemoFor returns the memo stamped on the n-th partial
+// reversal of entryID. It keeps the "reversal_of:" prefix (so partials
+// stay searchable through GET /entries?memo=reversal_of:) and encodes
+// the partial index, which is what distinguishes it from a full
+// reversal's memo.
+func partialReversalMemoFor(entryID string, n int) string {
+	return "reversal_of:" + entryID + "/partial/" + strconv.Itoa(n)
+}
+
+// isGenuinePartialReversalOf reports whether e is the genuine n-th
+// partial reversal of entryID: the deterministic partial ID *and* the
+// partial memo. Both must match — the ID alone could have been taken by
+// a hand-posted entry (see ErrReversalIDConflict).
+func isGenuinePartialReversalOf(e JournalEntry, entryID string, n int) bool {
+	return e.ID == partialReversalIDFor(entryID, n) && e.Memo == partialReversalMemoFor(entryID, n)
+}
+
+// partialReversalExternalRefFor derives the external reference of the
+// n-th partial reversal of an entry: the "reversal_of:" prefix plus the
+// original entry's reference plus the partial index, so the reversal
+// stays correlatable with the corrected posting and partials never
+// collide with each other (or with a full reversal) in the reference
+// index. An entry without a reference yields no inherited reference.
+// Like reversalExternalRefFor, an overlong inherited reference rejects
+// the reversal with ErrExternalRefTooLong instead of truncating.
+func partialReversalExternalRefFor(origRef string, n int) (string, error) {
+	if origRef == "" {
+		return "", nil
+	}
+	inherited := reversalRefPrefix + origRef + "/partial/" + strconv.Itoa(n)
+	if err := checkExternalRefLength(inherited); err != nil {
+		return "", err
+	}
+	return inherited, nil
+}
+
+// hasGenuinePartialReversalLocked reports whether entryID has at least
+// one genuine partial reversal. Partial indexes are dense from 1 (the
+// journal is append-only, so no index is ever removed), so checking
+// index 1 suffices. Callers must hold l.mu.
+func (l *Ledger) hasGenuinePartialReversalLocked(entryID string) bool {
+	e, taken := l.entries[partialReversalIDFor(entryID, 1)]
+	return taken && isGenuinePartialReversalOf(e, entryID, 1)
+}
+
+// netReversedLocked returns the net amount of entryID currently
+// reversed: the amounts of its genuine reversals (full and partial)
+// minus whatever of those reversals was itself reversed — a
+// reversal-of-reversal nets the correction back, so only the
+// *outstanding* correction counts against the entry. A squatter in the
+// partial namespace contributes nothing (it is not a genuine reversal;
+// it blocks new partials via ErrReversalIDConflict elsewhere) and
+// terminates the scan, because no genuine partial can exist beyond a
+// squatter. The journal is append-only and reversal IDs strictly
+// lengthen, so the recursion always terminates. Callers must hold
+// l.mu.
+func (l *Ledger) netReversedLocked(entryID string) int64 {
+	var net int64
+	if full, taken := l.entries[reversalIDFor(entryID)]; taken && isGenuineReversalOf(full, entryID) {
+		net += full.AmountCents - l.netReversedLocked(full.ID)
+	}
+	for n := 1; ; n++ {
+		id := partialReversalIDFor(entryID, n)
+		e, taken := l.entries[id]
+		if !taken {
+			break
+		}
+		if !isGenuinePartialReversalOf(e, entryID, n) {
+			break
+		}
+		net += e.AmountCents - l.netReversedLocked(e.ID)
+	}
+	return net
+}
+
+// ReverseEntryPartial appends a partial reversing journal entry for the
+// journal entry with the given ID: the caller-chosen amountCents (at
+// most the entry's remaining unreversed amount), same currency, debit
+// and credit legs swapped, memo "reversal_of:<entry ID>/partial/<n>".
+// The partial reversal ID is deterministic ("<entry ID>/reversal/<n>",
+// n the 1-based index of this entry's n-th partial reversal), so the
+// operation is idempotent per index.
+//
+// The cumulative corrected amount — the genuine partial reversals'
+// amounts plus a genuine full reversal's whole amount, which also
+// counts — can never exceed the original entry's amount: anything over
+// the cap is rejected with ErrAlreadyReversed (a 409-class error, like
+// a second full reversal). The original entry is never modified: the
+// audit chain is append-only, so a partial reversal only appends a new
+// link.
+//
+// The check order mirrors ReverseEntry: the amount must be positive
+// (ErrNonPositiveAmount); the original entry must exist
+// (ErrEntryNotFound); a pending-review entry cannot be reversed
+// (ErrReversalOfPendingReview); then the idempotency replay check — a
+// repeated idempotency key returns the originally created entry with
+// duplicate == true. Keyless calls always book the next partial index:
+// the deterministic ID is per-index, so a keyless call cannot identify
+// which partial to replay — pass an idempotency key for retry safety.
+// A hand-posted entry squatting in the deterministic partial
+// namespace is rejected with ErrReversalIDConflict. After that come
+// the risk gates in Post order: closed, frozen, suspended,
+// overdraft on the swapped credit leg, the daily outflow limit on the
+// same leg, and the period gate on the reversal's own timestamp. A
+// rejection records nothing: no journal row, no chain link, no version
+// bump.
+//
+// The commit is atomic and append-only, exactly like ReverseEntry:
+// the partial reversal's journal row, idempotency index entry,
+// per-account index rows, balance and total updates, audit-chain link,
+// and version bump land together under the one write lock. Journal
+// rules do not fire and the reversal never enters dual-control review.
+// Like full reversals it fires the balance-change hook and the
+// low-balance evaluation after commit, and emits the entry_posted
+// domain event plus the entry_reversed envelope (with partial details).
+func (l *Ledger) ReverseEntryPartial(entryID string, amountCents int64, idempotencyKey string) (reversal JournalEntry, duplicate bool, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.reverseEntryPartialLocked(entryID, amountCents, idempotencyKey)
+}
+
+// reverseEntryPartialLocked is the shared implementation of
+// ReverseEntryPartial. Callers must hold l.mu (the write lock).
+func (l *Ledger) reverseEntryPartialLocked(entryID string, amountCents int64, idempotencyKey string) (reversal JournalEntry, duplicate bool, err error) {
+	// The amount is field validation, like the legs: a non-positive
+	// partial reversal is rejected before the entry lookup or the
+	// replay checks, so a malformed request fails fast regardless of
+	// the ledger's reversal state.
+	if amountCents <= 0 {
+		return JournalEntry{}, false, ErrNonPositiveAmount
+	}
+
+	orig, ok := l.entries[entryID]
+	if !ok {
+		return JournalEntry{}, false, ErrEntryNotFound
+	}
+	if orig.PendingReview {
+		return JournalEntry{}, false, ErrReversalOfPendingReview
+	}
+
+	// Idempotency replay first, like Post and ReverseEntry: a repeated
+	// key returns the entry the key created, whatever it was, without
+	// booking anything.
+	if idempotencyKey != "" {
+		if prev, ok := l.byKey[idempotencyKey]; ok {
+			return prev, true, nil
+		}
+	}
+
+	// Walk the deterministic partial namespace to find the next free
+	// index. The journal is append-only, so the genuine indexes are
+	// dense from 1 and the scan terminates at the first untaken index.
+	// A hand-posted entry squatting in the namespace is rejected with
+	// ErrReversalIDConflict, like the full reversal's namespace
+	// conflict: booking the partial would silently overwrite that row.
+	n := 1
+	for {
+		id := partialReversalIDFor(entryID, n)
+		e, taken := l.entries[id]
+		if !taken {
+			break
+		}
+		if !isGenuinePartialReversalOf(e, entryID, n) {
+			return JournalEntry{}, false, ErrReversalIDConflict
+		}
+		n++
+	}
+	// The cumulative corrected amount — the net outstanding reversal
+	// (genuine reversals minus their own reversal-of-reversal
+	// corrections, so a corrected partial frees its slice again) plus
+	// this partial — can never exceed the original entry's amount:
+	// anything over the cap is rejected with ErrAlreadyReversed. The
+	// cap check is written as a subtraction so a huge amountCents
+	// cannot overflow the addition: the net never exceeds
+	// orig.AmountCents (every admitted reversal held the same cap), so
+	// orig.AmountCents - net is non-negative.
+	net := l.netReversedLocked(entryID)
+	if amountCents > orig.AmountCents-net {
+		return JournalEntry{}, false, ErrAlreadyReversed
+	}
+
+	now := time.Now()
+	inheritedRef, err := partialReversalExternalRefFor(orig.ExternalRef, n)
+	if err != nil {
+		return JournalEntry{}, false, err
+	}
+	reversalID := partialReversalIDFor(entryID, n)
+	reversal = JournalEntry{
+		ID:             reversalID,
+		DebitAccount:   orig.CreditAccount,
+		CreditAccount:  orig.DebitAccount,
+		AmountCents:    amountCents,
+		Currency:       orig.Currency,
+		IdempotencyKey: idempotencyKey,
+		Memo:           partialReversalMemoFor(entryID, n),
+		ExternalRef:    inheritedRef,
+		Attachments:    append([]string(nil), orig.Attachments...),
+		CreatedAt:      now,
+	}
+	if err := validateJournalEntry(&reversal); err != nil {
+		return JournalEntry{}, false, err
+	}
+	// External-reference uniqueness, like in ReverseEntry: the
+	// inherited reference is deterministic, so a collision can only
+	// come from a hand-posted row — but the journal stays append-only,
+	// so it is still rejected rather than overwritten.
+	if inheritedRef != "" {
+		if owner, taken := l.byRef[inheritedRef]; taken {
+			return JournalEntry{}, false, fmt.Errorf("%w: reference %q already journaled on entry %q", ErrDuplicateExternalRef, inheritedRef, owner)
+		}
+	}
+
+	// The risk gates run in Post order on the swapped legs, exactly
+	// like ReverseEntry: the partial reversal moves real money back, so
+	// it earns the same protections as the original posting.
+	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
+	if l.closedLocked(reversal.DebitAccount) || l.closedLocked(reversal.CreditAccount) {
+		return JournalEntry{}, false, ErrAccountClosed
+	}
+	if l.frozenLocked(reversal.DebitAccount) || l.frozenLocked(reversal.CreditAccount) {
+		return JournalEntry{}, false, ErrAccountFrozen
+	}
+	if l.suspendedLocked(reversal.DebitAccount) || l.suspendedLocked(reversal.CreditAccount) {
+		return JournalEntry{}, false, ErrAccountSuspended
+	}
+	if err := l.overdraftRejectedLocked(reversal); err != nil {
+		return JournalEntry{}, false, err
+	}
+	if l.dailyLimitRejectedLocked(reversal.CreditAccount, reversal.Currency, reversal.AmountCents, reversal.CreatedAt) {
+		return JournalEntry{}, false, ErrDailyLimitExceeded
+	}
+	// The period gate is keyed on the reversal's own timestamp, like
+	// ReverseEntry: the books are corrected as of now.
+	if err := l.periodRejectedLocked(reversal.CreatedAt); err != nil {
+		return JournalEntry{}, false, err
+	}
+
+	// Atomic append-only commit, exactly like ReverseEntry.
+	l.maybePruneIdempotencyKeys(now)
+	l.maybePruneDailyOutflowLocked(now)
+	versionBefore := l.version
+	hookTouched := touchedAccounts([]JournalEntry{reversal})
+	hookOld := l.balanceSnapshotLocked(hookTouched)
+	l.commitEntryLocked(reversal)
+	l.addDailyOutflowLocked(reversal.CreditAccount, reversal.Currency, reversal.AmountCents, reversal.CreatedAt)
+	// Low-balance alert evaluation: strictly after the atomic commit
+	// zone, read-only (see low_balance.go). Advisory only.
+	l.evaluateBalanceWatchesLocked(hookTouched, reversalID, "ReverseEntryPartial")
+	l.emitAudit(AuditEvent{
+		Op:            "reverse",
+		Actor:         "ReverseEntryPartial",
+		TraceID:       reversalID,
+		VersionBefore: versionBefore,
+		VersionAfter:  l.version,
+		EntryIDs:      []string{reversalID},
+		Accounts:      []AccountID{reversal.DebitAccount, reversal.CreditAccount},
+		Details: map[string]any{
+			"reversed_entry_id": entryID,
+			"amount_cents":      reversal.AmountCents,
+			"currency":          reversal.Currency,
+			"partial":           true,
+			"reversal_index":    n,
+		},
+	})
+	// Domain outbox: the partial reversal is itself a journal row
+	// (entry_posted), plus the entry_reversed envelope naming the
+	// corrected entry and the partial index.
+	l.emitOutboxEntriesLocked([]JournalEntry{reversal})
+	l.emitOutboxLocked(OutboxEvent{
+		Type:        OutboxEntryReversed,
+		Account:     reversal.DebitAccount,
+		EntryID:     reversalID,
+		AmountCents: reversal.AmountCents,
+		Currency:    reversal.Currency,
+		Details: map[string]any{
+			"reversed_entry_id": entryID,
+			"partial":           true,
+			"reversal_index":    n,
+		},
 	})
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
