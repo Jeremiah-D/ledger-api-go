@@ -336,17 +336,38 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   (`LEDGER_REVIEW_SWEEP_INTERVAL`) — auto-rejects lapsed reviews so
   frozen funds can never strand in dual-control limbo.
 - `Reconcile` lists every pending review (`pending_reviews`: frozen legs,
-  reserved outflow, expiry) and every per-account threshold
-  (`review_thresholds`); reviews survive disaster-recovery snapshots with
-  their statuses, and `GET /metrics` exposes
+  reserved outflow, expiry — plus each review's named approve/reject votes
+  under a quorum policy) and every per-account threshold
+  (`review_thresholds`), and discloses the active quorum policy
+  (`review_quorum`); reviews survive disaster-recovery snapshots with
+  their statuses and votes, and `GET /metrics` exposes
   `ledger_review_pending_total` / `ledger_review_approved_total` /
-  `ledger_review_rejected_total`.
+  `ledger_review_rejected_total` plus
+  `ledger_review_quorum_votes_total{approver,vote,outcome}`.
 - Configure with `LEDGER_REVIEW_THRESHOLD` (global, cents, e.g. `"100000"`
   for $1,000.00) and/or `LEDGER_REVIEW_THRESHOLDS`
   (`"<account>:<cents>,..."`, e.g. `"treasury:1000000,ops:500000"` — a
   per-account threshold wins over the global one for that account's
   outbound transfers). Unset means no review; invalid values fail startup
   fast.
+- **N-of-M quorum (four-eyes, hardened):** `SetReviewQuorumPolicy` installs
+  an opt-in approver set (M named approvers) plus an approval threshold N
+  — a single stolen operator credential can no longer move money alone.
+  The same `approve`/`reject` endpoints become named-vote entry points:
+  an approve call records one vote (returning `200` with
+  `review_status: "pending_review"` and the live `quorum_tally`) until N
+  distinct approvers have voted, and the Nth vote settles through the
+  normal approval path. A reject vote is decisive at once when the policy
+  is `RejectDecisive`; otherwise it is recorded as dissent and the review
+  stays pending (approval or expiry still terminates it). Only policy
+  members may vote (`403` otherwise); re-voting the same way is idempotent
+  and voting the opposite way returns `400`. Every vote — with the
+  approver identity, the tally, and the outcome
+  (`recorded`/`settled`/`decisive`/`duplicate`) — lands in the structured
+  audit chain and on
+  `ledger_review_quorum_votes_total{approver,vote,outcome}`. The policy is
+  structural config (no version bump) and round-trips through
+  disaster-recovery snapshots.
 
 ### Scheduled transfers (`POST /transfer-schedules`)
 

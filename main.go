@@ -577,6 +577,13 @@ type reviewDecisionRequest struct {
 // /transfers — balances apply, the version bumps, chain links land — and
 // returns the settlement receipt with review_status "approved".
 //
+// While an N-of-M quorum policy is active (see
+// ledger.SetReviewQuorumPolicy), the call records one named approve
+// vote instead: the receipt carries review_status "pending_review" and
+// the live vote tally until N distinct approvers have voted, and the
+// Nth vote settles. A vote by a non-member returns 403; voting the
+// opposite way after voting returns 400.
+//
 // Approval is idempotent: re-approving returns 200 with the original
 // receipt (duplicate == true) and settles nothing new. An unknown
 // transfer returns 404; approving a rejected or expired review returns
@@ -647,10 +654,26 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrQuorumNotMember) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrReviewerAlreadyVoted) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if !receipt.Duplicate {
+	// LG-124: under a quorum policy the call records a named approve
+	// vote. The vote is counted on the quorum vote metric with the
+	// outcome the ledger reports (recorded / settled / duplicate); the
+	// idempotent replay of an already-settled review carries no tally
+	// and counts nothing new.
+	if t := receipt.QuorumTally; t != nil {
+		s.metrics.QuorumVotesTotal.Add(t.LastVoter, "approve", t.Outcome)
+	}
+	if !receipt.Duplicate && receipt.ReviewStatus == ledger.ReviewStatusApproved {
 		s.metrics.ReviewApprovedTotal.Add(1)
 		if receipt.FeeCents > 0 {
 			s.metrics.TransferFeeCentsTotal.Add(uint64(receipt.FeeCents))
@@ -663,6 +686,13 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 // drops a pending review without settling anything, releasing the frozen
 // funds back to the payer's available balance. The legs stay in the
 // journal as historical pending-marked rows.
+//
+// While an N-of-M quorum policy is active (see
+// ledger.SetReviewQuorumPolicy), the call records one named reject
+// vote: with a RejectDecisive policy the vote rejects at once, without
+// it the vote is recorded as dissent and the review stays pending. A
+// vote by a non-member returns 403; voting the opposite way after
+// voting returns 400.
 //
 // Rejection is idempotent: rejecting an already-rejected or expired
 // review returns 200 with the review as-is. An unknown transfer returns
@@ -696,10 +726,43 @@ func (s *server) handleRejectTransferReview(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrQuorumNotMember) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrReviewerAlreadyVoted) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if changed {
+	// LG-124: under a quorum policy the call records a named reject
+	// vote. A recorded vote (the review stays pending under a
+	// non-decisive policy) counts on the quorum vote metric but not on
+	// the rejection total — only a review that actually closed as
+	// rejected feeds ledger_review_rejected_total.
+	if _, ok := s.ledgerFor(r).ReviewQuorumPolicy(); ok {
+		voter := req.Reviewer
+		if voter == "" {
+			// Mirrors the ledger's defaultReviewOperator: the vote was
+			// recorded under the defaulted identity.
+			voter = "operator"
+		}
+		if changed || review.Status == ledger.ReviewStatusPending {
+			outcome := ledger.QuorumOutcomeDuplicate
+			if changed {
+				outcome = ledger.QuorumOutcomeRecorded
+				if review.Status == ledger.ReviewStatusRejected {
+					outcome = ledger.QuorumOutcomeDecisive
+				}
+			}
+			s.metrics.QuorumVotesTotal.Add(voter, "reject", outcome)
+		}
+		if changed && review.Status == ledger.ReviewStatusRejected {
+			s.metrics.ReviewRejectedTotal.Add(1)
+		}
+	} else if changed {
 		s.metrics.ReviewRejectedTotal.Add(1)
 	}
 	writeJSON(w, http.StatusOK, review)

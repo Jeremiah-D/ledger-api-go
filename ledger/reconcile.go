@@ -321,11 +321,18 @@ type ReconciliationReport struct {
 	// PendingReviews lists every large transfer currently awaiting an
 	// operator decision (see review.go), sorted by (CreatedAt,
 	// TransferID): the frozen legs, the reserved outflow, and each
-	// review's expiry. Reviews whose expiry passed but which
-	// ExpireReviews has not swept yet are excluded — they are already
-	// inactive. Compliance tooling reads this to know which funds are
-	// frozen in dual-control limbo at report time.
+	// review's expiry. Under an N-of-M quorum policy (see
+	// review_quorum.go) each review also carries its named approve and
+	// reject votes, so the report shows exactly who has voted on what.
+	// Reviews whose expiry passed but which ExpireReviews has not swept
+	// yet are excluded — they are already inactive. Compliance tooling
+	// reads this to know which funds are frozen in dual-control limbo
+	// at report time.
 	PendingReviews []TransferReview `json:"pending_reviews"`
+	// ReviewQuorum carries the active N-of-M review quorum policy (see
+	// SetReviewQuorumPolicy), or nil when reviews settle on a single
+	// operator decision.
+	ReviewQuorum *QuorumPolicy `json:"review_quorum,omitempty"`
 	// ReviewThresholds lists every configured per-account review
 	// threshold (see SetReviewThreshold), sorted by account. The
 	// ledger-wide threshold is not listed here — it applies to every
@@ -768,6 +775,10 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		ActiveTransferSchedules: l.activeScheduleCountLocked(),
 		PendingReviews:          l.pendingTransferReviewsLocked(now),
 		ReviewThresholds:        l.reviewThresholdsLocked(),
+		// LG-124: the report discloses the active N-of-M quorum
+		// policy alongside the pending reviews that carry each
+		// review's named votes.
+		ReviewQuorum:            l.reviewQuorumCopyLocked(),
 		DunningStatuses:         l.dunningDisclosuresLocked(),
 		// LG-101: the report discloses the settlement-window config and
 		// every deferred transfer, so the reconciliation record shows

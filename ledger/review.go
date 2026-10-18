@@ -141,9 +141,18 @@ type TransferReview struct {
 	// ExpiresAt. Zero means the review never expires on its own.
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	// ReviewedBy is the operator identity from the approve/reject call
-	// (or "system" for auto-expiry); empty while pending.
+	// (or "system" for auto-expiry); empty while pending. Under an
+	// N-of-M quorum policy (see review_quorum.go) it carries the
+	// comma-joined approver identities whose votes settled the review.
 	ReviewedBy string    `json:"reviewed_by,omitempty"`
 	ReviewedAt time.Time `json:"reviewed_at,omitempty"`
+	// ApproveVotes and RejectVotes record the named quorum votes cast
+	// on the review (see review_quorum.go): approver identities in vote
+	// order. Empty unless a quorum policy was active when the votes
+	// were cast. The votes ride the snapshot record and the reconcile
+	// report, so the "who voted what" trail survives disaster recovery.
+	ApproveVotes []string `json:"approve_votes,omitempty"`
+	RejectVotes  []string `json:"reject_votes,omitempty"`
 	// ApprovedReceipt is the settlement receipt stored at approval, so
 	// re-approving returns the identical receipt idempotently. Nil
 	// unless Status is approved.
@@ -575,6 +584,15 @@ func (l *Ledger) PendingTransferReviewsAt(now time.Time) []TransferReview {
 // original approval receipt with Duplicate == true and settles nothing
 // new. Approving a rejected or expired review fails with
 // ErrReviewNotPending. An empty reviewer is recorded as "operator".
+//
+// While an N-of-M quorum policy is active (see SetReviewQuorumPolicy,
+// review_quorum.go), the call is a named approve vote instead of an
+// immediate settlement: the reviewer must be a policy member, the vote
+// is recorded in the review and in the structured audit chain, and the
+// call returns a pending receipt carrying the live vote tally until N
+// distinct approvers have voted — the Nth vote settles through the path
+// above. With no policy configured the behavior is exactly the LG-42
+// single-decision path.
 func (l *Ledger) ApproveTransferReview(transferID, reviewer string) (TransferReceipt, error) {
 	return l.ApproveTransferReviewCtx(context.Background(), transferID, reviewer)
 }
@@ -595,6 +613,11 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 	if r.Status == ReviewStatusApproved {
 		dup := *r.ApprovedReceipt
 		dup.Duplicate = true
+		// The idempotent replay of a quorum-settled review returns the
+		// original receipt without the vote tally: the tally described
+		// the settling call, not this replay. The review record (and
+		// the reconcile report) still carries the full vote history.
+		dup.QuorumTally = nil
 		return dup, nil
 	}
 	if r.Status != ReviewStatusPending {
@@ -610,6 +633,30 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 		reviewer = defaultReviewOperator
 	}
 
+	// LG-124: while a quorum policy is active, the approval is a named
+	// vote (see review_quorum.go) instead of an immediate settlement.
+	if qp := l.reviewQuorum; qp != nil {
+		return l.castQuorumApproveVoteLocked(ctx, r, reviewer, qp, now)
+	}
+	return l.settleReviewLocked(ctx, r, reviewer, now, nil)
+}
+
+// settleReviewLocked runs the LG-42 approval settlement for one pending
+// review: the risk checks re-run against current state, then the frozen
+// legs flip to effective and commit exactly like a direct PostTransfer —
+// balances and totals apply, the ledger version bumps once per leg, one
+// audit-chain link lands per leg, and the structured audit log records
+// the reviewer's identity in its hash chain.
+//
+// A leg through a now-frozen account fails with ErrAccountFrozen, an
+// overdraft-protected payer that can no longer cover the outflow fails
+// with ErrAccountOverdraft, and legs dated in a now-closed period fail
+// with ErrPeriodClosed — in all three cases the review stays pending, so
+// the operator can retry once the underlying condition clears. tally is
+// the quorum vote tally to disclose on the settlement receipt, or nil
+// for a direct single-operator approval. Callers must hold the write
+// lock.
+func (l *Ledger) settleReviewLocked(ctx context.Context, r *TransferReview, reviewer string, now time.Time, tally *ReviewQuorumTally) (TransferReceipt, error) {
 	// Re-verify the risk controls against current state: the freeze was
 	// advisory, so anything that changed between review creation and
 	// approval is re-checked now, exactly like Capture re-checks the
@@ -700,9 +747,13 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 		FeeSplits:        feeSplitSharesFromLegs(r.TransferID, r.Entries),
 		SettlementStatus: approvalSettlementStatus,
 		SettlementWindow: approvalSettlementWindow,
+		// LG-124: the final quorum tally, when the settlement came
+		// from an N-of-M vote; nil for a direct single-operator
+		// approval.
+		QuorumTally: tally,
 	}
 	r.ApprovedReceipt = &receipt
-	l.reviews[transferID] = r
+	l.reviews[r.TransferID] = r
 
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
@@ -757,6 +808,14 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 // review fails with ErrReviewNotPending — a settled transfer cannot be
 // un-settled through review. An empty reviewer is recorded as
 // "operator".
+//
+// While an N-of-M quorum policy is active (see SetReviewQuorumPolicy,
+// review_quorum.go), the call is a named reject vote instead of an
+// immediate rejection: the reviewer must be a policy member. When the
+// policy is RejectDecisive the vote rejects the review at once; when it
+// is not, the vote is recorded as dissent and the review stays pending
+// (approval or expiry still terminates it). With no policy configured
+// the behavior is exactly the LG-42 single-decision path.
 func (l *Ledger) RejectTransferReview(transferID, reviewer, reason string) (review *TransferReview, changed bool, err error) {
 	return l.RejectTransferReviewCtx(context.Background(), transferID, reviewer, reason)
 }
@@ -781,11 +840,26 @@ func (l *Ledger) RejectTransferReviewCtx(ctx context.Context, transferID, review
 	if reviewer == "" {
 		reviewer = defaultReviewOperator
 	}
+	// LG-124: while a quorum policy is active, the rejection is a named
+	// vote (see review_quorum.go) instead of an immediate rejection.
+	if qp := l.reviewQuorum; qp != nil {
+		return l.castQuorumRejectVoteLocked(ctx, r, reviewer, reason, qp)
+	}
+	return l.rejectReviewLocked(ctx, r, reviewer, reason)
+}
+
+// rejectReviewLocked drops a pending review without settling anything:
+// the frozen funds are released back to the payer's available balance
+// (the pending review simply stops reserving them) and the legs stay in
+// the journal as historical pending-marked rows. Only an actual state
+// transition is audited: idempotent replays settle nothing and stay
+// silent. Callers must hold the write lock.
+func (l *Ledger) rejectReviewLocked(ctx context.Context, r *TransferReview, reviewer, reason string) (review *TransferReview, changed bool, err error) {
 	now := time.Now()
 	r.Status = ReviewStatusRejected
 	r.ReviewedBy = reviewer
 	r.ReviewedAt = now
-	l.reviews[transferID] = r
+	l.reviews[r.TransferID] = r
 	// Only an actual state transition is audited: idempotent replays
 	// settle nothing and stay silent.
 	details := map[string]any{

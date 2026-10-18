@@ -5,9 +5,12 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -410,6 +413,12 @@ type Metrics struct {
 	// review-sweeper ticks, by number of reviews rejected/expired (not
 	// by request).
 	ReviewRejectedTotal atomic.Uint64
+	// QuorumVotesTotal counts review-quorum votes (LG-124): every named
+	// approve/reject vote cast through the review decision endpoints
+	// while a quorum policy is active, by approver identity, vote kind,
+	// and outcome. The zero value is ready to use. Exported as
+	// ledger_review_quorum_votes_total{approver,vote,outcome}.
+	QuorumVotesTotal QuorumVoteCounter
 	// SettlementRuns counts GET /settlement requests served (all
 	// formats: json, csv, sql).
 	SettlementRuns atomic.Uint64
@@ -819,6 +828,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_review_rejected_total",
 		"Total transfer reviews rejected or auto-expired: operator rejects, manual expire runs, and background sweeper ticks.",
 		m.ReviewRejectedTotal.Load())
+	writeLabeledCounter(&sb, "ledger_review_quorum_votes_total",
+		"Total review-quorum votes cast (LG-124): named approve/reject votes through the review decision endpoints while a quorum policy is active, by approver identity, vote kind (approve/reject), and outcome (recorded/settled/decisive/duplicate).",
+		m.QuorumVotesTotal.series())
 	writeCounter(&sb, "ledger_settlement_runs_total",
 		"Total GET /settlement requests served (all formats).",
 		m.SettlementRuns.Load())
@@ -879,6 +891,49 @@ func writeCounter(sb *strings.Builder, name, help string, value uint64) {
 	sb.WriteString("# HELP " + name + " " + help + "\n")
 	sb.WriteString("# TYPE " + name + " counter\n")
 	sb.WriteString(name + " " + strconv.FormatUint(value, 10) + "\n")
+}
+
+// QuorumVoteCounter is the per-(approver, vote, outcome) breakdown of
+// review-quorum votes (LG-124), rendered as
+// ledger_review_quorum_votes_total{approver="..",vote="..",outcome=".."}:
+// approver is the voting identity, vote is "approve" or "reject", and
+// outcome is "recorded" (the vote advanced a still-pending review),
+// "settled" (the approve vote reached the threshold), "decisive" (the
+// reject vote closed the review), or "duplicate" (an idempotent replay
+// of an earlier vote). Approver identities come from the configured
+// quorum policy -- a bounded set -- so the label cardinality stays
+// finite. The zero value is ready to use; Add is safe for concurrent
+// use.
+type QuorumVoteCounter struct {
+	mu     sync.Mutex
+	counts map[string]uint64
+}
+
+// Add records one quorum vote.
+func (c *QuorumVoteCounter) Add(approver, vote, outcome string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = make(map[string]uint64)
+	}
+	c.counts[approver+"\x00"+vote+"\x00"+outcome]++
+}
+
+// series renders the counter as labeled series, sorted by label set for
+// a deterministic exposition.
+func (c *QuorumVoteCounter) series() []labeledCounterSeries {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]labeledCounterSeries, 0, len(c.counts))
+	for k, v := range c.counts {
+		parts := strings.Split(k, "\x00")
+		out = append(out, labeledCounterSeries{
+			labels: fmt.Sprintf(`approver=%q,vote=%q,outcome=%q`, parts[0], parts[1], parts[2]),
+			value:  v,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].labels < out[j].labels })
+	return out
 }
 
 // labeledCounterSeries is one labeled series of a multi-dimensional

@@ -639,6 +639,12 @@ type Ledger struct {
 	reviewThresholds map[AccountID]int64
 	reviewThreshold  int64
 	reviewExpiry     time.Duration
+	// reviewQuorum is the opt-in N-of-M multi-approver quorum policy
+	// for dual-control reviews (see review_quorum.go): nil disables it,
+	// leaving the LG-42 single-operator decision path. Like the review
+	// thresholds it is structural config — it does not bump the ledger
+	// version — and it survives snapshots.
+	reviewQuorum *QuorumPolicy
 	// holds maps hold IDs to authorization holds (see hold.go). Holds are
 	// off-journal reservations: they never appear in entries, the audit
 	// chain, or the version counter. holdsByAccount indexes them per

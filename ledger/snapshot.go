@@ -374,6 +374,12 @@ type snapshotConfigLine struct {
 	// WithReviewExpiry) as a duration string; absent when auto-expiry
 	// is disabled.
 	ReviewExpiry string `json:"review_expiry,omitempty"`
+	// ReviewQuorum carries the N-of-M review quorum policy (see
+	// SetReviewQuorumPolicy); absent in snapshots written before
+	// LG-124 or when no policy is configured. A restore that dropped
+	// it would silently weaken the four-eyes control, so the policy
+	// round-trips like the review thresholds.
+	ReviewQuorum *QuorumPolicy `json:"review_quorum,omitempty"`
 	// DunningConfigs carries the opt-in collections escalation policies
 	// (see SetDunningConfig) and DunningStates the current escalation
 	// level per (account, currency); absent in snapshots written before
@@ -686,6 +692,11 @@ func reviewsEqual(a, b *TransferReview) bool {
 		a.FeeRateBps != b.FeeRateBps || a.TotalOutflowCents != b.TotalOutflowCents ||
 		a.ThresholdCents != b.ThresholdCents ||
 		a.ReviewedBy != b.ReviewedBy ||
+		// LG-124: the named quorum votes are part of the review
+		// record — a restore that dropped or reordered them would
+		// silently lose the "who voted what" trail.
+		!equalQuorumVotes(a.ApproveVotes, b.ApproveVotes) ||
+		!equalQuorumVotes(a.RejectVotes, b.RejectVotes) ||
 		a.CreatedAt.UnixNano() != b.CreatedAt.UnixNano() ||
 		a.ExpiresAt.UnixNano() != b.ExpiresAt.UnixNano() ||
 		a.ReviewedAt.UnixNano() != b.ReviewedAt.UnixNano() ||
@@ -1072,6 +1083,10 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 	if l.reviewExpiry > 0 {
 		cfg.ReviewExpiry = l.reviewExpiry.String()
 	}
+	// LG-124: the quorum policy round-trips like the review
+	// thresholds — a restore that dropped it would silently weaken the
+	// four-eyes control.
+	cfg.ReviewQuorum = l.reviewQuorumCopyLocked()
 	cfg.FrozenAutoUnfreeze = l.frozenAutoUnfreezeLocked()
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -2019,6 +2034,14 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	if cfg.ReviewThresholdCents < 0 {
 		return bad("negative global review threshold %d", cfg.ReviewThresholdCents)
 	}
+	// LG-124: the quorum policy restores like every other structural
+	// config row — a policy that could never have been installed (see
+	// SetReviewQuorumPolicy) fails the import instead of silently
+	// weakening the four-eyes control. Absent in legacy snapshots,
+	// which restore with quorum disabled.
+	if err := validateQuorumPolicy(cfg.ReviewQuorum); err != nil {
+		return bad("bad review_quorum: %v", quorumPolicyError(err))
+	}
 	// OFX import registry (LG-66): every record must carry its document
 	// SHA-256, and the report inside must agree with it — the registry
 	// is the duplicate-import idempotency, and a restore must not
@@ -2724,6 +2747,11 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	l.reviewThreshold = cfg.ReviewThresholdCents
 	l.reviewExpiry = reviewExpiry
+	// LG-124: the quorum policy restores like the review thresholds —
+	// a restore that dropped it would silently weaken the four-eyes
+	// control. Validated above; absent (nil) in legacy snapshots, which
+	// restore with quorum disabled.
+	l.reviewQuorum = copyQuorumPolicy(cfg.ReviewQuorum)
 	// Dunning policies and escalation states restore like the other
 	// structural config: a restore that dropped them would silently
 	// disarm the collections workflow. Validated above.

@@ -232,6 +232,15 @@ type TransferReceipt struct {
 	// "settled", the next window when it is "scheduled". Zero when the
 	// currency has no cutoff configured.
 	SettlementWindow time.Time `json:"settlement_window,omitempty"`
+	// QuorumTally discloses the live N-of-M vote count when the review
+	// decision went through a quorum policy (see review_quorum.go):
+	// the named votes, the threshold, and what this vote did. It is set
+	// on approve-vote receipts while the review is pending and on the
+	// settlement receipt when a vote reached the threshold. Nil for
+	// direct single-operator approvals and for idempotent replays of an
+	// already-settled review (the tally described the settling call,
+	// not the replay).
+	QuorumTally *ReviewQuorumTally `json:"quorum_tally,omitempty"`
 }
 
 // FeeTier is one band of the tiered transfer fee schedule: transfers of
