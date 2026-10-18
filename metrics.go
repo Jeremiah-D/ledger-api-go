@@ -331,6 +331,18 @@ type Metrics struct {
 	// idempotent replays not counted twice. Rendered as
 	// ledger_reversals_total{kind="partial"}.
 	ReversalsPartialTotal atomic.Uint64
+	// DisputesRaisedTotal counts transfer disputes raised by
+	// POST /disputes (see ledger.RaiseDispute): one per first-time
+	// raise — idempotent replays return the original dispute and book
+	// nothing new, so they are not counted twice. Rendered as
+	// ledger_disputes_raised_total.
+	DisputesRaisedTotal atomic.Uint64
+	// DisputesResolvedTotal counts transfer disputes terminally
+	// resolved by POST /disputes/{id}/resolve (see
+	// ledger.ResolveDispute): upheld and rejected resolutions both
+	// count — the uphold decision rides the dispute_resolved audit and
+	// outbox events. Rendered as ledger_disputes_resolved_total.
+	DisputesResolvedTotal atomic.Uint64
 	// RevaluationsTotal counts revaluation journal entries committed by
 	// POST /revaluations (see ledger.RevalueBalances): one per
 	// (account, currency) whose base-currency carrying value moved. Runs
@@ -710,6 +722,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			{labels: `kind="full"`, value: m.ReversalsFullTotal.Load()},
 			{labels: `kind="partial"`, value: m.ReversalsPartialTotal.Load()},
 		})
+	writeCounter(&sb, "ledger_disputes_raised_total",
+		"Total transfer disputes raised by POST /disputes (idempotent replays not counted twice).",
+		m.DisputesRaisedTotal.Load())
+	writeCounter(&sb, "ledger_disputes_resolved_total",
+		"Total transfer disputes terminally resolved by POST /disputes/{id}/resolve (upheld or rejected).",
+		m.DisputesResolvedTotal.Load())
 	writeCounter(&sb, "ledger_revaluations_total",
 		"Total revaluation journal entries committed by POST /revaluations (one per account/currency whose carrying value moved).",
 		m.RevaluationsTotal.Load())

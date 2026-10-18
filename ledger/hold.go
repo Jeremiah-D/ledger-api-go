@@ -202,7 +202,14 @@ type CaptureReceipt struct {
 func (l *Ledger) Hold(h Hold) (held Hold, duplicate bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.holdLocked(h)
+}
 
+// holdLocked is the shared implementation of Hold: see its doc comment
+// for the full contract. Callers must hold l.mu (the write lock).
+// RaiseDispute (see dispute.go) places its freeze hold through here so
+// the dispute record and its hold land atomically under the one lock.
+func (l *Ledger) holdLocked(h Hold) (held Hold, duplicate bool, err error) {
 	if h.ID == "" {
 		return Hold{}, false, ErrEmptyHoldID
 	}
@@ -388,7 +395,14 @@ func (l *Ledger) GetHold(id string) (Hold, bool) {
 func (l *Ledger) Release(id string) (Hold, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.releaseLocked(id)
+}
 
+// releaseLocked is the shared implementation of Release: see its doc
+// comment for the full contract. Callers must hold l.mu (the write
+// lock). ResolveDispute (see dispute.go) releases the dispute's freeze
+// hold through here inside the resolution's atomic commit.
+func (l *Ledger) releaseLocked(id string) (Hold, error) {
 	h, ok := l.holds[id]
 	if !ok {
 		return Hold{}, ErrHoldNotFound

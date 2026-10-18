@@ -2490,6 +2490,218 @@ func (s *server) handleExpireHolds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"expired": s.ledgerFor(r).ExpireHolds()})
 }
 
+// raiseDisputeRequest is the body of POST /disputes. dispute_id is the
+// caller-chosen dispute identity (replays return the original dispute),
+// transfer_id names the posted same-currency transfer being disputed,
+// reason_code is one of unauthorized/not_received/duplicate/fraud,
+// amount_cents is the disputed slice of the transfer (at most the
+// transfer's amount — partial disputes are allowed), and currency is
+// optional (it defaults to the transfer's currency and must match it
+// when given).
+type raiseDisputeRequest struct {
+	DisputeID      string `json:"dispute_id"`
+	TransferID     string `json:"transfer_id"`
+	ReasonCode     string `json:"reason_code"`
+	AmountCents    int64  `json:"amount_cents"`
+	Currency       string `json:"currency,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+// handleRaiseDispute implements POST /disputes, the payer-initiated
+// chargeback-style claim against a posted transfer (see
+// ledger.RaiseDispute): it freezes the disputed amount on the payee's
+// available balance through an authorization hold without journaling
+// anything, so raising a dispute never double-charges.
+//
+// A first-time raise returns 201 with the dispute. Repeating the
+// dispute ID (or the idempotency key) returns 200 with the originally
+// raised dispute — the replay books nothing new, even if the payee's
+// account was frozen afterwards. An unknown transfer ID returns 404;
+// a transfer pending dual-control review returns 409; malformed
+// requests (empty IDs, non-positive amount, unknown reason code,
+// amount above the transfer's, currency mismatch) return 400; a frozen
+// or closed payee account returns 403; a payee whose available funds
+// cannot cover the disputed amount returns 422.
+func (s *server) handleRaiseDispute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req raiseDisputeRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	d, duplicate, err := s.ledgerFor(r).RaiseDispute(ledger.Dispute{
+		ID:             req.DisputeID,
+		TransferID:     req.TransferID,
+		ReasonCode:     req.ReasonCode,
+		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
+		IdempotencyKey: req.IdempotencyKey,
+	})
+	if err != nil {
+		if errors.Is(err, ledger.ErrDisputeTransferNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDisputeTransferPendingReview) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInsufficientAvailableFunds) {
+			s.metrics.HoldRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, d)
+		return
+	}
+	// ledger_disputes_raised_total counts committed dispute raises,
+	// not requests: idempotent replays book nothing new and are not
+	// counted twice.
+	s.metrics.DisputesRaisedTotal.Add(1)
+	writeJSON(w, http.StatusCreated, d)
+}
+
+// resolveDisputeRequest is the body of POST /disputes/{id}/resolve.
+// uphold == true refunds the disputed amount to the payer (the payer
+// wins); uphold == false releases the freeze hold only and the payee
+// keeps the funds.
+type resolveDisputeRequest struct {
+	Uphold bool `json:"uphold"`
+}
+
+// handleResolveDispute implements POST /disputes/{id}/resolve, the
+// terminal resolution of a transfer dispute (see
+// ledger.ResolveDispute): open -> resolved, irreversibly. An upheld
+// dispute refunds the payer by appending a partial reversal of the
+// transfer's principal entry and releases the freeze hold; a rejected
+// dispute releases the hold only.
+//
+// A first-time resolution returns 200 with the resolved dispute. An
+// unknown dispute ID returns 404; resolving an already-resolved dispute
+// returns 409 (resolution is terminal). An upheld refund rejected by
+// the reversal's risk gates — a frozen payee (403), an
+// overdraft-protected payee whose balance cannot cover the refund, or
+// the reversal cap after a sibling dispute already refunded (409) —
+// leaves the dispute open: the resolution never half-commits.
+func (s *server) handleResolveDispute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req resolveDisputeRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "dispute id required"})
+		return
+	}
+
+	d, err := s.ledgerFor(r).ResolveDispute(id, req.Uphold)
+	if err != nil {
+		if errors.Is(err, ledger.ErrDisputeNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDisputeAlreadyResolved) || errors.Is(err, ledger.ErrAlreadyReversed) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrBudgetExceeded) {
+			s.metrics.BudgetRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// ledger_disputes_resolved_total counts committed resolutions:
+	// upheld and rejected alike — the decision rides the
+	// dispute_resolved audit and outbox events.
+	s.metrics.DisputesResolvedTotal.Add(1)
+	writeJSON(w, http.StatusOK, d)
+}
+
+// handleGetDispute implements GET /disputes/{id}: the dispute with its
+// current status (open until ResolveDispute moves it to resolved).
+// 404 on an unknown dispute ID.
+func (s *server) handleGetDispute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "dispute id required"})
+		return
+	}
+	d, ok := s.ledgerFor(r).GetDispute(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrDisputeNotFound.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
 type openTermDepositRequest struct {
 	ID             string           `json:"id"`
 	Account        ledger.AccountID `json:"account"`
@@ -5993,6 +6205,11 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /liquidity/intraday", s.handleIntradayLiquidity)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
 	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)
+	// LG-129: transfer disputes — payer-initiated chargeback-style
+	// claims that freeze the disputed amount on the payee via a hold.
+	mux.HandleFunc("POST /disputes", s.handleRaiseDispute)
+	mux.HandleFunc("POST /disputes/{id}/resolve", s.handleResolveDispute)
+	mux.HandleFunc("GET /disputes/{id}", s.handleGetDispute)
 	mux.HandleFunc("POST /term-deposits", s.handleOpenTermDeposit)
 	mux.HandleFunc("POST /term-deposits/sweep", s.handleSweepTermDeposits)
 	mux.HandleFunc("GET /term-deposits/{id}", s.handleGetTermDeposit)

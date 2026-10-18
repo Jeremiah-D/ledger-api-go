@@ -1946,6 +1946,86 @@ the un-settled remainder, and `Reconcile` reports per-hold
 status). Every `POST /holds/{id}/capture/partial` is counted by
 `ledger_partial_captures_total`.
 
+### Transfer disputes (chargeback-style, 转账争议)
+
+Payer-initiated chargeback-style claims against a posted same-currency
+transfer. Raising a dispute freezes the disputed amount on the **payee's**
+available balance through an authorization hold — no journal entry is
+booked, so a dispute can never double-charge. Resolving a dispute is
+terminal and one-way: `open` → `resolved`, never back.
+
+```
+┌──────┐  POST /disputes                ┌──────┐
+│ open ├───────────────────────────────►│resolved│
+└──┬───┘  (hold "dispute/<id>" freezes   └──┬───┘
+   │     the disputed amount on payee)      │
+   │                                        │
+   │          POST /disputes/{id}/resolve   │
+   │          {"uphold": true} → refund the payer via a partial
+   │          reversal of the transfer's principal entry, then
+   │          release the hold
+   │          {"uphold": false} → release the hold only;
+   │          the payee keeps the funds
+   ▼
+  disputed amount reserved from payee's available balance
+  while open ("争议期间资金不可动") — plain hold semantics,
+  no extra gating: new holds on the payee fail with
+  insufficient available funds while the freeze is active
+```
+
+Endpoints:
+
+- `POST /disputes` — raise. Body: `dispute_id`, `transfer_id`,
+  `reason_code` (`unauthorized` / `not_received` / `duplicate` /
+  `fraud`), `amount_cents` (positive, at most the transfer's amount —
+  partial disputes are allowed), optional `currency` (defaults to the
+  transfer's currency and must match it when given), optional
+  `idempotency_key`. The disputed transfer must be a posted
+  same-currency transfer principal; cross-currency transfers cannot be
+  disputed and land on 404 like unknown IDs. Returns `201` with the
+  dispute, `200` with the original on idempotent replay (repeated
+  dispute ID or idempotency key).
+- `POST /disputes/{id}/resolve` — resolve. Body: `{"uphold": bool}`.
+  Returns `200` with the resolved dispute; `404` on an unknown ID;
+  `409` when the dispute is already resolved (resolution is terminal).
+- `GET /disputes/{id}` — read the dispute with its current status.
+
+Error mapping follows the ledger's conventions: `400` for malformed
+requests (empty IDs, non-positive amount, unknown reason code, amount
+above the transfer's, currency mismatch), `404` for unknown dispute or
+transfer, `409` for terminal-state conflicts (double resolution, a
+transfer pending dual-control review), `403` when the payee's account is
+frozen/closed/suspended, `422` when the payee's available funds cannot
+cover the freeze.
+
+```bash
+# Raise: freeze 6000 of the payee's available balance on transfer t1.
+curl -s -X POST localhost:8080/disputes \
+  -d '{"dispute_id":"d1","transfer_id":"t1","reason_code":"unauthorized","amount_cents":6000}'
+# 201 {"id":"d1","transfer_id":"t1","status":"open","hold_id":"dispute/d1",...}
+# GET /accounts/payee/balance now reports balance_cents 10000,
+# available_cents 4000 — the 6000 is frozen, not moved.
+
+# The payer wins: refund the 6000 via a partial reversal of t1's
+# principal entry (t1/reversal/1), then release the hold.
+curl -s -X POST localhost:8080/disputes/d1/resolve -d '{"uphold":true}'
+# 200 {"id":"d1","status":"resolved","upheld":true,...}
+
+# The claim is rejected: release the hold only, the payee keeps the funds.
+curl -s -X POST localhost:8080/disputes/d2/resolve -d '{"uphold":false}'
+```
+
+Disputes are distinct from dunning: dunning is *merchant-initiated*
+collections escalation on overdue receivables and never moves money;
+disputes are *payer-initiated* claims that freeze the payee's funds and
+can force a refund.
+
+Observability: every raise emits a `dispute_raised` audit event and a
+`dispute_raised` outbox event; every resolution emits
+`dispute_resolved` (carrying the uphold decision and the reason) plus
+the outbox twin. `GET /metrics` exposes
+`ledger_disputes_raised_total` and `ledger_disputes_resolved_total`.
+
 ### Term deposits (定存)
 
 A bank-style time deposit: `POST /term-deposits` locks a principal for a

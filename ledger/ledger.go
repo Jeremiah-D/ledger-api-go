@@ -815,6 +815,22 @@ type Ledger struct {
 	dunningConfigs     map[dunningKey]DunningConfig
 	dunningStates      map[dunningKey]DunningState
 	dunningEscalations uint64
+	// disputes maps dispute IDs to transfer-dispute records (see
+	// dispute.go): payer-initiated chargeback-style claims that freeze
+	// the disputed amount on the payee's available balance through an
+	// authorization hold and resolve terminally to upheld (the payer is
+	// refunded) or rejected (the payee keeps the funds). disputeKeys
+	// maps a dispute raise's idempotency key to its dispute ID — its
+	// own namespace, expiring with the TTL like every other key index
+	// (see pruneDisputeKeysLocked in dispute.go). Dispute records are
+	// operational state that does not round-trip through
+	// disaster-recovery snapshots: after a restore, an open dispute's
+	// freeze hold is still present (holds do round-trip, so the funds
+	// stay conservatively frozen) but the dispute record itself must be
+	// re-derived from the dispute_raised / dispute_resolved audit
+	// events — the structured audit trail is the durable record.
+	disputes    map[string]Dispute
+	disputeKeys map[string]string
 	// healthViolations counts balance-health violations found by the
 	// background watchdog (see health_watch.go): the number of
 	// "balance_health_violation" audit events emitted. In-memory only —
@@ -1186,6 +1202,8 @@ func New(opts ...Option) *Ledger {
 		closingPL:                   make(map[AccountID]bool),
 		dunningConfigs:              make(map[dunningKey]DunningConfig),
 		dunningStates:               make(map[dunningKey]DunningState),
+		disputes:                    make(map[string]Dispute),
+		disputeKeys:                 make(map[string]string),
 		journalRules:                make(map[string]JournalRule),
 		revalBaselines:              make(map[revalKey]revalBaseline),
 		ofxImports:                  make(map[string]*OFXImportReport),
@@ -1730,6 +1748,10 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// pruneNettingKeysLocked in netting.go), and so do allocation receipt
 	// keys (see pruneAllocKeysLocked in allocation.go) and term-deposit
 	// open keys (see pruneTermDepositKeysLocked in termdeposit.go).
+	// Dispute-raise idempotency keys expire on the same schedule, in
+	// their own namespace (see pruneDisputeKeysLocked in dispute.go):
+	// the disputes themselves are never evicted — only the
+	// replay-detection index shrinks.
 	removed += l.pruneHoldKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
 	removed += l.pruneMergeKeysLocked(now)
@@ -1737,6 +1759,7 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	removed += l.pruneNettingKeysLocked(now)
 	removed += l.pruneAllocKeysLocked(now)
 	removed += l.pruneTermDepositKeysLocked(now)
+	removed += l.pruneDisputeKeysLocked(now)
 	return removed
 }
 

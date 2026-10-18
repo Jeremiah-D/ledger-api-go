@@ -98,6 +98,12 @@ const (
 	OutboxReviewRejected   = "review_rejected"
 	OutboxReviewExpired    = "review_expired"
 	OutboxEntryReversed    = "entry_reversed"
+	// Transfer dispute lifecycle (see dispute.go, LG-129): raising
+	// freezes the disputed amount on the payee's available balance via
+	// an authorization hold; resolving upholds (the payer is refunded)
+	// or rejects (the payee keeps the funds) and releases the hold.
+	OutboxDisputeRaised   = "dispute_raised"
+	OutboxDisputeResolved = "dispute_resolved"
 	// Direct-debit mandate lifecycle (see mandate.go, LG-125): the
 	// mandate is structural config, but its lifecycle moves are domain
 	// facts downstream consumers track — creation, suspension,
