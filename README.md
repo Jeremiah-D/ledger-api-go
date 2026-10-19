@@ -2152,6 +2152,38 @@ maturing before `matures_at`, withdrawing a matured deposit, or
 accruing after maturity; `500` interest-expense/penalty account not
 configured.
 
+### Installment plans (分期)
+
+A BNPL-style scheduled receivable: `OpenInstallmentPlan` splits a
+principal into `NumPeriods` equal collections from a payer to a payee on
+a `monthly` / `weekly` / `daily` billing rule anchored at `FirstDueAt`.
+Each period collects `⌊principal/periods⌋`, the final period absorbing
+the division remainder so the periods sum to exactly the principal — no
+dust created or lost. `InstallmentsDue(now)` is the sweeper: it books
+every period whose due date has arrived through the existing atomic
+`Post` path, one journal row per period as of its due date (a late
+sweep backdates honestly — the obligation existed at the due date).
+Collections follow the transfer convention (payee debited, payer
+credited).
+
+Lifecycle: `active → overdue → active → completed`, plus
+`active|overdue → settled_early` via `SettleInstallmentEarly`, which
+closes the plan in one row for the remaining principal. A rejected
+period posting (frozen account, overdraft, …) moves the plan to
+`overdue` and stops that plan's sweep — later periods wait rather than
+skipping the queue; a later sweep that posts every outstanding period
+recovers it to `active`. Every transition emits an audit event
+(`installment_overdue`, `installment_recovered`, `installment_completed`,
+`installment_settled_early`, `installment_plan_open`).
+
+Idempotency: period rows carry the deterministic entry ID and
+idempotency key `installment/<plan-id>/<seq>` (early-settle:
+`installment/<plan-id>/early-settle`), so a blind scheduled sweeper
+replays original rows instead of double-booking; plan opens carry their
+own key namespace honoring `LEDGER_IDEMPOTENCY_TTL`. Plans are
+in-memory only and do not round-trip through disaster-recovery
+snapshots — the journaled period rows do, so the money is safe.
+
 ### Credit lines (授信)
 
 `POST /credit-lines` grants a per-account, per-currency credit line

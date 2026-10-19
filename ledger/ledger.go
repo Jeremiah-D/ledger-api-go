@@ -744,6 +744,16 @@ type Ledger struct {
 	// snapshots — the journaled settlement entries do, so the money is
 	// safe; only the replay shortcut is lost.
 	nettingKeys map[string]nettingRecord
+	// installments maps installment-plan IDs to their records (see
+	// installment.go): scheduled receivables collected in equal
+	// periods. installmentKeys maps a plan open's idempotency key to
+	// its installmentKeyRecord — its own namespace, expiring with the
+	// TTL like every other key index (see
+	// pruneInstallmentKeysLocked). In-memory only: neither round-trips
+	// through disaster-recovery snapshots (see the installment.go
+	// package comment); the journaled period rows do.
+	installments    map[string]InstallmentPlan
+	installmentKeys map[string]installmentKeyRecord
 	// merges is the authoritative registry of committed account merges
 	// (see merge.go), keyed by merge ID: every PostMerge appends here,
 	// whether or not it carried an idempotency key. It feeds Reconcile's
@@ -1220,6 +1230,8 @@ func New(opts ...Option) *Ledger {
 		allocRules:            make(map[string]AllocationRule),
 		allocKeys:             make(map[string]allocRecord),
 		nettingKeys:           make(map[string]nettingRecord),
+		installments:          make(map[string]InstallmentPlan),
+		installmentKeys:       make(map[string]installmentKeyRecord),
 		merges:                make(map[string]mergeRecord),
 		mergeKeys:             make(map[string]string),
 		schedules:             make(map[string]*TransferSchedule),
@@ -1798,6 +1810,7 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	removed += l.pruneMergeKeysLocked(now)
 	removed += l.pruneBatchKeysLocked(now)
 	removed += l.pruneNettingKeysLocked(now)
+	removed += l.pruneInstallmentKeysLocked(now)
 	removed += l.pruneAllocKeysLocked(now)
 	removed += l.pruneTermDepositKeysLocked(now)
 	removed += l.pruneDisputeKeysLocked(now)
