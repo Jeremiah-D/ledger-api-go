@@ -781,6 +781,16 @@ type Ledger struct {
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
 	audit *AuditLog
+	// apiKeys is the issued API credential registry (see apikey.go,
+	// LG-130): key ID -> key. Only SHA-256 hashes of secrets are
+	// stored; the secrets themselves are shown once at issuance and
+	// are unrecoverable afterwards. Structural config: survives
+	// snapshots (hashes only).
+	apiKeys map[string]*APIKey
+	// apiKeyAuth flips HTTP-layer API key enforcement on (see
+	// WithAPIKeyAuth). Off by default: the middleware is a
+	// pass-through and the anonymous-operator flow is unchanged.
+	apiKeyAuth bool
 	// outbox is the domain-event outbox (see outbox.go). Nil means
 	// disabled: state changes skip event construction entirely and the
 	// read path is unaffected. The dry-run twin (see dryrun.go) always
@@ -1140,6 +1150,7 @@ func New(opts ...Option) *Ledger {
 		noOverdraft:           make(map[AccountID]bool),
 		deniedExact:           make(map[AccountID]DenylistEntry),
 		deniedPrefixes:        make(map[string]DenylistEntry),
+		apiKeys:               make(map[string]*APIKey),
 		dailyLimits:           make(map[dailyLimitKey]int64),
 		dailyOutflow:          make(map[dailyLimitKey]int64),
 		sweepReserves:         make(map[accountCurrency]int64),

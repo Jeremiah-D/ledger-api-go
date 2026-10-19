@@ -564,6 +564,12 @@ type snapshotConfigLine struct {
 	// at charge time), so they round-trip with their versions.
 	FTPCurves   []FtpCurveSnapshot `json:"ftp_curves,omitempty"`
 	FTPAccounts FtpAccounts        `json:"ftp_accounts,omitempty"`
+	// APIKeys carries the issued API credentials (see apikey.go,
+	// LG-130): hashes only, never secrets — a restored ledger keeps
+	// authenticating existing keys, and operators rotate for fresh
+	// secrets. Absent in snapshots written before API keys existed,
+	// which restore with no keys.
+	APIKeys []apiKeySnapshot `json:"api_keys,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -1097,6 +1103,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		// as unconfigured.
 		FTPCurves:   l.ftpCurvesSnapshotLocked(),
 		FTPAccounts: l.ftpAccounts,
+		APIKeys:     l.apiKeysSnapshotLocked(),
 	}
 	eclCfg := l.eclStageConfig
 	cfg.ECLStageConfig = &eclCfg
@@ -2999,6 +3006,14 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("bad FTP accounts: %v", err)
 		}
 		l.ftpAccounts = cfg.FTPAccounts
+	}
+	// API keys restore like the other structural config: a restore that
+	// dropped them would silently lock out every automation holding a
+	// key. Only hashes travel (secrets are unrecoverable by design), so
+	// existing keys keep authenticating after the restore. Malformed
+	// rows fail the import instead of installing a broken credential.
+	if err := l.restoreAPIKeysLocked(cfg.APIKeys); err != nil {
+		return bad("bad API keys: %v", err)
 	}
 	// Re-derive the balance-watch breach state from the restored
 	// balances: an account already outside its band counts as breached,

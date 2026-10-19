@@ -6255,6 +6255,11 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /entries/tsa-anchor", s.handleTSAAnchor)
 	mux.HandleFunc("GET /audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("GET /audit/export", s.handleAuditExport)
+	mux.HandleFunc("POST /api-keys", s.handleCreateAPIKey)
+	mux.HandleFunc("GET /api-keys", s.handleListAPIKeys)
+	mux.HandleFunc("GET /api-keys/{id}", s.handleGetAPIKey)
+	mux.HandleFunc("POST /api-keys/{id}/rotate", s.handleRotateAPIKey)
+	mux.HandleFunc("POST /api-keys/{id}/revoke", s.handleRevokeAPIKey)
 	mux.HandleFunc("GET /events", s.handleOutboxEvents)
 	mux.HandleFunc("GET /webhooks/deliveries", s.handleWebhookDeliveries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
@@ -6443,7 +6448,200 @@ func (s *server) handler() http.Handler {
 		}
 		s.metrics.handleMetrics(w, r)
 	})
-	return s.tenantMiddleware(mux)
+	return s.tenantMiddleware(s.apiKeyMiddleware(mux))
+}
+
+// apiKeyCtxKey carries the authenticated API key through the request
+// context (see apiKeyMiddleware).
+type apiKeyCtxKey struct{}
+
+// apiKeyRequiredScope maps a request to the API key scope it needs
+// (LG-130). Key management is always admin:keys; reads need
+// read:ledger; journal-booking paths need their write scope; review
+// decisions and every other mutating operator path need admin:audit.
+func apiKeyRequiredScope(method, path string) string {
+	if strings.HasPrefix(path, "/api-keys") {
+		return ledger.ScopeAdminKeys
+	}
+	if path == "/metrics" {
+		return ledger.ScopeReadLedger
+	}
+	if method == http.MethodGet || method == http.MethodHead {
+		return ledger.ScopeReadLedger
+	}
+	if strings.HasPrefix(path, "/entries") {
+		return ledger.ScopeWriteEntries
+	}
+	if strings.HasPrefix(path, "/transfers") {
+		for _, op := range []string{"/approve", "/reject", "/expire"} {
+			if strings.Contains(path, op) {
+				return ledger.ScopeAdminAudit
+			}
+		}
+		return ledger.ScopeWriteTransfer
+	}
+	return ledger.ScopeAdminAudit
+}
+
+// apiKeyMiddleware enforces API key authentication (LG-130). It is a
+// pure pass-through until the ledger enables enforcement with
+// ledger.WithAPIKeyAuth, so the anonymous-operator flow and every
+// existing test keep working unchanged. Inside tenantMiddleware, so
+// tenant resolution (and its path stripping) already happened and
+// s.ledgerFor resolves the right per-tenant key registry.
+func (s *server) apiKeyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		l := s.ledgerFor(r)
+		if !l.APIKeyAuthEnabled() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		secret := r.Header.Get("X-API-Key")
+		if secret == "" {
+			// Bootstrap: with zero keys issued, POST /api-keys is open
+			// so the first operator key can be minted; every other
+			// route is 401.
+			if r.Method == http.MethodPost && r.URL.Path == "/api-keys" && l.APIKeyCount() == 0 {
+				next.ServeHTTP(w, r)
+				return
+			}
+			s.metrics.APIKeyAuthFailuresTotal.Add(1)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing X-API-Key header"})
+			return
+		}
+		key, err := l.AuthenticateAPIKey(secret)
+		if err != nil {
+			s.metrics.APIKeyAuthFailuresTotal.Add(1)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid API key"})
+			return
+		}
+		if need := apiKeyRequiredScope(r.Method, r.URL.Path); !key.HasScope(need) {
+			s.metrics.APIKeyAuthFailuresTotal.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "API key lacks required scope: " + need})
+			return
+		}
+		if !l.ConsumeAPIKeyQuota(key.ID) {
+			s.metrics.APIKeyAuthFailuresTotal.Add(1)
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "API key rate quota exceeded"})
+			return
+		}
+		// Attribute the audit trail to the key when the caller did not
+		// name an explicit operator via x-ledger-actor.
+		if r.Header.Get("x-ledger-actor") == "" {
+			r = r.Clone(r.Context())
+			r.Header.Set("X-Ledger-Actor", "apikey:"+key.Name)
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), apiKeyCtxKey{}, key)))
+	})
+}
+
+// writeAPIKeyError maps ledger API key errors to HTTP status codes.
+func writeAPIKeyError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ledger.ErrAPIKeyNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	case errors.Is(err, ledger.ErrAPIKeyInvalid), errors.Is(err, ledger.ErrAPIKeyExpired):
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+	case errors.Is(err, ledger.ErrAPIKeyRevoked):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+}
+
+type createAPIKeyRequest struct {
+	Name            string     `json:"name"`
+	Scopes          []string   `json:"scopes"`
+	ExpiresAt       *time.Time `json:"expires_at"`
+	RateLimitPerMin int64      `json:"rate_limit_per_min"`
+}
+
+// handleCreateAPIKey implements POST /api-keys: mint a new API key.
+// The secret is returned exactly once in this response — the ledger
+// stores only its SHA-256 hash and can never reproduce it. Requires
+// the admin:keys scope, except for the bootstrap call (zero keys
+// issued yet), which the middleware lets through unauthenticated.
+func (s *server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
+	var req createAPIKeyRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	var exp time.Time
+	if req.ExpiresAt != nil {
+		exp = *req.ExpiresAt
+	}
+	k, secret, err := s.ledgerFor(r).CreateAPIKeyCtx(actx, req.Name, req.Scopes, exp, req.RateLimitPerMin)
+	if err != nil {
+		writeAPIKeyError(w, err)
+		return
+	}
+	s.metrics.APIKeyCreationsTotal.Add(1)
+	writeJSON(w, http.StatusCreated, map[string]any{"key": k, "secret": secret})
+}
+
+// handleListAPIKeys implements GET /api-keys: every key's public
+// record (secret material never included). Requires admin:keys.
+func (s *server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"keys": s.ledgerFor(r).ListAPIKeys()})
+}
+
+// handleGetAPIKey implements GET /api-keys/{id}. Requires admin:keys.
+func (s *server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
+	k, ok := s.ledgerFor(r).GetAPIKey(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrAPIKeyNotFound.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"key": k})
+}
+
+type rotateAPIKeyRequest struct {
+	// GraceSeconds is how long the old secret keeps working after the
+	// rotation (dual-run for rolling deployments). Zero retires it at
+	// once.
+	GraceSeconds int64 `json:"grace_seconds"`
+}
+
+// handleRotateAPIKey implements POST /api-keys/{id}/rotate: issue a
+// fresh secret for the same logical identity. The old secret stays
+// valid for grace_seconds. Requires admin:keys.
+func (s *server) handleRotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	var req rotateAPIKeyRequest
+	if r.ContentLength != 0 {
+		if !s.decodeJSONBody(w, r, &req) {
+			return
+		}
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	k, secret, err := s.ledgerFor(r).RotateAPIKeyCtx(actx, r.PathValue("id"), time.Duration(req.GraceSeconds)*time.Second)
+	if err != nil {
+		writeAPIKeyError(w, err)
+		return
+	}
+	s.metrics.APIKeyCreationsTotal.Add(1)
+	writeJSON(w, http.StatusOK, map[string]any{"key": k, "secret": secret})
+}
+
+// handleRevokeAPIKey implements POST /api-keys/{id}/revoke: retire a
+// key immediately. Idempotent. Requires admin:keys.
+func (s *server) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	k, err := s.ledgerFor(r).RevokeAPIKeyCtx(actx, r.PathValue("id"))
+	if err != nil {
+		writeAPIKeyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"key": k})
 }
 
 // tenantCtxKey carries the resolved tenant ID through the request

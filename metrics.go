@@ -143,6 +143,14 @@ type Metrics struct {
 	// means a downstream consumer is down or rejecting — alert on it.
 	// Delivery failures never block the posting path.
 	WebhookFailuresTotal atomic.Uint64
+	// APIKeyAuthFailuresTotal counts requests rejected by the API key
+	// middleware (LG-130): missing/invalid/expired/revoked credentials
+	// and rate-quota denials. Only meaningful when API key enforcement
+	// is enabled.
+	APIKeyAuthFailuresTotal atomic.Uint64
+	// APIKeyCreationsTotal counts API keys issued through the HTTP API
+	// (LG-130): creations and rotations both mint a fresh secret.
+	APIKeyCreationsTotal atomic.Uint64
 	// OverdraftRejections counts POST /entries, POST /entries/batch,
 	// POST /transfers, POST /merges, and capture requests rejected with
 	// 422 because they would have overdrawn an overdraft-protected
@@ -913,6 +921,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_webhook_failures_total",
 		"Total outbound webhook deliveries that exhausted their retries (one event x endpoint pair the dispatcher gave up on). A rising count means a downstream webhook consumer is down or rejecting; delivery failures never block the posting path.",
 		m.WebhookFailuresTotal.Load())
+	writeCounter(&sb, "ledger_api_key_auth_failures_total",
+		"Total requests rejected by the API key middleware (missing/invalid/expired/revoked credentials, insufficient scope, rate-quota denials).",
+		m.APIKeyAuthFailuresTotal.Load())
+	writeCounter(&sb, "ledger_api_key_creations_total",
+		"Total API keys issued through the HTTP API (creations and rotations).",
+		m.APIKeyCreationsTotal.Load())
 	writeCounter(&sb, "ledger_alias_sets_total",
 		"Total PUT /accounts/{id}/alias requests served successfully (alias bindings, rebinds, and clears).",
 		m.AliasSetsTotal.Load())

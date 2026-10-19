@@ -4244,6 +4244,48 @@ Semantics worth knowing:
 - Counted by `ledger_audit_export_total` /
   `ledger_audit_export_breaks_total` — alert on any nonzero breaks.
 
+### API key management (`POST /api-keys`, LG-130)
+
+Machine-to-machine authentication for the HTTP API. The ledger
+historically had no auth at all (operator endpoints relied on network
+posture plus the `x-ledger-actor` header, which is attribution, not
+authentication); API keys close that gap for automation
+(reconciliation jobs, payout workers) without disturbing the
+anonymous-operator flow:
+
+- `ledger.WithAPIKeyAuth()` enables enforcement; the middleware is a
+  pure pass-through until then, so existing deployments and tests are
+  unaffected.
+- `POST /api-keys` mints a key (`{"name","scopes","expires_at?",
+  "rate_limit_per_min?"}` → `201 {"key","secret"}`). The secret
+  (`lak_` + 64 hex chars) is shown **exactly once** — the ledger stores
+  only its SHA-256 hash, so a snapshot/database leak never yields a
+  usable credential.
+- Scopes are coarse and explicit: `read:ledger`, `write:entries`,
+  `write:transfer`, `admin:audit`, `admin:keys` (`admin:keys` implies
+  everything). Reads need `read:ledger`; `POST /entries*` needs
+  `write:entries`; `POST /transfers` needs `write:transfer`; review
+  decisions and every other mutating operator path need `admin:audit`.
+- `POST /api-keys/{id}/rotate` (`{"grace_seconds"}`) issues a fresh
+  secret for the same identity; the old secret dual-runs through the
+  grace window so rolling deployments never drop in flight. `POST
+  /api-keys/{id}/revoke` retires immediately (idempotent).
+- Per-key per-minute rate quotas (opt-in) bound a compromised key's
+  blast radius; over-quota requests get `429`.
+- Every lifecycle change emits a structured audit event
+  (`api_key_created` / `api_key_rotated` / `api_key_revoked`) with
+  who/what/when — key management itself is tamper-evident. When
+  `x-ledger-actor` is absent, requests are attributed as
+  `apikey:<name>`.
+- Bootstrap: with zero keys issued, `POST /api-keys` is open so the
+  first operator key can be minted; everything else is `401` until a
+  key exists.
+- Keys round-trip through disaster-recovery snapshots (hashes only —
+  existing keys keep authenticating after a restore; rotate for fresh
+  secrets).
+- Metrics: `ledger_api_key_auth_failures_total`,
+  `ledger_api_key_creations_total`.
+
 ### `GET /metrics`
 
 Prometheus-format counters, rendered by hand with the standard library
@@ -4497,6 +4539,11 @@ curl -s localhost:8080/metrics
 - `ledger_period_preflight_runs_total` — every
   `POST /periods/{id}/preflight` request received, including rejected
   ones.
+- `ledger_api_key_auth_failures_total` — requests rejected by the API
+  key middleware (missing/invalid/expired/revoked credentials,
+  insufficient scope, rate-quota denials).
+- `ledger_api_key_creations_total` — API keys issued through the HTTP
+  API (creations and rotations).
 
 ## Running
 
