@@ -2188,6 +2188,69 @@ maturing before `matures_at`, withdrawing a matured deposit, or
 accruing after maturity; `500` interest-expense/penalty account not
 configured.
 
+### Payout instructions (出款)
+
+The operator lifecycle of money leaving the ledger to an external
+destination: `draft → approved → submitted → settled | failed`, with
+`cancelled` reachable from draft/approved. Drafting (`POST /payouts`)
+is off-journal — it locks nothing; the instruction carries the payee
+account, amount, currency, an external destination reference
+(LG-122 style, e.g. `"FPS:6222000012345678"`), the maker, and an
+optional idempotency key (own namespace, honors
+`LEDGER_IDEMPOTENCY_TTL`).
+
+Approval (`POST /payouts/{id}/approve`) runs maker-checker against the
+LG-42 dual-control review threshold: at or above the payee's threshold
+the approver must differ from the maker (`403` otherwise); below it any
+approver may sign, and the approver is always recorded.
+
+Submit (`POST /payouts/{id}/submit`) earmarks the funds by posting
+**debit payout-clearing / credit payee** through the full Post gate
+order — denylist, replay, VAN, chart direction, closed, dormant,
+frozen, suspended, overdraft, daily-limit, period — so the instruction
+cannot route around the ledger's risk controls. The legs mirror a
+transfer `payee → clearing` under the ledger's transfer convention
+(debit = balance up): the payee's balance drops, the clearing account
+holds the earmark. The clearing account is fail-closed
+(`LEDGER_PAYOUT_CLEARING_ACCOUNT`, `500` when unconfigured). The entry
+ID is the deterministic `payout/<id>/clearing`.
+
+Settle (`POST /payouts/{id}/settle`) requires bank-statement evidence:
+the supplied statement line must be an outflow that matches the
+clearing entry through the statement-matching machinery (LG-107) —
+exactly one candidate, and it must be the clearing row itself, else
+`422`. On settle the suspense reverses — debit payee / credit clearing
+("冲待清算", `payout/<id>/settle`) — so the clearing account nets to
+zero; the economic outflow is evidenced by the matched statement line,
+not by a second journal leg. `POST /payouts/{id}/fail` does the same
+reversal for a bank rejection (`payout/<id>/fail`) but keeps the failed
+status with the reason, so the books never show money as left when it
+did not. Every transition audits (`payout_open/approved/submitted/
+settled/failed/cancelled`), emits an outbox event, and is idempotent;
+the reconcile report discloses every instruction (`payouts` section).
+Instructions are in-memory only (like clearing batches) — the journaled
+legs survive snapshots, and the fail-closed clearing account
+round-trips.
+
+```bash
+curl -s -X POST localhost:8080/payouts \
+  -d '{"id":"po-1","payee_account":"saver","amount_cents":250000,"destination":"FPS:6222000012345678","maker":"alice"}'
+# 201 {"id":"po-1","status":"draft",...}
+curl -s -X POST localhost:8080/payouts/po-1/approve -d '{"approver":"bob"}'
+curl -s -X POST localhost:8080/payouts/po-1/submit
+# 200 {"status":"submitted","clearing_entry_id":"payout/po-1/clearing",...}
+curl -s -X POST localhost:8080/payouts/po-1/settle \
+  -d '{"statement":{"id":"stmt-1","account":"saver","currency":"USD","direction":"out","amount_cents":250000,"posted_at":"2026-10-19T12:00:00Z"}}'
+# 200 {"status":"settled","statement_line_id":"stmt-1",...}
+```
+
+Status codes: `201` first draft / `200` replay or idempotent
+transition; `400` validation errors; `403` maker-checker violation or
+frozen/closed/suspended on the submit/settle legs; `404` unknown
+payout; `409` ID conflict or invalid state transition; `422`
+statement mismatch or overdraft/daily-limit/period rejection;
+`500` payout clearing account not configured.
+
 ### Installment plans (分期)
 
 A BNPL-style scheduled receivable: `OpenInstallmentPlan` splits a
@@ -4842,6 +4905,11 @@ curl -s localhost:8080/metrics
   requests received.
 - `ledger_term_deposit_rejections_total` — term-deposit requests rejected
   (insufficient available funds, not-yet-matured, conflict, …).
+- `ledger_payouts_total` — `POST /payouts` requests received.
+- `ledger_payouts_settled_total` — payout instructions that reached settled.
+- `ledger_payouts_rejected_total` — payout requests rejected
+  (maker-checker violations, invalid transitions, statement mismatches,
+  Post-gate rejections on the submit/settlement legs).
 - `ledger_credit_lines_total` — credit lines granted plus
   reduce/revoke requests received.
 - `ledger_credit_interest_accruals_total` — credit-line interest
@@ -5055,6 +5123,11 @@ Environment:
   `LEDGER_TD_INTEREST_EXPENSE=interest-expense`). Accruals are
   fail-closed: without this set, `POST /term-deposits/{id}/accrue`
   returns `500`.
+- `LEDGER_PAYOUT_CLEARING_ACCOUNT` — the ledger-wide clearing account
+  that payout submit legs debit (e.g.
+  `LEDGER_PAYOUT_CLEARING_ACCOUNT=payout-clearing`). Submits are
+  fail-closed: without this set, `POST /payouts/{id}/submit` returns
+  `500`.
 - `LEDGER_CREDIT_INTEREST_INCOME` — the ledger-wide interest-income
   account for credit-line utilization interest (e.g.
   `LEDGER_CREDIT_INTEREST_INCOME=interest-income`). Accruals are

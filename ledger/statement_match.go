@@ -153,11 +153,11 @@ type StatementMatchItem struct {
 // StatementMatchReport is the full match report for one MatchStatement
 // call.
 type StatementMatchReport struct {
-	Account   AccountID           `json:"account"`
+	Account   AccountID            `json:"account"`
 	Items     []StatementMatchItem `json:"items"`
-	Matched   int                 `json:"matched"`
-	Ambiguous int                 `json:"ambiguous"`
-	Unmatched int                 `json:"unmatched"`
+	Matched   int                  `json:"matched"`
+	Ambiguous int                  `json:"ambiguous"`
+	Unmatched int                  `json:"unmatched"`
 }
 
 // StatementMatchOptions tunes MatchStatement. AmountToleranceCents is
@@ -212,6 +212,16 @@ func (l *Ledger) MatchStatement(account AccountID, lines []StatementLine, opts S
 	if account == "" {
 		return nil, ErrEmptyAccountID
 	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.matchStatementLocked(account, lines, opts)
+}
+
+// matchStatementLocked is MatchStatement's body for callers that
+// already hold l.mu (the write lock) — e.g. SettlePayout, which matches
+// the settlement evidence atomically inside its own state transition.
+func (l *Ledger) matchStatementLocked(account AccountID, lines []StatementLine, opts StatementMatchOptions) (*StatementMatchReport, error) {
 	window := opts.MatchWindow
 	if window <= 0 {
 		window = DefaultOFXMatchWindow
@@ -220,9 +230,6 @@ func (l *Ledger) MatchStatement(account AccountID, lines []StatementLine, opts S
 	if tolerance < 0 {
 		tolerance = 0
 	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
 
 	if l.statementMatches == nil {
 		l.statementMatches = make(map[string]*statementMatchRecord)

@@ -152,16 +152,16 @@ type snapshotMergeLine struct {
 // Idempotency-key namespaces in a snapshot. One record per key, so every
 // namespace stays independently addressable on import.
 const (
-	snapshotNSEntry       = "entry"        // key -> JournalEntry (byKey)
-	snapshotNSTransfer    = "transfer"     // key -> []entry IDs (transferKeys)
-	snapshotNSHold        = "hold"         // key -> hold ID (holdKeys)
-	snapshotNSCapture     = "capture"      // key -> CaptureReceipt (captureKeys)
+	snapshotNSEntry       = "entry"           // key -> JournalEntry (byKey)
+	snapshotNSTransfer    = "transfer"        // key -> []entry IDs (transferKeys)
+	snapshotNSHold        = "hold"            // key -> hold ID (holdKeys)
+	snapshotNSCapture     = "capture"         // key -> CaptureReceipt (captureKeys)
 	snapshotNSPartialCap  = "partial_capture" // key -> PartialCaptureReceipt (partialCaptureKeys)
-	snapshotNSSweep       = "sweep"        // key -> snapshotSweep (sweepKeys)
-	snapshotNSMergeKey    = "merge_key"    // key -> merge ID (mergeKeys)
-	snapshotNSBatch       = "batch"        // key -> snapshotBatch (batchKeys)
-	snapshotNSAlloc       = "allocation"   // key -> snapshotAllocation (allocKeys)
-	snapshotNSTermDeposit = "term_deposit" // key -> deposit ID (termDepositKeys)
+	snapshotNSSweep       = "sweep"           // key -> snapshotSweep (sweepKeys)
+	snapshotNSMergeKey    = "merge_key"       // key -> merge ID (mergeKeys)
+	snapshotNSBatch       = "batch"           // key -> snapshotBatch (batchKeys)
+	snapshotNSAlloc       = "allocation"      // key -> snapshotAllocation (allocKeys)
+	snapshotNSTermDeposit = "term_deposit"    // key -> deposit ID (termDepositKeys)
 )
 
 // snapshotIdempotencyLine carries one idempotency-key registration. Only
@@ -177,9 +177,9 @@ type snapshotIdempotencyLine struct {
 	// PartialReceipt carries the partial-capture receipt row for the
 	// "partial_capture" namespace (see hold_partial.go).
 	PartialReceipt *PartialCaptureReceipt `json:"partial_receipt,omitempty"`
-	Sweep     *snapshotSweep  `json:"sweep,omitempty"`
-	MergeID   string          `json:"merge_id,omitempty"`
-	Batch     *snapshotBatch  `json:"batch,omitempty"`
+	Sweep          *snapshotSweep         `json:"sweep,omitempty"`
+	MergeID        string                 `json:"merge_id,omitempty"`
+	Batch          *snapshotBatch         `json:"batch,omitempty"`
 	// Allocation carries the allocation receipt row for the
 	// "allocation" namespace (see allocation.go).
 	Allocation *snapshotAllocation `json:"allocation,omitempty"`
@@ -407,7 +407,7 @@ type snapshotConfigLine struct {
 	// count backing ledger_review_delegations_total, so the metric
 	// does not reset across a disaster-recovery restore.
 	ReviewDelegations        []ReviewDelegation `json:"review_delegations,omitempty"`
-	ReviewDelegationsGranted uint64            `json:"review_delegations_granted,omitempty"`
+	ReviewDelegationsGranted uint64             `json:"review_delegations_granted,omitempty"`
 	// DunningConfigs carries the opt-in collections escalation policies
 	// (see SetDunningConfig) and DunningStates the current escalation
 	// level per (account, currency); absent in snapshots written before
@@ -509,6 +509,11 @@ type snapshotConfigLine struct {
 	// restore that dropped it would turn fail-closed accruals into
 	// fail-open ones, so it round-trips like the fee-revenue account.
 	TdInterestExpense AccountID `json:"td_interest_expense,omitempty"`
+	// PayoutClearingAccount carries the ledger-wide payout clearing
+	// account (see SetPayoutClearingAccount); absent in snapshots
+	// written before payout instructions existed, for the same
+	// fail-closed reason as TdInterestExpense.
+	PayoutClearingAccount AccountID `json:"payout_clearing_account,omitempty"`
 	// CreditInterestIncome carries the ledger-wide credit-line
 	// interest-income account (see SetCreditInterestIncome); absent in
 	// snapshots written before credit lines existed, for the same
@@ -1049,46 +1054,46 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		parents[c] = p
 	}
 	cfg := snapshotConfigLine{
-		Record:                "config",
-		Frozen:                frozen,
-		OverdraftProtected:    overdraft,
-		Parents:               parents,
-		Dormant:               l.dormantCopyLocked(),
-		FeeRateBps:            flatFeeRateBps(l.feeTiers),
-		FeeTiers:              l.feeTiers,
-		FeeRevenueAccount:     l.feeRevenueAccount,
-		InterestTiers:         append([]InterestTier(nil), l.interestTiers...),
-		MaxTransferChunkCents: l.maxTransferChunkCents,
-		SplitFeePerChunk:      l.splitFeePerChunk,
-		IdempotencyTTL:        l.idempotencyTTL.String(),
-		DailyLimits:           l.dailyLimitsLocked(),
-		SweepReserves:         l.sweepReservesLocked(),
-		Allowlists:            l.allowlistSnapshotLocked(),
-		LargeTxThresholds:     l.largeTxThresholdsLocked(),
-		LargeTxReportCurrency: l.largeTxReportCurrency,
-		BusinessDayCalendar:   l.businessCalendarSnapshotLocked(),
-		AccrualBusinessDaysOnly: l.accrualBusinessDaysOnly,
-		Budgets:               l.budgetsLocked(),
-		Denylist:              l.denylistLocked(),
-		FXRates:               l.fxRatesLocked(),
-		FXAccount:             l.fxAccount,
-		FXIncomeAccount:       l.fxIncomeAccount,
-		FXSnapshotVersion:     l.fxSnapshotVersion,
-		FXRateTableSnapshots:  l.fxRateTableSnapshotsLocked(),
-		FXForwards:            l.fxForwardsSnapshotLocked(),
-		ClosedPeriods:         l.closedPeriodsLocked(),
-		BalanceWatches:        l.balanceWatchesLocked(),
+		Record:                   "config",
+		Frozen:                   frozen,
+		OverdraftProtected:       overdraft,
+		Parents:                  parents,
+		Dormant:                  l.dormantCopyLocked(),
+		FeeRateBps:               flatFeeRateBps(l.feeTiers),
+		FeeTiers:                 l.feeTiers,
+		FeeRevenueAccount:        l.feeRevenueAccount,
+		InterestTiers:            append([]InterestTier(nil), l.interestTiers...),
+		MaxTransferChunkCents:    l.maxTransferChunkCents,
+		SplitFeePerChunk:         l.splitFeePerChunk,
+		IdempotencyTTL:           l.idempotencyTTL.String(),
+		DailyLimits:              l.dailyLimitsLocked(),
+		SweepReserves:            l.sweepReservesLocked(),
+		Allowlists:               l.allowlistSnapshotLocked(),
+		LargeTxThresholds:        l.largeTxThresholdsLocked(),
+		LargeTxReportCurrency:    l.largeTxReportCurrency,
+		BusinessDayCalendar:      l.businessCalendarSnapshotLocked(),
+		AccrualBusinessDaysOnly:  l.accrualBusinessDaysOnly,
+		Budgets:                  l.budgetsLocked(),
+		Denylist:                 l.denylistLocked(),
+		FXRates:                  l.fxRatesLocked(),
+		FXAccount:                l.fxAccount,
+		FXIncomeAccount:          l.fxIncomeAccount,
+		FXSnapshotVersion:        l.fxSnapshotVersion,
+		FXRateTableSnapshots:     l.fxRateTableSnapshotsLocked(),
+		FXForwards:               l.fxForwardsSnapshotLocked(),
+		ClosedPeriods:            l.closedPeriodsLocked(),
+		BalanceWatches:           l.balanceWatchesLocked(),
 		LiquidityAlertThresholds: l.liquidityThresholdsLocked(),
-		ReviewThresholds:      l.reviewThresholdsLocked(),
-		ReviewThresholdCents:  l.reviewThreshold,
-		DunningConfigs:        l.dunningConfigsLocked(),
-		DunningStates:         l.dunningStatesLocked(),
-		SettlementChannels:    l.settlementChannelsLocked(),
+		ReviewThresholds:         l.reviewThresholdsLocked(),
+		ReviewThresholdCents:     l.reviewThreshold,
+		DunningConfigs:           l.dunningConfigsLocked(),
+		DunningStates:            l.dunningStatesLocked(),
+		SettlementChannels:       l.settlementChannelsLocked(),
 		// LG-101: the cutoff config and the in-flight deferrals
 		// round-trip, so a restored ledger keeps the exact settlement
 		// windows and the exact settlement trail.
-		SettlementCutoffs:   l.settlementCutoffsSnapshotLocked(),
-		SettlementDeferrals: l.settlementDeferralsSnapshotLocked(),
+		SettlementCutoffs:     l.settlementCutoffsSnapshotLocked(),
+		SettlementDeferrals:   l.settlementDeferralsSnapshotLocked(),
 		JournalRules:          l.journalRulesLocked(),
 		JournalRuleVersion:    l.journalRuleVersion,
 		AllocationRules:       l.allocationRulesLocked(),
@@ -1096,28 +1101,29 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		// LG-132: the automatic posting rules round-trip as
 		// structural config, sorted by name for a deterministic
 		// snapshot.
-		PostingRules:          l.postingRulesSortedLocked(),
-		RevalAccount:          l.revalAccount,
-		RevalBaselines:        l.revaluationPositionsLocked(),
-		AccountTypes:          l.accountTypesLocked(),
-		AccountTags:           l.accountTagsLocked(),
-		AccountAliases:        l.accountAliasesLocked(),
-		ExternalMappings:      l.externalMappingsLocked(),
+		PostingRules:     l.postingRulesSortedLocked(),
+		RevalAccount:     l.revalAccount,
+		RevalBaselines:   l.revaluationPositionsLocked(),
+		AccountTypes:     l.accountTypesLocked(),
+		AccountTags:      l.accountTagsLocked(),
+		AccountAliases:   l.accountAliasesLocked(),
+		ExternalMappings: l.externalMappingsLocked(),
 		// LG-123: the declared entry links round-trip in declaration
 		// order; the link chain rebuilds from them on import, so a
 		// restored ledger keeps the exact tamper-evident association
 		// record.
-		EntryLinks:            l.entryLinksLocked(),
+		EntryLinks: l.entryLinksLocked(),
 		// LG-125: the mandate registry and its debit index round-trip,
 		// so a restored ledger keeps the exact standing pull
 		// authorizations the original ran on.
-		Mandates:      l.mandatesSnapshotLocked(),
-		MandateDebits: l.mandateDebitsSnapshotLocked(),
+		Mandates:              l.mandatesSnapshotLocked(),
+		MandateDebits:         l.mandateDebitsSnapshotLocked(),
 		ClosedAccounts:        l.closedCopyLocked(),
 		Suspended:             l.suspendedCopyLocked(),
 		OFXImportRegistry:     l.ofxImportsLocked(),
 		CAMT053ImportRegistry: l.camt053ImportsLocked(),
 		TdInterestExpense:     l.tdInterestExpense,
+		PayoutClearingAccount: l.payoutClearingAccount,
 		CreditInterestIncome:  l.creditInterestIncome,
 		CreditLines:           l.creditLinesLocked(),
 		ECLExpenseAccount:     l.eclExpenseAccount,
@@ -2854,6 +2860,7 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// -limit floor back to zero, so they round-trip like the
 	// overdraft-protection list.
 	l.tdInterestExpense = cfg.TdInterestExpense
+	l.payoutClearingAccount = cfg.PayoutClearingAccount
 	l.creditInterestIncome = cfg.CreditInterestIncome
 	l.creditLines = make(map[creditLineKey]CreditLine, len(cfg.CreditLines))
 	for _, cl := range cfg.CreditLines {

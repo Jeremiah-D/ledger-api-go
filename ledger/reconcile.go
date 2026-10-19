@@ -233,8 +233,8 @@ type ReconciliationReport struct {
 	// operator can see which authorizations still have open settlement
 	// capacity.
 	PartialCaptures []PartialCaptureSummary `json:"partial_captures"`
-	IdempotencyKeys IdempotencyKeyHealth `json:"idempotency_keys"`
-	AuditChain      AuditChainHealth     `json:"audit_chain"`
+	IdempotencyKeys IdempotencyKeyHealth    `json:"idempotency_keys"`
+	AuditChain      AuditChainHealth        `json:"audit_chain"`
 	// FXRates lists the configured FX conversion rates (see SetFXRate),
 	// sorted by (from, to): the conversion table a settlement operator
 	// audited against. The FX clearing account's own balances are part
@@ -406,6 +406,12 @@ type ReconciliationReport struct {
 	// dividend disclosure). Risk tooling reads this to know which funds
 	// are locked and when they release.
 	TermDeposits []TermDepositReport `json:"term_deposits"`
+	// Payouts lists every payout instruction (see CreatePayout), sorted
+	// by payout ID: the payee, amount, destination, maker/checker, and
+	// lifecycle status, with the clearing entry and the evidencing
+	// statement line once submitted/settled. Operations reads this to
+	// see which payouts are still in flight.
+	Payouts []PayoutReport `json:"payouts,omitempty"`
 	// CreditLines lists every granted credit line (see
 	// GrantCreditLine), sorted by (account, currency): the limit, the
 	// drawn utilization, and the remaining availability. Risk tooling
@@ -453,16 +459,16 @@ type ReconciliationReport struct {
 // TermDepositReport is one term deposit's Reconcile disclosure: the
 // locked principal and the interest the journal has booked for it.
 type TermDepositReport struct {
-	ID                   string          `json:"id"`
-	Account              AccountID       `json:"account"`
-	PrincipalCents       int64           `json:"principal_cents"`
-	Currency             string          `json:"currency"`
-	RateBps              int64           `json:"rate_bps"`
-	TermDays             int64           `json:"term_days"`
-	Status               string          `json:"status"`
-	OpenedAt             time.Time       `json:"opened_at"`
-	MaturesAt            time.Time       `json:"matures_at"`
-	AccruedInterestCents int64           `json:"accrued_interest_cents"`
+	ID                   string    `json:"id"`
+	Account              AccountID `json:"account"`
+	PrincipalCents       int64     `json:"principal_cents"`
+	Currency             string    `json:"currency"`
+	RateBps              int64     `json:"rate_bps"`
+	TermDays             int64     `json:"term_days"`
+	Status               string    `json:"status"`
+	OpenedAt             time.Time `json:"opened_at"`
+	MaturesAt            time.Time `json:"matures_at"`
+	AccruedInterestCents int64     `json:"accrued_interest_cents"`
 	// Rollover discloses the renewal policy (LG-139): the active
 	// policy, how many renewals this deposit has already spawned, and
 	// — for rollover-created deposits — the parent deposit's ID.
@@ -792,12 +798,12 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// "<transfer ID>/spread" legs (see fxSpreadPNLLocked) — the
 		// same legs the audit chain and trial balances already
 		// carry, so the section can never disagree with the books.
-		FXSpreadPNL:             l.fxSpreadPNLLocked(),
-		Dividends:               l.dividendsLocked(),
-		Escheats:                l.escheatsLocked(),
-		VirtualAccounts:         l.virtualAccountsLocked(),
-		VirtualAccountVersion:   l.virtualAccountVersion,
-		ExternalMappings:        l.externalMappingsLocked(),
+		FXSpreadPNL:           l.fxSpreadPNLLocked(),
+		Dividends:             l.dividendsLocked(),
+		Escheats:              l.escheatsLocked(),
+		VirtualAccounts:       l.virtualAccountsLocked(),
+		VirtualAccountVersion: l.virtualAccountVersion,
+		ExternalMappings:      l.externalMappingsLocked(),
 		// LG-123: the declared entry links and their per-root
 		// adjustment-chain expansion — the tamper-evident
 		// association record, disclosed like the mapping table.
@@ -810,7 +816,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// authorizations with their effective statuses and debit
 		// usage, so the reconciliation record shows which mandates
 		// are live and how far each has been drawn.
-		Mandates: l.mandateReportsLocked(now),
+		Mandates:                l.mandateReportsLocked(now),
 		ClosedPeriods:           l.closedPeriodsLocked(),
 		ActiveTransferSchedules: l.activeScheduleCountLocked(),
 		PendingReviews:          l.pendingTransferReviewsLocked(now),
@@ -818,12 +824,12 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// LG-124: the report discloses the active N-of-M quorum
 		// policy alongside the pending reviews that carry each
 		// review's named votes.
-		ReviewQuorum:            l.reviewQuorumCopyLocked(),
+		ReviewQuorum: l.reviewQuorumCopyLocked(),
 		// LG-126: the report discloses the active approval chain
 		// alongside the pending reviews that carry each review's
 		// stage and per-stage votes.
-		ApprovalChain:           l.approvalChainCopyLocked(),
-		DunningStatuses:         l.dunningDisclosuresLocked(),
+		ApprovalChain:   l.approvalChainCopyLocked(),
+		DunningStatuses: l.dunningDisclosuresLocked(),
 		// LG-101: the report discloses the settlement-window config and
 		// every deferred transfer, so the reconciliation record shows
 		// which money settles in which window.
@@ -833,6 +839,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		RevaluationImpact:   l.revaluationPositionsLocked(),
 		AccountTags:         l.accountTagsLocked(),
 		TermDeposits:        l.termDepositReportsLocked(),
+		Payouts:             l.payoutReportsLocked(),
 		CreditLines:         l.creditLineReportsLocked(),
 		// LG-98: the report discloses the day's intraday liquidity
 		// position table — the same read-only forecast the

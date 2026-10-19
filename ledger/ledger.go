@@ -694,6 +694,19 @@ type Ledger struct {
 	termDeposits      map[string]TermDeposit
 	termDepositKeys   map[string]string
 	tdInterestExpense AccountID
+	// payouts maps payout instruction IDs to their records (see
+	// payout.go): the operator lifecycle of money leaving the ledger.
+	// payoutKeys maps a payout open's idempotency key to its payout ID
+	// — its own namespace, expiring with the TTL like every other key
+	// index (see prunePayoutKeysLocked). payoutClearingAccount is the
+	// ledger-wide clearing account payout submit legs credit (see
+	// SetPayoutClearingAccount): empty means unconfigured and submits
+	// are fail-closed. The clearing account is structural config and
+	// round-trips through disaster-recovery snapshots; the instructions
+	// themselves are in-memory only, like clearing batches.
+	payouts               map[string]PayoutInstruction
+	payoutKeys            map[string]string
+	payoutClearingAccount AccountID
 	// creditLines maps (account, currency) to the granted credit line
 	// (see creditline.go): an opt-in per-account overdraft floor of
 	// -limit with daily interest on utilization. creditInterestIncome
@@ -1102,25 +1115,25 @@ type Ledger struct {
 	// the debits were never booked, so there is nothing to reconcile.
 	mandateRetries     map[string]*MandateRetry
 	mandateRetryFiring map[string]bool
-	chain              []chainLink   // audit chain, one link per successful Post, in order
+	chain              []chainLink // audit chain, one link per successful Post, in order
 	// chainArchives remembers the chain-segment archives this process
 	// exported (LG-136): PruneChainPrefix requires the dropped prefix
 	// to be covered by these archives and re-verifies them before
 	// dropping. Guarded by mu; in-memory only — a restart drops the
 	// registry (see chain_archive.go).
-	chainArchives      []chainArchiveRecord
+	chainArchives []chainArchiveRecord
 	// chainPrunedTo is the highest seq PruneChainPrefix has dropped
 	// (LG-136). It lets VerifyChain fail honestly on a pruned chain —
 	// including a fully pruned (empty) hot chain — instead of passing
 	// on a chain that no longer covers the ledger's history. Guarded
 	// by mu; monotonic.
-	chainPrunedTo       uint64
-	version            uint64        // bumped by every successful Post
-	idempotencyTTL     time.Duration // 0 = never expire idempotency keys
-	pruneInterval      time.Duration // min gap between lazy key sweeps
-	lastKeyPrune       time.Time
-	lastDailyPrune     time.Time // last run of the daily-outflow bucket sweep
-	lastBudgetPrune    time.Time // last run of the monthly-spend bucket sweep
+	chainPrunedTo   uint64
+	version         uint64        // bumped by every successful Post
+	idempotencyTTL  time.Duration // 0 = never expire idempotency keys
+	pruneInterval   time.Duration // min gap between lazy key sweeps
+	lastKeyPrune    time.Time
+	lastDailyPrune  time.Time // last run of the daily-outflow bucket sweep
+	lastBudgetPrune time.Time // last run of the monthly-spend bucket sweep
 	// anchor holds the external audit-chain anchoring state (LG-44):
 	// the configured Ed25519 key and the loaded checkpoints. See
 	// anchor.go for the lock-order contract.
@@ -1268,6 +1281,8 @@ func New(opts ...Option) *Ledger {
 		partialCaptureKeys:    make(map[string]PartialCaptureReceipt),
 		termDeposits:          make(map[string]TermDeposit),
 		termDepositKeys:       make(map[string]string),
+		payouts:               make(map[string]PayoutInstruction),
+		payoutKeys:            make(map[string]string),
 		ftpCurves:             make(map[string]*FtpCurve),
 		creditLines:           make(map[creditLineKey]CreditLine),
 		eclStageConfig:        DefaultECLStageConfig(),
@@ -1853,7 +1868,9 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// Dispute-raise idempotency keys expire on the same schedule, in
 	// their own namespace (see pruneDisputeKeysLocked in dispute.go):
 	// the disputes themselves are never evicted — only the
-	// replay-detection index shrinks.
+	// replay-detection index shrinks. Payout open keys expire on the
+	// same schedule, in their own namespace (see prunePayoutKeysLocked
+	// in payout.go).
 	removed += l.pruneHoldKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
 	removed += l.pruneMergeKeysLocked(now)
@@ -1864,6 +1881,7 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	removed += l.pruneAllocKeysLocked(now)
 	removed += l.pruneTermDepositKeysLocked(now)
 	removed += l.pruneDisputeKeysLocked(now)
+	removed += l.prunePayoutKeysLocked(now)
 	return removed
 }
 

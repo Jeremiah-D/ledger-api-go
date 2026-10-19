@@ -281,6 +281,18 @@ type Metrics struct {
 	// funds on open, accruing past maturity, or maturing/withdrawing a
 	// deposit in the wrong state.
 	TermDepositRejections atomic.Uint64
+	// PayoutsTotal counts POST /payouts requests received (all attempts,
+	// including duplicates and rejected payloads).
+	PayoutsTotal atomic.Uint64
+	// PayoutSettlementsTotal counts payout instructions that reached
+	// settled, the terminal success state (see SettlePayout).
+	PayoutSettlementsTotal atomic.Uint64
+	// PayoutRejections counts payout-domain requests rejected for
+	// semantic reasons: maker-checker violations, invalid state
+	// transitions, statement mismatches on settle, or Post-gate
+	// rejections (frozen/closed/overdraft/daily-limit/period) on the
+	// submit and settlement legs.
+	PayoutRejections atomic.Uint64
 	// CreditLinesTotal counts POST /credit-lines requests received
 	// (all attempts, including duplicates and rejected payloads).
 	CreditLinesTotal atomic.Uint64
@@ -727,6 +739,13 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_term_deposit_rejections_total",
 		"Total term-deposit-domain requests rejected with 422: insufficient available funds, accruing past maturity, or wrong-state maturity/withdrawal.",
 		m.TermDepositRejections.Load())
+	writeCounter(&sb, "ledger_payouts_total",
+		"Total POST /payouts requests received.", m.PayoutsTotal.Load())
+	writeCounter(&sb, "ledger_payouts_settled_total",
+		"Total payout instructions that reached settled.", m.PayoutSettlementsTotal.Load())
+	writeCounter(&sb, "ledger_payouts_rejected_total",
+		"Total payout-domain requests rejected: maker-checker violations, invalid transitions, statement mismatches, or Post-gate rejections on the submit/settlement legs.",
+		m.PayoutRejections.Load())
 	writeCounter(&sb, "ledger_credit_lines_total",
 		"Total POST /credit-lines requests received.", m.CreditLinesTotal.Load())
 	writeCounter(&sb, "ledger_credit_interest_accruals_total",

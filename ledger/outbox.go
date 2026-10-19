@@ -129,6 +129,15 @@ const (
 	OutboxTermDepositMatured    = "term_deposit_matured"
 	OutboxTermDepositWithdrawn  = "term_deposit_withdrawn"
 	OutboxTermDepositRolledOver = "term_deposit_rolled_over"
+	// Payout instruction lifecycle (see payout.go, LG-140): every
+	// instruction-level status move emits one event, so downstream
+	// consumers can subscribe to payout progress without polling.
+	OutboxPayoutCreated   = "payout_created"
+	OutboxPayoutApproved  = "payout_approved"
+	OutboxPayoutSubmitted = "payout_submitted"
+	OutboxPayoutSettled   = "payout_settled"
+	OutboxPayoutFailed    = "payout_failed"
+	OutboxPayoutCancelled = "payout_cancelled"
 	// pain.001 instruction lifecycle (see pain001_status.go, LG-102):
 	// every instruction-level or per-transfer status move emits one
 	// event, so downstream consumers can subscribe to bank-side

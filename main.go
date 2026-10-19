@@ -1908,12 +1908,12 @@ type createTransferScheduleRequest struct {
 	NextRunAt string `json:"next_run_at"`
 	// EndsAt is RFC3339, optional: the plan completes once the next run
 	// would fall after it.
-	EndsAt         string `json:"ends_at"`
+	EndsAt string `json:"ends_at"`
 	// BusinessDayCadence opts into business-day settlement (LG-95):
 	// after firing, NextRunAt advances T+N business days instead of a
 	// fixed duration.
-	BusinessDayCadence bool `json:"business_day_cadence"`
-	IdempotencyKey string `json:"idempotency_key"`
+	BusinessDayCadence bool   `json:"business_day_cadence"`
+	IdempotencyKey     string `json:"idempotency_key"`
 }
 
 // handleCreateTransferSchedule implements POST /transfer-schedules: it
@@ -1959,21 +1959,21 @@ func (s *server) handleCreateTransferSchedule(w http.ResponseWriter, r *http.Req
 		id = newID()
 	}
 	sched, duplicate, err := s.ledgerFor(r).CreateTransferSchedule(ledger.TransferSchedule{
-		ID:             id,
-		From:           req.FromAccount,
-		To:             req.ToAccount,
-		AmountCents:    req.AmountCents,
-		Currency:       req.Currency,
-		ToCurrency:     req.ToCurrency,
-		FXAccount:      req.FXAccount,
-		FeeCents:       req.FeeCents,
-		FeeAccount:     req.FeeAccount,
-		SkipFee:        req.SkipFee,
-		Memo:           req.Memo,
-		Interval:       interval,
-		NextRunAt:      nextRunAt,
-		EndsAt:         endsAt,
-		IdempotencyKey: req.IdempotencyKey,
+		ID:                 id,
+		From:               req.FromAccount,
+		To:                 req.ToAccount,
+		AmountCents:        req.AmountCents,
+		Currency:           req.Currency,
+		ToCurrency:         req.ToCurrency,
+		FXAccount:          req.FXAccount,
+		FeeCents:           req.FeeCents,
+		FeeAccount:         req.FeeAccount,
+		SkipFee:            req.SkipFee,
+		Memo:               req.Memo,
+		Interval:           interval,
+		NextRunAt:          nextRunAt,
+		EndsAt:             endsAt,
+		IdempotencyKey:     req.IdempotencyKey,
 		BusinessDayCadence: req.BusinessDayCadence,
 	})
 	if err != nil {
@@ -2339,12 +2339,12 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 // hold ID it is the operation's idempotency identity, and the journal
 // entry is booked under the deterministic "<holdID>/capture/<seq>" ID.
 type partialCaptureHoldRequest struct {
-	CaptureSeq    int               `json:"capture_seq"`
-	ToAccount     ledger.AccountID  `json:"to_account"`
-	AmountCents   int64             `json:"amount_cents"`
-	ExternalRef   string            `json:"external_ref"`
-	Attachments   []string          `json:"attachments"`
-	Metadata      map[string]string `json:"metadata"`
+	CaptureSeq  int               `json:"capture_seq"`
+	ToAccount   ledger.AccountID  `json:"to_account"`
+	AmountCents int64             `json:"amount_cents"`
+	ExternalRef string            `json:"external_ref"`
+	Attachments []string          `json:"attachments"`
+	Metadata    map[string]string `json:"metadata"`
 }
 
 // handlePartialCaptureHold implements POST /holds/{id}/capture/partial,
@@ -2377,14 +2377,14 @@ func (s *server) handlePartialCaptureHold(w http.ResponseWriter, r *http.Request
 		return
 	}
 	receipt, err := s.ledgerFor(r).CapturePartial(ledger.PartialCapture{
-		HoldID:       id,
-		To:           req.ToAccount,
-		CaptureSeq:   req.CaptureSeq,
-		AmountCents:  req.AmountCents,
-		ExternalRef:  req.ExternalRef,
-		Attachments:  req.Attachments,
-		Metadata:     req.Metadata,
-		CreatedAt:    time.Now(),
+		HoldID:      id,
+		To:          req.ToAccount,
+		CaptureSeq:  req.CaptureSeq,
+		AmountCents: req.AmountCents,
+		ExternalRef: req.ExternalRef,
+		Attachments: req.Attachments,
+		Metadata:    req.Metadata,
+		CreatedAt:   time.Now(),
 	})
 	if err != nil {
 		if errors.Is(err, ledger.ErrHoldNotFound) {
@@ -2749,15 +2749,15 @@ func (s *server) handleOpenTermDeposit(w http.ResponseWriter, r *http.Request) {
 		id = newID()
 	}
 	td, duplicate, err := s.ledgerFor(r).OpenTermDeposit(ledger.TermDeposit{
-		ID:                id,
-		Account:           req.Account,
-		AmountCents:       req.AmountCents,
-		Currency:          req.Currency,
-		TermDays:          req.TermDays,
-		RateBps:           req.RateBps,
-		IdempotencyKey:    req.IdempotencyKey,
+		ID:                  id,
+		Account:             req.Account,
+		AmountCents:         req.AmountCents,
+		Currency:            req.Currency,
+		TermDays:            req.TermDays,
+		RateBps:             req.RateBps,
+		IdempotencyKey:      req.IdempotencyKey,
 		BusinessDayMaturity: req.BusinessDayMaturity,
-		Rollover:          req.Rollover,
+		Rollover:            req.Rollover,
 	})
 	if err != nil {
 		if errors.Is(err, ledger.ErrAccountClosed) {
@@ -2970,6 +2970,251 @@ func (s *server) handleSweepTermDeposits(w http.ResponseWriter, r *http.Request)
 	s.metrics.TermDepositSweepsTotal.Add(1)
 	matured, accrued := s.ledgerFor(r).SweepTermDeposits(time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{"matured": matured, "accrued": accrued})
+}
+
+type createPayoutRequest struct {
+	ID             string           `json:"id"`
+	PayeeAccount   ledger.AccountID `json:"payee_account"`
+	AmountCents    int64            `json:"amount_cents"`
+	Currency       string           `json:"currency"`
+	Destination    string           `json:"destination"`
+	Maker          string           `json:"maker"`
+	IdempotencyKey string           `json:"idempotency_key"`
+}
+
+// handleCreatePayout implements POST /payouts: drafts a payout
+// instruction (see ledger.CreatePayout). Drafting is off-journal — it
+// locks nothing. 201 on first draft, 200 on idempotency replay, 409 on
+// ID conflict, 400 on validation errors.
+func (s *server) handleCreatePayout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.PayoutsTotal.Add(1)
+	var req createPayoutRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	id := req.ID
+	if id == "" {
+		id = newID()
+	}
+	p, duplicate, err := s.ledgerFor(r).CreatePayout(ledger.PayoutInstruction{
+		ID:             id,
+		PayeeAccount:   req.PayeeAccount,
+		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
+		Destination:    req.Destination,
+		Maker:          req.Maker,
+		IdempotencyKey: req.IdempotencyKey,
+	})
+	if err != nil {
+		if errors.Is(err, ledger.ErrPayoutIDConflict) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidCurrency) {
+			s.metrics.CurrencyRejections.Add(1)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, p)
+		return
+	}
+	writeJSON(w, http.StatusCreated, p)
+}
+
+// handleGetPayout implements GET /payouts/{id}: returns the instruction.
+// An unknown payout returns 404.
+func (s *server) handleGetPayout(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "payout id required"})
+		return
+	}
+	p, ok := s.ledgerFor(r).GetPayout(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "payout not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+type approvePayoutRequest struct {
+	Approver string `json:"approver"`
+}
+
+// handleApprovePayout implements POST /payouts/{id}/approve: moves a
+// draft instruction to approved (see ledger.ApprovePayout). At or above
+// the payee's LG-42 review threshold the approver must differ from the
+// maker (403 on violation); approving from a non-draft status is 409.
+func (s *server) handleApprovePayout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req approvePayoutRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	p, err := s.ledgerFor(r).ApprovePayout(r.PathValue("id"), req.Approver)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutMakerCheckerViolation):
+			s.metrics.PayoutRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition):
+			s.metrics.PayoutRejections.Add(1)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// handleSubmitPayout implements POST /payouts/{id}/submit: moves an
+// approved instruction to submitted, booking debit payout-clearing /
+// credit payee through the full Post gate order (see
+// ledger.SubmitPayout). Booking rejections reuse the shared Post error
+// mapping; a missing clearing account is 500 (fail-closed config);
+// submitting from a non-approved status is 409.
+func (s *server) handleSubmitPayout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	p, err := s.ledgerFor(r).SubmitPayout(r.PathValue("id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition):
+			s.metrics.PayoutRejections.Add(1)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutClearingAccountNotConfigured):
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		default:
+			s.metrics.PayoutRejections.Add(1)
+			s.writePostError(w, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+type settlePayoutRequest struct {
+	// Statement is the bank statement line evidencing the money
+	// movement; it must be an outflow matching this payout's clearing
+	// entry (see ledger.SettlePayout).
+	Statement ledger.StatementLine `json:"statement"`
+	// AmountToleranceCents widens the statement match amount window;
+	// MatchWindowHours widens the date window (default 24h).
+	AmountToleranceCents int64   `json:"amount_tolerance_cents"`
+	MatchWindowHours     float64 `json:"match_window_hours"`
+}
+
+// handleSettlePayout implements POST /payouts/{id}/settle: moves a
+// submitted instruction to settled once the bank statement evidences
+// the clearing leg (see ledger.SettlePayout). A non-matching statement
+// is 422; settling from a non-submitted status is 409.
+func (s *server) handleSettlePayout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req settlePayoutRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	opts := ledger.StatementMatchOptions{AmountToleranceCents: req.AmountToleranceCents}
+	if req.MatchWindowHours > 0 {
+		opts.MatchWindow = time.Duration(req.MatchWindowHours * float64(time.Hour))
+	}
+	p, err := s.ledgerFor(r).SettlePayout(r.PathValue("id"), req.Statement, opts)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition):
+			s.metrics.PayoutRejections.Add(1)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutStatementMismatch):
+			s.metrics.PayoutRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			s.metrics.PayoutRejections.Add(1)
+			s.writePostError(w, err)
+		}
+		return
+	}
+	s.metrics.PayoutSettlementsTotal.Add(1)
+	writeJSON(w, http.StatusOK, p)
+}
+
+type failPayoutRequest struct {
+	Reason string `json:"reason"`
+}
+
+// handleFailPayout implements POST /payouts/{id}/fail: moves a submitted
+// instruction to failed, reversing the clearing suspense (see
+// ledger.FailPayout). A reason is required (400 without); failing from
+// a non-submitted status is 409.
+func (s *server) handleFailPayout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req failPayoutRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	p, err := s.ledgerFor(r).FailPayout(r.PathValue("id"), req.Reason)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition):
+			s.metrics.PayoutRejections.Add(1)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			s.metrics.PayoutRejections.Add(1)
+			s.writePostError(w, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// handleCancelPayout implements POST /payouts/{id}/cancel: cancels a
+// draft or approved instruction (see ledger.CancelPayout). Nothing was
+// ever booked, so cancelling touches no journal row; cancelling from
+// any later status is 409.
+func (s *server) handleCancelPayout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	p, err := s.ledgerFor(r).CancelPayout(r.PathValue("id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition):
+			s.metrics.PayoutRejections.Add(1)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 type grantCreditLineRequest struct {
@@ -4895,20 +5140,20 @@ var outboxStreamHeartbeatInterval = 15 * time.Second
 // handleOutboxStream implements GET /events/stream: the live tail of
 // the domain-event outbox (LG-133), as Server-Sent Events.
 //
-//	GET /events/stream?cursor=<opaque>&account=<id>&type=<t1,t2>
+//		GET /events/stream?cursor=<opaque>&account=<id>&type=<t1,t2>
 //
-//   - The handler first replays every event after the cursor (from the
-//     outbox directory, via ReadOutboxEvents — the same store
-//     GET /events reads), then switches to live push: every newly
-//     committed event arrives on the stream in seq order.
-//   - cursor is the opaque page cursor (base64url of the last seen
-//     seq); the standard Last-Event-ID header (the raw seq the stream
-//     sends as the SSE id) is accepted too, so EventSource clients
-//     reconnect without any client code.
-//   - account/type filter like GET /events, applied to the replay and
-//     the live push alike.
-//   - ": ping" heartbeats (default 15s) keep idle connections alive
-//     through proxies; the stream opens with a ": connected" comment.
+//	  - The handler first replays every event after the cursor (from the
+//	    outbox directory, via ReadOutboxEvents — the same store
+//	    GET /events reads), then switches to live push: every newly
+//	    committed event arrives on the stream in seq order.
+//	  - cursor is the opaque page cursor (base64url of the last seen
+//	    seq); the standard Last-Event-ID header (the raw seq the stream
+//	    sends as the SSE id) is accepted too, so EventSource clients
+//	    reconnect without any client code.
+//	  - account/type filter like GET /events, applied to the replay and
+//	    the live push alike.
+//	  - ": ping" heartbeats (default 15s) keep idle connections alive
+//	    through proxies; the stream opens with a ": connected" comment.
 //
 // Backpressure is honest: the live subscription is a bounded queue
 // (512 events). A consumer that falls behind past that is dropped —
@@ -5108,12 +5353,12 @@ func writeSSEComment(w http.ResponseWriter, text string) {
 // the operator-facing query over recent outbound webhook delivery
 // attempts, latest first.
 //
-//	GET /webhooks/deliveries?endpoint=<name>&status=<pending|delivered|failed>&limit=50
+//		GET /webhooks/deliveries?endpoint=<name>&status=<pending|delivered|failed>&limit=50
 //
-//   - endpoint filters to one registered endpoint name.
-//   - status filters to pending, delivered, or failed (anything else
-//     is 400).
-//   - limit caps the page at 1..100 (default 50; anything else is 400).
+//	  - endpoint filters to one registered endpoint name.
+//	  - status filters to pending, delivered, or failed (anything else
+//	    is 400).
+//	  - limit caps the page at 1..100 (default 50; anything else is 400).
 //
 // Without LEDGER_WEBHOOKS the endpoint 404s fail-closed, like
 // handleOutboxEvents without LEDGER_OUTBOX_DIR: there is no delivery
@@ -6442,6 +6687,15 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /term-deposits/{id}/accrue", s.handleAccrueTermInterest)
 	mux.HandleFunc("POST /term-deposits/{id}/mature", s.handleMatureTermDeposit)
 	mux.HandleFunc("POST /term-deposits/{id}/withdraw", s.handleWithdrawTermDeposit)
+	// LG-140: payout instruction lifecycle — draft -> approved ->
+	// submitted -> settled | failed, with cancel from draft/approved.
+	mux.HandleFunc("POST /payouts", s.handleCreatePayout)
+	mux.HandleFunc("GET /payouts/{id}", s.handleGetPayout)
+	mux.HandleFunc("POST /payouts/{id}/approve", s.handleApprovePayout)
+	mux.HandleFunc("POST /payouts/{id}/submit", s.handleSubmitPayout)
+	mux.HandleFunc("POST /payouts/{id}/settle", s.handleSettlePayout)
+	mux.HandleFunc("POST /payouts/{id}/fail", s.handleFailPayout)
+	mux.HandleFunc("POST /payouts/{id}/cancel", s.handleCancelPayout)
 	mux.HandleFunc("POST /credit-lines", s.handleGrantCreditLine)
 	mux.HandleFunc("POST /credit-lines/reduce", s.handleReduceCreditLine)
 	mux.HandleFunc("GET /credit-lines", s.handleGetCreditLine)
@@ -6578,11 +6832,11 @@ func (s *server) handler() http.Handler {
 			}
 			vanAttributions += l.VANAttributionCount()
 			freezeReleases += l.FrozenAutoReleases()
-		// The settlement-deferral counter likewise lives in the
-		// ledger: deferrals are decided inside the PostTransfer
-		// commit paths, not in a handler (see
-		// ledger/settlement_cutoff.go, LG-101).
-		deferredSettlements += l.SettlementDeferredCount()
+			// The settlement-deferral counter likewise lives in the
+			// ledger: deferrals are decided inside the PostTransfer
+			// commit paths, not in a handler (see
+			// ledger/settlement_cutoff.go, LG-101).
+			deferredSettlements += l.SettlementDeferredCount()
 			healthViolations += l.HealthViolationCount()
 			fxStaleAlerts += l.FXRateStaleAlertCount()
 			fxExpiredAlerts += l.FXRateExpiredAlertCount()
@@ -7542,6 +7796,16 @@ func main() {
 	if raw := os.Getenv("LEDGER_TD_INTEREST_EXPENSE"); raw != "" {
 		opts = append(opts, ledger.WithTermDepositInterestExpense(ledger.AccountID(raw)))
 		log.Printf("ledger-api-go: term-deposit interest expense account = %q", raw)
+	}
+
+	// LEDGER_PAYOUT_CLEARING_ACCOUNT configures the ledger-wide
+	// clearing account that payout submit legs debit (see
+	// ledger.SetPayoutClearingAccount and POST /payouts/{id}/submit).
+	// Unset means unconfigured: submits are fail-closed until the
+	// operator configures it.
+	if raw := os.Getenv("LEDGER_PAYOUT_CLEARING_ACCOUNT"); raw != "" {
+		opts = append(opts, ledger.WithPayoutClearingAccount(ledger.AccountID(raw)))
+		log.Printf("ledger-api-go: payout clearing account = %q", raw)
 	}
 
 	// LEDGER_CREDIT_INTEREST_INCOME configures the ledger-wide
