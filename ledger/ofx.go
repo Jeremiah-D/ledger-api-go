@@ -106,7 +106,10 @@ func (l *Ledger) ExportOFX(opts OFXExportOptions) (doc []byte, checkpoint string
 		if currency != "" && e.Currency != currency {
 			continue
 		}
-		rows = append(rows, e)
+		// Erased memos redact to the tombstone (LG-131): the OFX
+		// export is a disclosure path like GET /entries. Redaction
+		// happens here, under the read lock, via the locked variant.
+		rows = append(rows, l.redactEntryMemoLocked(e))
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].CreatedAt.Equal(rows[j].CreatedAt) {

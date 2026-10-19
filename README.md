@@ -4286,6 +4286,48 @@ anonymous-operator flow:
 - Metrics: `ledger_api_key_auth_failures_total`,
   `ledger_api_key_creations_total`.
 
+### PII erasure — the right to be forgotten (`POST /pii/erase`, LG-131)
+
+A ledger is append-only by design: journal rows are sealed into a
+tamper-evident hash chain, so "deleting" a journaled business note
+would destroy the audit property the system is built on. Erasure
+therefore works in two layers:
+
+- **Account holder names** (`ledger.SetAccountHolderName`) live in a
+  mutable PII registry. Erasing one overwrites the stored bytes with
+  cryptographic randomness and drops the record — true deletion, with
+  a tombstone left behind.
+- **Entry memos** live on sealed journal rows whose bytes the chain
+  hash covers. Erasing a memo does **not** rewrite the row (that
+  would break `VerifyChain`); instead the erasure is recorded in an
+  erasure registry, and every read/export path (`GET /entries`, `GET
+  /accounts/{id}/entries`, OFX export) redacts the memo to
+  `"[erased]"`. The books stay verifiable, the PII stops being
+  disclosed.
+
+Erasure is maker-checker: `POST /pii/erase` (`{"account","fields"}`,
+→ `202`) files a pending request; a **different** reviewer must
+approve it via `POST /pii/erase/{id}/approve` — self-approval is
+rejected with `403` (the LG-126 dual-control convention). `POST
+/pii/erase/{id}/reject` terminally rejects. `GET
+/pii/erasures?account=` lists the tombstones.
+
+- The erasable field set is a closed whitelist (`holder_name`,
+  `memo`). Amounts, accounts, currencies, journal legs — the
+  financial facts — can never be erased: requests naming them fail
+  with `400`.
+- The erasure event itself is appended to the structured audit chain,
+  so the chain's hash continuity is preserved — erasure is proven,
+  not hidden.
+- `GET /audit/export` manifests annotate `erasure_version` /
+  `erasure_count`, so downstream consumers can tell whether their
+  copy predates an erasure.
+- Erasure marks round-trip through disaster-recovery snapshots (a
+  restore stays erased); unerased holder names round-trip as working
+  data.
+- Metrics: `ledger_pii_erasure_requests_total`,
+  `ledger_pii_erasures_total`.
+
 ### `GET /metrics`
 
 Prometheus-format counters, rendered by hand with the standard library
@@ -4544,6 +4586,10 @@ curl -s localhost:8080/metrics
   insufficient scope, rate-quota denials).
 - `ledger_api_key_creations_total` — API keys issued through the HTTP
   API (creations and rotations).
+- `ledger_pii_erasure_requests_total` — PII erasure requests filed
+  (`POST /pii/erase` requests that passed validation).
+- `ledger_pii_erasures_total` — PII erasures executed after
+  dual-control approval.
 
 ## Running
 

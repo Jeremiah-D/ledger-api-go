@@ -570,6 +570,16 @@ type snapshotConfigLine struct {
 	// secrets. Absent in snapshots written before API keys existed,
 	// which restore with no keys.
 	APIKeys []apiKeySnapshot `json:"api_keys,omitempty"`
+	// PIIHolderNames carries the unerased account holder names (see
+	// pii.go, LG-131): a restore keeps working PII data. Erased names
+	// are gone by design — only the erasure marks below travel.
+	// Absent in snapshots written before holder names existed.
+	PIIHolderNames []piiHolderNameSnapshot `json:"pii_holder_names,omitempty"`
+	// PIIErasures carries the erasure tombstones (see pii.go, LG-131):
+	// a restore stays erased. PIIErasureVersion is the monotonic
+	// counter annotated on export manifests (LG-128).
+	PIIErasures       []ErasureRecord `json:"pii_erasures,omitempty"`
+	PIIErasureVersion uint64          `json:"pii_erasure_version,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -1105,6 +1115,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FTPAccounts: l.ftpAccounts,
 		APIKeys:     l.apiKeysSnapshotLocked(),
 	}
+	cfg.PIIHolderNames, cfg.PIIErasures, cfg.PIIErasureVersion = l.piiSnapshotLocked()
 	eclCfg := l.eclStageConfig
 	cfg.ECLStageConfig = &eclCfg
 	plAccounts, retainedEarnings := l.closingAccountsLocked()
@@ -3014,6 +3025,13 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// rows fail the import instead of installing a broken credential.
 	if err := l.restoreAPIKeysLocked(cfg.APIKeys); err != nil {
 		return bad("bad API keys: %v", err)
+	}
+	// PII registries restore like the API keys: unerased holder names
+	// keep working data, erasure marks keep the restore erased, and the
+	// version counter keeps manifests comparable. Malformed rows fail
+	// the import instead of silently losing erasure state.
+	if err := l.restorePIILocked(cfg.PIIHolderNames, cfg.PIIErasures, cfg.PIIErasureVersion); err != nil {
+		return bad("bad PII state: %v", err)
 	}
 	// Re-derive the balance-watch breach state from the restored
 	// balances: an account already outside its band counts as breached,

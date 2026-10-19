@@ -151,6 +151,12 @@ type Metrics struct {
 	// APIKeyCreationsTotal counts API keys issued through the HTTP API
 	// (LG-130): creations and rotations both mint a fresh secret.
 	APIKeyCreationsTotal atomic.Uint64
+	// PIIErasureRequestsTotal counts PII erasure requests filed
+	// (LG-131): POST /pii/erase requests that passed validation.
+	PIIErasureRequestsTotal atomic.Uint64
+	// PIIErasuresTotal counts PII erasures executed after dual-control
+	// approval (LG-131).
+	PIIErasuresTotal atomic.Uint64
 	// OverdraftRejections counts POST /entries, POST /entries/batch,
 	// POST /transfers, POST /merges, and capture requests rejected with
 	// 422 because they would have overdrawn an overdraft-protected
@@ -927,6 +933,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_api_key_creations_total",
 		"Total API keys issued through the HTTP API (creations and rotations).",
 		m.APIKeyCreationsTotal.Load())
+	writeCounter(&sb, "ledger_pii_erasure_requests_total",
+		"Total PII erasure requests filed (POST /pii/erase requests that passed validation).",
+		m.PIIErasureRequestsTotal.Load())
+	writeCounter(&sb, "ledger_pii_erasures_total",
+		"Total PII erasures executed after dual-control approval.",
+		m.PIIErasuresTotal.Load())
 	writeCounter(&sb, "ledger_alias_sets_total",
 		"Total PUT /accounts/{id}/alias requests served successfully (alias bindings, rebinds, and clears).",
 		m.AliasSetsTotal.Load())

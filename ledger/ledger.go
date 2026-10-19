@@ -791,6 +791,19 @@ type Ledger struct {
 	// WithAPIKeyAuth). Off by default: the middleware is a
 	// pass-through and the anonymous-operator flow is unchanged.
 	apiKeyAuth bool
+	// holderNames is the PII registry of account holder names (see
+	// pii.go, LG-131). Names are kept as bytes so erasure can
+	// overwrite the backing store before the record is dropped.
+	holderNames map[AccountID]*holderNameRecord
+	// erasureRequests tracks PII erasure maker-checker requests by ID;
+	// erasedMemos marks journal rows whose memo is redacted on read
+	// (the sealed rows are never rewritten); erasureRecords are the
+	// tombstones in execution order; erasureVersion is the monotonic
+	// counter annotated on export manifests (LG-128).
+	erasureRequests map[string]*ErasureRequest
+	erasedMemos     map[string]ErasureRecord
+	erasureRecords  []ErasureRecord
+	erasureVersion  uint64
 	// outbox is the domain-event outbox (see outbox.go). Nil means
 	// disabled: state changes skip event construction entirely and the
 	// read path is unaffected. The dry-run twin (see dryrun.go) always
@@ -1151,6 +1164,9 @@ func New(opts ...Option) *Ledger {
 		deniedExact:           make(map[AccountID]DenylistEntry),
 		deniedPrefixes:        make(map[string]DenylistEntry),
 		apiKeys:               make(map[string]*APIKey),
+		holderNames:           make(map[AccountID]*holderNameRecord),
+		erasureRequests:       make(map[string]*ErasureRequest),
+		erasedMemos:           make(map[string]ErasureRecord),
 		dailyLimits:           make(map[dailyLimitKey]int64),
 		dailyOutflow:          make(map[dailyLimitKey]int64),
 		sweepReserves:         make(map[accountCurrency]int64),

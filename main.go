@@ -4784,11 +4784,14 @@ func (s *server) handleAuditExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.RemoveAll(tmp)
+	l := s.ledgerFor(r)
 	manifest, err := ledger.ExportAuditChain(dir, ledger.AuditChainExportOptions{
-		FromDay:     q.Get("from"),
-		ToDay:       q.Get("to"),
-		ExportDir:   tmp,
-		SigningKeys: keys,
+		FromDay:        q.Get("from"),
+		ToDay:          q.Get("to"),
+		ExportDir:      tmp,
+		SigningKeys:    keys,
+		ErasureVersion: l.ErasureVersion(),
+		ErasureCount:   l.ErasureCount(),
 	})
 	if err != nil {
 		if ledger.IsAuditExportInputError(err) {
@@ -6260,6 +6263,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /api-keys/{id}", s.handleGetAPIKey)
 	mux.HandleFunc("POST /api-keys/{id}/rotate", s.handleRotateAPIKey)
 	mux.HandleFunc("POST /api-keys/{id}/revoke", s.handleRevokeAPIKey)
+	mux.HandleFunc("POST /pii/erase", s.handleRequestPIIErasure)
+	mux.HandleFunc("POST /pii/erase/{id}/approve", s.handleApprovePIIErasure)
+	mux.HandleFunc("POST /pii/erase/{id}/reject", s.handleRejectPIIErasure)
+	mux.HandleFunc("GET /pii/erasures", s.handleListPIIErasures)
 	mux.HandleFunc("GET /events", s.handleOutboxEvents)
 	mux.HandleFunc("GET /webhooks/deliveries", s.handleWebhookDeliveries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
@@ -6463,6 +6470,9 @@ func apiKeyRequiredScope(method, path string) string {
 	if strings.HasPrefix(path, "/api-keys") {
 		return ledger.ScopeAdminKeys
 	}
+	if strings.HasPrefix(path, "/pii/") {
+		return ledger.ScopeAdminAudit
+	}
 	if path == "/metrics" {
 		return ledger.ScopeReadLedger
 	}
@@ -6644,6 +6654,100 @@ func (s *server) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"key": k})
 }
 
+// writePIIErasureError maps ledger PII erasure errors to HTTP status
+// codes.
+func writePIIErasureError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ledger.ErrErasureNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	case errors.Is(err, ledger.ErrErasureNotPending):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case errors.Is(err, ledger.ErrErasureSelfApproval):
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+}
+
+type requestPIIErasureRequest struct {
+	Account ledger.AccountID `json:"account"`
+	Fields  []string         `json:"fields"`
+}
+
+// handleRequestPIIErasure implements POST /pii/erase: file a PII
+// erasure request (LG-131). Nothing is erased yet — the request is
+// pending until a different reviewer approves it (dual control).
+// Returns 202 with the pending request. Requires admin:audit.
+func (s *server) handleRequestPIIErasure(w http.ResponseWriter, r *http.Request) {
+	var req requestPIIErasureRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	er, err := s.ledgerFor(r).ErasePIIWithCtx(actx, req.Account, req.Fields, ledger.ActorFromContext(actx))
+	if err != nil {
+		writePIIErasureError(w, err)
+		return
+	}
+	s.metrics.PIIErasureRequestsTotal.Add(1)
+	writeJSON(w, http.StatusAccepted, map[string]any{"request": er})
+}
+
+// handleApprovePIIErasure implements POST /pii/erase/{id}/approve: the
+// second operator approves and the erasure executes irreversibly. The
+// reviewer is the x-ledger-actor identity and must differ from the
+// requester. Requires admin:audit.
+func (s *server) handleApprovePIIErasure(w http.ResponseWriter, r *http.Request) {
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	er, err := s.ledgerFor(r).ApproveErasureCtx(actx, r.PathValue("id"), ledger.ActorFromContext(actx))
+	if err != nil {
+		writePIIErasureError(w, err)
+		return
+	}
+	s.metrics.PIIErasuresTotal.Add(1)
+	writeJSON(w, http.StatusOK, map[string]any{"request": er})
+}
+
+type rejectPIIErasureRequest struct {
+	Reason string `json:"reason"`
+}
+
+// handleRejectPIIErasure implements POST /pii/erase/{id}/reject:
+// terminally reject a pending request. Nothing is erased. Requires
+// admin:audit.
+func (s *server) handleRejectPIIErasure(w http.ResponseWriter, r *http.Request) {
+	var req rejectPIIErasureRequest
+	if r.ContentLength != 0 {
+		if !s.decodeJSONBody(w, r, &req) {
+			return
+		}
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	er, err := s.ledgerFor(r).RejectErasureCtx(actx, r.PathValue("id"), ledger.ActorFromContext(actx), req.Reason)
+	if err != nil {
+		writePIIErasureError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"request": er})
+}
+
+// handleListPIIErasures implements GET /pii/erasures?account=: the
+// erasure tombstones for an account, in execution order. Requires
+// admin:audit.
+func (s *server) handleListPIIErasures(w http.ResponseWriter, r *http.Request) {
+	account, _ := s.resolveAccountRef(r, r.URL.Query().Get("account"))
+	writeJSON(w, http.StatusOK, map[string]any{"erasures": s.ledgerFor(r).ErasureRecords(account)})
+}
+
 // tenantCtxKey carries the resolved tenant ID through the request
 // context from the tenant middleware to ledgerFor.
 type tenantCtxKey struct{}
@@ -6789,6 +6893,11 @@ func (s *server) handleListAccountEntries(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// Erased memos redact to the tombstone (LG-131).
+	l := s.ledgerFor(r)
+	for i := range page {
+		page[i] = l.RedactEntryMemo(page[i])
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"entries":     page,
 		"next_cursor": next,
@@ -6835,6 +6944,12 @@ func (s *server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+	// Erased memos redact to the tombstone (LG-131): the sealed rows
+	// are untouched, so the chain still verifies.
+	l := s.ledgerFor(r)
+	for i := range page {
+		page[i] = l.RedactEntryMemo(page[i])
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"entries":     page,

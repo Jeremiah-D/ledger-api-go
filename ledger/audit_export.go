@@ -30,6 +30,13 @@ type AuditChainExportOptions struct {
 	// convention (LG-65, see SignAuditManifest). Empty runs unsigned:
 	// the manifest records Signed:false honestly instead of failing.
 	SigningKeys []AuditSigningKey
+	// ErasureVersion/ErasureCount annotate the manifest with the PII
+	// erasure state (see pii.go, LG-131): downstream consumers can tell
+	// whether their copy predates an erasure. Zero values are omitted
+	// from the manifest, so exports from ledgers without erasures look
+	// exactly as before.
+	ErasureVersion uint64
+	ErasureCount   int
 }
 
 // AuditChainExportFile describes one audit file copied into the export
@@ -72,8 +79,14 @@ type AuditChainExportManifest struct {
 	ToDay      string                `json:"to_day,omitempty"`
 	Files      []AuditChainExportFile `json:"files"`
 	Report     AuditChainExportReport `json:"report"`
-	Signed     bool                  `json:"signed"`
-	Signature  *AuditSig             `json:"signature,omitempty"`
+	// ErasureVersion/ErasureCount annotate the PII erasure state at
+	// export time (see pii.go, LG-131): a consumer holding an older
+	// manifest can see that erasures happened since. Both are covered
+	// by the manifest signature like every other field.
+	ErasureVersion uint64 `json:"erasure_version,omitempty"`
+	ErasureCount   int    `json:"erasure_count,omitempty"`
+	Signed     bool                `json:"signed"`
+	Signature  *AuditSig            `json:"signature,omitempty"`
 }
 
 // manifestSignBytes returns the canonical bytes the manifest signature
@@ -165,11 +178,13 @@ func ExportAuditChain(dir string, opts AuditChainExportOptions) (AuditChainExpor
 	}
 
 	m = AuditChainExportManifest{
-		Format:     AuditChainExportFormat,
-		ExportedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		FromDay:    opts.FromDay,
-		ToDay:      opts.ToDay,
-		Files:      files,
+		Format:         AuditChainExportFormat,
+		ExportedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+		FromDay:        opts.FromDay,
+		ToDay:          opts.ToDay,
+		Files:          files,
+		ErasureVersion: opts.ErasureVersion,
+		ErasureCount:   opts.ErasureCount,
 		Report: AuditChainExportReport{
 			Ok:             rep.Ok,
 			CheckedEntries: rep.CheckedEntries,
