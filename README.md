@@ -3376,6 +3376,48 @@ curl -s -X POST localhost:8080/entries/tsa-anchor
   Idempotent re-anchors of an unchanged head emit no new op.
   (manual requests and worker ticks alike).
 
+### Audit chain archiving (`ledger.ExportChainSegment`)
+
+For long-lived ledgers the audit chain grows one link per Post forever.
+`Ledger.ExportChainSegment(fromSeq, toSeq, dir)` (Go API) writes a cold
+segment to `dir` as a gzip JSONL archive (`chain-segment-<from>-<to>.jsonl.gz`,
+one link per line: `seq`, `entry_id`, `prev_hash`, `hash`) plus a JSON
+manifest (`chain-segment-<from>-<to>.manifest.json`). The snapshot is
+taken under the read lock and the files are written after it is
+released, so a concurrent Post is blocked only for the slice copy, not
+for the compression. Both files are fsync'd: a segment archive is a
+compliance artifact.
+
+Manifest fields: `format` (`"chain-segment/1"`), `from_seq` / `to_seq`
+(1-based chain seqs = ledger versions at Post time), `link_count`,
+`segment_head_prev_hash` (the first link's `prev_hash` — the all-zero
+genesis marker when `from_seq` is 1), `segment_tail_hash`, the
+`export_chain_head_*` snapshot of the live head at export time (seq,
+hash, hot-link count), and `exported_at`.
+
+- `Ledger.VerifyChainWithArchives(archivePaths...)` re-verifies the chain
+  when its cold prefix lives in archives: each archive's internal
+  continuity (contiguous seqs, `prev_hash` links, every link's hash
+  recomputed from the in-memory journal), archive-to-archive stitching
+  (`segment_head_prev_hash` of each segment equals the previous
+  segment's `segment_tail_hash`, the first segment anchored at the
+  genesis), and the hot chain stitched onto the last archive's tail.
+  With no archives it degrades to the ordinary `VerifyChain` genesis
+  check.
+- `Ledger.PruneChainPrefix(toSeq)` drops the in-memory links with
+  `seq <= toSeq` — but only after re-verifying the archives that cover
+  the prefix: a missing or corrupt archive refuses the prune instead of
+  destroying the only verifiable copy. Journal entries are kept, so
+  balances, statements, and reconciliation are unaffected. After
+  pruning, `VerifyChain` fails honestly (the hot chain no longer starts
+  at the genesis) and tells you to use `VerifyChainWithArchives`.
+- `segment_tail_hash` is the value an external LG-44 anchor checkpoint
+  can witness to attest a segment: anchor the segment tail exactly like
+  anchoring a chain head. Note that pruning changes the hot chain's
+  length, so pre-prune anchors (which record `len(chain)` as their seq)
+  report "anchored data lost — chain was truncated" afterwards — the
+  honest signal; re-anchor after pruning.
+
 ### `POST /reconcile`
 
 The end-of-day reconciliation job. Runs a full read-only scan of the live

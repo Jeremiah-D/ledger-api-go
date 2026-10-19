@@ -1091,6 +1091,18 @@ type Ledger struct {
 	mandateRetries     map[string]*MandateRetry
 	mandateRetryFiring map[string]bool
 	chain              []chainLink   // audit chain, one link per successful Post, in order
+	// chainArchives remembers the chain-segment archives this process
+	// exported (LG-136): PruneChainPrefix requires the dropped prefix
+	// to be covered by these archives and re-verifies them before
+	// dropping. Guarded by mu; in-memory only — a restart drops the
+	// registry (see chain_archive.go).
+	chainArchives      []chainArchiveRecord
+	// chainPrunedTo is the highest seq PruneChainPrefix has dropped
+	// (LG-136). It lets VerifyChain fail honestly on a pruned chain —
+	// including a fully pruned (empty) hot chain — instead of passing
+	// on a chain that no longer covers the ledger's history. Guarded
+	// by mu; monotonic.
+	chainPrunedTo       uint64
 	version            uint64        // bumped by every successful Post
 	idempotencyTTL     time.Duration // 0 = never expire idempotency keys
 	pruneInterval      time.Duration // min gap between lazy key sweeps

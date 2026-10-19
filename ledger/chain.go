@@ -163,9 +163,26 @@ func (l *Ledger) VerifyChain() error {
 // reconciliation scan calls this directly so the chain check runs under the
 // same read lock as the rest of the report, keeping the snapshot consistent.
 func (l *Ledger) verifyChainLocked() error {
+	// A fully pruned hot chain is empty, but the ledger still has
+	// history (see chainPrunedTo): passing here would pretend the
+	// chain is whole. Fail honestly and point at the archive path.
+	if len(l.chain) == 0 && l.chainPrunedTo > 0 {
+		return fmt.Errorf("ledger: audit chain is empty: the prefix up to seq %d was pruned to a segment archive; use VerifyChainWithArchives to verify the archived prefix",
+			l.chainPrunedTo)
+	}
 	var prev [32]byte
 	for i, link := range l.chain {
 		if want := uint64(i + 1); link.seq != want {
+			if i == 0 && link.seq > 1 {
+				// The hot chain no longer starts at the genesis: its
+				// cold prefix was pruned to a segment archive (see
+				// ExportChainSegment / PruneChainPrefix) — or the
+				// chain was tampered with. VerifyChain cannot check
+				// the missing prefix, so it fails honestly instead of
+				// pretending the chain is whole.
+				return fmt.Errorf("ledger: audit chain starts at seq %d, not the genesis: if the prefix was pruned to a segment archive, use VerifyChainWithArchives to verify the archived prefix plus the hot chain",
+					link.seq)
+			}
 			return fmt.Errorf("ledger: audit chain link %d carries seq %d, want %d (reordered chain)",
 				i, link.seq, want)
 		}
