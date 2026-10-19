@@ -178,13 +178,13 @@ func (l *Ledger) rolloverTermDepositLocked(td TermDeposit, now time.Time) {
 	}
 
 	next := TermDeposit{
-		ID:                newID,
-		Account:           td.Account,
-		AmountCents:       principal,
-		Currency:          td.Currency,
-		RateBps:           td.RateBps,
-		TermDays:          p.TermDays,
-		OpenedAt:          now,
+		ID:                  newID,
+		Account:             td.Account,
+		AmountCents:         principal,
+		Currency:            td.Currency,
+		RateBps:             td.RateBps,
+		TermDays:            p.TermDays,
+		OpenedAt:            now,
 		BusinessDayMaturity: td.BusinessDayMaturity,
 		Rollover: &RolloverPolicy{
 			Mode:         mode,

@@ -77,8 +77,8 @@ const (
 
 // Validation and state errors returned by the term-deposit APIs.
 var (
-	ErrEmptyTermDepositID = errors.New("ledger: term deposit ID must not be empty")
-	ErrEmptyTermDepositAccount = errors.New("ledger: term deposit account must not be empty")
+	ErrEmptyTermDepositID           = errors.New("ledger: term deposit ID must not be empty")
+	ErrEmptyTermDepositAccount      = errors.New("ledger: term deposit account must not be empty")
 	ErrTermDepositNonPositiveAmount = errors.New("ledger: term deposit amount must be greater than zero")
 	// ErrTermDepositIDSeparator is returned when the deposit ID contains
 	// '/': the deterministic interest entry IDs join their components
@@ -134,21 +134,21 @@ var (
 // and inclusive for maturity (MatureTermDeposit accepts now >=
 // MaturesAt). Only active deposits count toward AvailableIn.
 type TermDeposit struct {
-	ID             string    `json:"id"`
-	Account        AccountID `json:"account"`
-	AmountCents    int64     `json:"amount_cents"`
-	Currency       string    `json:"currency"`
-	RateBps        int64     `json:"rate_bps"`
-	TermDays       int64     `json:"term_days"`
-	OpenedAt       time.Time `json:"opened_at"`
-	MaturesAt      time.Time `json:"matures_at"`
+	ID          string    `json:"id"`
+	Account     AccountID `json:"account"`
+	AmountCents int64     `json:"amount_cents"`
+	Currency    string    `json:"currency"`
+	RateBps     int64     `json:"rate_bps"`
+	TermDays    int64     `json:"term_days"`
+	OpenedAt    time.Time `json:"opened_at"`
+	MaturesAt   time.Time `json:"matures_at"`
 	// BusinessDayMaturity opts into business-day settlement (LG-95): when
 	// true and MaturesAt lands on a non-business day, OpenTermDeposit
 	// moves it to the next business day. The stored MaturesAt is the
 	// contractual date — MatureTermDeposit needs no special case.
-	BusinessDayMaturity bool      `json:"business_day_maturity,omitempty"`
-	IdempotencyKey      string    `json:"idempotency_key,omitempty"`
-	Status              string    `json:"status"`
+	BusinessDayMaturity bool   `json:"business_day_maturity,omitempty"`
+	IdempotencyKey      string `json:"idempotency_key,omitempty"`
+	Status              string `json:"status"`
 	// Rollover is the opt-in renewal policy (LG-139): when the maturity
 	// sweep matures this deposit, it opens the next term automatically.
 	// Nil (or mode "none") means no rollover.
@@ -165,10 +165,10 @@ type TermDeposit struct {
 // TermDepositWithdrawal is the receipt of an early withdrawal: the
 // terminal deposit plus the penalty that was booked, if any.
 type TermDepositWithdrawal struct {
-	Deposit       TermDeposit `json:"deposit"`
-	PenaltyCents  int64       `json:"penalty_cents"`
-	PenaltyEntry  string      `json:"penalty_entry,omitempty"`
-	Duplicate     bool        `json:"duplicate"`
+	Deposit      TermDeposit `json:"deposit"`
+	PenaltyCents int64       `json:"penalty_cents"`
+	PenaltyEntry string      `json:"penalty_entry,omitempty"`
+	Duplicate    bool        `json:"duplicate"`
 }
 
 // termDepositInterestEntryID builds the deterministic interest entry ID
