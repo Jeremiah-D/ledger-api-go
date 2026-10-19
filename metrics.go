@@ -462,6 +462,11 @@ type Metrics struct {
 	// is bounded by the rule set. Exported as
 	// ledger_posting_rule_legs_total{rule}.
 	PostingRuleLegsTotal PostingRuleLegCounter
+	// OutboxStreamConnections counts the currently open
+	// GET /events/stream live tails (LG-133): incremented when a
+	// stream opens, decremented when it closes. Exported as the
+	// ledger_outbox_stream_connections gauge.
+	OutboxStreamConnections atomic.Int64
 	// SettlementRuns counts GET /settlement requests served (all
 	// formats: json, csv, sql).
 	SettlementRuns atomic.Uint64
@@ -895,6 +900,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&sb, "ledger_posting_rule_legs_total",
 		"Total derived posting-rule legs committed (LG-132): every derived journal leg an automatic posting rule appended to a transfer, capture, or sweep event, by rule name.",
 		m.PostingRuleLegsTotal.series())
+	writeGauge(&sb, "ledger_outbox_stream_connections",
+		"Current open GET /events/stream live tails (LG-133): SSE connections receiving the domain-event outbox in real time.",
+		m.OutboxStreamConnections.Load())
 	writeCounter(&sb, "ledger_settlement_runs_total",
 		"Total GET /settlement requests served (all formats).",
 		m.SettlementRuns.Load())
@@ -970,6 +978,14 @@ func writeCounter(sb *strings.Builder, name, help string, value uint64) {
 	sb.WriteString("# HELP " + name + " " + help + "\n")
 	sb.WriteString("# TYPE " + name + " counter\n")
 	sb.WriteString(name + " " + strconv.FormatUint(value, 10) + "\n")
+}
+
+// writeGauge renders one Prometheus gauge metric: a value that goes up
+// and down, like the open SSE stream count.
+func writeGauge(sb *strings.Builder, name, help string, value int64) {
+	sb.WriteString("# HELP " + name + " " + help + "\n")
+	sb.WriteString("# TYPE " + name + " gauge\n")
+	sb.WriteString(name + " " + strconv.FormatInt(value, 10) + "\n")
 }
 
 // QuorumVoteCounter is the per-(approver, vote, outcome) breakdown of

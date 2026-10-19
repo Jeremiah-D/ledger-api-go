@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -4881,6 +4882,224 @@ func (s *server) handleOutboxEvents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// outboxStreamHeartbeatInterval is the SSE comment heartbeat on
+// GET /events/stream: a ": ping" every interval keeps intermediaries
+// from closing idle connections. A package var (not a const) so tests
+// can shorten it; production stays at 15s.
+var outboxStreamHeartbeatInterval = 15 * time.Second
+
+// handleOutboxStream implements GET /events/stream: the live tail of
+// the domain-event outbox (LG-133), as Server-Sent Events.
+//
+//	GET /events/stream?cursor=<opaque>&account=<id>&type=<t1,t2>
+//
+//   - The handler first replays every event after the cursor (from the
+//     outbox directory, via ReadOutboxEvents — the same store
+//     GET /events reads), then switches to live push: every newly
+//     committed event arrives on the stream in seq order.
+//   - cursor is the opaque page cursor (base64url of the last seen
+//     seq); the standard Last-Event-ID header (the raw seq the stream
+//     sends as the SSE id) is accepted too, so EventSource clients
+//     reconnect without any client code.
+//   - account/type filter like GET /events, applied to the replay and
+//     the live push alike.
+//   - ": ping" heartbeats (default 15s) keep idle connections alive
+//     through proxies; the stream opens with a ": connected" comment.
+//
+// Backpressure is honest: the live subscription is a bounded queue
+// (512 events). A consumer that falls behind past that is dropped —
+// the commit path never blocks on a slow consumer — the stream ends
+// with a ": slow-consumer-disconnected" comment, and the consumer
+// reconnects with its last id. Dropped subscribers are counted by the
+// outbox (see Outbox.SlowDrops); open streams are the
+// ledger_outbox_stream_connections gauge.
+//
+// Authentication rides the existing middleware: like every GET route it
+// needs the read:ledger API key scope when key enforcement is on, and
+// passes through untouched when it is off (zero configured keys is
+// fail-open, exactly like GET /events). Without LEDGER_OUTBOX_DIR the
+// endpoint 404s fail-closed: there is no stream to tail.
+func (s *server) handleOutboxStream(w http.ResponseWriter, r *http.Request) {
+	l := s.ledgerFor(r)
+	dir, ok := l.OutboxDir()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "domain event outbox disabled (LEDGER_OUTBOX_DIR unset)"})
+		return
+	}
+	q := r.URL.Query()
+	since, until, _, err := parseEntryListQuery(q)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	var types []string
+	if v := firstQuery(q, "type"); v != "" {
+		for _, t := range strings.Split(v, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				types = append(types, t)
+			}
+		}
+	}
+	afterSeq, err := outboxStreamCursor(q, r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	account := ledger.AccountID(firstQuery(q, "account"))
+
+	// Subscribe before the replay: an event committed between the
+	// replay scan and the live switch is caught by the dedupe on
+	// lastSeq below, never lost, never duplicated.
+	ch, unsubscribe, ok := l.OutboxSubscribe()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "domain event outbox closed"})
+		return
+	}
+	defer unsubscribe()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// Headers are already sent; nothing useful to do but stop.
+		return
+	}
+	s.metrics.OutboxStreamConnections.Add(1)
+	defer s.metrics.OutboxStreamConnections.Add(-1)
+
+	writeSSEComment(w, "connected")
+	flusher.Flush()
+
+	typeSet := make(map[string]bool, len(types))
+	for _, t := range types {
+		typeSet[t] = true
+	}
+	matches := func(ev ledger.OutboxEvent) bool {
+		if len(typeSet) > 0 && !typeSet[ev.Type] {
+			return false
+		}
+		if account == "" {
+			return true
+		}
+		if ev.Account == account {
+			return true
+		}
+		if s, ok := ev.Details["debit_account"].(string); ok && ledger.AccountID(s) == account {
+			return true
+		}
+		if s, ok := ev.Details["credit_account"].(string); ok && ledger.AccountID(s) == account {
+			return true
+		}
+		return false
+	}
+	writeEvent := func(ev ledger.OutboxEvent) {
+		line, err := json.Marshal(ev)
+		if err != nil {
+			return
+		}
+		// The SSE id is the raw seq: Last-Event-ID reconnects with it.
+		fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, ev.Type, line)
+	}
+
+	// Replay: page the outbox directory from the cursor until caught
+	// up, in 1000-event pages.
+	lastSeq := afterSeq
+	replayQ := ledger.OutboxQuery{
+		Since:    since,
+		Until:    until,
+		Types:    types,
+		Account:  account,
+		AfterSeq: afterSeq,
+		Limit:    1000,
+	}
+	for {
+		events, next, _, err := ledger.ReadOutboxEvents(dir, replayQ)
+		if err != nil {
+			// The stream is already open (200 sent); the failure is
+			// signalled as a terminal comment, not a second status.
+			writeSSEComment(w, "replay-error: "+err.Error())
+			flusher.Flush()
+			return
+		}
+		for _, ev := range events {
+			writeEvent(ev)
+			if ev.Seq > lastSeq {
+				lastSeq = ev.Seq
+			}
+		}
+		flusher.Flush()
+		if next == "" {
+			break
+		}
+		seq, err := ledger.DecodeOutboxCursor(next)
+		if err != nil {
+			writeSSEComment(w, "replay-error: "+err.Error())
+			flusher.Flush()
+			return
+		}
+		replayQ.AfterSeq = seq
+	}
+
+	// Live push.
+	ticker := time.NewTicker(outboxStreamHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			writeSSEComment(w, "ping")
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				// The outbox dropped this subscription for falling
+				// behind (see Outbox.Subscribe): end the stream with
+				// a terminal comment so the client reconnects with
+				// its last id.
+				writeSSEComment(w, "slow-consumer-disconnected")
+				flusher.Flush()
+				return
+			}
+			if ev.Seq <= lastSeq {
+				// Committed during the replay scan: already sent.
+				continue
+			}
+			lastSeq = ev.Seq
+			if !matches(ev) {
+				continue
+			}
+			writeEvent(ev)
+			flusher.Flush()
+		}
+	}
+}
+
+// outboxStreamCursor resolves the stream's resume point: the ?cursor=
+// opaque page cursor first, then the standard Last-Event-ID header
+// (the raw seq the stream sends as the SSE id). Empty means "from the
+// beginning".
+func outboxStreamCursor(q url.Values, r *http.Request) (uint64, error) {
+	if v := firstQuery(q, "cursor"); v != "" {
+		return ledger.DecodeOutboxCursor(v)
+	}
+	if v := r.Header.Get("Last-Event-ID"); v != "" {
+		seq, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0, ledger.ErrInvalidCursor
+		}
+		return seq, nil
+	}
+	return 0, nil
+}
+
+// writeSSEComment writes one SSE comment line (a ": ..." line the
+// EventSource client ignores as data but keeps the connection alive).
+func writeSSEComment(w http.ResponseWriter, text string) {
+	fmt.Fprintf(w, ": %s\n\n", text)
+}
+
 // handleWebhookDeliveries implements GET /webhooks/deliveries (LG-102):
 // the operator-facing query over recent outbound webhook delivery
 // attempts, latest first.
@@ -6268,6 +6487,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /pii/erase/{id}/reject", s.handleRejectPIIErasure)
 	mux.HandleFunc("GET /pii/erasures", s.handleListPIIErasures)
 	mux.HandleFunc("GET /events", s.handleOutboxEvents)
+	mux.HandleFunc("GET /events/stream", s.handleOutboxStream)
 	mux.HandleFunc("GET /webhooks/deliveries", s.handleWebhookDeliveries)
 	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
 	mux.HandleFunc("GET /accounts/{id}/entries", s.handleListAccountEntries)

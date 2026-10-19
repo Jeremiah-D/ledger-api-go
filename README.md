@@ -4103,6 +4103,51 @@ exclusive), `type` (comma-separated event types), `account`, `limit`
 resumes after it, empty on the last page). Invalid cursors/limits are
 `400`.
 
+#### Outbox live tail (`GET /events/stream`)
+
+The pull API above is for catch-up; downstream indexers and
+notification fan-out want low-latency push. `GET /events/stream` is
+the outbox as **Server-Sent Events**: it first replays every event
+after the cursor from the outbox directory (the same store
+`GET /events` reads), then switches to live push — every newly
+committed event arrives in `seq` order, no polling.
+
+```bash
+curl -N localhost:8080/events/stream '?cursor=<opaque>&account=cash'
+# : connected
+#
+# id: 41
+# event: entry_posted
+# data: {"seq":41,"type":"entry_posted",...}
+#
+# : ping          <- every 15s, keeps idle connections alive
+```
+
+Semantics:
+
+- **Resume.** `?cursor=` takes the opaque page cursor; the standard
+  `Last-Event-ID` header (the raw `seq` the stream sends as the SSE
+  `id`) is accepted too, so `EventSource` clients reconnect with zero
+  client code. The subscription is taken before the replay scan, and
+  events committed mid-replay are deduped by `seq` — nothing lost,
+  nothing duplicated.
+- **Filters.** `account` and `type` filter the replay and the live
+  push alike (same `account` semantics as `GET /events`: the event's
+  account or either leg of an `entry_posted`).
+- **Backpressure.** The live subscription is a bounded 512-event
+  queue. A consumer that falls behind past that is dropped — the
+  commit path never blocks on a slow consumer — the stream ends with
+  `: slow-consumer-disconnected`, and the consumer reconnects with
+  its last id. (This is the Go equivalent of a writableLength guard.)
+  Slow-consumer drops are counted by the outbox; open streams are the
+  `ledger_outbox_stream_connections` gauge on `GET /metrics`.
+- **Auth.** Like every `GET` route it needs the `read:ledger` API key
+  scope when key enforcement is on; with zero keys configured it is
+  fail-open, exactly like `GET /events`. Without
+  `LEDGER_OUTBOX_DIR` it 404s fail-closed.
+- **At-least-once**, like the outbox itself: consumers dedupe on
+  `(type, seq)`.
+
 #### Audit-sink webhook forwarder (`ledger/audit_sink.go`)
 
 An opt-in forwarder that streams the outbox's domain events to an
@@ -4423,6 +4468,8 @@ curl -s localhost:8080/metrics
   fee legs.
 - `ledger_posting_rule_legs_total{rule}` — derived journal legs committed
   by automatic posting rules (LG-132), one series per rule name.
+- `ledger_outbox_stream_connections` — currently open
+  `GET /events/stream` live tails (gauge).
 - `ledger_fx_transfers_total` — `POST /transfers` requests that attempted
   a cross-currency transfer, including rejected ones.
 - `ledger_period_rejections_total` — journal-writing requests rejected

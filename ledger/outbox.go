@@ -178,6 +178,11 @@ type Outbox struct {
 	written atomic.Uint64
 	dropped atomic.Uint64
 	closed  atomic.Bool
+	// Live-tail subscribers (see Subscribe, LG-133): guarded by mu,
+	// the same leaf lock Emit holds, so fan-out never deadlocks.
+	subs      map[uint64]chan OutboxEvent
+	nextSub   uint64
+	slowDrops atomic.Uint64
 }
 
 // NewOutbox creates the outbox directory (if needed), recovers the
@@ -188,7 +193,7 @@ func NewOutbox(dir string) (*Outbox, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("ledger: outbox: %w", err)
 	}
-	o := &Outbox{dir: dir}
+	o := &Outbox{dir: dir, subs: make(map[uint64]chan OutboxEvent)}
 	maxSeq, corrupt, err := scanOutboxMaxSeq(dir)
 	if err != nil {
 		return nil, err
@@ -277,7 +282,67 @@ func (o *Outbox) Emit(ev OutboxEvent) bool {
 		return false
 	}
 	o.written.Add(1)
+	// Fan out to live-tail subscribers (see Subscribe): delivery is
+	// non-blocking — a subscriber whose queue is full is dropped
+	// rather than stalling the commit.
+	o.deliverLocked(ev)
 	return true
+}
+
+// outboxStreamBuffer is the per-subscriber live-event queue depth. A
+// subscriber that falls behind past this is dropped (see deliverLocked):
+// the Go equivalent of a writableLength guard — the commit path never
+// blocks on a slow consumer and memory stays bounded.
+const outboxStreamBuffer = 512
+
+// Subscribe registers a live tail on the outbox (LG-133, see
+// GET /events/stream): every event Emit commits from here on is also
+// delivered on the returned channel, in seq order. The channel is
+// buffered to outboxStreamBuffer events; when a subscriber falls behind
+// past that, Emit drops the subscription and closes the channel — the
+// consumer must reconnect with its last cursor (Last-Event-ID) to catch
+// up from disk. Call the returned function to unsubscribe; it is
+// idempotent. ok is false when the outbox is closed: there is no live
+// tail to subscribe to.
+func (o *Outbox) Subscribe() (ch <-chan OutboxEvent, unsubscribe func(), ok bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed.Load() {
+		return nil, nil, false
+	}
+	sub := make(chan OutboxEvent, outboxStreamBuffer)
+	id := o.nextSub
+	o.nextSub++
+	o.subs[id] = sub
+	var once sync.Once
+	unsubscribe = func() {
+		once.Do(func() {
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			if c, found := o.subs[id]; found {
+				delete(o.subs, id)
+				close(c)
+			}
+		})
+	}
+	return sub, unsubscribe, true
+}
+
+// deliverLocked fans one committed event out to every live-tail
+// subscriber. Callers must hold o.mu (Emit does). Delivery is strictly
+// non-blocking: a full subscriber is dropped and its channel closed,
+// counted as a slow-consumer drop — the commit path never waits on a
+// consumer, and the dropped consumer reconnects with its cursor.
+func (o *Outbox) deliverLocked(ev OutboxEvent) {
+	for id, sub := range o.subs {
+		select {
+		case sub <- ev:
+		default:
+			delete(o.subs, id)
+			close(sub)
+			o.slowDrops.Add(1)
+		}
+	}
 }
 
 // Stats reports how many events were durably written and how many were
@@ -607,6 +672,14 @@ func (l *Ledger) OutboxStats() (written, dropped uint64, enabled bool) {
 	return w, d, true
 }
 
+// SlowDrops reports how many live-tail subscribers were dropped for
+// falling behind (see Subscribe): each one must reconnect with its
+// cursor. A rising count means consumers cannot keep up with the event
+// rate — add consumer capacity or shard the stream.
+func (o *Outbox) SlowDrops() uint64 {
+	return o.slowDrops.Load()
+}
+
 // OutboxDir reports the outbox directory when an outbox is attached
 // (WithOutbox was used). It lets the HTTP layer serve GET /events
 // without reaching into the ledger's internals.
@@ -615,4 +688,23 @@ func (l *Ledger) OutboxDir() (string, bool) {
 		return "", false
 	}
 	return l.outbox.Dir(), true
+}
+
+// OutboxSubscribe registers a live tail on the domain-event outbox
+// (see Outbox.Subscribe, LG-133): the HTTP layer's GET /events/stream
+// endpoint. ok is false when no outbox is attached.
+func (l *Ledger) OutboxSubscribe() (ch <-chan OutboxEvent, unsubscribe func(), ok bool) {
+	if l.outbox == nil {
+		return nil, nil, false
+	}
+	return l.outbox.Subscribe()
+}
+
+// OutboxSlowDrops reports the outbox's live-tail slow-consumer drop
+// count (see Outbox.SlowDrops). ok is false when no outbox is attached.
+func (l *Ledger) OutboxSlowDrops() (uint64, bool) {
+	if l.outbox == nil {
+		return 0, false
+	}
+	return l.outbox.SlowDrops(), true
 }
