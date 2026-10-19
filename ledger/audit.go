@@ -108,6 +108,11 @@ type AuditLogOption func(*auditLogConfig)
 type auditLogConfig struct {
 	maxBytes  int64
 	queueSize int
+	// retentionDays is the audit-log retention window in whole days
+	// (LG-137, see audit_retention.go): ApplyAuditRetention deletes
+	// whole audit files older than the window. 0 (the default) keeps
+	// everything; negative values fail NewAuditLog.
+	retentionDays int
 	// signingKeys enables per-line HMAC-SHA256 signatures (LG-65). Empty
 	// means the log runs unsigned — degraded mode, with an
 	// audit_signing_disabled alert recorded in the trail itself.
@@ -175,7 +180,9 @@ func WithAuditLogSigning(keys []AuditSigningKey, grace time.Duration) AuditLogOp
 // Rotation: a new file starts each UTC day, and whenever the current file
 // reaches the size cap. Rotated files are gzipped in the background
 // (audit-2006-01-02.jsonl.gz) so the directory stays compact; the writer
-// never blocks on compression.
+// never blocks on compression. Retention (LG-137): ApplyAuditRetention
+// deletes whole files older than the LEDGER_AUDIT_RETENTION_DAYS window;
+// inside the window files are append-only (WORM) and never modified.
 //
 // Failure semantics: a write error drops the event and counts it
 // (Dropped) but never panics and never propagates to the ledger
@@ -188,6 +195,14 @@ func WithAuditLogSigning(keys []AuditSigningKey, grace time.Duration) AuditLogOp
 type AuditLog struct {
 	dir      string
 	maxBytes int64
+	// retentionDays is the retention window in whole days (LG-137):
+	// ApplyAuditRetention deletes whole audit files older than the
+	// window. 0 means unlimited retention.
+	retentionDays int
+	// retentionDeletions counts audit files deleted by retention
+	// sweeps; synced into ledger_audit_retention_deletions_total on
+	// every /metrics scrape.
+	retentionDeletions atomic.Uint64
 	queue    chan AuditEvent
 	done     chan struct{}
 	wg       sync.WaitGroup
@@ -216,6 +231,9 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if cfg.retentionDays < 0 {
+		return nil, fmt.Errorf("ledger: audit log: negative retention days %d (want 0 for unlimited, or a positive number of days)", cfg.retentionDays)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("ledger: audit log: %w", err)
 	}
@@ -232,11 +250,12 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 		signer = s
 	}
 	a := &AuditLog{
-		dir:      dir,
-		maxBytes: cfg.maxBytes,
-		queue:    make(chan AuditEvent, cfg.queueSize),
-		done:     make(chan struct{}),
-		signer:   signer,
+		dir:           dir,
+		maxBytes:      cfg.maxBytes,
+		retentionDays: cfg.retentionDays,
+		queue:         make(chan AuditEvent, cfg.queueSize),
+		done:          make(chan struct{}),
+		signer:        signer,
 	}
 	// Recover the hash-chain head from the newest sealed entry on
 	// disk (bounded scan), so a restart continues the chain instead

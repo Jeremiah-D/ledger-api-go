@@ -4473,6 +4473,44 @@ Semantics worth knowing:
 - Counted by `ledger_audit_export_total` /
   `ledger_audit_export_breaks_total` — alert on any nonzero breaks.
 
+### Audit log retention (`LEDGER_AUDIT_RETENTION_DAYS`)
+
+Compliance regimes require audit trails to be kept for a defined period
+— and privacy regimes require them not to be kept forever.
+`LEDGER_AUDIT_RETENTION_DAYS` sets the retention window in whole days
+(integer; unset or `0` means unlimited retention). A negative or
+non-integer value fails startup fast.
+
+At startup the server runs one retention sweep
+(`ledger.AuditLog.ApplyAuditRetention`, also callable periodically —
+it is idempotent): whole audit files whose UTC day is strictly older
+than `(today - retentionDays)` are deleted, plain `.jsonl` and `.gz`
+copies alike. Inside the retention window files are append-only (WORM)
+— the sweep never modifies a file, only deletes whole ones past the
+cutoff. Files whose day cannot be parsed from the filename are never
+deleted, and today's active file is never a candidate.
+
+- Before deleting anything, the sweep records an
+  `audit_retention_deleted` event in the trail (`deleted_files`,
+  `cutoff_day`, `retention_days`, plus each deleted file's last sealed
+  hash so the cut is auditable). The event lands in today's active file,
+  which is never deleted. If the event cannot be enqueued the sweep
+  aborts and deletes nothing — an unaudited deletion must not happen —
+  and startup fails fast.
+- Deleting old files truncates the verifiable hash chain: the oldest
+  retained file's first entry still links the deleted history's last
+  seal, so `GET /audit/verify` reports a `prev_mismatch` at that
+  boundary. That break is the expected, documented signal of a
+  retention cut — not tampering — and the `last_seals` in the deletion
+  event show exactly where the chain was cut.
+- `ledger_audit_retention_deletions_total` counts deleted files in
+  `/metrics` (synced from the ledgers on every scrape, like the other
+  ledger-owned counters).
+- A retention of 2+ days keeps the sweep a full day away from the
+  background gzip rotation window; at 1 day a file can race the
+  midnight gzip and survive one sweep to be caught by the next —
+  benign, but use ≥ 2 days for a quiet boundary.
+
 ### API key management (`POST /api-keys`, LG-130)
 
 Machine-to-machine authentication for the HTTP API. The ledger
@@ -5082,6 +5120,11 @@ Environment:
   `104857600` = 100 MiB). Past the cap the writer rotates to a new file;
   rotated files are gzipped in the background. Unset or invalid means the
   default.
+- `LEDGER_AUDIT_RETENTION_DAYS` — the audit-log retention window in whole
+  days (see "Audit log retention" above): whole audit files older than the
+  window are deleted by a sweep at startup, recorded as an
+  `audit_retention_deleted` event in the trail itself. Unset or `0` means
+  unlimited retention; a negative or non-integer value fails startup fast.
 - `LEDGER_ANCHOR_KEY` — the Ed25519 key for external audit-chain
   anchoring (see above): hex of a 32-byte seed or a 64-byte private key.
   Checkpoints land in `LEDGER_AUDIT_DIR` as `checkpoints.jsonl`. Unset

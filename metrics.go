@@ -406,6 +406,12 @@ type Metrics struct {
 	// HTTP error). Any nonzero value is an integrity incident — alert
 	// on it.
 	AuditExportBreaks atomic.Uint64
+	// AuditRetentionDeletionsTotal counts audit-log files deleted by the
+	// retention sweep (see LEDGER_AUDIT_RETENTION_DAYS, LG-137): one per
+	// deleted file — the plain .jsonl and .gz copies of one logical
+	// file count once. Every deletion is also recorded as an
+	// audit_retention_deleted event in the trail itself.
+	AuditRetentionDeletionsTotal atomic.Uint64
 	// BalanceWatchBreaches counts balance-threshold alert events emitted
 	// by the ledger (see ledger.SetBalanceWatch). It is synced from the
 	// ledger on every GET /metrics scrape, like the audit-log counters,
@@ -787,6 +793,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_audit_export_breaks_total",
 		"Total audit-chain exports whose verification report found a broken chain.",
 		m.AuditExportBreaks.Load())
+	writeCounter(&sb, "ledger_audit_retention_deletions_total",
+		"Total audit-log files deleted by the retention sweep (see LEDGER_AUDIT_RETENTION_DAYS); each deletion is also an audit_retention_deleted event in the trail.",
+		m.AuditRetentionDeletionsTotal.Load())
 	writeCounter(&sb, "ledger_balance_watch_breaches_total",
 		"Total balance-threshold alert events emitted (advisory; never a rejection).",
 		m.BalanceWatchBreaches.Load())

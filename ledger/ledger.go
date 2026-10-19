@@ -1173,6 +1173,18 @@ func (l *Ledger) AuditStats() (written, dropped uint64, enabled bool) {
 	return w, d, true
 }
 
+// AuditRetentionDeletions reports how many audit-log files the retention
+// sweep has deleted on this ledger's audit log (LG-137). Enabled is
+// false when no audit log is attached. The HTTP layer syncs it into
+// ledger_audit_retention_deletions_total on every GET /metrics scrape,
+// like the other ledger-owned counters.
+func (l *Ledger) AuditRetentionDeletions() (deletions uint64, enabled bool) {
+	if l.audit == nil {
+		return 0, false
+	}
+	return l.audit.RetentionDeletions(), true
+}
+
 // WithOverdraftProtection marks the given accounts as protected from
 // overdrafts from the start: any Post that would take a protected credit
 // (payer) account's balance below zero is rejected with

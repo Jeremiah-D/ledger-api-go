@@ -6547,10 +6547,18 @@ func (s *server) handler() http.Handler {
 		var extMappingChanges uint64
 		var entryLinkChanges uint64
 		var mandateDebits uint64
+		var retentionDeletions uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
 				auditDropped += dropped
+			}
+			// The retention-deletion counter likewise lives in the
+			// ledger: deletions happen inside ApplyAuditRetention,
+			// not in a handler (see ledger/audit_retention.go,
+			// LG-137).
+			if n, ok := l.AuditRetentionDeletions(); ok {
+				retentionDeletions += n
 			}
 			if written, dropped, ok := l.OutboxStats(); ok {
 				outboxWritten += written
@@ -6598,6 +6606,11 @@ func (s *server) handler() http.Handler {
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
 		s.metrics.OutboxEventsTotal.Store(outboxWritten)
 		s.metrics.OutboxDroppedTotal.Store(outboxDropped)
+		// The retention-deletion counter is synced from the ledgers
+		// like the audit-log counters above: the ledger is the source
+		// of truth, so the scrape overwrites (never accumulates) the
+		// exposed series.
+		s.metrics.AuditRetentionDeletionsTotal.Store(retentionDeletions)
 		// The balance-watch breach counter lives in the ledger too (the
 		// alert fires inside Post/Transfer/..., not in a handler).
 		s.metrics.BalanceWatchBreaches.Store(breaches)
@@ -7564,8 +7577,23 @@ func main() {
 	// an audit_signing_disabled alert in the trail itself. An invalid
 	// value fails startup fast: a misconfigured signing key must never
 	// silently run.
+	//
+	// LEDGER_AUDIT_RETENTION_DAYS sets the audit-log retention window in
+	// whole days (see ledger/audit_retention.go): whole audit files older
+	// than the window are deleted by a sweep at startup, and each
+	// deletion is recorded as an audit_retention_deleted event in the
+	// trail itself. Unset or 0 means unlimited retention. A negative or
+	// non-integer value fails startup fast.
+	var auditRetentionDeleted []string
 	if dir := os.Getenv("LEDGER_AUDIT_DIR"); dir != "" {
 		auditOpts := []ledger.AuditLogOption{ledger.WithAuditLogMaxBytes(auditMaxBytes())}
+		if raw := os.Getenv("LEDGER_AUDIT_RETENTION_DAYS"); raw != "" {
+			days, err := ledger.ParseAuditRetentionDays(raw)
+			if err != nil {
+				log.Fatalf("ledger-api-go: LEDGER_AUDIT_RETENTION_DAYS: %v", err)
+			}
+			auditOpts = append(auditOpts, ledger.WithAuditLogRetentionDays(days))
+		}
 		if raw := os.Getenv("LEDGER_AUDIT_SIGNING_KEYS"); raw != "" {
 			keys, err := ledger.ParseAuditSigningKeys(raw)
 			if err != nil {
@@ -7581,6 +7609,14 @@ func main() {
 			log.Fatalf("ledger-api-go: audit log: %v", err)
 		}
 		defer al.Close()
+		// Run the retention sweep once at startup: whole audit files
+		// older than the retention window are deleted, and the sweep
+		// itself is recorded in the trail. A sweep failure (the
+		// deletion event could not be recorded) fails startup fast —
+		// an unaudited deletion must not happen.
+		if auditRetentionDeleted, err = al.ApplyAuditRetention(time.Now()); err != nil {
+			log.Fatalf("ledger-api-go: audit retention: %v", err)
+		}
 		opts = append(opts, ledger.WithAuditLog(al))
 		log.Printf("ledger-api-go: audit log enabled (dir %s)", dir)
 	}
@@ -7679,6 +7715,9 @@ func main() {
 	defer stop()
 
 	srv := newServer(ledger.New(opts...), opts...)
+	if n := len(auditRetentionDeleted); n > 0 {
+		log.Printf("ledger-api-go: audit retention deleted %d file(s) older than the retention window", n)
+	}
 	if webhooks != nil {
 		srv.webhooks = webhooks
 		defer webhooks.Stop()
