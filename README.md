@@ -1444,6 +1444,46 @@ l.FtpPreview("bu-lending", "USD", 12, 1_200_000) // read-only price
 l.ChargeFtp("bu-lending", "USD", 12, 1_200_000, asof) // books 60000c: debit ftp-expense / credit treasury-pool
 ```
 
+### Fixed-asset depreciation (Go API: `RegisterFixedAsset` / `Depreciate` / `AccumulatedDepreciation`)
+
+Systematic monthly amortization of capitalized assets — the complement
+of accruals (accruals pre-accrue expenses; depreciation amortizes
+capitalized assets). One entry per (asset, UTC calendar month): debit
+the depreciation expense account, credit the accumulated depreciation
+(contra-asset) account. Entry IDs are deterministic —
+`depr/<assetID>/<YYYY-MM>` — so re-running a month's depreciation is
+idempotent: the second call returns the original entry and books nothing
+new.
+
+```go
+l.RegisterFixedAsset(ledger.FixedAsset{
+    ID: "srv-001", Account: "fixed-assets:servers",
+    CostCents: 1_200_000, Currency: "USD", SalvageCents: 0,
+    UsefulLifeMonths: 36, Method: ledger.DepreciationStraightLine,
+})
+// Books 33333c for March 2026: debit depr-expense / credit accum-depr.
+l.Depreciate("srv-001", "depr-expense", "accum-depr", asof)
+// Net depreciation booked to date (reversals net out).
+l.AccumulatedDepreciation("srv-001")
+```
+
+Two methods: `straight-line` (`floor((cost-salvage)/months)` per month,
+trued up in the final month so the lifetime total is exact) and
+`double-declining` (`floor(bookValue*2/months)` against the declining
+book value). The charge is capped at the remaining depreciable base —
+depreciation never takes the book value below salvage — and a fully
+depreciated asset books nothing (empty entry, nil error). Depreciation
+entries are ordinary journal rows (own audit-chain link, version bump,
+full `Post` gates, covered by `VerifyAccountingEquation` and
+`Reconcile`) with two deliberate exceptions, mirroring accruals: they
+never fire the journal rules engine and never enter dual-control review.
+The memo `depreciation:<method>` makes rows discoverable via
+`GET /entries?memo=depreciation:straight-line`. Reversing a month with
+`ReverseEntry` nets against it in `AccumulatedDepreciation`, so the
+month can be corrected and re-run. The asset register is in-memory
+structural config — re-register assets after a disaster-recovery
+restore (the booked entries themselves round-trip as ordinary rows).
+
 ### Business-day calendar (LG-95)
 
 A configurable holiday calendar for interest accrual and settlement

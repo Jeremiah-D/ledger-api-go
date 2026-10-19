@@ -953,6 +953,14 @@ type Ledger struct {
 	// round-trips through the snapshot config record, so a restored
 	// ledger carries the same rule-set generation as the source.
 	journalRuleVersion uint64
+	// fixedAssets maps asset IDs to the registered fixed-asset master
+	// records (see depreciation.go): cost, salvage value, useful life
+	// and depreciation method. Registration is structural config — it
+	// does not bump the journal version. The register is in-memory;
+	// re-register assets after a disaster-recovery restore (the booked
+	// depreciation entries themselves round-trip as ordinary journal
+	// rows, so accumulated depreciation survives).
+	fixedAssets map[string]FixedAsset
 	// ruleLegsCommitted counts derived journal legs ever committed by
 	// the rules engine. Operational metric (surfaced on GET /metrics),
 	// not books: it is in-memory only and does not round-trip through
@@ -1322,6 +1330,7 @@ func New(opts ...Option) *Ledger {
 		disputes:                    make(map[string]Dispute),
 		disputeKeys:                 make(map[string]string),
 		journalRules:                make(map[string]JournalRule),
+		fixedAssets:               make(map[string]FixedAsset),
 		revalBaselines:              make(map[revalKey]revalBaseline),
 		ofxImports:                  make(map[string]*OFXImportReport),
 		camt053Imports:              make(map[string]*CAMT053ImportReport),
