@@ -294,6 +294,13 @@ type ReconciliationReport struct {
 	// Operations tooling reads this to know which entries correct,
 	// adjust, or refund which.
 	EntryLinks []EntryLink `json:"entry_links"`
+	// PostingRules lists the installed automatic posting rules for
+	// transfer/capture/sweep events (see posting_rules.go), sorted by
+	// name. Operations tooling reads this to know which event-driven
+	// derived legs the ledger appends — channel fees, tax
+	// withholdings, sweep reserves — and under which match
+	// predicates. Empty when no rules are installed.
+	PostingRules []PostingRule `json:"posting_rules"`
 	// LinkChains expands the reversal_of/adjustment_of links into
 	// per-root adjustment chains (see EntryLinkChain in links.go):
 	// each chain starts at the ultimate original entry and lists every
@@ -784,6 +791,9 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// association record, disclosed like the mapping table.
 		EntryLinks: l.entryLinksLocked(),
 		LinkChains: l.entryLinkChainsLocked(),
+		// LG-132: the installed automatic posting rules for
+		// transfer/capture/sweep events, sorted by name.
+		PostingRules: l.postingRulesSortedLocked(),
 		// LG-125: the direct-debit mandates table — the standing pull
 		// authorizations with their effective statuses and debit
 		// usage, so the reconciliation record shows which mandates

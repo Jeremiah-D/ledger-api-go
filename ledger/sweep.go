@@ -3,6 +3,7 @@ package ledger
 import (
 	"errors"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -111,6 +112,12 @@ type SweepReceipt struct {
 	Legs      []SweepLeg     `json:"legs"`
 	Entries   []JournalEntry `json:"entries"`
 	Duplicate bool           `json:"duplicate"`
+	// RuleLegs discloses the automatic posting-rule legs the sweep
+	// booked (see ledger/posting_rules.go): one row per derived leg
+	// with the rule name, the journal entry ID, the accounts, and the
+	// cents booked. Nil when no rule fired. Idempotent replays rebuild
+	// the same disclosure from the journaled legs' "/rule:" IDs.
+	RuleLegs []PostingRuleLegInfo `json:"rule_legs,omitempty"`
 }
 
 // sweepRecord remembers what a sweep posted so idempotent replays can
@@ -179,6 +186,7 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 				Legs:      sweepLegsOf(entries),
 				Entries:   entries,
 				Duplicate: true,
+				RuleLegs:  postingRuleLegInfosFromEntries(entries),
 			}, nil
 		}
 	}
@@ -260,6 +268,30 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 		return SweepReceipt{}, err
 	}
 
+	// Automatic posting rules (see posting_rules.go): each sweep leg
+	// that matches an installed rule appends its derived legs to the
+	// commit — one rule evaluation per (source, currency) leg, so every
+	// sub-merchant settlement books its own legs. Evaluated after every
+	// gate and before the first mutation, so a failing rule leg rejects
+	// the whole sweep with nothing recorded.
+	var ruleLegs []JournalEntry
+	var ruleLegInfos []PostingRuleLegInfo
+	for _, leg := range legs {
+		rl, ri, err := l.resolvePostingRuleLegsLocked(postingRuleContext{
+			kind:        PostingEventSweep,
+			payer:       leg.From,
+			payee:       s.To,
+			amountCents: leg.AmountCents,
+			currency:    leg.Currency,
+			triggerID:   leg.EntryID,
+		}, createdAt)
+		if err != nil {
+			return SweepReceipt{}, err
+		}
+		ruleLegs = append(ruleLegs, rl...)
+		ruleLegInfos = append(ruleLegInfos, ri...)
+	}
+
 	// Atomic commit: every leg's journal row, per-account index entries,
 	// balances, totals, chain links, and version bumps land together,
 	// under the one write lock, after all checks passed. Any failure
@@ -269,30 +301,30 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneMonthlySpendLocked(now)
 	versionBefore := l.version
-	entries := make([]JournalEntry, 0, len(legs))
-	// Pre-commit balance snapshot for the opt-in balance-change hook
-	// (see balance_hook.go): the legs are fully planned above, so the
-	// touched set is exact. Nil when no hook is registered.
-	hookTouched := make([]accountCurrency, 0, 2*len(legs))
+	entries := make([]JournalEntry, 0, len(legs)+len(ruleLegs))
 	for _, leg := range legs {
-		hookTouched = append(hookTouched,
-			accountCurrency{account: s.To, currency: leg.Currency},
-			accountCurrency{account: leg.From, currency: leg.Currency})
-	}
-	hookOld := l.balanceSnapshotLocked(hookTouched)
-	for _, leg := range legs {
-		e := JournalEntry{
+		entries = append(entries, JournalEntry{
 			ID:            leg.EntryID,
 			DebitAccount:  s.To,
 			CreditAccount: leg.From,
 			AmountCents:   leg.AmountCents,
 			Currency:      leg.Currency,
 			CreatedAt:     createdAt,
-		}
-		l.commitEntryLocked(e)
-		l.addMonthlySpendLocked(leg.From, leg.Currency, leg.AmountCents, createdAt)
-		entries = append(entries, e)
+		})
 	}
+	entries = append(entries, ruleLegs...)
+	// Pre-commit balance snapshot for the opt-in balance-change hook
+	// (see balance_hook.go): the legs are fully planned above, so the
+	// touched set is exact. Nil when no hook is registered.
+	hookTouched := touchedAccounts(entries)
+	hookOld := l.balanceSnapshotLocked(hookTouched)
+	for _, e := range entries {
+		l.commitEntryLocked(e)
+	}
+	for _, leg := range legs {
+		l.addMonthlySpendLocked(leg.From, leg.Currency, leg.AmountCents, createdAt)
+	}
+	l.countPostingRuleLegsLocked(ruleLegInfos)
 	if s.IdempotencyKey != "" {
 		ids := make([]string, 0, len(entries))
 		for _, e := range entries {
@@ -319,11 +351,9 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 		VersionAfter:  l.version,
 		EntryIDs:      sweepEntryIDs,
 		Accounts:      append(append([]AccountID{}, s.From...), s.To),
-		Details: map[string]any{
-			"legs": len(legs),
-		},
+		Details:       sweepDetails(len(legs), ruleLegInfos),
 	})
-	// Domain outbox: one entry_posted per sweep leg.
+	// Domain outbox: one entry_posted per sweep leg and rule leg.
 	l.emitOutboxEntriesLocked(entries)
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
@@ -334,6 +364,7 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 		Legs:      legs,
 		Entries:   entries,
 		Duplicate: false,
+		RuleLegs:  ruleLegInfos,
 	}, nil
 }
 
@@ -363,12 +394,27 @@ func (l *Ledger) sweepLegsLocked(s Sweep) []SweepLeg {
 	return legs
 }
 
+// sweepDetails renders the sweep's structured audit disclosure: the leg
+// count plus the automatic posting-rule legs (see posting_rules.go).
+func sweepDetails(legCount int, ruleLegs []PostingRuleLegInfo) map[string]any {
+	d := map[string]any{"legs": legCount}
+	if len(ruleLegs) > 0 {
+		d["posting_rule_legs"] = postingRuleDetails(ruleLegs)
+	}
+	return d
+}
+
 // sweepLegsOf rebuilds the leg descriptors of a replayed sweep from its
 // committed entries. The entry ID convention "<sweep ID>/<source>/<currency>"
 // carries everything the leg needs; the source account is the credit leg.
+// Rule legs (see posting_rules.go, "<...>/rule:<name>") are skipped: they
+// are not sweep legs and rebuild separately into the receipt's RuleLegs.
 func sweepLegsOf(entries []JournalEntry) []SweepLeg {
 	legs := make([]SweepLeg, 0, len(entries))
 	for _, e := range entries {
+		if strings.Contains(e.ID, "/rule:") {
+			continue
+		}
 		legs = append(legs, SweepLeg{
 			From:        e.CreditAccount,
 			Currency:    e.Currency,

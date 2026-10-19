@@ -453,6 +453,15 @@ type Metrics struct {
 	// and outcome. The zero value is ready to use. Exported as
 	// ledger_review_quorum_votes_total{approver,vote,outcome}.
 	QuorumVotesTotal QuorumVoteCounter
+	// PostingRuleLegsTotal counts derived posting-rule legs committed
+	// by the automatic posting rules (LG-132): every derived leg
+	// appended to a transfer, capture, or sweep event, by rule name.
+	// It is synced from the ledger on every GET /metrics scrape —
+	// the legs commit inside the event write paths, not in a handler.
+	// Rule names are operator-configured, so the label cardinality
+	// is bounded by the rule set. Exported as
+	// ledger_posting_rule_legs_total{rule}.
+	PostingRuleLegsTotal PostingRuleLegCounter
 	// SettlementRuns counts GET /settlement requests served (all
 	// formats: json, csv, sql).
 	SettlementRuns atomic.Uint64
@@ -883,6 +892,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&sb, "ledger_review_quorum_votes_total",
 		"Total review-quorum votes cast (LG-124): named approve/reject votes through the review decision endpoints while a quorum policy is active, by approver identity, vote kind (approve/reject), and outcome (recorded/settled/decisive/duplicate).",
 		m.QuorumVotesTotal.series())
+	writeLabeledCounter(&sb, "ledger_posting_rule_legs_total",
+		"Total derived posting-rule legs committed (LG-132): every derived journal leg an automatic posting rule appended to a transfer, capture, or sweep event, by rule name.",
+		m.PostingRuleLegsTotal.series())
 	writeCounter(&sb, "ledger_settlement_runs_total",
 		"Total GET /settlement requests served (all formats).",
 		m.SettlementRuns.Load())
@@ -1009,6 +1021,46 @@ func (c *QuorumVoteCounter) series() []labeledCounterSeries {
 type labeledCounterSeries struct {
 	labels string
 	value  uint64
+}
+
+// PostingRuleLegCounter is the per-rule breakdown of derived posting
+// rule legs committed (LG-132), rendered as
+// ledger_posting_rule_legs_total{rule=".."}: the ledger counts the legs
+// at commit time and the HTTP layer mirrors the counts on scrape, so
+// Set overwrites (never accumulates) — the ledger is the source of
+// truth. The zero value is ready to use; Set is safe for concurrent
+// use.
+type PostingRuleLegCounter struct {
+	mu     sync.Mutex
+	counts map[string]uint64
+}
+
+// Set records the ledger's authoritative per-rule leg count. Rule
+// names are operator config (no '/' allowed), rendered with %q so the
+// label value stays valid exposition text.
+func (c *PostingRuleLegCounter) Set(rule string, n uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = make(map[string]uint64)
+	}
+	c.counts[rule] = n
+}
+
+// series renders the counter as labeled series, sorted by rule name
+// for a deterministic exposition.
+func (c *PostingRuleLegCounter) series() []labeledCounterSeries {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]labeledCounterSeries, 0, len(c.counts))
+	for rule, v := range c.counts {
+		out = append(out, labeledCounterSeries{
+			labels: fmt.Sprintf(`rule=%q`, rule),
+			value:  v,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].labels < out[j].labels })
+	return out
 }
 
 // writeLabeledCounter renders one Prometheus counter metric with one

@@ -913,6 +913,20 @@ type Ledger struct {
 	// not books: it is in-memory only and does not round-trip through
 	// snapshots.
 	ruleLegsCommitted atomic.Uint64
+	// postingRules is the installed automatic posting rules for
+	// transfer/capture/sweep events (see posting_rules.go), in
+	// registration order: rules are deployment config set at
+	// construction with WithPostingRules, validated fail-fast. Empty
+	// by default — a ledger without posting rules posts exactly as
+	// before. Rule installation is structural config, like frozen and
+	// dailyLimits: it does not bump the journal version and it
+	// survives disaster-recovery snapshots.
+	postingRules []PostingRule
+	// postingRuleLegs counts derived posting-rule legs ever committed,
+	// per rule name: the source of truth for
+	// ledger_posting_rule_legs_total{rule} on GET /metrics.
+	// Operational metric, in-memory only, not in snapshots.
+	postingRuleLegs map[string]uint64
 	// vanAttributions counts virtual-account attributions ever applied
 	// (see virtual_account.go). Operational metric (surfaced on GET
 	// /metrics), not books: in-memory only, no snapshot round-trip.

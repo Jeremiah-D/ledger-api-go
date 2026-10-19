@@ -437,6 +437,12 @@ type snapshotConfigLine struct {
 	// mutation counter, restored like the journal rules' counter.
 	AllocationRules       []AllocationRule `json:"allocation_rules,omitempty"`
 	AllocationRuleVersion uint64           `json:"allocation_rule_version,omitempty"`
+	// PostingRules carries the opt-in automatic posting rules for
+	// transfer/capture/sweep events (see WithPostingRules); absent in
+	// snapshots written before posting rules existed. Rules restore
+	// like the other structural config, so a restored ledger applies
+	// the exact same event-driven derived legs as the source.
+	PostingRules []PostingRule `json:"posting_rules,omitempty"`
 	// ClosingPLAccounts and ClosingRetainedEarnings carry the opt-in
 	// period-closing account mapping (see SetClosingAccounts); absent in
 	// snapshots written before period-closing entries existed. A restore
@@ -1075,6 +1081,10 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		JournalRuleVersion:    l.journalRuleVersion,
 		AllocationRules:       l.allocationRulesLocked(),
 		AllocationRuleVersion: l.allocRuleVersion,
+		// LG-132: the automatic posting rules round-trip as
+		// structural config, sorted by name for a deterministic
+		// snapshot.
+		PostingRules:          l.postingRulesSortedLocked(),
 		RevalAccount:          l.revalAccount,
 		RevalBaselines:        l.revaluationPositionsLocked(),
 		AccountTypes:          l.accountTypesLocked(),
@@ -2711,6 +2721,30 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		l.journalRules[r.ID] = r
 	}
 	l.journalRuleVersion = cfg.JournalRuleVersion
+	// LG-132: posting rules restore like the other structural config:
+	// validated like construction (a snapshot rule that could never
+	// have been created fails the import), installed in name order for
+	// deterministic evaluation.
+	validatedPostingRules := make([]PostingRule, 0, len(cfg.PostingRules))
+	seenPostingRules := make(map[string]bool, len(cfg.PostingRules))
+	for _, r := range cfg.PostingRules {
+		nr, err := ValidatePostingRule(r)
+		if err != nil {
+			return bad("bad posting rule %q: %v", r.Name, err)
+		}
+		if seenPostingRules[nr.Name] {
+			return bad("duplicate posting rule %q", nr.Name)
+		}
+		seenPostingRules[nr.Name] = true
+		legs := make([]PostingRuleLeg, len(nr.Legs))
+		copy(legs, nr.Legs)
+		nr.Legs = legs
+		validatedPostingRules = append(validatedPostingRules, nr)
+	}
+	sort.Slice(validatedPostingRules, func(i, j int) bool {
+		return validatedPostingRules[i].Name < validatedPostingRules[j].Name
+	})
+	l.postingRules = validatedPostingRules
 	// Cost allocation rules restore like the other structural config:
 	// the rule set and its mutation counter round-trip together.
 	l.allocRules = make(map[string]AllocationRule, len(validatedAllocRules))

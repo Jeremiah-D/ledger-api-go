@@ -218,6 +218,12 @@ type TransferReceipt struct {
 	// was no fee). Idempotent replays rebuild the same breakdown from
 	// the journaled legs' memos.
 	FeeSplits []FeeSplitShare `json:"fee_splits,omitempty"`
+	// RuleLegs discloses the automatic posting-rule legs the transfer
+	// booked (see ledger/posting_rules.go): one row per derived leg
+	// with the rule name, the journal entry ID, the accounts, and the
+	// cents booked. Nil when no rule fired. Idempotent replays rebuild
+	// the same disclosure from the journaled legs' "/rule:" IDs.
+	RuleLegs []PostingRuleLegInfo `json:"rule_legs,omitempty"`
 	// SettlementStatus discloses the transfer's settlement-window
 	// outcome (see settlement_cutoff.go): "settled" when the transfer
 	// booked in its currency's current settlement window, "scheduled"
@@ -932,6 +938,25 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		return receipt, err
 	}
 
+	// Automatic posting rules (see posting_rules.go): transfers that
+	// match an installed rule append their derived legs to the commit.
+	// Evaluated after every gate — including the review gate, so
+	// review-frozen transfers book no rule legs — and before the first
+	// mutation, so a failing rule leg rejects the whole transfer with
+	// nothing recorded.
+	ruleLegs, ruleLegInfos, err := l.resolvePostingRuleLegsLocked(postingRuleContext{
+		kind:        PostingEventTransfer,
+		payer:       t.From,
+		payee:       t.To,
+		amountCents: t.AmountCents,
+		currency:    t.Currency,
+		triggerID:   t.ID,
+	}, principal.CreatedAt)
+	if err != nil {
+		return TransferReceipt{}, err
+	}
+	entries = append(entries, ruleLegs...)
+
 	// Atomic commit: every leg's journal row, idempotency index entries,
 	// balances, totals, chain links, and version bumps land together, under
 	// the one write lock, after all checks passed. Any failure above
@@ -949,6 +974,7 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	}
 	l.addDailyOutflowLocked(t.From, t.Currency, totalOutflow, principal.CreatedAt)
 	l.addMonthlySpendLocked(t.From, t.Currency, totalOutflow, principal.CreatedAt)
+	l.countPostingRuleLegsLocked(ruleLegInfos)
 	if t.IdempotencyKey != "" {
 		ids := make([]string, 0, len(entries))
 		for _, e := range entries {
@@ -974,6 +1000,12 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		// The per-recipient split breakdown enters the structured
 		// audit: account, promised basis points, and cents booked.
 		transferDetails["fee_splits"] = feeSplitAuditDetails(feeSplits)
+	}
+	if len(ruleLegInfos) > 0 {
+		// The automatic posting-rule legs (see posting_rules.go)
+		// enter the structured audit like the fee splits: rule,
+		// entry, accounts, and cents booked.
+		transferDetails["posting_rule_legs"] = postingRuleDetails(ruleLegInfos)
 	}
 	if t.Memo != "" {
 		transferDetails["memo"] = t.Memo
@@ -1017,6 +1049,7 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		FeeRateBps:       rateBps,
 		Duplicate:        false,
 		FeeSplits:        feeSplits,
+		RuleLegs:         ruleLegInfos,
 		SettlementStatus: settlementStatus,
 		SettlementWindow: settlementWindow,
 	}, nil
@@ -1070,10 +1103,15 @@ func (l *Ledger) replayTransferLocked(t Transfer) (TransferReceipt, bool) {
 		// entries[0] is the principal entry, whose ID is the original
 		// transfer ID — the replay request's ID may differ.
 		feeSplits := feeSplitSharesFromLegs(entries[0].ID, entries)
+		// The posting-rule legs rebuild from the journaled legs'
+		// "/rule:" IDs (see postingRuleLegInfosFromEntries): the
+		// replay discloses exactly what the original posted, and
+		// books nothing new.
+		ruleLegs := postingRuleLegInfosFromEntries(entries)
 		// Replays deliberately omit the FX disclosure (see
 		// TransferReceipt.FX): the rate table may have changed since the
 		// original posting.
-		return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCents, FeeTierIndex: tierIndex, FeeRateBps: rateBps, FeeSplits: feeSplits, Duplicate: true, ReviewStatus: reviewStatus}, true
+		return TransferReceipt{TransferID: t.ID, Entries: entries, FeeCents: feeCents, FeeTierIndex: tierIndex, FeeRateBps: rateBps, FeeSplits: feeSplits, RuleLegs: ruleLegs, Duplicate: true, ReviewStatus: reviewStatus}, true
 	}
 	if orig, ok := l.byKey[t.IdempotencyKey]; ok {
 		return TransferReceipt{

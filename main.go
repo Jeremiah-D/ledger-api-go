@@ -6311,6 +6311,9 @@ func (s *server) handler() http.Handler {
 		var auditWritten, auditDropped, outboxWritten, outboxDropped uint64
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
 		var deferredSettlements uint64
+		// Per-rule posting-rule leg counts (LG-132), aggregated across
+		// tenants like the other ledger-sourced counters above.
+		postingRuleLegs := map[string]uint64{}
 		var lowLiqAlerts uint64
 		var paceAlerts uint64
 		var vanAttributions uint64
@@ -6337,6 +6340,9 @@ func (s *server) handler() http.Handler {
 			paceAlerts += l.BudgetPaceAlertCount()
 			lowLiqAlerts += l.LiquidityAlertCount()
 			ruleLegs += l.RuleLegsCommitted()
+			for rule, n := range l.PostingRuleLegCounts() {
+				postingRuleLegs[rule] += n
+			}
 			vanAttributions += l.VANAttributionCount()
 			freezeReleases += l.FrozenAutoReleases()
 		// The settlement-deferral counter likewise lives in the
@@ -6384,6 +6390,14 @@ func (s *server) handler() http.Handler {
 		// The rules-engine leg counter likewise lives in the ledger: the
 		// legs commit inside Post, not in a handler.
 		s.metrics.JournalRuleLegsTotal.Store(ruleLegs)
+		// The per-rule posting-rule leg counts likewise live in the
+		// ledger: the legs commit inside the transfer/capture/sweep
+		// write paths, not in a handler (see ledger/posting_rules.go,
+		// LG-132). The ledger is the source of truth, so the scrape
+		// overwrites (never accumulates) the exposed series.
+		for rule, n := range postingRuleLegs {
+			s.metrics.PostingRuleLegsTotal.Set(rule, n)
+		}
 		// The VAN attribution counter likewise lives in the ledger:
 		// attributions apply inside Post/Transfer/..., not in a
 		// handler.

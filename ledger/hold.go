@@ -177,6 +177,11 @@ type CaptureReceipt struct {
 	CapturedCents int64        `json:"captured_cents"`
 	ReleasedCents int64        `json:"released_cents"`
 	Duplicate     bool         `json:"duplicate"`
+	// RuleLegs discloses the automatic posting-rule legs the capture
+	// booked (see ledger/posting_rules.go). Nil when no rule fired.
+	// Idempotent replays return the original receipt with the same
+	// disclosure.
+	RuleLegs []PostingRuleLegInfo `json:"rule_legs,omitempty"`
 }
 
 // Hold reserves AmountCents of the account's available funds until
@@ -671,12 +676,33 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneMonthlySpendLocked(now)
 	versionBefore := l.version
+	// Automatic posting rules (see posting_rules.go): captures that
+	// match an installed rule append their derived legs to the commit.
+	// Evaluated after every gate and before the first mutation, so a
+	// failing rule leg rejects the whole capture with nothing
+	// recorded. The rule context is the hold's account (payer) and the
+	// capture target (payee), in the hold's currency.
+	ruleLegs, ruleLegInfos, err := l.resolvePostingRuleLegsLocked(postingRuleContext{
+		kind:        PostingEventCapture,
+		payer:       h.Account,
+		payee:       c.To,
+		amountCents: c.AmountCents,
+		currency:    h.Currency,
+		triggerID:   c.ID,
+	}, entry.CreatedAt)
+	if err != nil {
+		return CaptureReceipt{}, err
+	}
+	entries := append([]JournalEntry{entry}, ruleLegs...)
 	// Pre-commit balance snapshot for the opt-in balance-change hook
 	// (see balance_hook.go): nil when no hook is registered.
-	hookTouched := touchedAccounts([]JournalEntry{entry})
+	hookTouched := touchedAccounts(entries)
 	hookOld := l.balanceSnapshotLocked(hookTouched)
-	l.commitEntryLocked(entry)
+	for _, e := range entries {
+		l.commitEntryLocked(e)
+	}
 	l.addMonthlySpendLocked(h.Account, h.Currency, c.AmountCents, entry.CreatedAt)
+	l.countPostingRuleLegsLocked(ruleLegInfos)
 	h.Status = HoldStatusCaptured
 	l.holds[c.HoldID] = h
 
@@ -689,30 +715,42 @@ func (l *Ledger) Capture(c Capture) (CaptureReceipt, error) {
 		// before this capture: with partial captures on the hold that
 		// is the post-partial remainder, not the original hold amount.
 		ReleasedCents: heldRemainingLocked(h) - c.AmountCents,
+		RuleLegs:      ruleLegInfos,
 	}
 	if c.IdempotencyKey != "" {
 		l.captureKeys[c.IdempotencyKey] = receipt
 	}
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
-	l.evaluateBalanceWatchesLocked(touchedAccounts([]JournalEntry{entry}), c.HoldID, "Capture")
+	l.evaluateBalanceWatchesLocked(touchedAccounts(entries), c.HoldID, "Capture")
+	captureDetails := map[string]any{
+		"captured_cents": entry.AmountCents,
+		"released_cents": receipt.ReleasedCents,
+		"currency":       h.Currency,
+	}
+	if len(ruleLegInfos) > 0 {
+		// The automatic posting-rule legs enter the structured
+		// audit (see posting_rules.go).
+		captureDetails["posting_rule_legs"] = postingRuleDetails(ruleLegInfos)
+	}
+	captureEntryIDs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		captureEntryIDs = append(captureEntryIDs, e.ID)
+	}
 	l.emitAudit(AuditEvent{
 		Op:            "hold_capture",
 		Actor:         "Capture",
 		TraceID:       c.HoldID,
 		VersionBefore: versionBefore,
 		VersionAfter:  l.version,
-		EntryIDs:      []string{entry.ID},
+		EntryIDs:      captureEntryIDs,
 		Accounts:      []AccountID{h.Account, c.To},
-		Details: map[string]any{
-			"captured_cents": entry.AmountCents,
-			"released_cents": receipt.ReleasedCents,
-			"currency":       h.Currency,
-		},
+		Details:       captureDetails,
 	})
 	// Domain outbox: the capture settles money — one entry_posted for
-	// the settlement leg, then the hold_captured envelope.
-	l.emitOutboxEntriesLocked([]JournalEntry{entry})
+	// the settlement leg and its rule legs, then the hold_captured
+	// envelope.
+	l.emitOutboxEntriesLocked(entries)
 	l.emitOutboxLocked(OutboxEvent{
 		Type:        OutboxHoldCaptured,
 		Account:     h.Account,

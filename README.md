@@ -288,6 +288,73 @@ curl -s localhost:8080/transfers/tx-2026-003/fee-split
 A transfer that posted no fee split (no fee leg, or a single fee
 account) returns `404` with a hint, like an unknown transfer ID.
 
+#### Posting rules (event-driven derived legs)
+
+Where the opt-in journal rules (`PUT /rules/{id}`) fire on raw `POST` entries, **posting rules**
+fire on domain events — `transfer`, `capture`, and `sweep` — and append
+derived journal legs that commit atomically with the event. The
+payment-fintech automations: a channel fee on a merchant settlement
+transfer, a tax withholding on a payout capture, a reserve on a treasury
+sweep.
+
+```go
+l := ledger.New(ledger.WithPostingRules([]ledger.PostingRule{{
+    Name:           "channel-fee",
+    EventKind:      ledger.PostingEventTransfer, // "transfer" | "capture" | "sweep"
+    AccountPrefix:  "merchant-",                 // payer must start with this (optional)
+    MinAmountCents: 10000,                       // event amount must reach this (optional)
+    Currency:       "USD",                       // event currency must equal this (optional)
+    Legs: []ledger.PostingRuleLeg{{
+        AccountTemplate: "channel-fee-revenue", // {payer} / {payee} interpolated from the event
+        Side:            "debit",               // "debit": debit template, credit payer
+        AmountExpr:      "bps:250",             // "bps:<1..10000>" or "fixed:<cents>"
+    }},
+}}))
+```
+
+Semantics:
+
+- **Event context.** Transfer: payer `from_account`, payee
+  `to_account`, amount the transfer amount, trigger the transfer ID.
+  Capture: payer the hold account, payee the capture target, amount
+  the captured cents, trigger the capture entry ID. Sweep: one
+  evaluation per (source, currency) leg — payer the source, payee the
+  sweep target, trigger the leg entry ID
+  (`<sweep_id>/<source>/<currency>`).
+- **Derived legs.** Each leg books its own journal entry: id
+  `<trigger_id>/rule:<rule_name>` (`/<i>` appended when the rule
+  defines several legs), `batch_id` = the trigger ID, memo
+  `rule:<rule_name>`, in the event's currency. Side `debit` debits the
+  resolved template account and credits the payer (the charge-on-top
+  fee shape); side `credit` does the reverse.
+- **Atomicity.** Rule legs are evaluated after every gate — including
+  the dual-control review gate, so review-frozen transfers book no
+  rule legs — and before the first mutation. A leg that fails any
+  gate (frozen/closed/suspended account, overdraft on a protected
+  payer, or an ID collision) rejects the whole event: no journal rows,
+  no chain links, no version bump. Rule legs are excluded from the
+  daily-outflow and monthly-spend accounting (the event's own gates
+  already evaluated the principal outflow), and derived legs never
+  re-trigger rules — one level deep, no cascades.
+- **Receipt & audit.** Receipts (`transfer`, `capture`, `sweep`)
+  disclose `rule_legs` (rule name, entry ID, accounts, cents);
+  idempotent replays rebuild the same disclosure from the journaled
+  `/rule:` IDs and book nothing new. The structured audit events
+  carry `posting_rule_legs`. `POST /reconcile` lists the installed
+  rules in `posting_rules`.
+- **Config.** Rules are deployment config, like the fee policy:
+  installed at construction, validated fail-fast (bad kind, unknown
+  `{placeholder}`, `bps` outside 1..10000, duplicate names — all
+  panic, mirroring the fee schedule), and round-tripped through the
+  disaster-recovery snapshot config. With no rules installed the
+  ledger posts exactly as before.
+- **Metrics.** `ledger_posting_rule_legs_total{rule}` counts committed
+  derived legs per rule on `GET /metrics`.
+
+A zero-cent derived leg (dust under a low bps rate) books nothing,
+mirroring the fee policy. A rule ID containing `/` is rejected so the
+derived-leg IDs stay unambiguous.
+
 #### Large-transfer dual review
 
 Opt-in maker-checker for big money movements (the fintech dual-control
@@ -4354,6 +4421,8 @@ curl -s localhost:8080/metrics
   nothing).
 - `ledger_transfer_fee_cents_total` — total fee cents booked by transfer
   fee legs.
+- `ledger_posting_rule_legs_total{rule}` — derived journal legs committed
+  by automatic posting rules (LG-132), one series per rule name.
 - `ledger_fx_transfers_total` — `POST /transfers` requests that attempted
   a cross-currency transfer, including rejected ones.
 - `ledger_period_rejections_total` — journal-writing requests rejected

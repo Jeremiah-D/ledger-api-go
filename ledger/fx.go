@@ -1227,6 +1227,28 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// Atomic commit: journal rows, idempotency index, balances, totals,
 	// chain links, and version bumps land together under the one write
 	// lock, after all checks passed.
+	//
+	// Automatic posting rules (see posting_rules.go): cross-currency
+	// transfers that match an installed rule append their derived
+	// legs to the commit, like the non-FX path. Evaluated after every
+	// gate — including the review gate, so review-frozen transfers
+	// book no rule legs — and before the first mutation, so a failing
+	// rule leg rejects the whole transfer with nothing recorded. The
+	// rule context is the source currency: rule legs book in the
+	// currency the payer is charged in.
+	ruleLegs, ruleLegInfos, err := l.resolvePostingRuleLegsLocked(postingRuleContext{
+		kind:        PostingEventTransfer,
+		payer:       t.From,
+		payee:       t.To,
+		amountCents: t.AmountCents,
+		currency:    t.Currency,
+		triggerID:   t.ID,
+	}, t.CreatedAt)
+	if err != nil {
+		return TransferReceipt{}, err
+	}
+	entries = append(entries, ruleLegs...)
+
 	l.maybePruneIdempotencyKeys(now)
 	l.maybePruneDailyOutflowLocked(now)
 	l.maybePruneMonthlySpendLocked(now)
@@ -1257,6 +1279,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		l.fxSpreadBookings++
 		l.fxSpreadCentsTotal += spreadCents
 	}
+	l.countPostingRuleLegsLocked(ruleLegInfos)
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
 	l.evaluateBalanceWatchesLocked(touchedAccounts(entries), t.ID, "PostTransfer")
@@ -1323,6 +1346,11 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		// audit, like the non-FX path.
 		fxDetails["fee_splits"] = feeSplitAuditDetails(feeSplits)
 	}
+	if len(ruleLegInfos) > 0 {
+		// The automatic posting-rule legs enter the structured
+		// audit, like the non-FX path (see posting_rules.go).
+		fxDetails["posting_rule_legs"] = postingRuleDetails(ruleLegInfos)
+	}
 	if overridden {
 		fxDetails["override_applied"] = true
 		fxDetails["override_rate"] = fmt.Sprintf("%d/%d", effNum, effDen)
@@ -1382,6 +1410,7 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		Duplicate:        false,
 		FX:               fxConv,
 		FeeSplits:        feeSplits,
+		RuleLegs:         ruleLegInfos,
 		SettlementStatus: settlementStatus,
 		SettlementWindow: settlementWindow,
 	}, nil
