@@ -2150,6 +2150,24 @@ ledger version; both the reconcile report and full snapshots disclose
 them (`term_deposits` section, `snapshotNS term_deposit`), and the
 dry-run twin copies deposit state so what-if postings respect the locks.
 
+**Rollover (automatic renewal):** pass `"rollover":{"mode":"principal"|"principal_plus_interest","term_days":30,"max_rollovers":3}`
+on `POST /term-deposits` to renew automatically. When the maturity sweep
+matures the deposit it opens the next term immediately — same account and
+rate, fresh tenor from the policy — under the deterministic ID
+`<deposit-id>/roll/<n>` (`n` 1-based; chained renewals nest:
+`td-1/roll/1/roll/2`). `principal` re-locks the original principal;
+`principal_plus_interest` compounds by adding the interest the journal
+booked for the maturing deposit. The renewal runs the full open commit
+path (closed/frozen/suspended gates + available-funds check), so it can
+fail while the original still matures — maturing is never held hostage
+by the renewal; successes audit as `term_deposit_rolled_over`, failures
+as `term_deposit_rollover_skipped` with the reason. Only the sweep rolls
+(`POST /term-deposits/sweep`); maturing one deposit by hand stays a plain
+release. Rollover IDs contain slashes (system-generated; operator IDs
+stay slash-free) — URL-encode them as `%2F` in HTTP paths — and interest
+rows attribute by exact deposit-ID segment, so a child's accruals never
+leak into the parent's totals.
+
 ```bash
 curl -s -X POST localhost:8080/term-deposits \
   -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'

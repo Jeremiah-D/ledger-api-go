@@ -453,16 +453,22 @@ type ReconciliationReport struct {
 // TermDepositReport is one term deposit's Reconcile disclosure: the
 // locked principal and the interest the journal has booked for it.
 type TermDepositReport struct {
-	ID                   string    `json:"id"`
-	Account              AccountID `json:"account"`
-	PrincipalCents       int64     `json:"principal_cents"`
-	Currency             string    `json:"currency"`
-	RateBps              int64     `json:"rate_bps"`
-	TermDays             int64     `json:"term_days"`
-	Status               string    `json:"status"`
-	OpenedAt             time.Time `json:"opened_at"`
-	MaturesAt            time.Time `json:"matures_at"`
-	AccruedInterestCents int64     `json:"accrued_interest_cents"`
+	ID                   string          `json:"id"`
+	Account              AccountID       `json:"account"`
+	PrincipalCents       int64           `json:"principal_cents"`
+	Currency             string          `json:"currency"`
+	RateBps              int64           `json:"rate_bps"`
+	TermDays             int64           `json:"term_days"`
+	Status               string          `json:"status"`
+	OpenedAt             time.Time       `json:"opened_at"`
+	MaturesAt            time.Time       `json:"matures_at"`
+	AccruedInterestCents int64           `json:"accrued_interest_cents"`
+	// Rollover discloses the renewal policy (LG-139): the active
+	// policy, how many renewals this deposit has already spawned, and
+	// — for rollover-created deposits — the parent deposit's ID.
+	Rollover      *RolloverPolicy `json:"rollover,omitempty"`
+	RolloversUsed int             `json:"rollovers_used,omitempty"`
+	RolledFrom    string          `json:"rolled_from,omitempty"`
 }
 
 // ECLExposureReport is one exposure's Reconcile disclosure: the

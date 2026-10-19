@@ -2715,6 +2715,9 @@ type openTermDepositRequest struct {
 	// MaturesAt landing on a non-business day moves to the next
 	// business day.
 	BusinessDayMaturity bool `json:"business_day_maturity"`
+	// Rollover is the opt-in renewal policy (LG-139): when the maturity
+	// sweep matures this deposit it opens the next term automatically.
+	Rollover *ledger.RolloverPolicy `json:"rollover,omitempty"`
 }
 
 // handleOpenTermDeposit implements POST /term-deposits: locks
@@ -2754,6 +2757,7 @@ func (s *server) handleOpenTermDeposit(w http.ResponseWriter, r *http.Request) {
 		RateBps:           req.RateBps,
 		IdempotencyKey:    req.IdempotencyKey,
 		BusinessDayMaturity: req.BusinessDayMaturity,
+		Rollover:          req.Rollover,
 	})
 	if err != nil {
 		if errors.Is(err, ledger.ErrAccountClosed) {

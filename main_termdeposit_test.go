@@ -161,3 +161,29 @@ func TestHTTPTermDepositGet(t *testing.T) {
 		t.Errorf("unknown get status = %d, want 404", code)
 	}
 }
+
+func TestHTTPTermDepositRolloverPolicy(t *testing.T) {
+	srv := seedTermDepositServer(t)
+	defer srv.Close()
+
+	// Open with a rollover policy: the policy round-trips through the
+	// HTTP layer onto the deposit.
+	code, body := postJSON(t, srv.URL+"/term-deposits",
+		`{"id":"td-rp","account":"saver","amount_cents":100000,"term_days":30,"rate_bps":500,`+
+			`"rollover":{"mode":"principal","term_days":30,"max_rollovers":2}}`)
+	if code != http.StatusCreated {
+		t.Fatalf("POST /term-deposits status = %d, want 201 (body %v)", code, body)
+	}
+	roll, ok := body["rollover"].(map[string]any)
+	if !ok || roll["mode"] != "principal" || roll["max_rollovers"] != float64(2) {
+		t.Errorf("rollover = %v, want principal/2", body["rollover"])
+	}
+
+	// An invalid policy is rejected with 400.
+	code, _ = postJSON(t, srv.URL+"/term-deposits",
+		`{"id":"td-rp-bad","account":"saver","amount_cents":100000,"term_days":30,"rate_bps":500,`+
+			`"rollover":{"mode":"principal","term_days":30,"max_rollovers":0}}`)
+	if code != http.StatusBadRequest {
+		t.Errorf("bad policy status = %d, want 400", code)
+	}
+}

@@ -149,6 +149,17 @@ type TermDeposit struct {
 	BusinessDayMaturity bool      `json:"business_day_maturity,omitempty"`
 	IdempotencyKey      string    `json:"idempotency_key,omitempty"`
 	Status              string    `json:"status"`
+	// Rollover is the opt-in renewal policy (LG-139): when the maturity
+	// sweep matures this deposit, it opens the next term automatically.
+	// Nil (or mode "none") means no rollover.
+	Rollover *RolloverPolicy `json:"rollover,omitempty"`
+	// RolloversUsed counts how many times this deposit was renewed into
+	// a new term (0 for operator-opened deposits). RolledFrom is the
+	// parent deposit's ID for rollover-created deposits, empty
+	// otherwise. Both are system-maintained: OpenTermDeposit resets
+	// them, so callers cannot game the MaxRollovers cap.
+	RolloversUsed int    `json:"rollovers_used,omitempty"`
+	RolledFrom    string `json:"rolled_from,omitempty"`
 }
 
 // TermDepositWithdrawal is the receipt of an early withdrawal: the
@@ -168,12 +179,6 @@ func termDepositInterestEntryID(id string, asof time.Time) string {
 	return "term-interest/" + id + "/" + asof.UTC().Format("2006-01-02")
 }
 
-// termDepositInterestPrefix is the ID prefix shared by every interest
-// row of one deposit, used to total accrued interest from the journal.
-func termDepositInterestPrefix(id string) string {
-	return "term-interest/" + id + "/"
-}
-
 // termDepositPenaltyEntryID builds the deterministic penalty entry ID:
 // "<deposit ID>/penalty". One deposit admits at most one early
 // withdrawal, so at most one penalty row exists.
@@ -186,7 +191,8 @@ func termDepositPenaltyEntryID(id string) string {
 //
 // Validation runs first (non-empty ID without '/', non-empty account,
 // positive amount, valid currency, 1..36500 term days, 1..10000 rate
-// bps), then the idempotency replay check on the term-deposit namespace
+// bps, sane rollover policy — see validateTermDeposit), then the
+// idempotency replay check on the term-deposit namespace
 // (a replay returns the original deposit with duplicate == true and
 // locks nothing new), then the deposit-ID conflict check, then the
 // frozen and closed checks (a frozen account rejects the open with
@@ -204,33 +210,66 @@ func termDepositPenaltyEntryID(id string) string {
 // off-journal, like an authorization hold; only interest accruals and
 // penalties journal real postings.
 func (l *Ledger) OpenTermDeposit(t TermDeposit) (TermDeposit, bool, error) {
-	if t.ID == "" {
-		return TermDeposit{}, false, ErrEmptyTermDepositID
-	}
-	if strings.Contains(t.ID, "/") {
-		return TermDeposit{}, false, ErrTermDepositIDSeparator
-	}
-	if t.Account == "" {
-		return TermDeposit{}, false, ErrEmptyTermDepositAccount
-	}
-	if t.AmountCents <= 0 {
-		return TermDeposit{}, false, ErrTermDepositNonPositiveAmount
-	}
-	currency, err := normalizeCurrency(t.Currency)
-	if err != nil {
+	if err := validateTermDeposit(&t); err != nil {
 		return TermDeposit{}, false, err
-	}
-	t.Currency = currency
-	if t.TermDays < 1 || t.TermDays > 36500 {
-		return TermDeposit{}, false, ErrInvalidTermDays
-	}
-	if t.RateBps < 1 || t.RateBps > 10000 {
-		return TermDeposit{}, false, ErrInvalidTermDepositRate
 	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.openTermDepositLocked(t)
+}
 
+// validateTermDeposit runs the operator-input validation for
+// OpenTermDeposit: field checks (non-empty ID without '/', non-empty
+// account, positive amount, valid currency, 1..36500 term days,
+// 1..10000 rate bps, sane rollover policy) and input normalization
+// (currency upper-casing, rollover-policy normalization). It also
+// resets the system-maintained rollover counters, so callers cannot
+// open a deposit that already claims rolled terms.
+func validateTermDeposit(t *TermDeposit) error {
+	if t.ID == "" {
+		return ErrEmptyTermDepositID
+	}
+	if strings.Contains(t.ID, "/") {
+		return ErrTermDepositIDSeparator
+	}
+	if t.Account == "" {
+		return ErrEmptyTermDepositAccount
+	}
+	if t.AmountCents <= 0 {
+		return ErrTermDepositNonPositiveAmount
+	}
+	currency, err := normalizeCurrency(t.Currency)
+	if err != nil {
+		return err
+	}
+	t.Currency = currency
+	if t.TermDays < 1 || t.TermDays > 36500 {
+		return ErrInvalidTermDays
+	}
+	if t.RateBps < 1 || t.RateBps > 10000 {
+		return ErrInvalidTermDepositRate
+	}
+	if err := validateRolloverPolicy(t.Rollover); err != nil {
+		return err
+	}
+	if t.Rollover != nil && t.Rollover.Mode == RolloverNone {
+		t.Rollover = nil
+	}
+	t.RolloversUsed = 0
+	t.RolledFrom = ""
+	return nil
+}
+
+// openTermDepositLocked is the open commit path: idempotency replay,
+// ID conflict, closed/frozen/suspended gates, the available-funds
+// check, and the atomic commit with audit and outbox events. It does
+// NOT run the operator-ID validation (validateTermDeposit) — in
+// particular it accepts the system-generated rollover IDs, which
+// contain slashes (see termdeposit_rollover.go); every other check is
+// identical, so a renewal clears exactly the gates an operator open
+// would. Callers must hold l.mu (the write lock).
+func (l *Ledger) openTermDepositLocked(t TermDeposit) (TermDeposit, bool, error) {
 	if t.IdempotencyKey != "" {
 		if id, ok := l.termDepositKeys[t.IdempotencyKey]; ok {
 			return l.termDeposits[id], true, nil
@@ -443,17 +482,31 @@ func (l *Ledger) TermDepositInterestAccrued(id string) int64 {
 }
 
 // termDepositInterestAccruedLocked is TermDepositInterestAccrued's body.
-// Callers must hold l.mu; the read lock suffices.
+// Interest rows are attributed by exact deposit-ID segment, not by naive
+// prefix: a rollover deposit's ID ("<id>/roll/<n>", see
+// termdeposit_rollover.go) extends its parent's ID, so a plain
+// HasPrefix(id + "/") scan would count the child's interest rows into
+// the parent's total. The remainder after "<id>/" must contain no
+// further '/' (it is always the YYYY-MM-DD day). Callers must hold
+// l.mu; the read lock suffices.
 func (l *Ledger) termDepositInterestAccruedLocked(id string) int64 {
-	prefix := termDepositInterestPrefix(id)
 	var total int64
 	for entryID, e := range l.entries {
-		if !strings.HasPrefix(entryID, prefix) {
+		rest, ok := strings.CutPrefix(entryID, "term-interest/")
+		if !ok {
 			continue
 		}
-		var ok bool
-		total, ok = addCents(total, e.AmountCents)
-		if !ok {
+		// Match the full deposit-ID segment: rest must start with
+		// "<id>/" and the tail after it must be slash-free.
+		if !strings.HasPrefix(rest, id+"/") {
+			continue
+		}
+		if strings.Contains(rest[len(id)+1:], "/") {
+			continue
+		}
+		var addOK bool
+		total, addOK = addCents(total, e.AmountCents)
+		if !addOK {
 			return int64(^uint64(0) >> 1)
 		}
 	}
@@ -612,7 +665,9 @@ func (l *Ledger) WithdrawTermDeposit(id string, penaltyBps int64, now time.Time)
 
 // SweepTermDeposits is the operator's daily batch: for every active term
 // deposit, it accrues interest through now's UTC day and matures every
-// deposit whose maturity has arrived. Accrual is best-effort per deposit
+// deposit whose maturity has arrived. A matured deposit with an active
+// rollover policy (LG-139) renews into the next term right here — the
+// sweep is the only entry point that rolls. Accrual is best-effort per deposit
 // — a deposit that cannot accrue (dust amount, unconfigured expense
 // account) is skipped, never aborts the sweep — because the deterministic
 // interest IDs make accrual idempotent: the next sweep retries exactly
@@ -657,6 +712,14 @@ func (l *Ledger) SweepTermDeposits(now time.Time) (matured, accrued int) {
 				Currency:    td.Currency,
 				Details:     map[string]any{"term_deposit_id": id},
 			})
+			// LG-139: a maturing deposit with an active rollover policy
+			// renews into the next term here — the sweep is the only
+			// entry point that rolls; MatureTermDeposit stays a plain
+			// release. The renewal runs the full open commit path, so
+			// it can fail (frozen account, spent funds) while this
+			// deposit stays matured; the outcome is audited either
+			// way.
+			l.rolloverTermDepositLocked(td, now)
 			continue
 		}
 		// Best-effort: a deposit that cannot accrue today (dust,
@@ -724,6 +787,9 @@ func (l *Ledger) termDepositReportsLocked() []TermDepositReport {
 			OpenedAt:             td.OpenedAt,
 			MaturesAt:            td.MaturesAt,
 			AccruedInterestCents: l.termDepositInterestAccruedLocked(id),
+			Rollover:             td.Rollover,
+			RolloversUsed:        td.RolloversUsed,
+			RolledFrom:           td.RolledFrom,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
