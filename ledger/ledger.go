@@ -754,6 +754,16 @@ type Ledger struct {
 	// package comment); the journaled period rows do.
 	installments    map[string]InstallmentPlan
 	installmentKeys map[string]installmentKeyRecord
+	// clearingBatches maps clearing-batch IDs to their records (see
+	// clearing.go): off-book transfer intents settled atomically in
+	// net form. clearingKeys maps a batch open's idempotency key to
+	// its clearingKeyRecord — its own namespace, expiring with the
+	// TTL like every other key index (see
+	// pruneClearingKeysLocked). In-memory only: neither round-trips
+	// through disaster-recovery snapshots (see the clearing.go
+	// package comment); the journaled net rows do.
+	clearingBatches map[string]ClearingBatch
+	clearingKeys    map[string]clearingKeyRecord
 	// merges is the authoritative registry of committed account merges
 	// (see merge.go), keyed by merge ID: every PostMerge appends here,
 	// whether or not it carried an idempotency key. It feeds Reconcile's
@@ -1232,6 +1242,8 @@ func New(opts ...Option) *Ledger {
 		nettingKeys:           make(map[string]nettingRecord),
 		installments:          make(map[string]InstallmentPlan),
 		installmentKeys:       make(map[string]installmentKeyRecord),
+		clearingBatches:       make(map[string]ClearingBatch),
+		clearingKeys:          make(map[string]clearingKeyRecord),
 		merges:                make(map[string]mergeRecord),
 		mergeKeys:             make(map[string]string),
 		schedules:             make(map[string]*TransferSchedule),
@@ -1811,6 +1823,7 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	removed += l.pruneBatchKeysLocked(now)
 	removed += l.pruneNettingKeysLocked(now)
 	removed += l.pruneInstallmentKeysLocked(now)
+	removed += l.pruneClearingKeysLocked(now)
 	removed += l.pruneAllocKeysLocked(now)
 	removed += l.pruneTermDepositKeysLocked(now)
 	removed += l.pruneDisputeKeysLocked(now)

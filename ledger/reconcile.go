@@ -156,6 +156,11 @@ type ReconciliationReport struct {
 	// through any of them while the suspension holds, but the pause is
 	// reversible — unlike the closed accounts above. Sorted.
 	SuspendedAccounts []AccountID `json:"suspended_accounts"`
+	// ClearingBatches lists every net-settlement batch (see
+	// clearing.go), sorted by batch ID: which intents are still open,
+	// which settled into the rows on the books, and which were
+	// cancelled. Empty when no batch was ever opened.
+	ClearingBatches []ClearingBatchSummary `json:"clearing_batches,omitempty"`
 	// FrozenAccountAutoUnfreeze annotates every timed-frozen account
 	// with its scheduled automatic-unfreeze time (see FreezeUntil in
 	// freeze.go); manually frozen accounts are absent from the map.
@@ -760,6 +765,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FrozenAccounts:             l.frozenAccountsLocked(),
 		ClosedAccounts:             l.closedAccountsLocked(),
 		SuspendedAccounts:          l.suspendedAccountsLocked(),
+		ClearingBatches:            l.clearingBatchSummariesLocked(),
 		FrozenAccountAutoUnfreeze:  l.frozenUntilCopyLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),

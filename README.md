@@ -3759,6 +3759,49 @@ report, err := l.PostNetting("cutoff-2026-10-11", []ledger.AccountID{"merch-a", 
 // report.Before / report.After: per-(account, currency) net positions around the settlement
 ```
 
+### Net settlement batches (`ledger/clearing.go`)
+
+The workflow container around netting (LG-135): where multilateral
+netting nets on-book positions at cut-off, a clearing batch collects
+off-book transfer intents over time — payouts queued through the day,
+marketplace seller settlements, payroll legs — and settles them later in
+one atomic batch. `OpenClearingBatch(id, legs, key)` validates and stores
+the intents without touching the journal, so the operator sees exactly
+what will move before anything moves.
+
+`SettleClearingBatch(id, now)` aggregates the legs per (account,
+currency), then books the minimal greedy transfer set (largest debtor
+against largest creditor per currency, deterministic by account ID) in
+one atomic batch through the full Post gate order — any failing leg
+rejects the whole batch before the first mutation, the batch stays
+`open`, and zero partial rows land, so a retry after fixing the cause is
+safe. Settlement legs follow the transfer convention on the netted
+amounts: the net payee is debited, the net payer credited. Net entry
+IDs are deterministic (`clearing/<batch-id>/<n>`) and carry
+`BatchID: "clearing/<batch-id>"`, so a retried settle replays through
+the shared entry idempotency namespace instead of double-booking.
+
+Lifecycle: `open → settled | cancelled`. `CancelClearingBatch` discards
+an open batch's intents (nothing was ever journaled); cancelling a
+settled batch is rejected. Every transition is audited
+(`clearing_batch_open`, `clearing_batch_settled`,
+`clearing_batch_cancelled`). Re-settling a settled batch returns it
+unchanged. `Reconcile` lists every batch (`id`, `status`, `legs`,
+`currencies`, `settled_at`) on the report, so the operator can always
+see which batches produced the rows on the books. Like netting
+sessions, batches are in-memory only and do not round-trip through
+disaster-recovery snapshots — the journaled net rows do.
+
+```go
+batch, err := l.OpenClearingBatch("payouts-2026-10-19", []ledger.ClearingLeg{
+    {ID: "l1", From: "marketplace", To: "seller-a", AmountCents: 10000, Currency: "USD"},
+    {ID: "l2", From: "marketplace", To: "seller-b", AmountCents: 5000, Currency: "USD"},
+}, "")
+// batch.Status == "open", nothing journaled yet
+settled, err := l.SettleClearingBatch("payouts-2026-10-19", time.Now())
+// settled.Status == "settled", settled.EntryIDs == ["clearing/payouts-2026-10-19/1", ...]
+```
+
 ### Disaster-recovery snapshots (`ledger/snapshot.go`)
 
 The ledger can be exported to a JSONL disaster-recovery snapshot and
