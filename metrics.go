@@ -459,6 +459,16 @@ type Metrics struct {
 	// and outcome. The zero value is ready to use. Exported as
 	// ledger_review_quorum_votes_total{approver,vote,outcome}.
 	QuorumVotesTotal QuorumVoteCounter
+	// ReviewDelegationsTotal counts review vote delegations granted
+	// (LG-138): every DelegateVote grant, whether direct, extended, or
+	// re-granted after a revoke. It is synced from the ledgers on
+	// every GET /metrics scrape — grants happen inside the ledger,
+	// not in a handler (see ledger/review_delegation.go). The
+	// ledger is the source of truth, so the scrape overwrites (never
+	// accumulates) the exposed series; the count is monotonic and
+	// survives disaster-recovery snapshots. Exported as
+	// ledger_review_delegations_total.
+	ReviewDelegationsTotal atomic.Uint64
 	// PostingRuleLegsTotal counts derived posting-rule legs committed
 	// by the automatic posting rules (LG-132): every derived leg
 	// appended to a transfer, capture, or sweep event, by rule name.
@@ -906,6 +916,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&sb, "ledger_review_quorum_votes_total",
 		"Total review-quorum votes cast (LG-124): named approve/reject votes through the review decision endpoints while a quorum policy is active, by approver identity, vote kind (approve/reject), and outcome (recorded/settled/decisive/duplicate).",
 		m.QuorumVotesTotal.series())
+	writeCounter(&sb, "ledger_review_delegations_total",
+		"Total review vote delegations granted (LG-138): every DelegateVote grant on any voting path (review/quorum/chain), including extensions and re-grants after revocation. Synced from the ledger on every scrape; monotonic and snapshot-durable.",
+		m.ReviewDelegationsTotal.Load())
 	writeLabeledCounter(&sb, "ledger_posting_rule_legs_total",
 		"Total derived posting-rule legs committed (LG-132): every derived journal leg an automatic posting rule appended to a transfer, capture, or sweep event, by rule name.",
 		m.PostingRuleLegsTotal.series())

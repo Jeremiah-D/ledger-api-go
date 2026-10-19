@@ -6543,6 +6543,7 @@ func (s *server) handler() http.Handler {
 		var fxSpreadBookings uint64
 		var fxSpreadCents int64
 		var eclProvisions, eclMigrations uint64
+		var delegationsGranted uint64
 		var dunningEscalations uint64
 		var extMappingChanges uint64
 		var entryLinkChanges uint64
@@ -6590,6 +6591,10 @@ func (s *server) handler() http.Handler {
 			fxSpreadCents += l.FXSpreadCentsTotal()
 			eclProvisions += l.ECLProvisionCount()
 			eclMigrations += l.ECLStageMigrationCount()
+			// The delegation-grant counter likewise lives in the
+			// ledger: grants happen inside DelegateVote, not in a
+			// handler (see ledger/review_delegation.go, LG-138).
+			delegationsGranted += l.ReviewDelegationsGranted()
 			dunningEscalations += l.DunningEscalationCount()
 			extMappingChanges += l.ExternalMappingChangeCount()
 			// The entry-link declaration counter likewise lives in the
@@ -6675,6 +6680,12 @@ func (s *server) handler() http.Handler {
 		// migrations record inside the staging paths, not in a handler.
 		s.metrics.ECLProvisionsTotal.Store(eclProvisions)
 		s.metrics.ECLStageMigrationsTotal.Store(eclMigrations)
+		// The delegation-grant counter likewise lives in the ledger:
+		// grants happen inside DelegateVote, not in a handler (see
+		// ledger/review_delegation.go, LG-138). The ledger is the
+		// source of truth, so the scrape overwrites (never
+		// accumulates) the exposed series.
+		s.metrics.ReviewDelegationsTotal.Store(delegationsGranted)
 		// The dunning escalation counter likewise lives in the ledger:
 		// escalations fire inside EscalateDunning, not in a handler.
 		s.metrics.DunningEscalationsTotal.Store(dunningEscalations)

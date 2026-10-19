@@ -669,7 +669,24 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 	if qp := l.reviewQuorum; qp != nil {
 		return l.castQuorumApproveVoteLocked(ctx, r, reviewer, qp, now)
 	}
-	return l.settleReviewLocked(ctx, r, reviewer, now, nil)
+	// LG-138: on the flat path a reviewer holding an active
+	// review-scope delegation votes as their principal — the decision
+	// is attributed to the principal, with delegate+principal in the
+	// audit trail. Without a delegation the reviewer is recorded
+	// as-is, exactly like the LG-42 path. The vote event owns the
+	// vote_by_delegate emission (the quorum/chain vote events do the
+	// same); the settlement below only carries the dual-attribution
+	// details, so a settling delegated vote is never recorded twice.
+	var deleg *voteDelegation
+	if res, ok := l.resolveDelegationLocked(DelegationScopeReview, transferID, reviewer, now); ok {
+		deleg = res
+		reviewer = res.principal
+	}
+	receipt, err := l.settleReviewLocked(ctx, r, reviewer, now, nil, deleg)
+	if err == nil && deleg != nil {
+		l.emitVoteByDelegateLocked(ctx, "ApproveTransferReview", "approve", r, deleg)
+	}
+	return receipt, err
 }
 
 // settleReviewLocked runs the LG-42 approval settlement for one pending
@@ -685,9 +702,12 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 // with ErrPeriodClosed — in all three cases the review stays pending, so
 // the operator can retry once the underlying condition clears. tally is
 // the quorum vote tally to disclose on the settlement receipt, or nil
-// for a direct single-operator approval. Callers must hold the write
-// lock.
-func (l *Ledger) settleReviewLocked(ctx context.Context, r *TransferReview, reviewer string, now time.Time, tally *ReviewQuorumTally) (TransferReceipt, error) {
+// for a direct single-operator approval. deleg carries the delegation
+// the vote was cast through (LG-138), or nil for a direct vote: a
+// delegated settlement attributes the decision to the principal and
+// records delegate+principal in the audit trail. Callers must hold the
+// write lock.
+func (l *Ledger) settleReviewLocked(ctx context.Context, r *TransferReview, reviewer string, now time.Time, tally *ReviewQuorumTally, deleg *voteDelegation) (TransferReceipt, error) {
 	// Re-verify the risk controls against current state: the freeze was
 	// advisory, so anything that changed between review creation and
 	// approval is re-checked now, exactly like Capture re-checks the
@@ -789,6 +809,18 @@ func (l *Ledger) settleReviewLocked(ctx context.Context, r *TransferReview, revi
 	// Low-balance alert evaluation: strictly after the atomic commit
 	// zone, read-only (see low_balance.go). Advisory only.
 	l.evaluateBalanceWatchesLocked(touchedAccounts(r.Entries), r.TransferID, "ApproveTransferReview")
+	approvedDetails := map[string]any{
+		"amount_cents": r.Transfer.AmountCents,
+		"currency":     r.Transfer.Currency,
+		"fee_cents":    r.FeeCents,
+		"reviewed_by":  reviewer,
+	}
+	if deleg != nil {
+		// LG-138: dual attribution — the delegate cast the vote,
+		// the principal's identity settled the review.
+		approvedDetails["delegate"] = deleg.delegate
+		approvedDetails["principal"] = deleg.principal
+	}
 	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "transfer_review_approved",
 		Actor:         "ApproveTransferReview",
@@ -797,12 +829,7 @@ func (l *Ledger) settleReviewLocked(ctx context.Context, r *TransferReview, revi
 		VersionAfter:  l.version,
 		EntryIDs:      entryIDs,
 		Accounts:      []AccountID{r.Transfer.From, r.Transfer.To},
-		Details: map[string]any{
-			"amount_cents": r.Transfer.AmountCents,
-			"currency":     r.Transfer.Currency,
-			"fee_cents":    r.FeeCents,
-			"reviewed_by":  reviewer,
-		},
+		Details:       approvedDetails,
 	})
 	// Domain outbox: the approval settles the legs — one entry_posted
 	// per effectuated entry, then the review_approved envelope. The
@@ -882,7 +909,21 @@ func (l *Ledger) RejectTransferReviewCtx(ctx context.Context, transferID, review
 	if qp := l.reviewQuorum; qp != nil {
 		return l.castQuorumRejectVoteLocked(ctx, r, reviewer, reason, qp)
 	}
-	return l.rejectReviewLocked(ctx, r, reviewer, reason)
+	// LG-138: on the flat path a reviewer holding an active
+	// review-scope delegation rejects as their principal — dual
+	// attribution, like the approve path above. The vote event owns
+	// the vote_by_delegate emission; the rejection below only
+	// carries the dual-attribution details.
+	var deleg *voteDelegation
+	if res, ok := l.resolveDelegationLocked(DelegationScopeReview, transferID, reviewer, time.Now()); ok {
+		deleg = res
+		reviewer = res.principal
+	}
+	review, changed, err = l.rejectReviewLocked(ctx, r, reviewer, reason, deleg)
+	if err == nil && changed && deleg != nil {
+		l.emitVoteByDelegateLocked(ctx, "RejectTransferReview", "reject", r, deleg)
+	}
+	return review, changed, err
 }
 
 // rejectReviewLocked drops a pending review without settling anything:
@@ -890,8 +931,12 @@ func (l *Ledger) RejectTransferReviewCtx(ctx context.Context, transferID, review
 // (the pending review simply stops reserving them) and the legs stay in
 // the journal as historical pending-marked rows. Only an actual state
 // transition is audited: idempotent replays settle nothing and stay
-// silent. Callers must hold the write lock.
-func (l *Ledger) rejectReviewLocked(ctx context.Context, r *TransferReview, reviewer, reason string) (review *TransferReview, changed bool, err error) {
+// silent. deleg carries the delegation the rejection was cast through
+// (LG-138), or nil for a direct rejection: a delegated rejection
+// attributes the decision to the principal and records
+// delegate+principal in the audit trail. Callers must hold the write
+// lock.
+func (l *Ledger) rejectReviewLocked(ctx context.Context, r *TransferReview, reviewer, reason string, deleg *voteDelegation) (review *TransferReview, changed bool, err error) {
 	now := time.Now()
 	r.Status = ReviewStatusRejected
 	r.ReviewedBy = reviewer
@@ -906,6 +951,12 @@ func (l *Ledger) rejectReviewLocked(ctx context.Context, r *TransferReview, revi
 	}
 	if reason != "" {
 		details["reason"] = reason
+	}
+	if deleg != nil {
+		// LG-138: dual attribution — the delegate cast the vote,
+		// the principal's identity rejected the review.
+		details["delegate"] = deleg.delegate
+		details["principal"] = deleg.principal
 	}
 	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "transfer_review_rejected",

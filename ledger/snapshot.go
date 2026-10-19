@@ -396,6 +396,18 @@ type snapshotConfigLine struct {
 	// dropped it would silently weaken the tiered-approval control, so
 	// it round-trips like the quorum policy.
 	ApprovalChain *ApprovalChain `json:"approval_chain,omitempty"`
+	// ReviewDelegations carries the active review vote delegations
+	// (see DelegateVote); absent in snapshots written before LG-138
+	// or when no delegation was ever granted. A restore that dropped
+	// them would silently disarm standing delegations, so they
+	// round-trip like the quorum policy. Only non-revoked delegations
+	// are written — a revoked delegation is terminal and its history
+	// lives in the audit log.
+	// ReviewDelegationsGranted carries the ever-granted delegation
+	// count backing ledger_review_delegations_total, so the metric
+	// does not reset across a disaster-recovery restore.
+	ReviewDelegations        []ReviewDelegation `json:"review_delegations,omitempty"`
+	ReviewDelegationsGranted uint64            `json:"review_delegations_granted,omitempty"`
 	// DunningConfigs carries the opt-in collections escalation policies
 	// (see SetDunningConfig) and DunningStates the current escalation
 	// level per (account, currency); absent in snapshots written before
@@ -1144,6 +1156,12 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 	// a restore that dropped it would silently weaken the
 	// tiered-approval control.
 	cfg.ApprovalChain = l.approvalChainCopyLocked()
+	// LG-138: vote delegations round-trip like the quorum policy — a
+	// restore that dropped them would silently disarm standing
+	// delegations. The ever-granted counter rides along so the
+	// ledger_review_delegations_total metric survives a restore.
+	cfg.ReviewDelegations = l.reviewDelegationsSnapshotLocked()
+	cfg.ReviewDelegationsGranted = l.reviewDelegationsGranted
 	cfg.FrozenAutoUnfreeze = l.frozenAutoUnfreezeLocked()
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
@@ -2134,6 +2152,29 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	if err := validateApprovalChain(cfg.ApprovalChain); err != nil {
 		return bad("bad approval_chain: %v", approvalChainError(err))
 	}
+	// LG-138: vote delegations restore like the quorum policy — a
+	// delegation that could never have been granted fails the import
+	// instead of silently running with a corrupted trust graph.
+	// Absent in legacy snapshots, which restore with no delegations.
+	// Cycles are checked incrementally at apply time against the
+	// delegations restored so far (see applySnapshotConfigLocked):
+	// the exporter only ever writes acyclic data, so a cycle in a
+	// snapshot means corruption.
+	seenDelegations := make(map[delegationKey]bool, len(cfg.ReviewDelegations))
+	for i := range cfg.ReviewDelegations {
+		d := &cfg.ReviewDelegations[i]
+		if err := validateDelegation(d); err != nil {
+			return bad("bad review_delegation: %v", delegationError(err))
+		}
+		if d.Revoked {
+			return bad("revoked review_delegation in snapshot")
+		}
+		key := delegationKey{scope: d.Scope, reviewID: d.ReviewID, principal: d.Principal, delegatee: d.Delegatee}
+		if seenDelegations[key] {
+			return bad("duplicate review_delegation %+v", key)
+		}
+		seenDelegations[key] = true
+	}
 	// OFX import registry (LG-66): every record must carry its document
 	// SHA-256, and the report inside must agree with it — the registry
 	// is the duplicate-import idempotency, and a restore must not
@@ -2925,6 +2966,24 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// Validated above; absent (nil) in legacy snapshots, which restore
 	// with the chain disabled.
 	l.approvalChain = copyApprovalChain(cfg.ApprovalChain)
+	// LG-138: vote delegations restore like the quorum policy.
+	// Validated above; absent in legacy snapshots, which restore with
+	// no delegations. Each restored delegation is cycle-checked
+	// against the ones restored before it, with the same active-edge
+	// definition as the grant path — the exporter only writes acyclic
+	// data, so a cycle here means a corrupt snapshot.
+	now := time.Now()
+	for i := range cfg.ReviewDelegations {
+		d := cfg.ReviewDelegations[i]
+		key := delegationKey{scope: d.Scope, reviewID: d.ReviewID, principal: d.Principal, delegatee: d.Delegatee}
+		if l.delegationReachesLocked(d.Delegatee, d.Principal, now) {
+			l.reviewDelegations = make(map[delegationKey]*ReviewDelegation)
+			return bad("review_delegation cycle in snapshot")
+		}
+		cp := d
+		l.reviewDelegations[key] = &cp
+	}
+	l.reviewDelegationsGranted = cfg.ReviewDelegationsGranted
 	// Dunning policies and escalation states restore like the other
 	// structural config: a restore that dropped them would silently
 	// disarm the collections workflow. Validated above.

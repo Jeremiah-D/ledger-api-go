@@ -330,9 +330,23 @@ func settledQuorumTallyLocked(r *TransferReview, qp *QuorumPolicy, voter string)
 // audit chain: who voted, which way, and the resulting tally against
 // the policy parameters. Votes move no money, so the version is
 // unchanged on both sides. actor is the decision entrypoint
-// ("ApproveTransferReview" or "RejectTransferReview"). Callers must
-// hold l.mu.
-func (l *Ledger) emitQuorumVoteAuditLocked(ctx context.Context, actor string, r *TransferReview, voter, vote string, qp *QuorumPolicy) {
+// ("ApproveTransferReview" or "RejectTransferReview"). deleg carries
+// the delegation the vote was cast through (LG-138), or nil for a
+// direct vote: a delegated vote is recorded as the principal's and
+// carries delegate+principal in the details. Callers must hold l.mu.
+func (l *Ledger) emitQuorumVoteAuditLocked(ctx context.Context, actor string, r *TransferReview, voter, vote string, qp *QuorumPolicy, deleg *voteDelegation) {
+	details := map[string]any{
+		"voter":         voter,
+		"vote":          vote,
+		"approve_votes": len(r.ApproveVotes),
+		"reject_votes":  len(r.RejectVotes),
+		"threshold_n":   qp.ThresholdN,
+		"member_count":  len(qp.Approvers),
+	}
+	if deleg != nil {
+		details["delegate"] = deleg.delegate
+		details["principal"] = deleg.principal
+	}
 	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "transfer_review_vote",
 		Actor:         actor,
@@ -340,31 +354,43 @@ func (l *Ledger) emitQuorumVoteAuditLocked(ctx context.Context, actor string, r 
 		VersionBefore: l.version,
 		VersionAfter:  l.version,
 		Accounts:      []AccountID{r.Transfer.From, r.Transfer.To},
-		Details: map[string]any{
-			"voter":         voter,
-			"vote":          vote,
-			"approve_votes": len(r.ApproveVotes),
-			"reject_votes":  len(r.RejectVotes),
-			"threshold_n":   qp.ThresholdN,
-			"member_count":  len(qp.Approvers),
-		},
+		Details:       details,
 	})
+	if deleg != nil {
+		l.emitVoteByDelegateLocked(ctx, actor, vote, r, deleg)
+	}
 }
 
 // castQuorumApproveVoteLocked records one named approve vote on a
 // pending review and settles it once the tally reaches the policy
 // threshold. The review lookup, the terminal-state handling, and the
-// expiry check already happened in ApproveTransferReviewCtx. Callers
-// must hold the write lock.
+// expiry check already happened in ApproveTransferReviewCtx.
+//
+// LG-138: a non-member holding an active quorum-scope delegation votes
+// through it — the vote is recorded as the principal's (the
+// one-vote-per-approver rule applies to the principal), with
+// delegate+principal in the audit trail. The principal must itself be
+// a policy member; otherwise the vote still fails with
+// ErrQuorumNotMember. Callers must hold the write lock.
 func (l *Ledger) castQuorumApproveVoteLocked(ctx context.Context, r *TransferReview, approver string, qp *QuorumPolicy, now time.Time) (TransferReceipt, error) {
+	// voter is the identity the vote is recorded as; deleg is non-nil
+	// when the vote was cast through a delegation. The tally's
+	// LastVoter keeps the actual caller (the delegate), while the
+	// named vote lists carry the principal.
+	voter := approver
+	var deleg *voteDelegation
 	if !quorumHasApprover(qp, approver) {
-		return TransferReceipt{}, ErrQuorumNotMember
+		res, ok := l.resolveDelegationLocked(DelegationScopeQuorum, r.TransferID, approver, now)
+		if !ok || !quorumHasApprover(qp, res.principal) {
+			return TransferReceipt{}, ErrQuorumNotMember
+		}
+		voter, deleg = res.principal, res
 	}
-	if quorumStringContains(r.RejectVotes, approver) {
-		// The approver already voted reject: the first vote stands.
+	if quorumStringContains(r.RejectVotes, voter) {
+		// The voter already voted reject: the first vote stands.
 		return TransferReceipt{}, ErrReviewerAlreadyVoted
 	}
-	if quorumStringContains(r.ApproveVotes, approver) {
+	if quorumStringContains(r.ApproveVotes, voter) {
 		// Idempotent replay of the recorded approve vote: the current
 		// tally, marked as a replay. It settles nothing and stays
 		// silent in the audit trail, like every idempotent replay.
@@ -372,15 +398,15 @@ func (l *Ledger) castQuorumApproveVoteLocked(ctx context.Context, r *TransferRev
 		receipt.Duplicate = true
 		return receipt, nil
 	}
-	r.ApproveVotes = append(r.ApproveVotes, approver)
+	r.ApproveVotes = append(r.ApproveVotes, voter)
 	l.reviews[r.TransferID] = r
-	l.emitQuorumVoteAuditLocked(ctx, "ApproveTransferReview", r, approver, "approve", qp)
+	l.emitQuorumVoteAuditLocked(ctx, "ApproveTransferReview", r, voter, "approve", qp, deleg)
 	if len(r.ApproveVotes) >= qp.ThresholdN {
 		// Quorum reached: settle through the LG-42 settlement path —
 		// the frozen legs flip to effective exactly like a
 		// single-operator approval — with the final tally disclosed on
 		// the receipt.
-		return l.settleReviewLocked(ctx, r, quorumReviewedByLocked(r), now, settledQuorumTallyLocked(r, qp, approver))
+		return l.settleReviewLocked(ctx, r, quorumReviewedByLocked(r), now, settledQuorumTallyLocked(r, qp, approver), deleg)
 	}
 	return pendingQuorumReceiptLocked(r, qp, approver, QuorumOutcomeRecorded), nil
 }
@@ -391,31 +417,44 @@ func (l *Ledger) castQuorumApproveVoteLocked(ctx context.Context, r *TransferRev
 // dissent trail survives); without it the vote is recorded as dissent
 // and the review stays pending — approval or expiry still terminates
 // it. The review lookup and terminal-state handling already happened in
-// RejectTransferReviewCtx. Callers must hold the write lock.
+// RejectTransferReviewCtx.
+//
+// LG-138: a non-member holding an active quorum-scope delegation
+// rejects through it — the vote is recorded as the principal's, with
+// delegate+principal in the audit trail. Callers must hold the write
+// lock.
 func (l *Ledger) castQuorumRejectVoteLocked(ctx context.Context, r *TransferReview, reviewer, reason string, qp *QuorumPolicy) (review *TransferReview, changed bool, err error) {
+	// voter is the identity the vote is recorded as; deleg is non-nil
+	// when the vote was cast through a delegation.
+	voter := reviewer
+	var deleg *voteDelegation
 	if !quorumHasApprover(qp, reviewer) {
-		return nil, false, ErrQuorumNotMember
+		res, ok := l.resolveDelegationLocked(DelegationScopeQuorum, r.TransferID, reviewer, time.Now())
+		if !ok || !quorumHasApprover(qp, res.principal) {
+			return nil, false, ErrQuorumNotMember
+		}
+		voter, deleg = res.principal, res
 	}
-	if quorumStringContains(r.ApproveVotes, reviewer) {
-		// The approver already voted approve: the first vote stands.
+	if quorumStringContains(r.ApproveVotes, voter) {
+		// The voter already voted approve: the first vote stands.
 		return nil, false, ErrReviewerAlreadyVoted
 	}
-	if quorumStringContains(r.RejectVotes, reviewer) {
+	if quorumStringContains(r.RejectVotes, voter) {
 		// Idempotent replay of the recorded reject vote: the record
 		// as-is, unchanged, and silent — like the terminal-state
 		// replay in RejectTransferReviewCtx.
 		out := *r
 		return &out, false, nil
 	}
-	r.RejectVotes = append(r.RejectVotes, reviewer)
+	r.RejectVotes = append(r.RejectVotes, voter)
 	l.reviews[r.TransferID] = r
-	l.emitQuorumVoteAuditLocked(ctx, "RejectTransferReview", r, reviewer, "reject", qp)
+	l.emitQuorumVoteAuditLocked(ctx, "RejectTransferReview", r, voter, "reject", qp, deleg)
 	if qp.RejectDecisive {
 		// One reject vote is decisive: reject through the standard
 		// path, which records the decisive reviewer, releases the
 		// freeze, and emits the rejection audit event and outbox
 		// envelope. The recorded vote stays on the review.
-		return l.rejectReviewLocked(ctx, r, reviewer, reason)
+		return l.rejectReviewLocked(ctx, r, voter, reason, deleg)
 	}
 	// Recorded but not decisive: the review stays pending and the
 	// freeze stays in place. The recorded vote is a state change

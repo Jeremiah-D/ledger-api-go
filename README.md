@@ -455,6 +455,24 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   longer auto-rejects the review (lazy by predicate, swept by the same
   expiry worker), so funds can never strand on a silent approver.
   While a chain is configured it supersedes the flat N-of-M policy.
+- **Approver vote delegation (vote by proxy):** `DelegateVote` grants a
+  delegatee the right to cast votes in the granter's place — on the
+  flat review path, the quorum path, or the chain path (`scope:
+  "review" | "quorum" | "chain"`), optionally narrowed to one review
+  and/or bounded by an expiry (`RevokeDelegation` ends it early). A
+  delegated vote counts exactly as the principal's own (the
+  one-vote-per-approver rule applies to the principal), but the audit
+  trail attributes both hands: the standard decision events carry
+  `delegate` + `principal`, and a dedicated `vote_by_delegate` event
+  records the delegation exercise. Delegation chains are allowed but
+  cycles are rejected at grant time (`A→B→A` fails) so the "whose vote
+  was it" question always has an answer. Delegations are structural
+  config (no version bump) and round-trip through disaster-recovery
+  snapshots — including the ever-granted counter behind
+  `ledger_review_delegations_total` — with `delegation_granted` /
+  `delegation_revoked` in the audit chain. The fintech use case: an
+  approver on leave delegates their four-eyes vote to a colleague
+  instead of the payment stalling in dual-control limbo.
 
 ### Scheduled transfers (`POST /transfer-schedules`)
 

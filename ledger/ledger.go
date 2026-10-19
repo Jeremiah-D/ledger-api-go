@@ -652,6 +652,18 @@ type Ledger struct {
 	// config like the quorum policy: no version bump, survives
 	// snapshots.
 	approvalChain *ApprovalChain
+	// reviewDelegations is the registry of review vote delegations
+	// (see review_delegation.go), keyed by (scope, reviewID,
+	// principal, delegatee): a principal's standing permission for a
+	// delegatee to cast votes in the principal's place, on the flat
+	// review path, the quorum path, or the chain path. Structural
+	// config like the quorum policy: no version bump, survives
+	// snapshots. reviewDelegationsGranted counts delegations ever
+	// granted: the ledger-side source of the
+	// ledger_review_delegations_total metric (monotonic — extensions
+	// and revocations do not move it).
+	reviewDelegations        map[delegationKey]*ReviewDelegation
+	reviewDelegationsGranted uint64
 	// holds maps hold IDs to authorization holds (see hold.go). Holds are
 	// off-journal reservations: they never appear in entries, the audit
 	// chain, or the version counter. holdsByAccount indexes them per
@@ -1248,6 +1260,7 @@ func New(opts ...Option) *Ledger {
 		transferKeys:          make(map[string][]string),
 		reviews:               make(map[string]*TransferReview),
 		reviewThresholds:      make(map[AccountID]int64),
+		reviewDelegations:     make(map[delegationKey]*ReviewDelegation),
 		holds:                 make(map[string]Hold),
 		holdsByAccount:        make(map[AccountID][]string),
 		holdKeys:              make(map[string]string),

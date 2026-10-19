@@ -393,8 +393,25 @@ func chainSettledReviewerLocked(r *TransferReview, p *ReviewChainProgress) strin
 // the resulting tally against the stage parameters. Votes move no
 // money, so the version is unchanged on both sides. actor is the
 // decision entrypoint ("ApproveTransferReview" or
-// "RejectTransferReview"). Callers must hold l.mu.
-func (l *Ledger) emitChainVoteAuditLocked(ctx context.Context, actor string, r *TransferReview, p *ReviewChainProgress, voter, vote string, c *ApprovalChain) {
+// "RejectTransferReview"). deleg carries the delegation the vote was
+// cast through (LG-138), or nil for a direct vote: a delegated vote
+// is recorded as the principal's and carries delegate+principal in
+// the details. Callers must hold l.mu.
+func (l *Ledger) emitChainVoteAuditLocked(ctx context.Context, actor string, r *TransferReview, p *ReviewChainProgress, voter, vote string, c *ApprovalChain, deleg *voteDelegation) {
+	details := map[string]any{
+		"stage":        p.Stage,
+		"stage_count":  len(c.Stages),
+		"voter":        voter,
+		"vote":         vote,
+		"approve_votes": len(p.Votes[p.Stage].ApproveVotes),
+		"reject_votes":  len(p.Votes[p.Stage].RejectVotes),
+		"threshold_n":   c.Stages[p.Stage].ThresholdN,
+		"member_count":  len(c.Stages[p.Stage].Approvers),
+	}
+	if deleg != nil {
+		details["delegate"] = deleg.delegate
+		details["principal"] = deleg.principal
+	}
 	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "transfer_review_chain_vote",
 		Actor:         actor,
@@ -402,17 +419,11 @@ func (l *Ledger) emitChainVoteAuditLocked(ctx context.Context, actor string, r *
 		VersionBefore: l.version,
 		VersionAfter:  l.version,
 		Accounts:      []AccountID{r.Transfer.From, r.Transfer.To},
-		Details: map[string]any{
-			"stage":        p.Stage,
-			"stage_count":  len(c.Stages),
-			"voter":        voter,
-			"vote":         vote,
-			"approve_votes": len(p.Votes[p.Stage].ApproveVotes),
-			"reject_votes":  len(p.Votes[p.Stage].RejectVotes),
-			"threshold_n":   c.Stages[p.Stage].ThresholdN,
-			"member_count":  len(c.Stages[p.Stage].Approvers),
-		},
+		Details:       details,
 	})
+	if deleg != nil {
+		l.emitVoteByDelegateLocked(ctx, actor, vote, r, deleg)
+	}
 }
 
 // timeoutChainStageLocked marks one review rejected for a lapsed chain
@@ -431,7 +442,14 @@ func (l *Ledger) timeoutChainStageLocked(r *TransferReview, now time.Time) {
 // threshold is reached — settling through the LG-42 settlement path
 // on the last stage. The review lookup, the terminal-state handling,
 // and the review-level expiry check already happened in
-// ApproveTransferReviewCtx. Callers must hold the write lock.
+// ApproveTransferReviewCtx.
+//
+// LG-138: a non-member holding an active chain-scope delegation votes
+// through it — the vote is recorded as the principal's (the
+// one-vote-per-approver-per-stage rule applies to the principal),
+// with delegate+principal in the audit trail. The principal must
+// itself be a current-stage member; otherwise the vote still fails
+// with ErrQuorumNotMember. Callers must hold the write lock.
 func (l *Ledger) castChainApproveVoteLocked(ctx context.Context, r *TransferReview, approver string, c *ApprovalChain, now time.Time) (TransferReceipt, error) {
 	p := l.bindChainProgressLocked(r, c, now)
 	if p.Stage < 0 || p.Stage >= len(c.Stages) {
@@ -457,15 +475,25 @@ func (l *Ledger) castChainApproveVoteLocked(ctx context.Context, r *TransferRevi
 		})
 		return TransferReceipt{}, ErrReviewExpired
 	}
+	// voter is the identity the vote is recorded as; deleg is non-nil
+	// when the vote was cast through a delegation. The tally's
+	// LastVoter keeps the actual caller (the delegate), while the
+	// per-stage vote lists carry the principal.
+	voter := approver
+	var deleg *voteDelegation
 	if !quorumStringContains(stage.Approvers, approver) {
-		return TransferReceipt{}, fmt.Errorf("stage %d: %w", p.Stage, ErrQuorumNotMember)
+		res, ok := l.resolveDelegationLocked(DelegationScopeChain, r.TransferID, approver, now)
+		if !ok || !quorumStringContains(stage.Approvers, res.principal) {
+			return TransferReceipt{}, fmt.Errorf("stage %d: %w", p.Stage, ErrQuorumNotMember)
+		}
+		voter, deleg = res.principal, res
 	}
-	if quorumStringContains(p.Votes[p.Stage].RejectVotes, approver) {
-		// The approver already voted reject on this stage: the first
+	if quorumStringContains(p.Votes[p.Stage].RejectVotes, voter) {
+		// The voter already voted reject on this stage: the first
 		// vote stands.
 		return TransferReceipt{}, ErrReviewerAlreadyVoted
 	}
-	if quorumStringContains(p.Votes[p.Stage].ApproveVotes, approver) {
+	if quorumStringContains(p.Votes[p.Stage].ApproveVotes, voter) {
 		// Idempotent replay of the recorded approve vote: the current
 		// tally, marked as a replay. It settles nothing and stays
 		// silent in the audit trail, like every idempotent replay.
@@ -473,15 +501,15 @@ func (l *Ledger) castChainApproveVoteLocked(ctx context.Context, r *TransferRevi
 		receipt.Duplicate = true
 		return receipt, nil
 	}
-	p.Votes[p.Stage].ApproveVotes = append(p.Votes[p.Stage].ApproveVotes, approver)
+	p.Votes[p.Stage].ApproveVotes = append(p.Votes[p.Stage].ApproveVotes, voter)
 	l.reviews[r.TransferID] = r
-	l.emitChainVoteAuditLocked(ctx, "ApproveTransferReview", r, p, approver, "approve", c)
+	l.emitChainVoteAuditLocked(ctx, "ApproveTransferReview", r, p, voter, "approve", c, deleg)
 	if len(p.Votes[p.Stage].ApproveVotes) >= stage.ThresholdN {
 		if p.Stage == len(c.Stages)-1 {
 			// Final stage reached: settle through the LG-42
 			// settlement path — the frozen legs flip to effective
 			// exactly like a single-operator approval.
-			return l.settleReviewLocked(ctx, r, chainSettledReviewerLocked(r, p), now, nil)
+			return l.settleReviewLocked(ctx, r, chainSettledReviewerLocked(r, p), now, nil, deleg)
 		}
 		// Stage threshold reached: advance to the next stage. The
 		// votes of the settled stage stay on the review.
@@ -512,36 +540,49 @@ func (l *Ledger) castChainApproveVoteLocked(ctx context.Context, r *TransferRevi
 // review's current chain stage and closes the review immediately — a
 // reject is decisive at every stage. The review lookup and
 // terminal-state handling already happened in
-// RejectTransferReviewCtx. Callers must hold the write lock.
+// RejectTransferReviewCtx.
+//
+// LG-138: a non-member holding an active chain-scope delegation
+// rejects through it — the vote is recorded as the principal's, with
+// delegate+principal in the audit trail. Callers must hold the write
+// lock.
 func (l *Ledger) castChainRejectVoteLocked(ctx context.Context, r *TransferReview, reviewer, reason string, c *ApprovalChain, now time.Time) (review *TransferReview, changed bool, err error) {
 	p := l.bindChainProgressLocked(r, c, now)
 	if p.Stage < 0 || p.Stage >= len(c.Stages) {
 		return nil, false, fmt.Errorf("stage %d: %w", p.Stage, ErrApprovalChainStageRange)
 	}
 	stage := c.Stages[p.Stage]
+	// voter is the identity the vote is recorded as; deleg is non-nil
+	// when the vote was cast through a delegation.
+	voter := reviewer
+	var deleg *voteDelegation
 	if !quorumStringContains(stage.Approvers, reviewer) {
-		return nil, false, fmt.Errorf("stage %d: %w", p.Stage, ErrQuorumNotMember)
+		res, ok := l.resolveDelegationLocked(DelegationScopeChain, r.TransferID, reviewer, now)
+		if !ok || !quorumStringContains(stage.Approvers, res.principal) {
+			return nil, false, fmt.Errorf("stage %d: %w", p.Stage, ErrQuorumNotMember)
+		}
+		voter, deleg = res.principal, res
 	}
-	if quorumStringContains(p.Votes[p.Stage].ApproveVotes, reviewer) {
-		// The approver already voted approve on this stage: the first
+	if quorumStringContains(p.Votes[p.Stage].ApproveVotes, voter) {
+		// The voter already voted approve on this stage: the first
 		// vote stands.
 		return nil, false, ErrReviewerAlreadyVoted
 	}
-	if quorumStringContains(p.Votes[p.Stage].RejectVotes, reviewer) {
+	if quorumStringContains(p.Votes[p.Stage].RejectVotes, voter) {
 		// Idempotent replay of the recorded reject vote: the record
 		// as-is, unchanged, and silent — like the terminal-state
 		// replay in RejectTransferReviewCtx.
 		out := *r
 		return &out, false, nil
 	}
-	p.Votes[p.Stage].RejectVotes = append(p.Votes[p.Stage].RejectVotes, reviewer)
+	p.Votes[p.Stage].RejectVotes = append(p.Votes[p.Stage].RejectVotes, voter)
 	l.reviews[r.TransferID] = r
-	l.emitChainVoteAuditLocked(ctx, "RejectTransferReview", r, p, reviewer, "reject", c)
+	l.emitChainVoteAuditLocked(ctx, "RejectTransferReview", r, p, voter, "reject", c, deleg)
 	// One reject vote is decisive at every stage: reject through the
 	// standard path, which records the decisive reviewer, releases the
 	// freeze, and emits the rejection audit event and outbox envelope.
 	// The recorded vote stays on the review.
-	return l.rejectReviewLocked(ctx, r, reviewer, reason)
+	return l.rejectReviewLocked(ctx, r, voter, reason, deleg)
 }
 
 // expireChainStagesLocked marks every pending review whose current
