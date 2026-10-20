@@ -639,6 +639,12 @@ type snapshotConfigLine struct {
 	// empty account) fails the import.
 	KycProfiles       []KycProfile `json:"kyc_profiles,omitempty"`
 	KycThresholdCents int64        `json:"kyc_threshold_cents,omitempty"`
+	// Invoices carries the issued invoice register (see invoice.go,
+	// LG-148), sorted by invoice ID; absent in snapshots written
+	// before invoice support existed. The register is re-validated on
+	// import — a snapshot row that could never have been issued
+	// fails the import instead of installing a corrupt receivable.
+	Invoices []Invoice `json:"invoices,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -1223,6 +1229,9 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		// counterparty stops exactly as the source.
 		KycProfiles:       l.kycProfilesLocked(),
 		KycThresholdCents: l.kycThresholdCents,
+		// LG-148: the invoice register round-trips, so a restored
+		// ledger keeps its open receivables exactly as the source.
+		Invoices: l.invoicesLocked(),
 	}
 	cfg.PIIHolderNames, cfg.PIIErasures, cfg.PIIErasureVersion = l.piiSnapshotLocked()
 	eclCfg := l.eclStageConfig
@@ -2679,6 +2688,42 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		return bad("negative KYC threshold %d", cfg.KycThresholdCents)
 	}
 	l.kycThresholdCents = cfg.KycThresholdCents
+	// Invoices restore like the KYC profiles: every row is re-validated
+	// — an empty ID or account, a non-positive amount, a bad currency,
+	// an unknown status, paid cents outside [0, amount], or a due date
+	// before the issue date fails the import instead of installing a
+	// receivable that could never have been issued. The per-account
+	// index rebuilds from the restored map.
+	for _, inv := range cfg.Invoices {
+		if inv.ID == "" {
+			return bad("invoice with empty ID")
+		}
+		if inv.Account == "" {
+			return bad("invoice %q with empty account", inv.ID)
+		}
+		if inv.AmountCents <= 0 {
+			return bad("invoice %q with non-positive amount %d", inv.ID, inv.AmountCents)
+		}
+		cur, err := normalizeCurrency(inv.Currency)
+		if err != nil {
+			return bad("invoice %q with invalid currency %q", inv.ID, inv.Currency)
+		}
+		inv.Currency = cur
+		if !validInvoiceStatus(inv.Status) {
+			return bad("invoice %q with invalid status %q", inv.ID, inv.Status)
+		}
+		if inv.PaidCents < 0 || inv.PaidCents > inv.AmountCents {
+			return bad("invoice %q with paid cents %d outside [0, %d]", inv.ID, inv.PaidCents, inv.AmountCents)
+		}
+		if inv.DueDate.IsZero() || inv.DueDate.Before(inv.IssuedAt) {
+			return bad("invoice %q with due date before issue date", inv.ID)
+		}
+		if _, exists := l.invoices[inv.ID]; exists {
+			return bad("duplicate invoice ID %q", inv.ID)
+		}
+		l.invoices[inv.ID] = inv
+	}
+	l.rebuildInvoiceIndexLocked()
 	// Chart-of-accounts registrations restore like the frozen list: an
 	// empty account or an invalid type fails the import instead of
 	// installing a registration that could never have been created.

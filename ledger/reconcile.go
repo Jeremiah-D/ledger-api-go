@@ -187,6 +187,12 @@ type ReconciliationReport struct {
 	// reads this to know which counterparties are cleared, pending,
 	// or stopped.
 	Kyc KycSummary `json:"kyc"`
+	// ReceivablesAging discloses the open receivables (see
+	// IssueInvoice, LG-148): per currency, the outstanding cents of
+	// open invoices (issued/partial/overdue) bucketed by days past due
+	// as of the report time. Collections tooling reads this for the
+	// aging view the dunning escalation acts on.
+	ReceivablesAging []ReceivablesAging `json:"receivables_aging"`
 	// DailyLimits lists every configured daily outflow limit (see
 	// SetDailyLimit), sorted by (account, currency). Risk tooling reads
 	// this to know which accounts are capped on daily outflow and at
@@ -807,6 +813,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FrozenAccountAutoUnfreeze:  l.frozenUntilCopyLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
 		Kyc:                        l.kycSummaryLocked(),
+		ReceivablesAging:            l.receivablesAgingLocked(now),
 		DailyLimits:                l.dailyLimitsLocked(),
 		SweepReserves:              l.sweepReservesLocked(),
 		SubtreeLimitUtilization:    l.subtreeLimitUtilizationLocked(now),

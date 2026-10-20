@@ -4101,6 +4101,42 @@ escalated := l.EscalateDunning(time.Now()) // []DunningEscalation, edge-triggere
 l.ResetDunning("cust-123", "USD")          // after the money comes back
 ```
 
+### Receivable invoices (`POST /invoices`, 开票/应收)
+
+Invoices are off-journal receivables: the operator's claim that a payer
+account owes a fixed amount in a currency by a due date. They never
+appear in entries, the audit chain, or the version counter — but they
+drive the collections workflow that dunning escalates on.
+
+- **Lifecycle** (Go API: `IssueInvoice` / `ApplyPayment` / `VoidInvoice` /
+  `SweepOverdueInvoices`, or the `POST /invoices*` endpoints): an invoice
+  opens as `issued`; `ApplyPayment` retires open invoices **FIFO** — the
+  oldest invoice is paid first, a partially covered invoice becomes
+  `partial`, a fully covered one becomes `paid`, and any amount beyond
+  the open balance is returned as a remainder (an overpayment), never
+  silently kept; `SweepOverdueInvoices` moves `issued`/`partial` invoices
+  past their due date to `overdue` (the operator's "到期复核"); `VoidInvoice`
+  cancels an invoice that never received a payment — a paid invoice
+  cannot be voided (`422`), the record must stay for the audit trail.
+- **Dunning 衔接**: open invoices past due feed the collections
+  escalation directly — an overdue invoice is a FIFO lot aged from its
+  due date, so a `(account, currency)` with a dunning policy escalates
+  on an overdue invoice even when the journal shows no outstanding
+  receivable. Not-yet-due invoices never escalate.
+- **Disclosure**: the reconcile report carries per-currency
+  `receivables_aging` (current / 1-30 / 31-60 / 61-90 / 90+ days past
+  due, outstanding cents of open invoices), and the invoice register
+  round-trips through disaster-recovery snapshots.
+
+```bash
+curl -s -X POST localhost:8080/invoices \
+  -d '{"id":"inv-2026-001","account":"cust-123","amount_cents":500000,"due_date":"2026-11-30T00:00:00Z"}'
+curl -s -X POST localhost:8080/invoices/apply \
+  -d '{"account":"cust-123","currency":"USD","amount_cents":200000}'
+# {"applied":[{"invoice_id":"inv-2026-001","applied_cents":200000,"status_after":"partial"}],"remainder_cents":0}
+curl -s -X POST localhost:8080/invoices/sweep-overdue   # {"overdue":[...]}
+```
+
 ### Multilateral netting (`ledger/netting.go`)
 
 The clearinghouse view (LG-56): at cut-off time, given a set of

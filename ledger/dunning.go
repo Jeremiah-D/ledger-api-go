@@ -281,15 +281,6 @@ func (l *Ledger) dunningAgeLocked(a AccountID, currency string, asof time.Time) 
 			deltas = append(deltas, agingDelta{createdAt: e.CreatedAt, id: e.ID, cents: -e.AmountCents})
 		}
 	}
-	if len(deltas) == 0 {
-		return 0, 0, false
-	}
-	sort.Slice(deltas, func(i, j int) bool {
-		if deltas[i].createdAt.Equal(deltas[j].createdAt) {
-			return deltas[i].id < deltas[j].id
-		}
-		return deltas[i].createdAt.Before(deltas[j].createdAt)
-	})
 	// FIFO lot attribution with the lots' timestamps retained, mirroring
 	// attributeAgingLots: debits open lots, credits retire the oldest
 	// lots first, an over-applied credit parks as negative carry at its
@@ -298,6 +289,41 @@ func (l *Ledger) dunningAgeLocked(a AccountID, currency string, asof time.Time) 
 		createdAt time.Time
 		cents     int64
 	}
+	// Invoice receivables feed dunning (see invoice.go, LG-148): open
+	// invoices past due are FIFO lots aged from their due dates, so a
+	// configured (account, currency) escalates on an overdue invoice
+	// even when the journal shows no outstanding receivable. Not-yet-due
+	// invoices are excluded — they are not receivables for dunning.
+	// They are collected before the empty-journal early return below:
+	// an invoice-only exposure must not be mistaken for "nothing to
+	// age".
+	var invoiceLots []lot
+	var invoiceOutstanding int64
+	for _, inv := range l.invoices {
+		if inv.Account != a || inv.Currency != currency {
+			continue
+		}
+		if !invoiceOpen(inv.Status) {
+			continue
+		}
+		outstanding := inv.AmountCents - inv.PaidCents
+		if outstanding <= 0 {
+			continue
+		}
+		if dpd := int64(asof.Sub(inv.DueDate) / (24 * time.Hour)); dpd > 0 {
+			invoiceLots = append(invoiceLots, lot{createdAt: inv.DueDate, cents: outstanding})
+			invoiceOutstanding += outstanding
+		}
+	}
+	if len(deltas) == 0 && len(invoiceLots) == 0 {
+		return 0, 0, false
+	}
+	sort.Slice(deltas, func(i, j int) bool {
+		if deltas[i].createdAt.Equal(deltas[j].createdAt) {
+			return deltas[i].id < deltas[j].id
+		}
+		return deltas[i].createdAt.Before(deltas[j].createdAt)
+	})
 	lots := make([]lot, 0, len(deltas))
 	var negCarry int64
 	for _, d := range deltas {
@@ -337,6 +363,15 @@ func (l *Ledger) dunningAgeLocked(a AccountID, currency string, asof time.Time) 
 		total += lt.cents
 	}
 	total += negCarry
+	// Merge the invoice lots (collected above) into the same
+	// oldest-first ordering the journal lots already carry, so the
+	// level stays driven by the oldest outstanding lot, journal or
+	// invoice.
+	lots = append(lots, invoiceLots...)
+	total += invoiceOutstanding
+	if len(lots) > 1 {
+		sort.Slice(lots, func(i, j int) bool { return lots[i].createdAt.Before(lots[j].createdAt) })
+	}
 	if total <= 0 || len(lots) == 0 {
 		// Overpaid or settled: not a receivable, nothing to age. The
 		// FIFO lots are in oldest-first order, so lots[0] is the oldest

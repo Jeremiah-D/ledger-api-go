@@ -5675,6 +5675,182 @@ func (s *server) handleExpireKyc(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"expired": expired})
 }
 
+// writeInvoiceError maps an invoice-domain error to its HTTP status:
+// 404 for an unknown invoice, 409 for a duplicate invoice ID, 422 for
+// a semantic rejection (voiding an invoice that already has payments),
+// and reports whether err was an invoice-domain error at all. Field
+// validation (400) is left to the caller via writePostError's default.
+func writeInvoiceError(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, ledger.ErrInvoiceNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	case errors.Is(err, ledger.ErrDuplicateInvoiceID):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case errors.Is(err, ledger.ErrInvoiceHasPayments):
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+	default:
+		return false
+	}
+	return true
+}
+
+// issueInvoiceRequest is the body of POST /invoices: the receivable to
+// open. Only id, account, amount_cents, and due_date are required;
+// currency defaults to USD, issued_at defaults to now.
+type issueInvoiceRequest struct {
+	ID        string     `json:"id"`
+	Account   string     `json:"account"`
+	Currency  string     `json:"currency"`
+	AmountCents int64    `json:"amount_cents"`
+	IssuedAt  *time.Time `json:"issued_at"`
+	DueDate   *time.Time `json:"due_date"`
+	Memo      string     `json:"memo"`
+}
+
+// handleIssueInvoice implements POST /invoices: opens a new receivable
+// (status issued). Returns the issued invoice.
+func (s *server) handleIssueInvoice(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req issueInvoiceRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	inv := ledger.Invoice{
+		ID:          req.ID,
+		Account:     ledger.AccountID(req.Account),
+		Currency:    req.Currency,
+		AmountCents: req.AmountCents,
+		Memo:        req.Memo,
+	}
+	if req.IssuedAt != nil {
+		inv.IssuedAt = req.IssuedAt.UTC()
+	}
+	if req.DueDate != nil {
+		inv.DueDate = req.DueDate.UTC()
+	}
+	issued, err := s.ledgerFor(r).IssueInvoiceCtx(actx, inv)
+	if err != nil {
+		if !writeInvoiceError(w, err) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusCreated, issued)
+}
+
+// handleGetInvoice implements GET /invoices/{id}: returns one invoice,
+// or 404 when the ID is unknown.
+func (s *server) handleGetInvoice(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invoice id required"})
+		return
+	}
+	inv, ok := s.ledgerFor(r).GetInvoice(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrInvoiceNotFound.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, inv)
+}
+
+// handleListInvoices implements GET /invoices: lists invoices,
+// optionally filtered by ?account= and ?currency=, in (issued_at, id)
+// order.
+func (s *server) handleListInvoices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	q := r.URL.Query()
+	invoices := s.ledgerFor(r).ListInvoices(ledger.AccountID(q.Get("account")), q.Get("currency"))
+	writeJSON(w, http.StatusOK, map[string]any{"invoices": invoices})
+}
+
+// applyInvoicePaymentRequest is the body of POST /invoices/apply: the
+// payer account, the currency, and the cents to retire FIFO.
+type applyInvoicePaymentRequest struct {
+	Account     string `json:"account"`
+	Currency    string `json:"currency"`
+	AmountCents int64  `json:"amount_cents"`
+}
+
+// handleApplyInvoicePayment implements POST /invoices/apply: retires
+// the account's open invoices FIFO and returns the per-invoice
+// applications plus any remainder (overpayment).
+func (s *server) handleApplyInvoicePayment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req applyInvoicePaymentRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	applied, remainder, err := s.ledgerFor(r).ApplyPaymentCtx(actx,
+		ledger.AccountID(req.Account), req.Currency, req.AmountCents, time.Now().UTC())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"applied":         applied,
+		"remainder_cents": remainder,
+	})
+}
+
+// handleVoidInvoice implements POST /invoices/{id}/void: cancels an
+// invoice that never received a payment. Voiding is idempotent.
+func (s *server) handleVoidInvoice(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invoice id required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	if err := s.ledgerFor(r).VoidInvoiceCtx(actx, id); err != nil {
+		if !writeInvoiceError(w, err) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "voided"})
+}
+
+// handleSweepOverdueInvoices implements POST /invoices/sweep-overdue:
+// moves every issued/partial invoice past its due date to overdue and
+// returns their IDs.
+func (s *server) handleSweepOverdueInvoices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	overdue := s.ledgerFor(r).SweepOverdueInvoices(time.Now().UTC())
+	writeJSON(w, http.StatusOK, map[string]any{"overdue": overdue})
+}
+
 // handleSuspendAccount implements POST /accounts/{id}/suspend: the
 // operator-facing operational pause. A suspended account rejects every
 // new journal-writing request that names it as either leg with 403,
@@ -7053,6 +7229,12 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /accounts/{id}/kyc", s.handleSetKyc)
 	mux.HandleFunc("GET /accounts/{id}/kyc", s.handleGetKyc)
 	mux.HandleFunc("POST /kyc/expire", s.handleExpireKyc)
+	mux.HandleFunc("POST /invoices", s.handleIssueInvoice)
+	mux.HandleFunc("GET /invoices", s.handleListInvoices)
+	mux.HandleFunc("GET /invoices/{id}", s.handleGetInvoice)
+	mux.HandleFunc("POST /invoices/apply", s.handleApplyInvoicePayment)
+	mux.HandleFunc("POST /invoices/{id}/void", s.handleVoidInvoice)
+	mux.HandleFunc("POST /invoices/sweep-overdue", s.handleSweepOverdueInvoices)
 	mux.HandleFunc("POST /accounts/{id}/suspend", s.handleSuspendAccount)
 	mux.HandleFunc("POST /accounts/{id}/resume", s.handleResumeAccount)
 	mux.HandleFunc("POST /virtual-accounts", s.handleRegisterVirtualAccount)

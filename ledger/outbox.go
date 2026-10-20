@@ -149,6 +149,13 @@ const (
 	// counterparty is (re-)cleared or stopped.
 	OutboxKycStatusSet = "kyc_status_set"
 	OutboxKycExpired   = "kyc_expired"
+	// Invoice lifecycle (see invoice.go, LG-148): every invoice-level
+	// move emits one event, so downstream consumers (collections,
+	// dunning) can subscribe to receivable progress without polling.
+	OutboxInvoiceIssued  = "invoice_issued"
+	OutboxInvoicePaid    = "invoice_paid"
+	OutboxInvoiceOverdue = "invoice_overdue"
+	OutboxInvoiceVoided  = "invoice_voided"
 )
 
 // OutboxEvent is one domain fact in the outbox stream.

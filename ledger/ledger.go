@@ -391,6 +391,14 @@ type Ledger struct {
 	// journal version and survive disaster-recovery snapshots.
 	kyc               map[AccountID]KycProfile
 	kycThresholdCents int64
+	// invoices maps invoice IDs to issued invoices (see invoice.go):
+	// off-journal receivables. invoicesByAccount indexes them per
+	// payer account for FIFO payment application. Invoices never
+	// appear in entries, the audit chain, or the version counter.
+	// Structural state, like holds: it round-trips through
+	// disaster-recovery snapshots.
+	invoices          map[string]Invoice
+	invoicesByAccount map[AccountID][]string
 	// deniedExact and deniedPrefixes are the sanctions/denylist (see
 	// denylist.go): exact account IDs and prefix patterns whose accounts
 	// may not move money. Post, PostTransfer, and Capture screen every
@@ -1300,6 +1308,8 @@ func New(opts ...Option) *Ledger {
 		accountAliases:        make(map[AccountID]string),
 		noOverdraft:           make(map[AccountID]bool),
 		kyc:                 make(map[AccountID]KycProfile),
+		invoices:            make(map[string]Invoice),
+		invoicesByAccount:   make(map[AccountID][]string),
 		deniedExact:           make(map[AccountID]DenylistEntry),
 		deniedPrefixes:        make(map[string]DenylistEntry),
 		apiKeys:               make(map[string]*APIKey),
