@@ -411,6 +411,20 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   `ledger_review_pending_total` / `ledger_review_approved_total` /
   `ledger_review_rejected_total` plus
   `ledger_review_quorum_votes_total{approver,vote,outcome}`.
+- **Batch approve:** `POST /transfers/reviews/approve` approves many
+  reviews in one operator call (`{"reviewer": "op-alice", "review_ids":
+  ["t1", "t2"]}`) — every review runs through the same approve path as
+  the single-review endpoint, with full per-item failure isolation
+  (unknown IDs, non-pending reviews, frozen accounts, overdraft,
+  closed periods fail only their own item) and per-item idempotency.
+  The response carries each item's outcome (`settled` / `duplicate` /
+  `vote_recorded` / `failed` with the reason) in input order; every
+  batch also emits one sealed-audit envelope event
+  (`transfer_reviews_batch_approved`) listing all item outcomes.
+  `GET /metrics` exposes `ledger_review_batch_requests_total`;
+  settled items additionally count in
+  `ledger_review_approved_total`, recorded quorum/chain votes in
+  `ledger_review_quorum_votes_total`.
 - Configure with `LEDGER_REVIEW_THRESHOLD` (global, cents, e.g. `"100000"`
   for $1,000.00) and/or `LEDGER_REVIEW_THRESHOLDS`
   (`"<account>:<cents>,..."`, e.g. `"treasury:1000000,ops:500000"` — a

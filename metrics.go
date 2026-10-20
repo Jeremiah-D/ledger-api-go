@@ -480,6 +480,13 @@ type Metrics struct {
 	// review-sweeper ticks, by number of reviews rejected/expired (not
 	// by request).
 	ReviewRejectedTotal atomic.Uint64
+	// ReviewBatchRequestsTotal counts POST /transfers/reviews/approve
+	// requests served (LG-149): the batch endpoint that approves many
+	// pending reviews in one operator call. Counted by request; the
+	// per-item outcomes are recorded separately (settled items count
+	// in ReviewApprovedTotal, recorded quorum/chain votes in
+	// QuorumVotesTotal).
+	ReviewBatchRequestsTotal atomic.Uint64
 	// QuorumVotesTotal counts review-quorum votes (LG-124): every named
 	// approve/reject vote cast through the review decision endpoints
 	// while a quorum policy is active, by approver identity, vote kind,
@@ -978,6 +985,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_review_rejected_total",
 		"Total transfer reviews rejected or auto-expired: operator rejects, manual expire runs, and background sweeper ticks.",
 		m.ReviewRejectedTotal.Load())
+	writeCounter(&sb, "ledger_review_batch_requests_total",
+		"Total POST /transfers/reviews/approve batch requests served (LG-149): one operator call approving many pending reviews. Settled items also count in ledger_review_approved_total; recorded quorum/chain votes in ledger_review_quorum_votes_total.",
+		m.ReviewBatchRequestsTotal.Load())
 	writeLabeledCounter(&sb, "ledger_review_quorum_votes_total",
 		"Total review-quorum votes cast (LG-124): named approve/reject votes through the review decision endpoints while a quorum policy is active, by approver identity, vote kind (approve/reject), and outcome (recorded/settled/decisive/duplicate).",
 		m.QuorumVotesTotal.series())

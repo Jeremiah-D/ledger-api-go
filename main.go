@@ -723,6 +723,64 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, receipt)
 }
 
+// reviewBatchApproveRequest is the body of POST
+// /transfers/reviews/approve (LG-149): which reviews to approve and
+// who approves them.
+type reviewBatchApproveRequest struct {
+	Reviewer  string   `json:"reviewer"`
+	ReviewIDs []string `json:"review_ids"`
+}
+
+// handleBatchApproveTransferReviews implements POST
+// /transfers/reviews/approve, the batch half of dual-control review
+// (LG-149): one operator call that runs every listed review through
+// the same approve path as POST /transfers/{id}/approve, with full
+// per-item failure isolation and idempotency. The response is the
+// ledger.ReviewBatchReport: per-item outcomes in input order (each
+// settled, duplicate, vote_recorded, or failed with the reason), plus
+// outcome counts.
+//
+// Unlike the single-review endpoint, per-item risk-control refusals
+// (frozen account, overdraft, closed period) are not HTTP errors: they
+// land on the item as outcome "failed", and the batch still returns
+// 200 — partial success is the normal case, not an exception.
+// Malformed bodies return 400. Metrics: one batch request counted,
+// every settled item counted as an approval, every recorded
+// quorum/chain vote counted as a vote, mirroring the single-review
+// endpoint's accounting.
+func (s *server) handleBatchApproveTransferReviews(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req reviewBatchApproveRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	report := s.ledgerFor(r).ApproveReviewsCtx(actx, req.ReviewIDs, req.Reviewer)
+	s.metrics.ReviewBatchRequestsTotal.Add(1)
+	for i := range report.Results {
+		rcpt := report.Results[i].Receipt
+		if rcpt == nil {
+			continue
+		}
+		if t := rcpt.QuorumTally; t != nil {
+			s.metrics.QuorumVotesTotal.Add(t.LastVoter, "approve", t.Outcome)
+		}
+		if report.Results[i].Outcome == ledger.ReviewBatchOutcomeSettled {
+			s.metrics.ReviewApprovedTotal.Add(1)
+			if rcpt.FeeCents > 0 {
+				s.metrics.TransferFeeCentsTotal.Add(uint64(rcpt.FeeCents))
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // handleRejectTransferReview implements POST /transfers/{id}/reject:
 // drops a pending review without settling anything, releasing the frozen
 // funds back to the payer's available balance. The legs stay in the
@@ -7145,6 +7203,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
 	mux.HandleFunc("POST /transfers/dry-run", s.handleDryRunTransfer)
 	mux.HandleFunc("POST /transfers/reviews/expire", s.handleExpireReviews)
+	mux.HandleFunc("POST /transfers/reviews/approve", s.handleBatchApproveTransferReviews)
 	mux.HandleFunc("POST /transfers/{id}/approve", s.handleApproveTransferReview)
 	mux.HandleFunc("POST /transfers/{id}/reject", s.handleRejectTransferReview)
 	mux.HandleFunc("GET /transfers/{id}/fee-split", s.handleGetTransferFeeSplit)
