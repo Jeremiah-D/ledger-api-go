@@ -338,6 +338,13 @@ type snapshotConfigLine struct {
 	// exports to internal account IDs, so mappings are part of the
 	// operational config like the account aliases.
 	ExternalMappings []ExternalAccountMapping `json:"external_mappings,omitempty"`
+	// CashAccounts carries the cash-class designations (see
+	// MarkCashAccount), sorted by (account, currency); absent in
+	// snapshots written before cash-flow support existed. A restore
+	// that dropped them would silently unclassify the cash accounts,
+	// so they are part of the operational config like the
+	// chart-of-accounts registrations.
+	CashAccounts []CashAccountMark `json:"cash_accounts,omitempty"`
 	// EntryLinks carries the declared entry links (see DeclareEntryLink),
 	// in declaration order; absent in snapshots written before entry
 	// links existed. A restore that dropped them would silently lose
@@ -1105,6 +1112,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		RevalAccount:     l.revalAccount,
 		RevalBaselines:   l.revaluationPositionsLocked(),
 		AccountTypes:     l.accountTypesLocked(),
+		CashAccounts:     l.cashAccountsLocked(),
 		AccountTags:      l.accountTagsLocked(),
 		AccountAliases:   l.accountAliasesLocked(),
 		ExternalMappings: l.externalMappingsLocked(),
@@ -2548,6 +2556,25 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		l.chart[reg.Account] = reg.Type
 	}
+	// Cash-class designations restore like the chart-of-accounts
+	// registrations: an empty account or an invalid currency fails the
+	// import instead of installing a mark that could never have been
+	// created.
+	for _, m := range cfg.CashAccounts {
+		if m.Account == "" {
+			return bad("cash account mark with empty account")
+		}
+		if m.Currency != "" {
+			if _, cerr := normalizeCurrency(m.Currency); cerr != nil {
+				return bad("cash account mark with invalid currency %q", m.Currency)
+			}
+		}
+		if m.Currency == "" {
+			l.cashAccounts[m.Account] = true
+		} else {
+			l.cashAccountCurrencies[accountCurrency{account: m.Account, currency: m.Currency}] = true
+		}
+	}
 	// Account tags restore like the chart-of-accounts registrations: an
 	// empty account or a malformed key/value fails the import instead of
 	// installing tags that could never have been created. The nil-map
@@ -3395,6 +3422,15 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// structural config: a restore that dropped them would silently
 	// lift the posting-direction control.
 	if !reflect.DeepEqual(a.chart, b.chart) {
+		return false
+	}
+	// Cash-class designations must round-trip like the chart
+	// registrations: a restore that dropped them would silently
+	// unclassify the cash accounts.
+	if !reflect.DeepEqual(a.cashAccounts, b.cashAccounts) {
+		return false
+	}
+	if !reflect.DeepEqual(a.cashAccountCurrencies, b.cashAccountCurrencies) {
 		return false
 	}
 	// Account tags must round-trip like the chart registrations: a

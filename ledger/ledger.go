@@ -350,6 +350,18 @@ type Ledger struct {
 	// like frozen and noOverdraft: registering or clearing a type does
 	// not bump the journal version and survives snapshots.
 	chart map[AccountID]AccountType
+	// cashAccounts marks accounts as cash-class for the cash-flow
+	// statement (see cashflow.go): movements on these accounts are the
+	// cash inflows and outflows the statement aggregates. The plain map
+	// marks an account in every currency; cashAccountCurrencies marks
+	// (account, currency) pairs for the scoped case — e.g. a
+	// multi-currency settlement account that is cash-class only in its
+	// settlement currency. Structural config, like chart: marking or
+	// unmarking does not bump the journal version, changes are audited
+	// (cash_account_marked / cash_account_unmarked), and both maps
+	// round-trip through disaster-recovery snapshots.
+	cashAccounts          map[AccountID]bool
+	cashAccountCurrencies map[accountCurrency]bool
 	// aliases maps a human-readable alias to the account it names, and
 	// accountAliases is the reverse index (see alias.go). The mapping
 	// is bijective: one alias names exactly one account, one account
@@ -1263,6 +1275,8 @@ func New(opts ...Option) *Ledger {
 		suspended:             make(map[AccountID]AccountSuspension),
 		dormant:               make(map[AccountID]DormancyRecord),
 		chart:                 make(map[AccountID]AccountType),
+		cashAccounts:          make(map[AccountID]bool),
+		cashAccountCurrencies: make(map[accountCurrency]bool),
 		tags:                  make(map[AccountID]map[string]string),
 		aliases:               make(map[string]AccountID),
 		accountAliases:        make(map[AccountID]string),
@@ -1348,7 +1362,7 @@ func New(opts ...Option) *Ledger {
 		disputes:                    make(map[string]Dispute),
 		disputeKeys:                 make(map[string]string),
 		journalRules:                make(map[string]JournalRule),
-		fixedAssets:               make(map[string]FixedAsset),
+		fixedAssets:                 make(map[string]FixedAsset),
 		revalBaselines:              make(map[revalKey]revalBaseline),
 		ofxImports:                  make(map[string]*OFXImportReport),
 		camt053Imports:              make(map[string]*CAMT053ImportReport),

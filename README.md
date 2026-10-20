@@ -3795,6 +3795,63 @@ Malformed `day` (`YYYY-MM-DD` required), `format`, `expected`, or
 `expected`/`tolerance` are validated by the ledger when the report runs
 (`abs_cents >= 0`, `0 <= bps <= 10000`).
 
+### `GET /cash-flow` — cash-flow statement (LG-144)
+
+The treasury question at period end: how much cash moved in and out, in
+which activity, and does the period's net cash movement reconcile with
+the cash accounts' opening and closing balances?
+`GET /cash-flow?from=2026-10-01&to=2026-10-31&currency=USD`.
+
+- **Cash-class accounts**: opt-in via `MarkCashAccount(account,
+  currency)` in the `ledger` package — an empty currency marks the
+  account in every currency, a code scopes it (a multi-currency
+  settlement account that is cash-class only in its settlement currency).
+  Structural config like the chart-of-accounts registrations: marking or
+  unmarking does not bump the journal version, changes are audited
+  (`cash_account_marked` / `cash_account_unmarked`), and the marks
+  survive disaster-recovery snapshots. A cash account that pays out
+  typically stays unregistered from the chart — `chart.go`'s direction
+  control rejects crediting an asset-class account — and the mark is
+  independent of chart registration either way.
+- **Aggregation**: every effective leg on a cash-class account in
+  `[from, to]` (UTC calendar days, inclusive) is a cash movement — a
+  debit leg is an inflow, a credit leg an outflow. Journal entries marked
+  `PendingReview` are excluded (booked but not effective, the LG-43
+  settlement convention). The activity comes from the counterparty — the
+  other leg's account — and its chart-of-accounts type:
+  `revenue`/`expense` → `operating`; `equity`/`liability` →
+  `financing`; `asset` → `investing`; unregistered counterparty →
+  `operating` (the opt-in chart's honest fallback). Documented
+  approximations: a liability counterparty labels working-capital moves
+  like trade payables as `financing` (keep payables unregistered to land
+  them in `operating`), and under the strict chart direction control
+  investing inflows via asset counterparties do not occur (crediting an
+  asset is rejected) — the investing leg is typically capex-style
+  outflows. A transfer between two cash accounts nets to zero at the
+  pool level (gross operating inflow + outflow by the fallback rule).
+- **Reconciliation**: the report independently accumulates each cash
+  account's opening balance, its period net flow, and its closing
+  balance. A cash account whose `closing != opening + net flow` lands in
+  `discrepancies` — the same self-consistency role
+  `TrialBalanceDiscrepancy` plays in `POST /reconcile`. Aggregation uses
+  checked `int64` cents arithmetic: a pathological overflow fails the
+  report instead of wrapping.
+- **Semantics**: the report is read-only — no version bump, no audit
+  event, no journal rows. A ledger with no cash-class marks returns
+  `200` with an empty report (zero totals, no discrepancies), not `404`.
+  Malformed `from`/`to` (`YYYY-MM-DD` required, `from <= to`), an empty
+  or invalid `currency`, or a `format` other than `json`/`csv` are `400`.
+  `?format=csv` downloads the per-`(account, activity)` breakdown
+  (`from,to,currency,account,activity,inflow_cents,outflow_cents,net_cents,opening_cents,closing_cents`,
+  sorted by account, activities in operating/investing/financing order).
+  Every `GET /cash-flow` increments `ledger_cash_flow_runs_total` on
+  `/metrics`.
+
+```bash
+curl -s 'localhost:8080/cash-flow?from=2026-10-01&to=2026-10-31&currency=USD' | head -30
+curl -s 'localhost:8080/cash-flow?from=2026-10-01&to=2026-10-31&currency=USD&format=csv' -o cash-flow.csv
+```
+
 ### `GET /tax-report` — tax/VAT report export
 
 The finance team's filing query: `GET

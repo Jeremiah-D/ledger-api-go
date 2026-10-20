@@ -6375,6 +6375,74 @@ func (s *server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleCashFlow implements GET /cash-flow, the operator-facing cash-flow
+// statement (LG-144): per-activity (operating/investing/financing)
+// inflow/outflow/net over the cash-class accounts for an inclusive UTC
+// date range, with the per-account opening/closing reconciliation check
+// and JSON/CSV exports for the treasury workflow.
+//
+// Query parameters (from, to, and currency are required):
+//
+//	from     "YYYY-MM-DD" UTC calendar day, inclusive period start.
+//	to       "YYYY-MM-DD" UTC calendar day, inclusive period end;
+//	           must not be before from.
+//	currency the 3-letter ISO 4217 code the statement is drawn in.
+//	format   json (default) or csv (the per-(account, activity) breakdown).
+//
+// A ledger with no cash-class marks returns 200 with an empty report —
+// "nothing designated cash" is a configuration state, not a failure.
+// Like POST /reconcile, a reconciliation finding (discrepancies) is still
+// a successful 200: the findings live in the report, not the status code.
+func (s *server) handleCashFlow(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CashFlowRuns.Add(1)
+	q := r.URL.Query()
+
+	format := q.Get("format")
+	if format == "" {
+		format = "json"
+	}
+	switch format {
+	case "json", "csv":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `format must be one of "json", "csv"`})
+		return
+	}
+
+	opts := ledger.CashFlowOptions{
+		From:     q.Get("from"),
+		To:       q.Get("to"),
+		Currency: q.Get("currency"),
+	}
+	report, err := s.ledgerFor(r).CashFlow(time.Now(), opts)
+	if err != nil {
+		if errors.Is(err, ledger.ErrInvalidCashFlowRange) ||
+			errors.Is(err, ledger.ErrInvalidCurrency) ||
+			errors.Is(err, ledger.ErrEmptyCashFlowCurrency) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		log.Printf("ledger-api-go: GET /cash-flow: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cash flow failed"})
+		return
+	}
+
+	switch format {
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=cash-flow-"+report.From+"-to-"+report.To+".csv")
+		w.WriteHeader(http.StatusOK)
+		if err := report.WriteCSV(w); err != nil {
+			log.Printf("ledger-api-go: GET /cash-flow csv encode error: %v", err)
+		}
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := report.WriteJSON(w); err != nil {
+			log.Printf("ledger-api-go: GET /cash-flow encode error: %v", err)
+		}
+	}
+}
+
 // handleTaxReport implements GET /tax-report (LG-143): the operator's
 // tax/VAT filing query over derived tax legs.
 //
@@ -6751,6 +6819,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
 	mux.HandleFunc("POST /compliance/large-tx-reports", s.handleLargeTxReports)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
+	mux.HandleFunc("GET /cash-flow", s.handleCashFlow)
 	mux.HandleFunc("GET /tax-report", s.handleTaxReport)
 	mux.HandleFunc("GET /settlement/next-window", s.handleSettlementNextWindow)
 	mux.HandleFunc("GET /settlement/deferred", s.handleListSettlementDeferrals)
