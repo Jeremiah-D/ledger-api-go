@@ -2127,6 +2127,17 @@ each trial balance carries `low_balance_threshold_cents` /
 lists every watch (`balance_watches`), and watch CRUD itself is audited
 (`balance_watch_set` / `balance_watch_cleared`).
 
+Every breach is also emitted to the domain-event outbox as
+`balance_threshold_breached` (same facts as the audit event, plus the
+breach's `trace_id` and `actor`), so registered webhook endpoints whose
+event filter includes `balance_threshold_breached` receive an
+HMAC-SHA256-signed notification through the outbound webhook dispatcher
+(see the webhooks section) — the audit log stays the compliance record,
+the webhook is the live channel. Without `LEDGER_OUTBOX_DIR` the event
+is simply not emitted; filtering is a webhook concern, so a filtered-out
+endpoint misses the push but the event remains in the outbox stream for
+`GET /events` consumers.
+
 ```bash
 LEDGER_BALANCE_WATCHES="cust-123:USD:50000:,treasury:USD::10000000" ./ledger-api-go
 # post cust-123's USD balance below $500.00, then:

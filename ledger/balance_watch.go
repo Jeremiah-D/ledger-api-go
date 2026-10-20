@@ -461,6 +461,32 @@ func (l *Ledger) fireBalanceWatchLocked(k accountCurrency, direction BalanceWatc
 			"version":         l.version,
 		},
 	})
+	// Domain outbox (LG-154): the same breach as a domain fact, so the
+	// webhook dispatcher (see webhook.go, LG-102) can fan it out to
+	// registered endpoints whose event filter matches
+	// balance_threshold_breached. The payload mirrors the audit event's
+	// details — the audit log stays the compliance record, this event
+	// is the live notification channel. Emitted under the same write
+	// lock, inside the commit critical section, so the event is fsync'd
+	// before the operation reports success (the outbox contract); a
+	// full webhook endpoint queue drops the event without touching
+	// this path.
+	l.emitOutboxLocked(OutboxEvent{
+		Type:        OutboxBalanceThresholdBreached,
+		Account:     k.account,
+		AmountCents: balance,
+		Currency:    k.currency,
+		Details: map[string]any{
+			"account":         string(k.account),
+			"currency":        k.currency,
+			"direction":       string(direction),
+			"threshold_cents": threshold,
+			"balance_cents":   balance,
+			"version":         l.version,
+			"trace_id":        traceID,
+			"actor":           actor,
+		},
+	})
 }
 
 // recomputeBalanceWatchBreachesLocked re-derives the breach state from

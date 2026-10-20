@@ -156,6 +156,13 @@ const (
 	OutboxInvoicePaid    = "invoice_paid"
 	OutboxInvoiceOverdue = "invoice_overdue"
 	OutboxInvoiceVoided  = "invoice_voided"
+	// Balance-threshold watch breach (see balance_watch.go, LG-61):
+	// fired by the ledger's own breach evaluation, not by a webhook
+	// subscriber — the webhook dispatcher (see webhook.go, LG-102)
+	// fans it out to registered endpoints whose event filter matches.
+	// The audit log keeps the compliance record; this event is the
+	// live notification channel for webhook subscribers (LG-154).
+	OutboxBalanceThresholdBreached = "balance_threshold_breached"
 )
 
 // OutboxEvent is one domain fact in the outbox stream.
