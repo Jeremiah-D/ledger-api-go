@@ -628,6 +628,17 @@ type snapshotConfigLine struct {
 	// counter annotated on export manifests (LG-128).
 	PIIErasures       []ErasureRecord `json:"pii_erasures,omitempty"`
 	PIIErasureVersion uint64          `json:"pii_erasure_version,omitempty"`
+	// KycProfiles carries the per-account KYC/尽调 profiles (see kyc.go,
+	// LG-147), sorted by account, and KycThresholdCents the ledger-wide
+	// posting threshold. Absent in snapshots written before KYC
+	// support existed, which restore with no profiles and the
+	// threshold disabled. A restore that dropped the profiles would
+	// silently un-stop expired accounts, so they round-trip like the
+	// frozen-account list. Profiles are re-validated on import — a
+	// snapshot row that could never have been installed (bad status,
+	// empty account) fails the import.
+	KycProfiles       []KycProfile `json:"kyc_profiles,omitempty"`
+	KycThresholdCents int64        `json:"kyc_threshold_cents,omitempty"`
 }
 
 // FrozenAutoUnfreeze pairs a frozen account with its scheduled
@@ -1207,6 +1218,11 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FTPCurves:   l.ftpCurvesSnapshotLocked(),
 		FTPAccounts: l.ftpAccounts,
 		APIKeys:     l.apiKeysSnapshotLocked(),
+		// LG-147: the KYC profiles and the ledger-wide posting
+		// threshold round-trip, so a restored ledger keeps its
+		// counterparty stops exactly as the source.
+		KycProfiles:       l.kycProfilesLocked(),
+		KycThresholdCents: l.kycThresholdCents,
 	}
 	cfg.PIIHolderNames, cfg.PIIErasures, cfg.PIIErasureVersion = l.piiSnapshotLocked()
 	eclCfg := l.eclStageConfig
@@ -2644,6 +2660,25 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, a := range cfg.OverdraftProtected {
 		l.noOverdraft[a] = true
 	}
+	// KYC profiles restore like the frozen list: an empty account or an
+	// invalid status fails the import instead of installing a profile
+	// that could never have been created. The profile restores verbatim,
+	// including the original VerifiedAt/ExpiresAt — a restore must not
+	// move an account's compliance timestamps. The threshold restores
+	// too: a negative threshold could never have been set.
+	for _, p := range cfg.KycProfiles {
+		if p.Account == "" {
+			return bad("KYC profile with empty account")
+		}
+		if !validKycStatus(p.Status) {
+			return bad("KYC profile with invalid status %q for account %s", p.Status, p.Account)
+		}
+		l.kyc[p.Account] = p
+	}
+	if cfg.KycThresholdCents < 0 {
+		return bad("negative KYC threshold %d", cfg.KycThresholdCents)
+	}
+	l.kycThresholdCents = cfg.KycThresholdCents
 	// Chart-of-accounts registrations restore like the frozen list: an
 	// empty account or an invalid type fails the import instead of
 	// installing a registration that could never have been created.

@@ -143,6 +143,12 @@ const (
 	// event, so downstream consumers can subscribe to bank-side
 	// settlement progress without polling.
 	OutboxPain001StatusChanged = "pain001_status_changed"
+	// KYC/尽调 lifecycle (see kyc.go, LG-147): the compliance team sets
+	// an account's KYC status, and the expiry sweep stops lapsed
+	// accounts. Downstream consumers can subscribe to know when a
+	// counterparty is (re-)cleared or stopped.
+	OutboxKycStatusSet = "kyc_status_set"
+	OutboxKycExpired   = "kyc_expired"
 )
 
 // OutboxEvent is one domain fact in the outbox stream.

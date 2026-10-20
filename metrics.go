@@ -178,6 +178,14 @@ type Metrics struct {
 	// account's cumulative spend for the UTC calendar month above its
 	// configured monthly spend budget (see ledger.SetAccountBudget).
 	BudgetRejections atomic.Uint64
+	// KycRejections counts POST /entries, POST /entries/batch, and
+	// POST /transfers requests rejected with 422 by the KYC/尽调 gate
+	// (see ledger.SetKyc): an expired profile blocks any amount, and an
+	// unverified (or pending) account is rejected above the ledger's
+	// opt-in KYC threshold. The gate runs after the idempotency replay
+	// check, so replayed keys do not count here — a replay returns the
+	// original entry instead of failing.
+	KycRejections atomic.Uint64
 	// DenylistRejections counts POST /entries, POST /entries/batch,
 	// POST /transfers, and POST /holds/{id}/capture requests rejected
 	// with 422 because a leg of the posting named an account on the
@@ -872,6 +880,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_overdraft_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, and capture requests rejected because they would have overdrawn an overdraft-protected account.",
 		m.OverdraftRejections.Load())
+	writeCounter(&sb, "ledger_kyc_rejections_total",
+		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected by the KYC gate: an expired profile blocks any amount, an unverified account is rejected above the opt-in threshold.",
+		m.KycRejections.Load())
 	writeCounter(&sb, "ledger_chart_direction_rejections_total",
 		"Total POST /entries, POST /entries/batch, and POST /entries/dry-run requests rejected because a leg of the entry booked against the account's registered chart-of-accounts type.",
 		m.ChartDirectionRejections.Load())

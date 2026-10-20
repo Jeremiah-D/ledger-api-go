@@ -181,6 +181,12 @@ type ReconciliationReport struct {
 	// against overdrafts (see EnableOverdraftProtection). Risk tooling
 	// reads this to know which accounts cannot go negative.
 	OverdraftProtectedAccounts []AccountID `json:"overdraft_protected_accounts"`
+	// Kyc discloses the KYC/尽调 position (see SetKyc, LG-147): the
+	// ledger-wide posting threshold and the profile counts by state,
+	// with the currently expired accounts named. Compliance tooling
+	// reads this to know which counterparties are cleared, pending,
+	// or stopped.
+	Kyc KycSummary `json:"kyc"`
 	// DailyLimits lists every configured daily outflow limit (see
 	// SetDailyLimit), sorted by (account, currency). Risk tooling reads
 	// this to know which accounts are capped on daily outflow and at
@@ -800,6 +806,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		ClearingBatches:            l.clearingBatchSummariesLocked(),
 		FrozenAccountAutoUnfreeze:  l.frozenUntilCopyLocked(),
 		OverdraftProtectedAccounts: l.overdraftProtectedAccountsLocked(),
+		Kyc:                        l.kycSummaryLocked(),
 		DailyLimits:                l.dailyLimitsLocked(),
 		SweepReserves:              l.sweepReservesLocked(),
 		SubtreeLimitUtilization:    l.subtreeLimitUtilizationLocked(now),

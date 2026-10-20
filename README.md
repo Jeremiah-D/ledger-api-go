@@ -1309,6 +1309,44 @@ curl -s -X POST localhost:8080/entries \
 # 422 {"error":"ledger: posting would overdraw a protected account"}
 ```
 
+### KYC/尽调状态门控 (Go API: `SetKyc` / `GetKyc` / `ExpireKyc` / `SetKycThreshold`)
+
+Per-account KYC (know-your-customer / 尽调) profiles gate the posting
+paths — a fintech compliance control for counterparty due diligence.
+Each profile carries a status (`unverified` / `pending` / `verified` /
+`expired`), an optional risk tier, and optional verification/expiry
+timestamps.
+
+Gate policy: an account whose profile is **expired** blocks *all* new
+`POST /entries` / `POST /transfers` through it (`422`), whatever the
+amount — a lapsed KYC means the ledger no longer knows the
+counterparty, so the account is stopped until re-verified. An account
+with **no profile** (or an `unverified` / `pending` profile) is rejected
+only when the posting amount exceeds the ledger's opt-in KYC threshold
+(`SetKycThreshold`, cents; `0` disables the threshold gate, the
+default) — small-value activity may proceed while a review is pending,
+but material amounts need a verified counterparty.
+
+Check order inside `Post`: field validation → idempotency replay →
+frozen (`403`) → overdraft (`422`) → **KYC (`422`)** → daily limit →
+budget → period. Like the other risk controls, a KYC rejection books
+nothing, and idempotent replays return the original entry instead of
+failing (the replay books nothing new). Expiry is lazy: every write
+path sweeps lapsed profiles before the gate, and `POST /kyc/expire`
+runs the same sweep explicitly (the scheduled "到期复核").
+
+```bash
+curl -s -X POST localhost:8080/accounts/acme/kyc \
+  -d '{"status":"verified","risk_tier":"low","expires_at":"2027-01-01T00:00:00Z"}'
+curl -s localhost:8080/accounts/acme/kyc          # query the profile
+curl -s -X POST localhost:8080/kyc/expire         # {"expired": N}
+```
+
+The reconcile report discloses the KYC position (`kyc`: threshold,
+profile counts by state, expired accounts), profiles and the threshold
+round-trip through disaster-recovery snapshots, and rejections are
+counted on `ledger_kyc_rejections_total`.
+
 ### Chart of accounts (Go API: `RegisterAccountType`)
 
 Opt-in five-category classification — `asset`, `liability`, `equity`,
@@ -5006,6 +5044,12 @@ curl -s localhost:8080/metrics
 - `ledger_overdraft_rejections_total` — `POST /entries`, `POST
   /transfers`, `POST /merges`, and capture requests rejected with `422`
   because the posting would have overdrawn an overdraft-protected account.
+- `ledger_kyc_rejections_total` — `POST /entries`, `POST
+  /entries/batch`, and `POST /transfers` requests rejected with `422` by
+  the KYC/尽调 gate: an expired profile blocks any amount, and an
+  unverified (or pending) account is rejected above the ledger's opt-in
+  KYC threshold. Replays never count — the gate runs after the
+  idempotency replay check.
 - `ledger_daily_limit_rejections_total` — `POST /entries` and
   `POST /transfers` requests rejected with `422` because the posting would
   have taken the account's UTC-day cumulative outflow above its configured

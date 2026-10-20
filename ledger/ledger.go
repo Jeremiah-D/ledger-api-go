@@ -382,6 +382,15 @@ type Ledger struct {
 	// would take a protected credit (payer) account below zero is rejected
 	// with ErrAccountOverdraft (see overdraft.go). Opt-in per account.
 	noOverdraft map[AccountID]bool
+	// kyc maps an account to its KYC/尽调 profile (see kyc.go): opt-in
+	// per account. kycThresholdCents is the ledger-wide posting
+	// threshold in cents above which accounts with no (or a
+	// non-verified) profile are rejected; 0 disables the threshold
+	// gate. Expired profiles block all new postings. Structural
+	// config, like noOverdraft: profile changes do not bump the
+	// journal version and survive disaster-recovery snapshots.
+	kyc               map[AccountID]KycProfile
+	kycThresholdCents int64
 	// deniedExact and deniedPrefixes are the sanctions/denylist (see
 	// denylist.go): exact account IDs and prefix patterns whose accounts
 	// may not move money. Post, PostTransfer, and Capture screen every
@@ -1290,6 +1299,7 @@ func New(opts ...Option) *Ledger {
 		aliases:               make(map[string]AccountID),
 		accountAliases:        make(map[AccountID]string),
 		noOverdraft:           make(map[AccountID]bool),
+		kyc:                 make(map[AccountID]KycProfile),
 		deniedExact:           make(map[AccountID]DenylistEntry),
 		deniedPrefixes:        make(map[string]DenylistEntry),
 		apiKeys:               make(map[string]*APIKey),
@@ -1636,6 +1646,13 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 	// frozen gate below, so this Post sees the account unfrozen.
 	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
 
+	// Expired KYC profiles are swept lazily on the write path, like the
+	// timed-freeze release above: a verification that lapsed must stop
+	// new postings from this Post on (see expireKycLocked in kyc.go).
+	// The sweep runs before the KYC gate below, so this Post sees the
+	// account expired.
+	l.expireKycLocked(time.Now())
+
 	// A closed account (see close.go) is a terminal lifecycle state and
 	// the strongest of the account stops: it runs before the frozen
 	// gate below, and rejected posts record nothing, bump nothing, and
@@ -1683,6 +1700,18 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 	// the entry's currency: within-line postings clear the gate, and
 	// breaching the floor is rejected with ErrCreditLimitExceeded.
 	if err := l.overdraftRejectedLocked(e); err != nil {
+		return JournalEntry{}, false, err
+	}
+
+	// KYC/尽调门控 (see kyc.go): an account whose KYC profile expired
+	// rejects any new posting through it; an account with no (or a
+	// non-verified) profile is rejected only above the ledger's opt-in
+	// KYC threshold. The gate runs after the overdraft check — both are
+	// account risk controls — and after the idempotency replay check
+	// above: a replay books nothing new, so it must not fail on an
+	// account whose KYC lapsed after the original posting. Rejected
+	// posts record nothing.
+	if err := l.kycRejectedLocked(e.DebitAccount, e.CreditAccount, e.AmountCents); err != nil {
 		return JournalEntry{}, false, err
 	}
 

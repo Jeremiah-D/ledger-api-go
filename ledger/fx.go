@@ -1082,6 +1082,19 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		l.balances[accountCurrency{account: t.From, currency: t.Currency}] < totalOutflow {
 		return TransferReceipt{}, ErrAccountOverdraft
 	}
+	// KYC/尽调门控 (see kyc.go): after the overdraft check — both are
+	// account risk controls — and after the idempotency replay check
+	// above: a replay books nothing new, so it must not fail on an
+	// account whose KYC lapsed after the original transfer. Expired KYC
+	// profiles sweep lazily here (the FX path branches before the main
+	// transfer path's sweep), so this transfer sees the lapsed account
+	// expired. Only the principal legs are gated: the FX clearing
+	// account and the operator's fee recipients are exempt, like the
+	// fee-leg carve-out on the non-FX path.
+	l.expireKycLocked(now)
+	if err := l.kycRejectedLocked(t.From, t.To, totalOutflow); err != nil {
+		return TransferReceipt{}, err
+	}
 	if l.dailyLimitRejectedLocked(t.From, t.Currency, totalOutflow, t.CreatedAt) {
 		return TransferReceipt{}, ErrDailyLimitExceeded
 	}

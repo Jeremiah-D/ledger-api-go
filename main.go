@@ -152,6 +152,11 @@ func (s *server) writePostError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
+	if errors.Is(err, ledger.ErrKycUnverified) || errors.Is(err, ledger.ErrKycExpired) {
+		s.metrics.KycRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
 	if errors.Is(err, ledger.ErrAccountDenied) {
 		s.metrics.DenylistRejections.Add(1)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -5583,6 +5588,93 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
+// kycSetRequest is the body of POST /accounts/{id}/kyc: the KYC/尽调
+// profile to install. Only status is required; risk_tier, verified_at,
+// and expires_at are optional. The expired state cannot be set directly
+// — it is derived by the expiry sweep.
+type kycSetRequest struct {
+	Status     string     `json:"status"`
+	RiskTier   string     `json:"risk_tier"`
+	VerifiedAt *time.Time `json:"verified_at"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+}
+
+// handleSetKyc implements POST /accounts/{id}/kyc: installs (or
+// replaces) the account's KYC profile. Returns the stored profile.
+// Setting a profile is idempotent and does not bump the ledger version.
+func (s *server) handleSetKyc(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	var req kycSetRequest
+	if r.ContentLength != 0 {
+		if !s.decodeJSONBody(w, r, &req) {
+			return
+		}
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	prof := ledger.KycProfile{
+		Status:   ledger.KycStatus(req.Status),
+		RiskTier: req.RiskTier,
+	}
+	if req.VerifiedAt != nil {
+		prof.VerifiedAt = req.VerifiedAt.UTC()
+	}
+	if req.ExpiresAt != nil {
+		prof.ExpiresAt = req.ExpiresAt.UTC()
+	}
+	if err := s.ledgerFor(r).SetKycCtx(actx, ledger.AccountID(id), prof); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	stored, _ := s.ledgerFor(r).GetKyc(ledger.AccountID(id))
+	writeJSON(w, http.StatusOK, stored)
+}
+
+// handleGetKyc implements GET /accounts/{id}/kyc: returns the account's
+// KYC profile, or 404 when the account has no profile (it posts as
+// unverified).
+func (s *server) handleGetKyc(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	prof, ok := s.ledgerFor(r).GetKyc(ledger.AccountID(id))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no KYC profile for account"})
+		return
+	}
+	writeJSON(w, http.StatusOK, prof)
+}
+
+// handleExpireKyc implements POST /kyc/expire: the explicit operator
+// sweep that moves every profile whose ExpiresAt has passed to the
+// expired state. Returns the number of profiles expired. The write
+// paths sweep lazily on their own; this endpoint is the scheduled
+// "到期复核" twin.
+func (s *server) handleExpireKyc(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	expired := s.ledgerFor(r).ExpireKyc(time.Now().UTC())
+	writeJSON(w, http.StatusOK, map[string]any{"expired": expired})
+}
+
 // handleSuspendAccount implements POST /accounts/{id}/suspend: the
 // operator-facing operational pause. A suspended account rejects every
 // new journal-writing request that names it as either leg with 403,
@@ -6958,6 +7050,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
+	mux.HandleFunc("POST /accounts/{id}/kyc", s.handleSetKyc)
+	mux.HandleFunc("GET /accounts/{id}/kyc", s.handleGetKyc)
+	mux.HandleFunc("POST /kyc/expire", s.handleExpireKyc)
 	mux.HandleFunc("POST /accounts/{id}/suspend", s.handleSuspendAccount)
 	mux.HandleFunc("POST /accounts/{id}/resume", s.handleResumeAccount)
 	mux.HandleFunc("POST /virtual-accounts", s.handleRegisterVirtualAccount)

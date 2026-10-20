@@ -783,6 +783,11 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	// rejecting transfers.
 	l.releaseExpiredFreezesLocked(time.Now(), "write_path")
 
+	// Expired KYC profiles sweep lazily before the KYC gate below, like
+	// in Post (see expireKycLocked in kyc.go): a lapsed verification
+	// stops new transfers from this transfer on.
+	l.expireKycLocked(time.Now())
+
 	if l.closedLocked(t.From) || l.closedLocked(t.To) {
 		return TransferReceipt{}, ErrAccountClosed
 	}
@@ -842,6 +847,18 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	if l.noOverdraft[t.From] &&
 		l.balances[accountCurrency{account: t.From, currency: t.Currency}] < totalOutflow {
 		return TransferReceipt{}, ErrAccountOverdraft
+	}
+
+	// KYC/尽调门控 (see kyc.go): after the overdraft check — both are
+	// account risk controls — and after the idempotency replay check
+	// above: a replay books nothing new, so it must not fail on an
+	// account whose KYC lapsed after the original transfer. Only the
+	// principal legs are gated: the fee legs are system-routed to the
+	// operator's own revenue accounts (the same carve-out the dormant
+	// gate makes). The threshold compares the payer's total outflow
+	// (amount + fee), like the overdraft gate.
+	if err := l.kycRejectedLocked(t.From, t.To, totalOutflow); err != nil {
+		return TransferReceipt{}, err
 	}
 
 	// Daily outflow limits guard the same total outflow (amount + fee):
