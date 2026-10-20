@@ -825,6 +825,15 @@ type Ledger struct {
 	// namespace, expiring with the TTL like every other key index (see
 	// pruneMergeKeysLocked in merge.go).
 	mergeKeys map[string]string
+	// splits is the authoritative registry of committed account splits
+	// (see split.go), keyed by split ID: every SplitAccount appends
+	// here, whether or not it carried an idempotency key. It feeds
+	// Reconcile's split history and idempotent replays (via splitKeys).
+	splits map[string]splitRecord
+	// splitKeys maps a split's idempotency key to its split ID. Its own
+	// namespace, expiring with the TTL like every other key index (see
+	// pruneSplitKeysLocked in split.go).
+	splitKeys map[string]string
 	// schedules is the registry of recurring transfer plans (see
 	// schedule.go), keyed by schedule ID. scheduleKeys maps a schedule
 	// creation's idempotency key to its schedule ID — its own namespace,
@@ -1338,6 +1347,8 @@ func New(opts ...Option) *Ledger {
 		clearingKeys:          make(map[string]clearingKeyRecord),
 		merges:                make(map[string]mergeRecord),
 		mergeKeys:             make(map[string]string),
+		splits:                make(map[string]splitRecord),
+		splitKeys:             make(map[string]string),
 		schedules:             make(map[string]*TransferSchedule),
 		scheduleKeys:          make(map[string]string),
 		scheduleRuns:          make(map[string][]ScheduleRun),
@@ -1901,7 +1912,9 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// namespaces (see pruneHoldKeysLocked in hold.go). Sweep keys expire
 	// on the same schedule too (see pruneSweepKeysLocked in sweep.go),
 	// and so do merge keys (see pruneMergeKeysLocked in merge.go) and
-	// batch keys (see pruneBatchKeysLocked in batch.go). Netting session
+	// batch keys (see pruneBatchKeysLocked in batch.go). Split keys
+	// expire on the same schedule, in their own namespace (see
+	// pruneSplitKeysLocked in split.go). Netting session
 	// keys expire on the same schedule, in their own namespace (see
 	// pruneNettingKeysLocked in netting.go), and so do allocation receipt
 	// keys (see pruneAllocKeysLocked in allocation.go) and term-deposit
@@ -1915,6 +1928,7 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	removed += l.pruneHoldKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
 	removed += l.pruneMergeKeysLocked(now)
+	removed += l.pruneSplitKeysLocked(now)
 	removed += l.pruneBatchKeysLocked(now)
 	removed += l.pruneNettingKeysLocked(now)
 	removed += l.pruneInstallmentKeysLocked(now)

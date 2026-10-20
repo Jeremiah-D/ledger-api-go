@@ -342,6 +342,13 @@ type Metrics struct {
 	// already-posted merge idempotency key and returned the original
 	// receipt.
 	MergeIdempotencyHits atomic.Uint64
+	// SplitsTotal counts POST /accounts/{id}/split requests received
+	// (all attempts, including duplicates and rejected payloads).
+	SplitsTotal atomic.Uint64
+	// SplitIdempotencyHits counts POST /accounts/{id}/split requests
+	// that replayed an already-posted split idempotency key and
+	// returned the original receipt.
+	SplitIdempotencyHits atomic.Uint64
 	// ReversalsFullTotal counts full reversal journal entries committed
 	// by POST /entries/{id}/reverse (see ledger.ReverseEntry). Only
 	// first-time reversals are counted: idempotent replays return the
@@ -802,6 +809,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_merge_idempotency_hits_total",
 		"Total POST /merges requests that replayed an existing merge idempotency key.",
 		m.MergeIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_splits_total",
+		"Total POST /accounts/{id}/split requests received.", m.SplitsTotal.Load())
+	writeCounter(&sb, "ledger_split_idempotency_hits_total",
+		"Total POST /accounts/{id}/split requests that replayed an existing split idempotency key.",
+		m.SplitIdempotencyHits.Load())
 	writeLabeledCounter(&sb, "ledger_reversals_total",
 		"Total reversal journal entries committed (idempotent replays not counted twice), split by kind: full reversals via POST /entries/{id}/reverse and partial reversals via POST /entries/{id}/reverse-partial.",
 		[]labeledCounterSeries{

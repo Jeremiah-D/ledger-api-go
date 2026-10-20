@@ -93,6 +93,17 @@ type AccountMerge struct {
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
+// AccountSplit is one committed account split in the Reconcile
+// disclosure (see SplitAccount): which source account was carved into
+// which target, the per-currency legs, and when.
+type AccountSplit struct {
+	SplitID     string              `json:"split_id"`
+	FromAccount AccountID           `json:"from_account"`
+	ToAccount   AccountID           `json:"to_account"`
+	Legs        []SplitCommittedLeg `json:"legs"`
+	CreatedAt   time.Time           `json:"created_at"`
+}
+
 // CurrencyHoldTotals is the per-currency rollup of active authorization
 // holds (see hold.go) at report time: how many cents are currently
 // reserved from available balances, and in how many holds. Currencies are
@@ -259,6 +270,11 @@ type ReconciliationReport struct {
 	// frozen — the frozen_accounts list in this report shows the
 	// resulting stops.
 	Merges []AccountMerge `json:"merges"`
+	// Splits lists every committed account split (see SplitAccount),
+	// sorted by split ID: which source account was carved into which
+	// target, the per-currency legs, and when. Unlike merges, split
+	// sources keep operating — nothing here is frozen by the split.
+	Splits []AccountSplit `json:"splits"`
 	// FXSpreadPNL lists the dealer's realized FX spread income (LG-93,
 	// see fx_spread.go), summed per settlement currency and sorted by
 	// currency: the booked "<transfer ID>/spread" legs, net of their
@@ -757,6 +773,7 @@ func (l *Ledger) ReconcileWithOptions(now time.Time, opts ReconcileOptions) (Rec
 			"accounting_equation_ok": report.AccountingEquationOK,
 			"discrepancies":          len(report.Discrepancies),
 			"merges":                 len(report.Merges),
+			"splits":                 len(report.Splits),
 			"dividends":              len(report.Dividends),
 			"escheats":               len(report.Escheats),
 			"entry_links":            len(report.EntryLinks),
@@ -797,6 +814,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		FXRateVersions:             l.fxRateVersionReportLocked(),
 		ForwardBook:                l.forwardBookReportLocked(now),
 		Merges:                     l.mergesLocked(),
+		Splits:                     l.splitsLocked(),
 		// LG-93: the spread P&L is derived from the journal's
 		// "<transfer ID>/spread" legs (see fxSpreadPNLLocked) — the
 		// same legs the audit chain and trial balances already
@@ -1160,6 +1178,29 @@ func (l *Ledger) mergesLocked() []AccountMerge {
 		rec := l.merges[id]
 		out = append(out, AccountMerge{
 			MergeID:     rec.mergeID,
+			FromAccount: rec.from,
+			ToAccount:   rec.to,
+			Legs:        rec.legs,
+			CreatedAt:   rec.createdAt,
+		})
+	}
+	return out
+}
+
+// splitsLocked lists every committed account split, sorted by split ID,
+// for the reconciliation report. Callers must hold l.mu; the read lock
+// suffices because the scan mutates nothing.
+func (l *Ledger) splitsLocked() []AccountSplit {
+	ids := make([]string, 0, len(l.splits))
+	for id := range l.splits {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]AccountSplit, 0, len(ids))
+	for _, id := range ids {
+		rec := l.splits[id]
+		out = append(out, AccountSplit{
+			SplitID:     rec.splitID,
 			FromAccount: rec.from,
 			ToAccount:   rec.to,
 			Legs:        rec.legs,

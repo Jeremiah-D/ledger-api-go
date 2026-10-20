@@ -178,6 +178,8 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	sweepKeys := map[string]sweepRecord{}
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
+	splits := map[string]splitRecord{}
+	splitKeys := map[string]string{}
 	batchKeys := map[string]batchRecord{}
 	allocKeys := map[string]allocRecord{}
 	var cfg *snapshotConfigLine
@@ -312,6 +314,28 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 				entryIDs:  ml.Merge.EntryIDs,
 				createdAt: ml.Merge.CreatedAt,
 			}
+		case "split":
+			if meta == nil {
+				return fail("line %d: split before meta", lineNo)
+			}
+			var sl snapshotSplitLine
+			if err := json.Unmarshal(line, &sl); err != nil {
+				return fail("line %d: malformed split: %v", lineNo, err)
+			}
+			if sl.Split.SplitID == "" {
+				return fail("line %d: split with empty ID", lineNo)
+			}
+			if _, dup := splits[sl.Split.SplitID]; dup {
+				return fail("line %d: duplicate split ID %q", lineNo, sl.Split.SplitID)
+			}
+			splits[sl.Split.SplitID] = splitRecord{
+				splitID:   sl.Split.SplitID,
+				from:      sl.Split.From,
+				to:        sl.Split.To,
+				legs:      sl.Split.Legs,
+				entryIDs:  sl.Split.EntryIDs,
+				createdAt: sl.Split.CreatedAt,
+			}
 		case "idempotency":
 			if meta == nil {
 				return fail("line %d: idempotency record before meta", lineNo)
@@ -389,6 +413,14 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
 				}
 				mergeKeys[il.Key] = il.MergeID
+			case snapshotNSSplitKey:
+				if il.SplitID == "" {
+					return fail("line %d: split_key-namespace record without split_id", lineNo)
+				}
+				if _, dup := splitKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				splitKeys[il.Key] = il.SplitID
 			case snapshotNSBatch:
 				if il.Batch == nil {
 					return fail("line %d: batch-namespace record without batch", lineNo)
@@ -711,6 +743,16 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 			return fail("merge %q conflicts with the ledger's merge registry: refusing merge", id)
 		}
 	}
+	for id, rec := range splits {
+		for _, eid := range rec.entryIDs {
+			if _, ok := entryVisible(eid); !ok {
+				return fail("split %q references missing entry %q", id, eid)
+			}
+		}
+		if existing, ok := l.splits[id]; ok && !splitRecordsEqual(existing, rec) {
+			return fail("split %q conflicts with the ledger's split registry: refusing merge", id)
+		}
+	}
 	for k, mergeID := range mergeKeys {
 		if _, ok := l.merges[mergeID]; !ok {
 			if _, ok := merges[mergeID]; !ok {
@@ -719,6 +761,16 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 		}
 		if existing, ok := l.mergeKeys[k]; ok && existing != mergeID {
 			return fail("merge idempotency key %q conflicts with the ledger's registry: refusing merge", k)
+		}
+	}
+	for k, splitID := range splitKeys {
+		if _, ok := l.splits[splitID]; !ok {
+			if _, ok := splits[splitID]; !ok {
+				return fail("split idempotency key %q references missing split %q", k, splitID)
+			}
+		}
+		if existing, ok := l.splitKeys[k]; ok && existing != splitID {
+			return fail("split idempotency key %q conflicts with the ledger's registry: refusing merge", k)
 		}
 	}
 	for k, rec := range batchKeys {
@@ -834,6 +886,16 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	for k, mergeID := range mergeKeys {
 		if _, ok := l.mergeKeys[k]; !ok {
 			l.mergeKeys[k] = mergeID
+		}
+	}
+	for id, rec := range splits {
+		if _, ok := l.splits[id]; !ok {
+			l.splits[id] = rec
+		}
+	}
+	for k, splitID := range splitKeys {
+		if _, ok := l.splitKeys[k]; !ok {
+			l.splitKeys[k] = splitID
 		}
 	}
 	for k, rec := range batchKeys {

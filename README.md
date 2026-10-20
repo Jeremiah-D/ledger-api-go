@@ -695,6 +695,47 @@ release them before merging; daily outflow limits do not apply to merges.
 `POST /reconcile` reports every committed merge in its `merges` list, and
 the frozen source shows up in `frozen_accounts` for cross-checking.
 
+### `POST /accounts/{id}/split`
+
+Account split: the inverse of a merge — atomically moves **specified**
+amounts out of the source account (`{id}`) into the target account, one
+journal entry per leg, `<split ID>/<currency>`, while the source keeps
+operating on the remainder. The shape is a merchant spinning a product
+line into its own sub-account: the source is **not** frozen or closed —
+splitting is a reorganization, not a decommission. Each leg names either
+a fixed `amount_cents` or a `ratio_bps` share (1–10000 basis points,
+floored) of the source's balance in that currency at split time; exactly
+one sizing mode per leg, one leg per currency.
+
+```bash
+curl -X POST localhost:8080/accounts/parent-corp/split -d '{
+  "split_id": "split-2026-10-20",
+  "to_account": "child-corp",
+  "legs": [{"currency":"USD","amount_cents":4000},{"currency":"EUR","ratio_bps":5000}],
+  "idempotency_key": "split-parent-corp-2026-10-20"
+}'
+# 201 {"split_id":"split-2026-10-20","from_account":"parent-corp","to_account":"child-corp",
+#      "legs":[{"from_account":"parent-corp","to_account":"child-corp","currency":"USD",
+#               "amount_cents":4000,"entry_id":"split-2026-10-20/USD"}, ...],
+#      "entries":[{...}],"duplicate":false}
+```
+
+Only positive balances are splittable: a leg's effective amount must be
+positive and must not exceed the source's balance in its currency — a
+dust ratio that floors to zero or a fixed amount above the balance is
+rejected, never clamped. Check order is validation, then the idempotency
+replay check, then the split-ID conflict check, then the
+closed/frozen/suspended checks on **both** accounts, then the overdraft
+check on the target (a documented no-op: legs move positive money into
+the target, which can never take it below zero), then the
+accounting-period gate — a backdated split landing in a closed period
+returns `422`. A duplicate idempotency key returns `200` with the
+original receipt. Split keys live in their own namespace and honor
+`LEDGER_IDEMPOTENCY_TTL`; the split registry itself survives pruning and
+round-trips through full and incremental snapshots. Like merges, holds
+are advisory and daily outflow limits do not apply. `POST /reconcile`
+reports every committed split in its `splits` list.
+
 ### `POST /entries/{id}/reverse` (reversal / 冲正)
 
 Reverses a posted journal entry: appends a new entry with the debit and
@@ -3621,6 +3662,7 @@ Report fields:
 | `idempotency_keys`     | `ttl_configured`, `ttl`, `total_keys`, and `expired_eligible` (keys older than the TTL, i.e. the next sweep's eviction set) |
 | `audit_chain`          | `verify_ok` / `verify_error`, `head`, `links`, plus `head_consistent` — the chain-length == ledger-version check with `consistency_error` when the counters desync |
 | `merges`               | every committed account merge, sorted by merge ID: `merge_id`, `from_account`, `to_account`, the per-currency `legs`, and `created_at`. Merged sources stay frozen — cross-check `from_account` against `frozen_accounts` in the same report |
+| `splits`               | every committed account split, sorted by split ID: `split_id`, `from_account`, `to_account`, the per-currency `legs`, and `created_at`. Unlike merges, split sources keep operating — nothing here is frozen by the split |
 | `entry_links`          | every declared entry link (LG-123), in declaration order: `from_entry_id`, `to_entry_id`, `link_type` (`reversal_of` / `adjustment_of` / `fee_of` / `refund_of` / `mandate_of`), `declared_at`, and `declared_by` — the explicit directed associations between journal entries (for `mandate_of` the `to` endpoint is the mandate's reference record, not a journal entry) |
 | `link_chains`          | the `reversal_of`/`adjustment_of` links expanded into per-root adjustment chains, sorted by `root_entry_id`: each chain's `root_entry_id` is the ultimate original entry and `links` lists every correction link reachable from it in declaration order, so the full correction history of an entry audits end to end (`fee_of`/`refund_of`/`mandate_of` links stay out of the chains — they are associations, not corrections — and are disclosed flat in `entry_links`) |
 | `mandates`             | every direct-debit mandate (LG-125), sorted by ID: `payer`, `payee`, `max_amount_cents`, `currency`, `frequency`, validity window, effective `status`, plus `total_debits` and `window_debits` usage — the standing pull authorizations and how far each has been drawn |
@@ -4890,6 +4932,9 @@ curl -s localhost:8080/metrics
   idempotency key (returned the original receipt, booked nothing).
 - `ledger_merges_total` — every `POST /merges` request received.
 - `ledger_merge_idempotency_hits_total` — merges that replayed an existing
+  idempotency key (returned the original receipt, booked nothing).
+- `ledger_splits_total` — every `POST /accounts/{id}/split` request received.
+- `ledger_split_idempotency_hits_total` — splits that replayed an existing
   idempotency key (returned the original receipt, booked nothing).
 - `ledger_reversals_total` — reversal journal entries committed by
   `POST /entries/{id}/reverse` (idempotent replays book nothing new and are

@@ -1376,7 +1376,93 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, receipt)
 }
 
-// createReversalRequest is the body of POST /entries/{id}/reverse. The
+// createSplitRequest is the body of POST /accounts/{id}/split. The
+// source account comes from the path; the body names the target account
+// and the legs to carve out. Each leg carries exactly one of
+// amount_cents (fixed) or ratio_bps (share of the source's balance in
+// that currency, 1..10000, floored). The server generates split_id when
+// the client omits it.
+type createSplitRequest struct {
+	SplitID        string            `json:"split_id"`
+	ToAccount      ledger.AccountID  `json:"to_account"`
+	Legs           []ledger.SplitLeg `json:"legs"`
+	IdempotencyKey string            `json:"idempotency_key"`
+}
+
+// handleCreateSplit implements POST /accounts/{id}/split, the inverse
+// of POST /merges: the caller names a source account (the path {id}) and
+// a target account, and the ledger atomically moves the legs' amounts
+// out of the source — one journal entry per leg, "<split ID>/<currency>"
+// — while the source keeps operating on the remainder.
+//
+// The server generates split_id when the client omits it. A first-time
+// split returns 201 with the receipt; a duplicate idempotency key
+// returns 200 with the originally posted receipt (the replay books
+// nothing new); invalid splits return 400; a split touching a
+// closed/frozen/suspended account returns 403; a split landing in a
+// closed accounting period returns 422.
+func (s *server) handleCreateSplit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	// Every POST attempt is counted; replays are counted separately below.
+	s.metrics.SplitsTotal.Add(1)
+
+	var req createSplitRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	id := req.SplitID
+	if id == "" {
+		id = newID()
+	}
+	receipt, err := s.ledgerFor(r).SplitAccount(ledger.Split{
+		ID:             id,
+		From:           ledger.AccountID(r.PathValue("id")),
+		To:             req.ToAccount,
+		Legs:           req.Legs,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	})
+	if err != nil {
+		if errors.Is(err, ledger.ErrAccountClosed) {
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountFrozen) {
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountSuspended) {
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrAccountOverdraft) {
+			s.metrics.OverdraftRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPeriodClosed) {
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if receipt.Duplicate {
+		s.metrics.SplitIdempotencyHits.Add(1)
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
 // idempotency key is optional: the reversal ID itself
 // ("<entry ID>/reversal") is deterministic, so a keyless retry returns the
 // existing reversal with 200. A *new* key on an already-reversed entry
@@ -6810,6 +6896,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /sweeps", s.handleCreateSweep)
 	mux.HandleFunc("POST /sweeps/dry-run", s.handleDryRunSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
+	mux.HandleFunc("POST /accounts/{id}/split", s.handleCreateSplit)
 	mux.HandleFunc("POST /entries/{id}/reverse", s.handleReverseEntry)
 	mux.HandleFunc("POST /entries/{id}/reverse-partial", s.handleReverseEntryPartial)
 	mux.HandleFunc("GET /entries/{id}/links", s.handleEntryLinks)

@@ -149,6 +149,22 @@ type snapshotMergeLine struct {
 	Merge  snapshotMerge `json:"merge"`
 }
 
+// snapshotSplit carries one committed account split.
+type snapshotSplit struct {
+	SplitID   string              `json:"split_id"`
+	From      AccountID           `json:"from_account"`
+	To        AccountID           `json:"to_account"`
+	Legs      []SplitCommittedLeg `json:"legs"`
+	EntryIDs  []string            `json:"entry_ids"`
+	CreatedAt time.Time           `json:"created_at"`
+}
+
+// snapshotSplitLine carries one committed account split, by split ID.
+type snapshotSplitLine struct {
+	Record string        `json:"record"`
+	Split  snapshotSplit `json:"split"`
+}
+
 // Idempotency-key namespaces in a snapshot. One record per key, so every
 // namespace stays independently addressable on import.
 const (
@@ -159,6 +175,7 @@ const (
 	snapshotNSPartialCap  = "partial_capture" // key -> PartialCaptureReceipt (partialCaptureKeys)
 	snapshotNSSweep       = "sweep"           // key -> snapshotSweep (sweepKeys)
 	snapshotNSMergeKey    = "merge_key"       // key -> merge ID (mergeKeys)
+	snapshotNSSplitKey    = "split_key"       // key -> split ID (splitKeys)
 	snapshotNSBatch       = "batch"           // key -> snapshotBatch (batchKeys)
 	snapshotNSAlloc       = "allocation"      // key -> snapshotAllocation (allocKeys)
 	snapshotNSTermDeposit = "term_deposit"    // key -> deposit ID (termDepositKeys)
@@ -179,6 +196,7 @@ type snapshotIdempotencyLine struct {
 	PartialReceipt *PartialCaptureReceipt `json:"partial_receipt,omitempty"`
 	Sweep          *snapshotSweep         `json:"sweep,omitempty"`
 	MergeID        string                 `json:"merge_id,omitempty"`
+	SplitID        string                 `json:"split_id,omitempty"`
 	Batch          *snapshotBatch         `json:"batch,omitempty"`
 	// Allocation carries the allocation receipt row for the
 	// "allocation" namespace (see allocation.go).
@@ -692,6 +710,9 @@ func (l *Ledger) ExportSnapshot(w io.Writer) error {
 	if err := l.exportMergesLocked(enc); err != nil {
 		return err
 	}
+	if err := l.exportSplitsLocked(enc); err != nil {
+		return err
+	}
 	if err := l.exportSchedulesLocked(enc); err != nil {
 		return err
 	}
@@ -851,6 +872,30 @@ func (l *Ledger) exportMergesLocked(enc *json.Encoder) error {
 	return nil
 }
 
+// exportSplitsLocked writes the split records, sorted by split ID for
+// determinism. Callers must hold l.mu; the read lock suffices.
+func (l *Ledger) exportSplitsLocked(enc *json.Encoder) error {
+	ids := make([]string, 0, len(l.splits))
+	for id := range l.splits {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		rec := l.splits[id]
+		if err := enc.Encode(snapshotSplitLine{Record: "split", Split: snapshotSplit{
+			SplitID:   rec.splitID,
+			From:      rec.from,
+			To:        rec.to,
+			Legs:      rec.legs,
+			EntryIDs:  rec.entryIDs,
+			CreatedAt: rec.createdAt,
+		}}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
+	return nil
+}
+
 // snapshotReviewLine carries one transfer dual-control review (see
 // review.go), in transfer-ID order. The review carries its legs: for a
 // pending, rejected, or expired review the legs are the frozen,
@@ -998,6 +1043,18 @@ func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
 		if err := enc.Encode(snapshotIdempotencyLine{
 			Record: "idempotency", Namespace: snapshotNSMergeKey, Key: k,
 			MergeID: l.mergeKeys[k],
+		}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
+	splitKeyList := make([]string, 0, len(l.splitKeys))
+	for k := range l.splitKeys {
+		splitKeyList = append(splitKeyList, k)
+	}
+	for _, k := range sortedKeys(splitKeyList) {
+		if err := enc.Encode(snapshotIdempotencyLine{
+			Record: "idempotency", Namespace: snapshotNSSplitKey, Key: k,
+			SplitID: l.splitKeys[k],
 		}); err != nil {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
@@ -1322,6 +1379,8 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	sweepKeys := map[string]sweepRecord{}
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
+	splits := map[string]splitRecord{}
+	splitKeys := map[string]string{}
 	batchKeys := map[string]batchRecord{}
 	allocKeys := map[string]allocRecord{}
 	schedules := map[string]TransferSchedule{}
@@ -1450,6 +1509,25 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 				entryIDs:  ml.Merge.EntryIDs,
 				createdAt: ml.Merge.CreatedAt,
 			}
+		case "split":
+			var sl snapshotSplitLine
+			if err := json.Unmarshal(line, &sl); err != nil {
+				return fail("line %d: malformed split: %v", lineNo, err)
+			}
+			if sl.Split.SplitID == "" {
+				return fail("line %d: split with empty ID", lineNo)
+			}
+			if _, dup := splits[sl.Split.SplitID]; dup {
+				return fail("line %d: duplicate split ID %q", lineNo, sl.Split.SplitID)
+			}
+			splits[sl.Split.SplitID] = splitRecord{
+				splitID:   sl.Split.SplitID,
+				from:      sl.Split.From,
+				to:        sl.Split.To,
+				legs:      sl.Split.Legs,
+				entryIDs:  sl.Split.EntryIDs,
+				createdAt: sl.Split.CreatedAt,
+			}
 		case "idempotency":
 			if meta == nil {
 				return fail("line %d: idempotency record before meta", lineNo)
@@ -1527,6 +1605,14 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
 				}
 				mergeKeys[il.Key] = il.MergeID
+			case snapshotNSSplitKey:
+				if il.SplitID == "" {
+					return fail("line %d: split_key-namespace record without split_id", lineNo)
+				}
+				if _, dup := splitKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				splitKeys[il.Key] = il.SplitID
 			case snapshotNSBatch:
 				if il.Batch == nil {
 					return fail("line %d: batch-namespace record without batch", lineNo)
@@ -1843,6 +1929,20 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 			return fail("merge idempotency key %q references missing merge %q", k, mergeID)
 		}
 		l.mergeKeys[k] = mergeID
+	}
+	for id, rec := range splits {
+		for _, eid := range rec.entryIDs {
+			if _, ok := l.entries[eid]; !ok {
+				return fail("split %q references missing entry %q", id, eid)
+			}
+		}
+		l.splits[id] = rec
+	}
+	for k, splitID := range splitKeys {
+		if _, ok := splits[splitID]; !ok {
+			return fail("split idempotency key %q references missing split %q", k, splitID)
+		}
+		l.splitKeys[k] = splitID
 	}
 	for k, rec := range batchKeys {
 		for _, id := range rec.entryIDs {
@@ -3272,6 +3372,17 @@ func mergeRecordsEqual(a, b mergeRecord) bool {
 		a.createdAt.UnixNano() == b.createdAt.UnixNano()
 }
 
+// splitRecordsEqual compares two split registry entries field by field,
+// ignoring time.Location representation (see journalEntriesEqual).
+func splitRecordsEqual(a, b splitRecord) bool {
+	return a.splitID == b.splitID &&
+		a.from == b.from &&
+		a.to == b.to &&
+		reflect.DeepEqual(a.legs, b.legs) &&
+		reflect.DeepEqual(a.entryIDs, b.entryIDs) &&
+		a.createdAt.UnixNano() == b.createdAt.UnixNano()
+}
+
 // schedulesEqual compares two transfer schedules field by field,
 // ignoring time.Location representation (see journalEntriesEqual).
 func schedulesEqual(a, b *TransferSchedule) bool {
@@ -3396,6 +3507,21 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		}
 	}
 	if !reflect.DeepEqual(a.mergeKeys, b.mergeKeys) {
+		return false
+	}
+	if len(a.splits) != len(b.splits) {
+		return false
+	}
+	for id, sa := range a.splits {
+		sb, ok := b.splits[id]
+		if !ok || sa.splitID != sb.splitID || sa.from != sb.from || sa.to != sb.to ||
+			!reflect.DeepEqual(sa.legs, sb.legs) ||
+			!reflect.DeepEqual(sa.entryIDs, sb.entryIDs) ||
+			sa.createdAt.UnixNano() != sb.createdAt.UnixNano() {
+			return false
+		}
+	}
+	if !reflect.DeepEqual(a.splitKeys, b.splitKeys) {
 		return false
 	}
 	if len(a.schedules) != len(b.schedules) {
