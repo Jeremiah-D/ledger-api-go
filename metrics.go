@@ -343,6 +343,13 @@ type Metrics struct {
 	// already-posted sweep idempotency key and returned the original
 	// receipt.
 	SweepIdempotencyHits atomic.Uint64
+	// SweepsFXTotal counts POST /sweeps/fx requests received (all
+	// attempts, including duplicates and rejected payloads).
+	SweepsFXTotal atomic.Uint64
+	// SweepFXIdempotencyHits counts POST /sweeps/fx requests that
+	// replayed an already-posted cross-currency sweep idempotency key
+	// and returned the original receipt.
+	SweepFXIdempotencyHits atomic.Uint64
 	// MergesTotal counts POST /merges requests received (all attempts,
 	// including duplicates and rejected payloads).
 	MergesTotal atomic.Uint64
@@ -824,6 +831,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_sweep_idempotency_hits_total",
 		"Total POST /sweeps requests that replayed an existing sweep idempotency key.",
 		m.SweepIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_sweep_fx_total",
+		"Total POST /sweeps/fx requests received.", m.SweepsFXTotal.Load())
+	writeCounter(&sb, "ledger_sweep_fx_idempotency_hits_total",
+		"Total POST /sweeps/fx requests that replayed an existing cross-currency sweep idempotency key.",
+		m.SweepFXIdempotencyHits.Load())
 	writeCounter(&sb, "ledger_merges_total",
 		"Total POST /merges requests received.", m.MergesTotal.Load())
 	writeCounter(&sb, "ledger_merge_idempotency_hits_total",

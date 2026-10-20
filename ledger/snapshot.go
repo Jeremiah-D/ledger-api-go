@@ -116,6 +116,18 @@ type snapshotSweep struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// snapshotSweepFX is the exportable form of the unexported
+// sweepFXRecord (see sweep_fx.go): a cross-currency sweep's idempotency
+// registration, with the settlement currency and FX clearing account the
+// replay rebuilds the receipt from.
+type snapshotSweepFX struct {
+	SweepID    string    `json:"sweep_id"`
+	ToCurrency string    `json:"to_currency"`
+	FXAccount  AccountID `json:"fx_account"`
+	EntryIDs   []string  `json:"entry_ids"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 // snapshotBatch is the exportable form of the unexported batchRecord.
 type snapshotBatch struct {
 	BatchID   string    `json:"batch_id"`
@@ -174,6 +186,7 @@ const (
 	snapshotNSCapture     = "capture"         // key -> CaptureReceipt (captureKeys)
 	snapshotNSPartialCap  = "partial_capture" // key -> PartialCaptureReceipt (partialCaptureKeys)
 	snapshotNSSweep       = "sweep"           // key -> snapshotSweep (sweepKeys)
+	snapshotNSSweepFX     = "sweep_fx"        // key -> snapshotSweepFX (sweepFXKeys)
 	snapshotNSMergeKey    = "merge_key"       // key -> merge ID (mergeKeys)
 	snapshotNSSplitKey    = "split_key"       // key -> split ID (splitKeys)
 	snapshotNSBatch       = "batch"           // key -> snapshotBatch (batchKeys)
@@ -195,6 +208,9 @@ type snapshotIdempotencyLine struct {
 	// "partial_capture" namespace (see hold_partial.go).
 	PartialReceipt *PartialCaptureReceipt `json:"partial_receipt,omitempty"`
 	Sweep          *snapshotSweep         `json:"sweep,omitempty"`
+	// SweepFX carries the cross-currency sweep registration row for the
+	// "sweep_fx" namespace (see sweep_fx.go).
+	SweepFX *snapshotSweepFX `json:"sweep_fx,omitempty"`
 	MergeID        string                 `json:"merge_id,omitempty"`
 	SplitID        string                 `json:"split_id,omitempty"`
 	Batch          *snapshotBatch         `json:"batch,omitempty"`
@@ -975,7 +991,7 @@ func (l *Ledger) exportSchedulesLocked(enc *json.Encoder) error {
 	return nil
 }
 
-// exportIdempotencyLocked writes the seven idempotency-key namespaces, one
+// exportIdempotencyLocked writes every idempotency-key namespace, one
 // record per key, sorted for determinism. Callers must hold l.mu; the
 // read lock suffices.
 func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
@@ -1054,6 +1070,25 @@ func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
 		if err := enc.Encode(snapshotIdempotencyLine{
 			Record: "idempotency", Namespace: snapshotNSSweep, Key: k,
 			Sweep: &snapshotSweep{SweepID: rec.sweepID, EntryIDs: rec.entryIDs, CreatedAt: rec.createdAt},
+		}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
+	sweepFXKeyList := make([]string, 0, len(l.sweepFXKeys))
+	for k := range l.sweepFXKeys {
+		sweepFXKeyList = append(sweepFXKeyList, k)
+	}
+	for _, k := range sortedKeys(sweepFXKeyList) {
+		rec := l.sweepFXKeys[k]
+		if err := enc.Encode(snapshotIdempotencyLine{
+			Record: "idempotency", Namespace: snapshotNSSweepFX, Key: k,
+			SweepFX: &snapshotSweepFX{
+				SweepID:    rec.sweepID,
+				ToCurrency: rec.toCurrency,
+				FXAccount:  rec.fxAccount,
+				EntryIDs:   rec.entryIDs,
+				CreatedAt:  rec.createdAt,
+			},
 		}); err != nil {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
@@ -1418,6 +1453,7 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	captureKeys := map[string]CaptureReceipt{}
 	partialCaptureKeys := map[string]PartialCaptureReceipt{}
 	sweepKeys := map[string]sweepRecord{}
+	sweepFXKeys := map[string]sweepFXRecord{}
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
 	splits := map[string]splitRecord{}
@@ -1637,6 +1673,20 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 					sweepID:   il.Sweep.SweepID,
 					entryIDs:  il.Sweep.EntryIDs,
 					createdAt: il.Sweep.CreatedAt,
+				}
+			case snapshotNSSweepFX:
+				if il.SweepFX == nil {
+					return fail("line %d: sweep_fx-namespace record without sweep", lineNo)
+				}
+				if _, dup := sweepFXKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				sweepFXKeys[il.Key] = sweepFXRecord{
+					sweepID:    il.SweepFX.SweepID,
+					toCurrency: il.SweepFX.ToCurrency,
+					fxAccount:  il.SweepFX.FXAccount,
+					entryIDs:   il.SweepFX.EntryIDs,
+					createdAt:  il.SweepFX.CreatedAt,
 				}
 			case snapshotNSMergeKey:
 				if il.MergeID == "" {
@@ -1956,6 +2006,14 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 			}
 		}
 		l.sweepKeys[k] = rec
+	}
+	for k, rec := range sweepFXKeys {
+		for _, id := range rec.entryIDs {
+			if _, ok := l.entries[id]; !ok {
+				return fail("sweep_fx idempotency key %q references missing entry %q", k, id)
+			}
+		}
+		l.sweepFXKeys[k] = rec
 	}
 	for id, rec := range merges {
 		for _, eid := range rec.entryIDs {
@@ -3596,6 +3654,18 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	for k, sa := range a.sweepKeys {
 		sb, ok := b.sweepKeys[k]
 		if !ok || sa.sweepID != sb.sweepID ||
+			!reflect.DeepEqual(sa.entryIDs, sb.entryIDs) ||
+			sa.createdAt.UnixNano() != sb.createdAt.UnixNano() {
+			return false
+		}
+	}
+	if len(a.sweepFXKeys) != len(b.sweepFXKeys) {
+		return false
+	}
+	for k, sa := range a.sweepFXKeys {
+		sb, ok := b.sweepFXKeys[k]
+		if !ok || sa.sweepID != sb.sweepID || sa.toCurrency != sb.toCurrency ||
+			sa.fxAccount != sb.fxAccount ||
 			!reflect.DeepEqual(sa.entryIDs, sb.entryIDs) ||
 			sa.createdAt.UnixNano() != sb.createdAt.UnixNano() {
 			return false

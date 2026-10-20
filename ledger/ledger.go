@@ -785,6 +785,11 @@ type Ledger struct {
 	// replays rebuild the full receipt (see sweep.go). Its own namespace,
 	// like holdKeys/captureKeys, expiring with the TTL.
 	sweepKeys map[string]sweepRecord
+	// sweepFXKeys maps a cross-currency sweep's idempotency key to its
+	// sweepFXRecord, so replays rebuild the full receipt (see
+	// sweep_fx.go). Its own namespace, expiring with the TTL like every
+	// other key index (see pruneSweepFXKeysLocked in sweep_fx.go).
+	sweepFXKeys map[string]sweepFXRecord
 	// batchKeys maps a batch's idempotency key to its batchRecord, so
 	// replays rebuild the full receipt (see batch.go). Its own namespace,
 	// expiring with the TTL like every other key index (see
@@ -1367,6 +1372,7 @@ func New(opts ...Option) *Ledger {
 		eclStageConfig:        DefaultECLStageConfig(),
 		eclExposures:          make(map[eclExposureKey]eclExposureRow),
 		sweepKeys:             make(map[string]sweepRecord),
+		sweepFXKeys:           make(map[string]sweepFXRecord),
 		batchKeys:             make(map[string]batchRecord),
 		allocRules:            make(map[string]AllocationRule),
 		allocKeys:             make(map[string]allocRecord),
@@ -1962,8 +1968,9 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// Hold and capture keys expire on the same schedule, in their own
 	// namespaces (see pruneHoldKeysLocked in hold.go). Sweep keys expire
 	// on the same schedule too (see pruneSweepKeysLocked in sweep.go),
-	// and so do merge keys (see pruneMergeKeysLocked in merge.go) and
-	// batch keys (see pruneBatchKeysLocked in batch.go). Split keys
+	// and so do cross-currency sweep keys (see pruneSweepFXKeysLocked in
+	// sweep_fx.go), and so do merge keys (see pruneMergeKeysLocked in
+	// merge.go) and batch keys (see pruneBatchKeysLocked in batch.go). Split keys
 	// expire on the same schedule, in their own namespace (see
 	// pruneSplitKeysLocked in split.go). Netting session
 	// keys expire on the same schedule, in their own namespace (see
@@ -1978,6 +1985,7 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// in payout.go).
 	removed += l.pruneHoldKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
+	removed += l.pruneSweepFXKeysLocked(now)
 	removed += l.pruneMergeKeysLocked(now)
 	removed += l.pruneSplitKeysLocked(now)
 	removed += l.pruneBatchKeysLocked(now)

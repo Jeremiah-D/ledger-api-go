@@ -636,6 +636,55 @@ with the receipt; a duplicate idempotency key returns `200` with the
 original receipt (its own key namespace, expiring with the TTL); invalid
 sweeps return `400`; a sweep touching a frozen account returns `403`.
 
+#### Cross-currency sweep (`POST /sweeps/fx`)
+
+The FX twin of `POST /sweeps`: every source's positive per-currency
+balance is converted into one target currency at the ledger's configured
+FX rate table and moved to the target account — one FX leg-pair per
+`(source, currency)`, all under the sweep ID, atomically. A `(source,
+currency)` already in the target currency sweeps same-currency (no rate
+lookup, one entry). The shape is a regional treasury sweeping
+multi-currency sub-merchant balances into one home-currency master
+account.
+
+```bash
+curl -X POST localhost:8080/sweeps/fx -d '{
+  "sweep_id": "fxsweep-2026-10-20",
+  "from_accounts": ["sub-merchant-1", "sub-merchant-2"],
+  "to_account": "treasury",
+  "to_currency": "EUR",
+  "idempotency_key": "fxsweep-day-2026-10-20"
+}'
+# 201 {"sweep_id":"fxsweep-2026-10-20","to_currency":"EUR","fx_account":"fx-clearing",
+#      "legs":[{"from_account":"sub-merchant-1","source_currency":"USD","amount_cents":10000,
+#               "converted_cents":10800,"principal_entry_id":"fxsweep-2026-10-20/sub-merchant-1/USD",
+#               "fx_entry_id":"fxsweep-2026-10-20/sub-merchant-1/USD/fx"}, ...],
+#      "fx":[{"from_currency":"USD","to_currency":"EUR","source_cents":10000,
+#             "converted_cents":10800,"rate_num":108,"rate_den":100,"direction":"sell",...}],
+#      "entries":[{...}],"duplicate":false}
+```
+
+Each converted leg reuses transfer-FX semantics (see the `FX transfers`
+section below): the principal books the converted
+amount in the target currency (debit target, credit the FX clearing
+account) and the `/fx` leg books the source amount in the source currency
+(debit FX clearing account, credit source). Pricing is the transfer
+default — the sweep "sells" its foreign balances at the pair's bid (a
+mid-only rate deals at mid). Unlike a transfer, no spread leg is booked:
+the target receives the full dealing-price conversion; the spread is
+disclosed on the receipt, never taken. A missing rate (or an expired
+one) for a `(source, target)` pair rejects the whole sweep with `422` —
+nothing is recorded. The FX clearing account defaults to the
+ledger-wide one (`LEDGER_FX_ACCOUNT` / `WithFXAccount`) and may be
+overridden per sweep with `fx_account`; it must differ from every source
+and the target. The receipt's `fx` array discloses the conversion behind
+each leg (rate, effective version, dealing side, settled amounts on both
+sides) — idempotent replays omit it, because the rate table may have
+moved since (the replayed journal entries are the authoritative record).
+Sweep reserve floors, the monthly spend budget, the period gate, posting
+rules, balance watches, and the idempotency/snapshot/audit chains all
+behave exactly like the plain sweep.
+
 #### Sweep reserve floors (`PUT/GET/DELETE /sweep-reserves`)
 
 An opt-in per-`(account, currency)` minimum balance that sweeps leave
@@ -5115,6 +5164,10 @@ curl -s localhost:8080/metrics
 - `ledger_sweeps_total` — every `POST /sweeps` request received.
 - `ledger_sweep_idempotency_hits_total` — sweeps that replayed an existing
   idempotency key (returned the original receipt, booked nothing).
+- `ledger_sweep_fx_total` — every `POST /sweeps/fx` request received.
+- `ledger_sweep_fx_idempotency_hits_total` — cross-currency sweeps that
+  replayed an existing idempotency key (returned the original receipt,
+  booked nothing).
 - `ledger_merges_total` — every `POST /merges` request received.
 - `ledger_merge_idempotency_hits_total` — merges that replayed an existing
   idempotency key (returned the original receipt, booked nothing).

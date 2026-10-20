@@ -176,6 +176,7 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	captureKeys := map[string]CaptureReceipt{}
 	partialCaptureKeys := map[string]PartialCaptureReceipt{}
 	sweepKeys := map[string]sweepRecord{}
+	sweepFXKeys := map[string]sweepFXRecord{}
 	merges := map[string]mergeRecord{}
 	mergeKeys := map[string]string{}
 	splits := map[string]splitRecord{}
@@ -404,6 +405,20 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 					sweepID:   il.Sweep.SweepID,
 					entryIDs:  il.Sweep.EntryIDs,
 					createdAt: il.Sweep.CreatedAt,
+				}
+			case snapshotNSSweepFX:
+				if il.SweepFX == nil {
+					return fail("line %d: sweep_fx-namespace record without sweep", lineNo)
+				}
+				if _, dup := sweepFXKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				sweepFXKeys[il.Key] = sweepFXRecord{
+					sweepID:    il.SweepFX.SweepID,
+					toCurrency: il.SweepFX.ToCurrency,
+					fxAccount:  il.SweepFX.FXAccount,
+					entryIDs:   il.SweepFX.EntryIDs,
+					createdAt:  il.SweepFX.CreatedAt,
 				}
 			case snapshotNSMergeKey:
 				if il.MergeID == "" {
@@ -733,6 +748,20 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 			}
 		}
 	}
+	for k, rec := range sweepFXKeys {
+		for _, id := range rec.entryIDs {
+			if _, ok := entryVisible(id); !ok {
+				return fail("sweep_fx idempotency key %q references missing entry %q", k, id)
+			}
+		}
+		if existing, ok := l.sweepFXKeys[k]; ok {
+			if existing.sweepID != rec.sweepID || existing.toCurrency != rec.toCurrency ||
+				existing.fxAccount != rec.fxAccount || !reflect.DeepEqual(existing.entryIDs, rec.entryIDs) ||
+				existing.createdAt.UnixNano() != rec.createdAt.UnixNano() {
+				return fail("sweep_fx idempotency key %q conflicts with the ledger's registry: refusing merge", k)
+			}
+		}
+	}
 	for id, rec := range merges {
 		for _, eid := range rec.entryIDs {
 			if _, ok := entryVisible(eid); !ok {
@@ -876,6 +905,11 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	for k, rec := range sweepKeys {
 		if _, ok := l.sweepKeys[k]; !ok {
 			l.sweepKeys[k] = rec
+		}
+	}
+	for k, rec := range sweepFXKeys {
+		if _, ok := l.sweepFXKeys[k]; !ok {
+			l.sweepFXKeys[k] = rec
 		}
 	}
 	for id, rec := range merges {

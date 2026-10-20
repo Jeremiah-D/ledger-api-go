@@ -1283,6 +1283,94 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, receipt)
 }
 
+// createSweepFXRequest is the POST /sweeps/fx request body: like a
+// plain sweep (see createSweepRequest), plus the settlement currency
+// every leg converts into and the optional FX clearing account.
+type createSweepFXRequest struct {
+	SweepID        string             `json:"sweep_id"`
+	FromAccounts   []ledger.AccountID `json:"from_accounts"`
+	ToAccount      ledger.AccountID   `json:"to_account"`
+	ToCurrency     string             `json:"to_currency"`
+	FXAccount      ledger.AccountID   `json:"fx_account"`
+	IdempotencyKey string             `json:"idempotency_key"`
+}
+
+// handleCreateSweepFX implements POST /sweeps/fx, the cross-currency
+// twin of POST /sweeps: the caller names the source accounts, the
+// target account, and the settlement currency, and the ledger
+// atomically converts every source's positive per-currency balance at
+// the configured FX rate table and moves it to the target — one FX
+// leg-pair per (source, currency), all under the sweep ID.
+//
+// The server generates sweep_id when the client omits it. A first-time
+// sweep returns 201 with the receipt (including the per-leg FX
+// disclosure); a duplicate idempotency key returns 200 with the
+// originally posted receipt; invalid sweeps return 400; a sweep
+// touching a frozen/closed/suspended account returns 403; a sweep with
+// no configured rate (or an expired rate) for a (source, target)
+// currency pair returns 422. A sweep whose sources all have
+// non-positive balances succeeds with an empty receipt (sources are
+// skipped, never swept into debt).
+func (s *server) handleCreateSweepFX(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	// Every POST attempt is counted; replays are counted separately below.
+	s.metrics.SweepsFXTotal.Add(1)
+
+	var req createSweepFXRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	id := req.SweepID
+	if id == "" {
+		id = newID()
+	}
+	receipt, err := s.ledgerFor(r).PostSweepFX(ledger.SweepFX{
+		ID:             id,
+		From:           req.FromAccounts,
+		To:             req.ToAccount,
+		ToCurrency:     req.ToCurrency,
+		FXAccount:      req.FXAccount,
+		IdempotencyKey: req.IdempotencyKey,
+		CreatedAt:      time.Now(),
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrAccountClosed):
+			s.metrics.ClosedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrAccountFrozen):
+			s.metrics.FrozenRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrAccountSuspended):
+			s.metrics.SuspendedRejections.Add(1)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrBudgetExceeded):
+			s.metrics.BudgetRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPeriodClosed):
+			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrFXRateMissing) || errors.Is(err, ledger.ErrFXRateExpired):
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	if receipt.Duplicate {
+		s.metrics.SweepFXIdempotencyHits.Add(1)
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
 // handleDryRunSweep implements POST /sweeps/dry-run, the what-if twin of
 // POST /sweeps: the request body is decoded exactly like a real sweep and
 // the ledger runs the full PostSweep check sequence — field validation,
@@ -7389,6 +7477,7 @@ func (s *server) handler() http.Handler {
 		s.scheduleTransition(w, r, "cancel")
 	})
 	mux.HandleFunc("POST /sweeps", s.handleCreateSweep)
+	mux.HandleFunc("POST /sweeps/fx", s.handleCreateSweepFX)
 	mux.HandleFunc("POST /sweeps/dry-run", s.handleDryRunSweep)
 	mux.HandleFunc("POST /merges", s.handleCreateMerge)
 	mux.HandleFunc("POST /accounts/{id}/split", s.handleCreateSplit)
