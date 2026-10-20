@@ -823,6 +823,10 @@ type Ledger struct {
 	// package comment); the journaled period rows do.
 	installments    map[string]InstallmentPlan
 	installmentKeys map[string]installmentKeyRecord
+	// installmentLateFees maps plan IDs to their opt-in late-fee rules
+	// (see installment_latefee.go, LG-150): structural configuration,
+	// like installmentKeys, that does not round-trip through snapshots.
+	installmentLateFees map[string]InstallmentLateFeeRule
 	// clearingBatches maps clearing-batch IDs to their records (see
 	// clearing.go): off-book transfer intents settled atomically in
 	// net form. clearingKeys maps a batch open's idempotency key to
@@ -1363,6 +1367,7 @@ func New(opts ...Option) *Ledger {
 		nettingKeys:           make(map[string]nettingRecord),
 		installments:          make(map[string]InstallmentPlan),
 		installmentKeys:       make(map[string]installmentKeyRecord),
+		installmentLateFees:   make(map[string]InstallmentLateFeeRule),
 		clearingBatches:       make(map[string]ClearingBatch),
 		clearingKeys:          make(map[string]clearingKeyRecord),
 		merges:                make(map[string]mergeRecord),

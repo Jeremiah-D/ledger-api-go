@@ -2452,6 +2452,46 @@ own key namespace honoring `LEDGER_IDEMPOTENCY_TTL`. Plans are
 in-memory only and do not round-trip through disaster-recovery
 snapshots — the journaled period rows do, so the money is safe.
 
+### Installment late fees (LG-150)
+
+Overdue money is free money for the payer — unless the plan opts in:
+`SetInstallmentLateFee(planID, InstallmentLateFeeRule)` arms one plan
+with a late-fee rule (`{fee_account, daily_rate_bps, fixed_cents_per_day,
+max_total_cents}`), and `AccrueInstallmentLateFees(asof)` books one
+day's fee per overdue-but-unposted period on every sweep:
+
+```go
+l.SetInstallmentLateFee("ip-2026-001", ledger.InstallmentLateFeeRule{
+    FeeAccount:       "fee-income",
+    DailyRateBps:     2400,  // 24% annual, pro-rata per 365-day year
+    FixedCentsPerDay: 50,    // flat penalty on top, plan currency cents
+    MaxTotalCents:    5000,  // per-period cap, net of reversals; 0 = uncapped
+})
+```
+
+Each fee is an ordinary journal row — debit `fee_account`, credit the
+plan's payer (the fee-leg direction used everywhere) — with the
+deterministic ID `installment-latefee/<plan-id>/<seq>/<YYYY-MM-DD>`
+(UTC), so a day's sweep is idempotent: replays return the same rows
+with `duplicate: true`. Fees post through the full Post gate order
+(field validation, idempotency replay, chart direction, frozen,
+overdraft, daily-limit, period) via `postSystemLocked`, never through
+posting rules or dual-control review — a frozen payer, overdraft, or
+closed period blocks the fee like any other booking, and a failed fee
+is reported on the result while the sweep continues with the next
+period. The rule is validated at set time (plain account name, rate in
+`[0,10000]` bps, non-negative fixed/cap, and it must actually charge
+something); `ClearInstallmentLateFee` removes it (already-booked rows
+are real history and stay), and `InstallmentLateFee` reads it back.
+Set/clear emit `installment_late_fee_set` /
+`installment_late_fee_cleared` audit events; the rule is structural
+configuration, like the other operator knobs — no version bump, no
+snapshot round-trip.
+
+Late fees are bookkeeping, not collections: the LG-118 dunning
+escalations (reminders, suspension threats, legal holds) are the
+operational counterpart and stay untouched.
+
 ### Credit lines (授信)
 
 `POST /credit-lines` grants a per-account, per-currency credit line
