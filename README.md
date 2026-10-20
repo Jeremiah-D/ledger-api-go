@@ -2229,6 +2229,21 @@ stay slash-free) — URL-encode them as `%2F` in HTTP paths — and interest
 rows attribute by exact deposit-ID segment, so a child's accruals never
 leak into the parent's totals.
 
+**Tiered rates (LG-145):** pass `"rate_tiers":[{"min_cents":0,"rate_bps":500},{"min_cents":1000000,"rate_bps":300}]`
+instead of `rate_bps` (the two are mutually exclusive — a deposit with
+`rate_tiers` leaves `rate_bps` at 0). Each principal band
+`[min_cents, next_min_cents)` earns its own annual rate: one day's
+interest is the sum over bands of `⌊band × rate_bps / 10000 / 365⌋`
+(per-band floor, overflow-safe), so a ¥15,000 deposit on the ladder
+above books `⌊1000000×500/10000/365⌋ + ⌊500000×300/10000/365⌋ = 136 + 41 = 177`
+cents/day. The ladder reuses the `InterestTier` shape from the tiered
+accrual engine (LG-114): first band must start at 0, minima strictly
+ascending, rates 1–10000 bps, validated at open. Rollover keeps the
+ladder — a tiered deposit renews as a tiered deposit, never silently
+flattening. The reconcile report (`term_deposits` section) and the open
+audit event disclose the ladder; the deterministic interest entry IDs
+(`term-interest/<id>/<date>`) are unchanged.
+
 ```bash
 curl -s -X POST localhost:8080/term-deposits \
   -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'

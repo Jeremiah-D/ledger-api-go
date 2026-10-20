@@ -2710,7 +2710,11 @@ type openTermDepositRequest struct {
 	Currency       string           `json:"currency"`
 	TermDays       int64            `json:"term_days"`
 	RateBps        int64            `json:"rate_bps"`
-	IdempotencyKey string           `json:"idempotency_key"`
+	// RateTiers is the opt-in tiered rate ladder (LG-145), mutually
+	// exclusive with rate_bps: [{min_cents, rate_bps}], first band at 0,
+	// strictly ascending minima, rates 1..10000 bps.
+	RateTiers      []ledger.InterestTier `json:"rate_tiers,omitempty"`
+	IdempotencyKey string                `json:"idempotency_key"`
 	// BusinessDayMaturity opts into business-day settlement (LG-95): a
 	// MaturesAt landing on a non-business day moves to the next
 	// business day.
@@ -2733,7 +2737,10 @@ type openTermDepositRequest struct {
 // frozen or closed account returns 403; an open the account's available
 // funds cannot cover returns 422. The currency field is optional and
 // defaults to USD; when given it must be a 3-letter uppercase ISO 4217
-// code. term_days must be 1..36500 and rate_bps 1..10000.
+// code. term_days must be 1..36500 and rate_bps 1..10000 — or, for
+// tiered deposits (LG-145), rate_tiers carries [{min_cents, rate_bps}]
+// (mutually exclusive with rate_bps, first band at 0, strictly ascending
+// minima, rates 1..10000 bps).
 func (s *server) handleOpenTermDeposit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -2755,6 +2762,7 @@ func (s *server) handleOpenTermDeposit(w http.ResponseWriter, r *http.Request) {
 		Currency:            req.Currency,
 		TermDays:            req.TermDays,
 		RateBps:             req.RateBps,
+		RateTiers:           req.RateTiers,
 		IdempotencyKey:      req.IdempotencyKey,
 		BusinessDayMaturity: req.BusinessDayMaturity,
 		Rollover:            req.Rollover,

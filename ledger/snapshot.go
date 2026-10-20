@@ -3232,6 +3232,7 @@ func termDepositsEqual(a, b TermDeposit) bool {
 		a.AmountCents == b.AmountCents &&
 		a.Currency == b.Currency &&
 		a.RateBps == b.RateBps &&
+		tiersEqual(a.RateTiers, b.RateTiers) &&
 		a.TermDays == b.TermDays &&
 		a.OpenedAt.UnixNano() == b.OpenedAt.UnixNano() &&
 		a.MaturesAt.UnixNano() == b.MaturesAt.UnixNano() &&

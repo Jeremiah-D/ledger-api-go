@@ -89,6 +89,11 @@ var (
 	// 1..10000: a rate above 100% per year is a configuration bug, not a
 	// clampable rate (same bound as the accrual rate, see accrual.go).
 	ErrInvalidTermDepositRate = errors.New("ledger: term deposit rate must be between 1 and 10000 basis points")
+	// ErrTermDepositRateTiersConflict is returned when a deposit carries
+	// both a flat RateBps and a tiered RateTiers ladder (LG-145): the
+	// two rate modes are mutually exclusive — pick one. A tiered deposit
+	// leaves RateBps at zero.
+	ErrTermDepositRateTiersConflict = errors.New("ledger: term deposit rate_bps and rate_tiers are mutually exclusive")
 	// ErrInvalidTermDays is returned when termDays is outside 1..36500:
 	// a non-positive tenor is not a deposit, and more than a century is
 	// a data error, not a booking.
@@ -139,7 +144,19 @@ type TermDeposit struct {
 	AmountCents int64     `json:"amount_cents"`
 	Currency    string    `json:"currency"`
 	RateBps     int64     `json:"rate_bps"`
-	TermDays    int64     `json:"term_days"`
+	// RateTiers is the opt-in tiered rate ladder (LG-145): when set, the
+	// deposit earns tiered interest instead of the flat RateBps rate —
+	// the two are mutually exclusive (see validateTermDeposit). It
+	// reuses the InterestTier ladder from interest_tiers.go (LG-114):
+	// band i prices the principal slice [MinCents_i, MinCents_{i+1}) at
+	// its own annual RateBps, the first band must start at 0, minima
+	// strictly ascending, rates 1..10000 bps. Real deposit products
+	// price balance bands differently (the first million at 5%/yr, the
+	// next at 3%/yr); a flat rate cannot express that. The ladder is
+	// copied defensively at open, so the caller's slice never aliases
+	// the stored record.
+	RateTiers   []InterestTier `json:"rate_tiers,omitempty"`
+	TermDays    int64          `json:"term_days"`
 	OpenedAt    time.Time `json:"opened_at"`
 	MaturesAt   time.Time `json:"matures_at"`
 	// BusinessDayMaturity opts into business-day settlement (LG-95): when
@@ -247,7 +264,23 @@ func validateTermDeposit(t *TermDeposit) error {
 	if t.TermDays < 1 || t.TermDays > 36500 {
 		return ErrInvalidTermDays
 	}
-	if t.RateBps < 1 || t.RateBps > 10000 {
+	// LG-145: the flat rate and the tiered ladder are mutually
+	// exclusive. A tiered deposit leaves RateBps at zero; a flat-rate
+	// deposit carries no ladder. The ladder shape (first band at 0,
+	// strictly ascending minima, rates 1..10000) is validated by the
+	// shared tier validator (see interest_tiers.go).
+	if len(t.RateTiers) > 0 {
+		if t.RateBps != 0 {
+			return ErrTermDepositRateTiersConflict
+		}
+		if err := validateInterestTiers(t.RateTiers); err != nil {
+			return err
+		}
+		// Defensive copy: the caller's slice must not alias the
+		// stored record — a later append by the caller would
+		// otherwise rewrite the deposit's rate.
+		t.RateTiers = append([]InterestTier(nil), t.RateTiers...)
+	} else if t.RateBps < 1 || t.RateBps > 10000 {
 		return ErrInvalidTermDepositRate
 	}
 	if err := validateRolloverPolicy(t.Rollover); err != nil {
@@ -325,6 +358,26 @@ func (l *Ledger) openTermDepositLocked(t TermDeposit) (TermDeposit, bool, error)
 	if t.IdempotencyKey != "" {
 		l.termDepositKeys[t.IdempotencyKey] = t.ID
 	}
+	// LG-145: a tiered deposit discloses its ladder in the audit
+	// trail and the outbox, so the rate the deposit earns is visible
+	// to compliance tooling without reading the deposit row.
+	openDetails := map[string]any{
+		"amount_cents": t.AmountCents,
+		"currency":     t.Currency,
+		"rate_bps":     t.RateBps,
+		"term_days":    t.TermDays,
+		"matures_at":   t.MaturesAt.UTC().Format(time.RFC3339),
+	}
+	if len(t.RateTiers) > 0 {
+		tiers := make([]map[string]any, 0, len(t.RateTiers))
+		for _, tier := range t.RateTiers {
+			tiers = append(tiers, map[string]any{
+				"min_cents": tier.MinCents,
+				"rate_bps":  tier.RateBps,
+			})
+		}
+		openDetails["rate_tiers"] = tiers
+	}
 	l.emitAudit(AuditEvent{
 		Op:            "term_deposit_open",
 		Actor:         "OpenTermDeposit",
@@ -332,25 +385,23 @@ func (l *Ledger) openTermDepositLocked(t TermDeposit) (TermDeposit, bool, error)
 		VersionBefore: l.version,
 		VersionAfter:  l.version,
 		Accounts:      []AccountID{t.Account},
-		Details: map[string]any{
-			"amount_cents": t.AmountCents,
-			"currency":     t.Currency,
-			"rate_bps":     t.RateBps,
-			"term_days":    t.TermDays,
-			"matures_at":   t.MaturesAt.UTC().Format(time.RFC3339),
-		},
+		Details:       openDetails,
 	})
+	outboxDetails := map[string]any{
+		"term_deposit_id": t.ID,
+		"rate_bps":        t.RateBps,
+		"term_days":       t.TermDays,
+		"matures_at":      t.MaturesAt.UTC().Format(time.RFC3339),
+	}
+	if tiers, ok := openDetails["rate_tiers"]; ok {
+		outboxDetails["rate_tiers"] = tiers
+	}
 	l.emitOutboxLocked(OutboxEvent{
 		Type:        OutboxTermDepositOpened,
 		Account:     t.Account,
 		AmountCents: t.AmountCents,
 		Currency:    t.Currency,
-		Details: map[string]any{
-			"term_deposit_id": t.ID,
-			"rate_bps":        t.RateBps,
-			"term_days":       t.TermDays,
-			"matures_at":      t.MaturesAt.UTC().Format(time.RFC3339),
-		},
+		Details:     outboxDetails,
 	})
 	return t, false, nil
 }
@@ -399,6 +450,22 @@ func (l *Ledger) TermDeposits() []TermDeposit {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// termDepositDailyInterestCents computes one day's interest on the
+// deposit's principal. Flat-rate deposits use floor(principal *
+// rateBps / 10000 / 365) — the overflow-safe basis-point math the
+// transfer fee policy uses (see policyFeeCents), divided by the days in
+// a year, like AccrueInterest in accrual.go. Tiered deposits (LG-145)
+// price each principal band at its own rate via tieredInterestCents
+// (see interest_tiers.go): the sum over bands of floor(bandPrincipal *
+// rateBps / 10000 / 365), each band floored separately and
+// overflow-safe. A zero return means a dust amount that books nothing.
+func termDepositDailyInterestCents(td TermDeposit) (int64, error) {
+	if len(td.RateTiers) > 0 {
+		return tieredInterestCents(td.AmountCents, td.RateTiers)
+	}
+	return policyFeeCents(td.AmountCents, td.RateBps) / 365, nil
 }
 
 // AccrueTermInterest books one day's interest on an active term
@@ -452,8 +519,13 @@ func (l *Ledger) AccrueTermInterest(id string, asof time.Time) (JournalEntry, bo
 
 	// Overflow-safe floor(principal * rateBps / 10000 / 365): the same
 	// basis-point helper the transfer fee policy uses, divided by the
-	// days in a year (see AccrueInterest in accrual.go).
-	amount := policyFeeCents(td.AmountCents, td.RateBps) / 365
+	// days in a year (see AccrueInterest in accrual.go). Tiered
+	// deposits (LG-145) price each principal band at its own rate
+	// instead — see termDepositDailyInterestCents.
+	amount, err := termDepositDailyInterestCents(td)
+	if err != nil {
+		return JournalEntry{}, false, err
+	}
 	if amount <= 0 {
 		return JournalEntry{}, false, ErrNonPositiveAmount
 	}
@@ -729,8 +801,12 @@ func (l *Ledger) SweepTermDeposits(now time.Time) (matured, accrued int) {
 		if l.tdInterestExpense == "" {
 			continue
 		}
-		amount := policyFeeCents(td.AmountCents, td.RateBps) / 365
-		if amount <= 0 {
+		// Flat or tiered (LG-145) daily interest — see
+		// termDepositDailyInterestCents. An overflow from a corrupt
+		// ladder is a skip, not a sweep abort: the deterministic ID
+		// means the next sweep retries the day.
+		amount, aerr := termDepositDailyInterestCents(td)
+		if aerr != nil || amount <= 0 {
 			continue
 		}
 		entryID := termDepositInterestEntryID(id, now)
@@ -782,6 +858,7 @@ func (l *Ledger) termDepositReportsLocked() []TermDepositReport {
 			PrincipalCents:       td.AmountCents,
 			Currency:             td.Currency,
 			RateBps:              td.RateBps,
+			RateTiers:            td.RateTiers,
 			TermDays:             td.TermDays,
 			Status:               td.Status,
 			OpenedAt:             td.OpenedAt,

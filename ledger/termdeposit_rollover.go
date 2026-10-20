@@ -183,6 +183,10 @@ func (l *Ledger) rolloverTermDepositLocked(td TermDeposit, now time.Time) {
 		AmountCents:         principal,
 		Currency:            td.Currency,
 		RateBps:             td.RateBps,
+		// LG-145: the renewal keeps the tiered ladder — a tiered
+		// deposit rolls as a tiered deposit, never silently
+		// flattening to a single rate.
+		RateTiers:           td.RateTiers,
 		TermDays:            p.TermDays,
 		OpenedAt:            now,
 		BusinessDayMaturity: td.BusinessDayMaturity,

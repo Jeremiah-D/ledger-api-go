@@ -464,7 +464,10 @@ type TermDepositReport struct {
 	PrincipalCents       int64     `json:"principal_cents"`
 	Currency             string    `json:"currency"`
 	RateBps              int64     `json:"rate_bps"`
-	TermDays             int64     `json:"term_days"`
+	// RateTiers discloses the opt-in tiered rate ladder (LG-145);
+	// nil for flat-rate deposits.
+	RateTiers            []InterestTier `json:"rate_tiers,omitempty"`
+	TermDays             int64          `json:"term_days"`
 	Status               string    `json:"status"`
 	OpenedAt             time.Time `json:"opened_at"`
 	MaturesAt            time.Time `json:"matures_at"`
