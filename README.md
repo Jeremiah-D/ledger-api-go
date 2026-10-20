@@ -1328,6 +1328,30 @@ never silently cancels a month-end close. The worker is opt-in via
 `ledger_period_autocloses_total` counts fired plans, executed and
 failed.
 
+### Idempotency key registry query (`GET /idempotency-keys`)
+
+Every journal-writing operation keeps its own idempotency namespace, and
+an operator chasing "why did my retry return a duplicate?" currently has
+to guess which one the key landed in. This endpoint is the read-only
+cross-namespace listing: the key, its namespace, what it maps to (an
+operation ID — never a payload or an amount), and when it expires under
+the idempotency TTL:
+
+```bash
+curl -s 'localhost:8080/idempotency-keys?namespace=transfers&limit=50'
+# {"keys":[{"namespace":"transfers","key":"op-2026-10-001",
+#           "maps_to":"tx-2026-001","expires_at":"2026-10-21T13:00:00Z"},...],
+#  "count":1}
+```
+
+`?prefix=` filters keys by prefix, `?namespace=` restricts to one
+namespace (unknown names fail `400` and the response names the valid
+ones), `?limit=` bounds the result (default 100, capped at 1000). The
+listing is operator tooling: it requires the operator API-key scope even
+though it is a `GET` (`read:ledger` keys are refused when API-key auth
+is enabled), and it never exposes business payloads — amounts,
+accounts, and memo text are not in the response.
+
 ### Overdraft protection
 
 Per-account guard against negative balances (fintech risk control —

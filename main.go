@@ -6569,6 +6569,46 @@ func (s *server) handleListPeriodAutoCloses(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"plans": s.ledgerFor(r).PeriodAutoClosePlans()})
 }
 
+// handleListIdempotencyKeys implements GET /idempotency-keys (LG-152):
+// the read-only cross-namespace idempotency key registry query. Optional
+// ?prefix= filters keys by prefix, ?namespace= restricts to one
+// namespace (unknown namespaces fail 400), ?limit= bounds the result.
+//
+// The response carries the key, its namespace, what it maps to (an
+// operation ID — never a payload or an amount), and its TTL expiry. It
+// is operator tooling: the API key scope mapping requires
+// ledger.ScopeAdminAudit (see apiKeyRequiredScope), and the listing
+// never exposes business payloads.
+//
+//	curl -s 'localhost:8080/idempotency-keys?namespace=transfers&limit=50'
+func (s *server) handleListIdempotencyKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	q := r.URL.Query()
+	prefix := q.Get("prefix")
+	namespace := q.Get("namespace")
+	if namespace != "" && !ledger.IsIdempotencyNamespace(namespace) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":      "unknown idempotency key namespace",
+			"namespaces": ledger.IdempotencyNamespaces(),
+		})
+		return
+	}
+	limit := 0
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be a non-negative integer"})
+			return
+		}
+		limit = n
+	}
+	keys := s.ledgerFor(r).ListIdempotencyKeys(prefix, namespace, limit)
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys, "count": len(keys)})
+}
+
 // reconcileRequest is the optional POST /reconcile body. base_currency
 // opts into the base-currency summary: the report's per-currency totals
 // and discrepancies converted through the FX rate table, with the rate
@@ -7438,6 +7478,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /periods/{id}/auto-close/cancel", s.handleCancelPeriodAutoClose)
 	mux.HandleFunc("GET /periods/{id}/auto-close", s.handleGetPeriodAutoClose)
 	mux.HandleFunc("GET /periods/auto-close", s.handleListPeriodAutoCloses)
+	mux.HandleFunc("GET /idempotency-keys", s.handleListIdempotencyKeys)
 	mux.HandleFunc("PUT /closing-accounts", s.handleSetClosingAccounts)
 	mux.HandleFunc("GET /closing-accounts", s.handleGetClosingAccounts)
 	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)
@@ -7720,6 +7761,12 @@ func apiKeyRequiredScope(method, path string) string {
 	}
 	if path == "/metrics" {
 		return ledger.ScopeReadLedger
+	}
+	// The idempotency key registry is operator tooling: it exposes
+	// replay-index internals, so it needs the operator scope even
+	// though it is a GET (LG-152).
+	if path == "/idempotency-keys" {
+		return ledger.ScopeAdminAudit
 	}
 	if method == http.MethodGet || method == http.MethodHead {
 		return ledger.ScopeReadLedger
