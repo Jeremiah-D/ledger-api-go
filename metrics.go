@@ -580,6 +580,11 @@ type Metrics struct {
 	// PeriodPreflightRunsTotal counts POST /periods/{id}/preflight
 	// requests received (all attempts, including rejected ones).
 	PeriodPreflightRunsTotal atomic.Uint64
+	// PeriodAutoClosesTotal counts period auto-close plans the
+	// background sweeper fired (LG-151): executed and failed closes.
+	// Failed plans keep their period open; the count records the fire,
+	// not the outcome.
+	PeriodAutoClosesTotal atomic.Uint64
 	// ClosingEntriesTotal counts period-closing journal entries
 	// committed by POST /periods/{id}/close?closing=true (see
 	// ledger.ClosePeriodWithClosing).
@@ -923,6 +928,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_period_preflight_runs_total",
 		"Total POST /periods/{id}/preflight requests received, including rejected ones.",
 		m.PeriodPreflightRunsTotal.Load())
+	writeCounter(&sb, "ledger_period_autocloses_total",
+		"Total period auto-close plans fired by the background sweeper (LG-151), executed and failed: failed plans keep their period open.",
+		m.PeriodAutoClosesTotal.Load())
 	writeCounter(&sb, "ledger_closing_entries_total",
 		"Total period-closing journal entries committed by POST /periods/{id}/close?closing=true.",
 		m.ClosingEntriesTotal.Load())

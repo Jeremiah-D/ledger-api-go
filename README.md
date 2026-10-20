@@ -1295,6 +1295,39 @@ curl -s -X POST 'localhost:8080/periods/2026-09/close?preflight_clean=true'
 # 422 {"error":"ledger: period close blocked by preflight findings: 1 blocker(s), first: pending_reviews"}
 ```
 
+#### Period auto-close plans (`POST /periods/{id}/auto-close`, `.../auto-close/cancel`, `GET /periods/auto-close`)
+
+Month-end compliance without an operator at the terminal at midnight: a
+plan registers a period to close at a scheduled UTC instant, and the
+background worker fires it through the same close path as `POST
+/periods/{id}/close` — identical gates, identical audit events:
+
+```bash
+curl -s -X POST localhost:8080/periods/2026-09/auto-close \
+  -d '{"at":"2026-10-01T00:00:00Z","closing":true}'
+# 201 {"period":"2026-09","close_at":"2026-10-01T00:00:00Z","with_closing":true,"status":"pending"}
+curl -s -X POST localhost:8080/periods/2026-09/auto-close/cancel
+# 200 {"period":"2026-09","status":"cancelled"}
+curl -s localhost:8080/periods/2026-09/auto-close   # one plan
+curl -s localhost:8080/periods/auto-close            # all plans, sorted
+```
+
+With `"closing":true` the fired close books the LG-48 closing entries;
+without it the plan just locks the period. The close instant must be in
+the future; only one pending plan per period is allowed (a duplicate is
+`409`, a missing plan is `404`). A failed fire — the same gates that
+fail a manual close (frozen account, overdraft, unconfigured closing
+accounts, next month closed) — marks the plan `failed` with the reason,
+audits `period_autoclose_failed`, and **keeps the period open**: a failed
+plan is never retried by the sweeper, so the operator closes the month
+by hand after fixing the gate. Every transition (`scheduled`,
+`cancelled`, `executed`, `failed`) lands in the structured audit chain,
+and plans round-trip through disaster-recovery snapshots, so a restore
+never silently cancels a month-end close. The worker is opt-in via
+`LEDGER_PERIOD_AUTOCLOSE_INTERVAL` (see [Environment](#running));
+`ledger_period_autocloses_total` counts fired plans, executed and
+failed.
+
 ### Overdraft protection
 
 Per-account guard against negative balances (fintech risk control —
@@ -5157,6 +5190,9 @@ curl -s localhost:8080/metrics
   entries.
 - `ledger_closing_entries_total` — period-closing journal entries
   committed by `POST /periods/{id}/close?closing=true`.
+- `ledger_period_autocloses_total` — period auto-close plans fired by
+  the background sweeper, executed and failed: a failed plan keeps its
+  period open, so the count records the fire, not the outcome.
 - `ledger_balance_health_violations_total` — balance-health violations
   found by the background health watchdog (advisory integrity signal).
   Synced from the ledger on every scrape. Any nonzero value is an
@@ -5331,6 +5367,16 @@ Environment:
   The first tick fires after one full interval; SIGINT/SIGTERM stops the
   worker with the server. Unset or invalid means disabled — expiry stays
   lazy by predicate and available on demand via `POST /holds/expire`.
+- `LEDGER_PERIOD_AUTOCLOSE_INTERVAL` — enables the background period
+  auto-close worker, e.g. `LEDGER_PERIOD_AUTOCLOSE_INTERVAL=1m`. While
+  enabled, the server fires due plans registered with `POST
+  /periods/{id}/auto-close` on the interval (executed plans close the
+  period through the same path as `POST /periods/{id}/close`; failed
+  plans keep their period open and are never retried by the sweeper).
+  Every tick's decided plans are counted in
+  `ledger_period_autocloses_total`. The first tick fires after one full
+  interval; SIGINT/SIGTERM stops the worker with the server. Unset or
+  invalid means disabled — periods stay on manual close.
 - `LEDGER_FREEZE_SWEEP_INTERVAL` — enables the background freeze-expiry
   worker, e.g. `LEDGER_FREEZE_SWEEP_INTERVAL=1m`. While enabled, the
   server releases timed account freezes whose auto-unfreeze deadline has

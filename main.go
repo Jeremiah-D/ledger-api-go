@@ -6441,6 +6441,134 @@ func (s *server) handleGetClosingAccounts(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"pl_accounts": names, "retained_earnings": string(retained)})
 }
 
+// autoClosePlanRequest is the POST /periods/{id}/auto-close body: the
+// UTC instant (RFC 3339) the sweeper fires the close at, and whether the
+// close books the LG-48 closing entries.
+type autoClosePlanRequest struct {
+	At      string `json:"at"`
+	Closing bool   `json:"closing"`
+}
+
+// handleSchedulePeriodAutoClose implements POST /periods/{id}/auto-close:
+// registers a plan for the background sweeper to close the period at the
+// requested instant (LG-151). The plan does not close anything by itself —
+// it fires later through the same close path as POST
+// /periods/{id}/close, with the same gates. Only one pending plan per
+// period is allowed.
+//
+//	curl -s -X POST localhost:8080/periods/2026-09/auto-close \
+//	  -d '{"at":"2026-10-01T00:00:00Z","closing":true}'
+func (s *server) handleSchedulePeriodAutoClose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req autoClosePlanRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(req.At))
+	if err != nil || strings.TrimSpace(req.At) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at must be an RFC 3339 timestamp"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	plan, err := s.ledgerFor(r).SchedulePeriodAutoCloseCtx(actx, id, at, req.Closing)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrAutoCloseDuplicate):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusCreated, plan)
+}
+
+// handleCancelPeriodAutoClose implements POST
+// /periods/{id}/auto-close/cancel: cancels a pending auto-close plan
+// before it fires.
+func (s *server) handleCancelPeriodAutoClose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	plan, err := s.ledgerFor(r).CancelPeriodAutoCloseCtx(actx, id)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrAutoCloseNoPlan):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrAutoCloseNotPending):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+// handleGetPeriodAutoClose implements GET /periods/{id}/auto-close:
+// returns the plan registered for the period, if any.
+func (s *server) handleGetPeriodAutoClose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
+		return
+	}
+	plan, ok := s.ledgerFor(r).PeriodAutoClosePlan(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrAutoCloseNoPlan.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+// handleListPeriodAutoCloses implements GET /periods/auto-close: lists
+// every registered auto-close plan, sorted by period.
+func (s *server) handleListPeriodAutoCloses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plans": s.ledgerFor(r).PeriodAutoClosePlans()})
+}
+
 // reconcileRequest is the optional POST /reconcile body. base_currency
 // opts into the base-currency summary: the report's per-currency totals
 // and discrepancies converted through the FX rate table, with the rate
@@ -7306,6 +7434,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /periods/{id}/close", s.handleClosePeriod)
 	mux.HandleFunc("POST /periods/{id}/preflight", s.handlePeriodPreflight)
 	mux.HandleFunc("POST /periods/{id}/reopen", s.handleReopenPeriod)
+	mux.HandleFunc("POST /periods/{id}/auto-close", s.handleSchedulePeriodAutoClose)
+	mux.HandleFunc("POST /periods/{id}/auto-close/cancel", s.handleCancelPeriodAutoClose)
+	mux.HandleFunc("GET /periods/{id}/auto-close", s.handleGetPeriodAutoClose)
+	mux.HandleFunc("GET /periods/auto-close", s.handleListPeriodAutoCloses)
 	mux.HandleFunc("PUT /closing-accounts", s.handleSetClosingAccounts)
 	mux.HandleFunc("GET /closing-accounts", s.handleGetClosingAccounts)
 	mux.HandleFunc("POST /accounts/{id}/parent", s.handleSetParent)
@@ -8612,6 +8744,21 @@ func main() {
 		defer sweeper.Stop()
 	}
 
+	// Optional background period auto-close worker (LG-151): fires due
+	// auto-close plans registered with POST /periods/{id}/auto-close.
+	// It shares the server context, so SIGINT/SIGTERM stops it, and every
+	// tick's decided plans (executed + failed) are counted by
+	// ledger_period_autocloses_total. Failed plans keep their period
+	// open; a failed close is retried by the operator, not the sweeper.
+	// Unset or invalid means disabled.
+	if interval, ok := periodAutoCloseInterval(); ok {
+		sweeper := ledger.StartPeriodAutoCloseSweeper(ctx, srv.ledger, interval, func(decided int) {
+			srv.metrics.PeriodAutoClosesTotal.Add(uint64(decided))
+		})
+		log.Printf("ledger-api-go: period auto-close worker started (interval %v)", interval)
+		defer sweeper.Stop()
+	}
+
 	// Optional background TSA anchoring worker (LG-84): periodically
 	// countersigns the audit-chain head with the external RFC 3161
 	// timestamp authority. It shares the server context, so
@@ -8939,6 +9086,25 @@ func holdSweepInterval() (time.Duration, bool) {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		log.Printf("ledger-api-go: ignoring invalid LEDGER_HOLD_SWEEP_INTERVAL %q, hold sweep worker disabled", raw)
+		return 0, false
+	}
+	return d, true
+}
+
+// periodAutoCloseInterval reads LEDGER_PERIOD_AUTOCLOSE_INTERVAL (a Go
+// duration string, e.g. "1m") for the background period auto-close
+// worker that fires due plans registered with POST
+// /periods/{id}/auto-close (see ledger.StartPeriodAutoCloseSweeper).
+// Unset or invalid values mean the worker is disabled; a non-positive
+// duration is invalid and falls back to disabled with a log line.
+func periodAutoCloseInterval() (time.Duration, bool) {
+	raw := os.Getenv("LEDGER_PERIOD_AUTOCLOSE_INTERVAL")
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_PERIOD_AUTOCLOSE_INTERVAL %q, period auto-close worker disabled", raw)
 		return 0, false
 	}
 	return d, true

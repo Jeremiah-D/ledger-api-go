@@ -487,6 +487,12 @@ type snapshotConfigLine struct {
 	// mapping round-trips like the other structural config.
 	ClosingPLAccounts       []AccountID `json:"closing_pl_accounts,omitempty"`
 	ClosingRetainedEarnings AccountID   `json:"closing_retained_earnings,omitempty"`
+	// PeriodAutoCloses carries the registered period auto-close plans
+	// (see period_autoclose.go); absent in snapshots written before
+	// auto-close plans existed. Plans are structural config — a restore
+	// that dropped them would silently cancel month-end compliance
+	// closes — so they round-trip with their statuses intact.
+	PeriodAutoCloses []PeriodAutoClosePlan `json:"period_auto_closes,omitempty"`
 	// RevalAccount carries the configured revaluation P&L account (see
 	// SetRevaluationAccount); absent in snapshots written before FX
 	// revaluation existed. RevalBaselines carries every revaluation
@@ -1240,6 +1246,16 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 	if retainedEarnings != "" {
 		cfg.ClosingPLAccounts = plAccounts
 		cfg.ClosingRetainedEarnings = retainedEarnings
+	}
+	// LG-151: the period auto-close plans round-trip like the other
+	// structural config — a restore that dropped them would silently
+	// cancel month-end compliance closes. Terminal plans round-trip too:
+	// they are audit history, not live work.
+	if plans := l.periodAutoClosesLocked(); len(plans) > 0 {
+		cfg.PeriodAutoCloses = make([]PeriodAutoClosePlan, 0, len(plans))
+		for _, p := range plans {
+			cfg.PeriodAutoCloses = append(cfg.PeriodAutoCloses, *p)
+		}
 	}
 	if l.reviewExpiry > 0 {
 		cfg.ReviewExpiry = l.reviewExpiry.String()
@@ -3163,6 +3179,17 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			l.closingPL[a] = true
 		}
 		l.closingRetained = cfg.ClosingRetainedEarnings
+	}
+	// LG-151: the period auto-close plans restore like the other
+	// structural config. Plans found mid-execution restore as pending —
+	// a crashed sweeper must never leave a plan stuck in the internal
+	// executing state.
+	for _, p := range cfg.PeriodAutoCloses {
+		cp := p
+		if cp.Status == periodAutoCloseExecuting {
+			cp.Status = PeriodAutoClosePending
+		}
+		l.periodAutoCloses[cp.PeriodID] = &cp
 	}
 	// Review thresholds restore like the other risk controls: a restore
 	// that dropped them would silently stop reviewing large transfers.

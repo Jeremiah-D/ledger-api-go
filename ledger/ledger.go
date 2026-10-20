@@ -924,6 +924,12 @@ type Ledger struct {
 	// Structural config like frozen — it survives snapshots and is
 	// listed in Reconcile.
 	closedPeriods map[string]bool
+	// periodAutoCloses is the registry of period auto-close plans (see
+	// period_autoclose.go), keyed by period ID. At most one live plan
+	// per period; terminal plans linger for audit history until
+	// re-registered. Structural config like frozen — it survives
+	// snapshots.
+	periodAutoCloses map[string]*PeriodAutoClosePlan
 	// closingPL and closingRetained configure the opt-in period-closing
 	// mapping (see closing.go): the P&L accounts zeroed at period close
 	// and the retained-earnings account that receives them. An empty
@@ -1392,6 +1398,7 @@ func New(opts ...Option) *Ledger {
 		rateOverrideTTL:             defaultRateOverrideTTL,
 		rateOverrideMaxDeviationBps: defaultRateOverrideMaxDeviationBps,
 		closedPeriods:               make(map[string]bool),
+		periodAutoCloses:            make(map[string]*PeriodAutoClosePlan),
 		closingPL:                   make(map[AccountID]bool),
 		dunningConfigs:              make(map[dunningKey]DunningConfig),
 		dunningStates:               make(map[dunningKey]DunningState),
