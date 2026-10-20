@@ -473,6 +473,27 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   `delegation_revoked` in the audit chain. The fintech use case: an
   approver on leave delegates their four-eyes vote to a colleague
   instead of the payment stalling in dual-control limbo.
+- **N-of-M Ed25519 multi-signature approval (cryptographic quorum):**
+  `RegisterMultisigApprover` binds an approver ID to an Ed25519 public
+  key and `SetMultisigPolicy` installs a per-operation-type (`transfer`
+  / `payout` / `reversal`) N-of-M policy. `SubmitMultisigOperation`
+  parks a large operation in the `pending_multisig` queue and freezes
+  its funds with a hold (available drops, journal untouched); approvers
+  vote with `VoteMultisig`, each vote an Ed25519 signature over the
+  operation's canonical bytes (domain-separated, binding op ID, amount,
+  payee, expiry, and vote direction — a signature cannot be transplanted
+  to another operation or replayed for the opposite vote). N distinct
+  approve signatures execute the operation through the standard write
+  paths (`PostTransfer` / `CreatePayout` / `ReverseEntry`) under an
+  op-derived idempotency key, so retries never double-book; one reject
+  signature rejects the op at once and releases the freeze. Expired ops
+  are swept by `ExpireMultisigOperations` (lazy on votes too). Every
+  submission, vote, approval, rejection, expiry, and execution lands in
+  the structured audit chain, and `GET /metrics` exposes
+  `ledger_multisig_submitted_total` / `ledger_multisig_approved_total` /
+  `ledger_multisig_rejected_total` / `ledger_multisig_expired_total`.
+  Complements the named-vote quorum above: quorum trusts the
+  caller-supplied approver identity, multisig verifies the key.
 
 ### Scheduled transfers (`POST /transfer-schedules`)
 

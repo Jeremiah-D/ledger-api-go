@@ -481,6 +481,26 @@ type Metrics struct {
 	// survives disaster-recovery snapshots. Exported as
 	// ledger_review_delegations_total.
 	ReviewDelegationsTotal atomic.Uint64
+	// MultisigSubmittedTotal counts multisig operations submitted to
+	// the pending_multisig queue (LG-142): first-time submissions
+	// only, not idempotent replays. It is synced from the ledgers on
+	// every GET /metrics scrape — submissions happen inside the
+	// ledger, not in a handler (see ledger/multisig.go). Exported as
+	// ledger_multisig_submitted_total.
+	MultisigSubmittedTotal atomic.Uint64
+	// MultisigApprovedTotal counts multisig operations that reached
+	// quorum (LG-142). Synced from the ledgers on every scrape, like
+	// MultisigSubmittedTotal. Exported as
+	// ledger_multisig_approved_total.
+	MultisigApprovedTotal atomic.Uint64
+	// MultisigRejectedTotal counts multisig operations killed by a
+	// reject vote (LG-142). Synced from the ledgers on every scrape.
+	// Exported as ledger_multisig_rejected_total.
+	MultisigRejectedTotal atomic.Uint64
+	// MultisigExpiredTotal counts multisig operations that lapsed
+	// without quorum (LG-142). Synced from the ledgers on every
+	// scrape. Exported as ledger_multisig_expired_total.
+	MultisigExpiredTotal atomic.Uint64
 	// PostingRuleLegsTotal counts derived posting-rule legs committed
 	// by the automatic posting rules (LG-132): every derived leg
 	// appended to a transfer, capture, or sweep event, by rule name.
@@ -938,6 +958,18 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_review_delegations_total",
 		"Total review vote delegations granted (LG-138): every DelegateVote grant on any voting path (review/quorum/chain), including extensions and re-grants after revocation. Synced from the ledger on every scrape; monotonic and snapshot-durable.",
 		m.ReviewDelegationsTotal.Load())
+	writeCounter(&sb, "ledger_multisig_submitted_total",
+		"Total multisig operations submitted to the pending_multisig queue (LG-142): first-time submissions only. Synced from the ledger on every scrape.",
+		m.MultisigSubmittedTotal.Load())
+	writeCounter(&sb, "ledger_multisig_approved_total",
+		"Total multisig operations that reached quorum (LG-142). Synced from the ledger on every scrape.",
+		m.MultisigApprovedTotal.Load())
+	writeCounter(&sb, "ledger_multisig_rejected_total",
+		"Total multisig operations killed by a reject vote (LG-142). Synced from the ledger on every scrape.",
+		m.MultisigRejectedTotal.Load())
+	writeCounter(&sb, "ledger_multisig_expired_total",
+		"Total multisig operations that lapsed without quorum (LG-142). Synced from the ledger on every scrape.",
+		m.MultisigExpiredTotal.Load())
 	writeLabeledCounter(&sb, "ledger_posting_rule_legs_total",
 		"Total derived posting-rule legs committed (LG-132): every derived journal leg an automatic posting rule appended to a transfer, capture, or sweep event, by rule name.",
 		m.PostingRuleLegsTotal.series())

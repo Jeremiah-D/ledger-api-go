@@ -6802,6 +6802,7 @@ func (s *server) handler() http.Handler {
 		var fxSpreadCents int64
 		var eclProvisions, eclMigrations uint64
 		var delegationsGranted uint64
+		var multisigSubmitted, multisigApproved, multisigRejected, multisigExpired uint64
 		var dunningEscalations uint64
 		var extMappingChanges uint64
 		var entryLinkChanges uint64
@@ -6853,6 +6854,14 @@ func (s *server) handler() http.Handler {
 			// ledger: grants happen inside DelegateVote, not in a
 			// handler (see ledger/review_delegation.go, LG-138).
 			delegationsGranted += l.ReviewDelegationsGranted()
+			// The multisig counters likewise live in the ledger:
+			// submissions, quorum approvals, rejections, and expiries
+			// happen inside the multisig paths, not in a handler (see
+			// ledger/multisig.go, LG-142).
+			multisigSubmitted += l.MultisigSubmitted()
+			multisigApproved += l.MultisigApproved()
+			multisigRejected += l.MultisigRejected()
+			multisigExpired += l.MultisigExpired()
 			dunningEscalations += l.DunningEscalationCount()
 			extMappingChanges += l.ExternalMappingChangeCount()
 			// The entry-link declaration counter likewise lives in the
@@ -6944,6 +6953,10 @@ func (s *server) handler() http.Handler {
 		// source of truth, so the scrape overwrites (never
 		// accumulates) the exposed series.
 		s.metrics.ReviewDelegationsTotal.Store(delegationsGranted)
+		s.metrics.MultisigSubmittedTotal.Store(multisigSubmitted)
+		s.metrics.MultisigApprovedTotal.Store(multisigApproved)
+		s.metrics.MultisigRejectedTotal.Store(multisigRejected)
+		s.metrics.MultisigExpiredTotal.Store(multisigExpired)
 		// The dunning escalation counter likewise lives in the ledger:
 		// escalations fire inside EscalateDunning, not in a handler.
 		s.metrics.DunningEscalationsTotal.Store(dunningEscalations)

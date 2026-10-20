@@ -12,6 +12,7 @@
 package ledger
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"net/url"
@@ -664,6 +665,20 @@ type Ledger struct {
 	// and revocations do not move it).
 	reviewDelegations        map[delegationKey]*ReviewDelegation
 	reviewDelegationsGranted uint64
+	// multisigApprovers maps approver IDs to registered Ed25519 public
+	// keys, multisigPolicies maps operation types to their N-of-M
+	// policies, and multisigOps is the pending_multisig queue keyed by
+	// operation ID (see multisig.go). Policies and the approver registry
+	// are structural config — no version bump, survive snapshots. The
+	// counters are the ledger-side sources of the ledger_multisig_*
+	// metrics (monotonic).
+	multisigApprovers map[string]ed25519.PublicKey
+	multisigPolicies  map[string]MultisigPolicy
+	multisigOps       map[string]*MultisigOperation
+	multisigSubmitted atomic.Uint64
+	multisigApproved  atomic.Uint64
+	multisigRejected  atomic.Uint64
+	multisigExpired   atomic.Uint64
 	// holds maps hold IDs to authorization holds (see hold.go). Holds are
 	// off-journal reservations: they never appear in entries, the audit
 	// chain, or the version counter. holdsByAccount indexes them per
@@ -1282,6 +1297,9 @@ func New(opts ...Option) *Ledger {
 		reviews:               make(map[string]*TransferReview),
 		reviewThresholds:      make(map[AccountID]int64),
 		reviewDelegations:     make(map[delegationKey]*ReviewDelegation),
+		multisigApprovers:     make(map[string]ed25519.PublicKey),
+		multisigPolicies:      make(map[string]MultisigPolicy),
+		multisigOps:           make(map[string]*MultisigOperation),
 		holds:                 make(map[string]Hold),
 		holdsByAccount:        make(map[AccountID][]string),
 		holdKeys:              make(map[string]string),
