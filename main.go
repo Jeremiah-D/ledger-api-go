@@ -6375,6 +6375,89 @@ func (s *server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleTaxReport implements GET /tax-report (LG-143): the operator's
+// tax/VAT filing query over derived tax legs.
+//
+// Query parameters:
+//
+//	from          required: RFC3339 period start (inclusive)
+//	to            required: RFC3339 period end (exclusive)
+//	currency      optional: ISO 4217 filter (default: all currencies)
+//	format        optional: "json" (default) or "csv"
+//	rule          repeated: "name:kind" — a posting rule designated as
+//	              a tax rule, kind "output" or "input"
+//	exempt_prefix repeated: account prefixes excluded from the totals
+//	sign          optional: "true" signs the report with the LG-44
+//	              anchor key (fails 400 when no key is configured)
+//
+// The report is read-only: it aggregates derived tax legs (memo
+// "rule:<name>") and books nothing, bumps no version, and appends no
+// audit link.
+func (s *server) handleTaxReport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	format := q.Get("format")
+	if format == "" {
+		format = "json"
+	}
+	if format != "json" && format != "csv" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `format must be "json" or "csv"`})
+		return
+	}
+	fromRaw, toRaw := q.Get("from"), q.Get("to")
+	if fromRaw == "" || toRaw == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from and to (RFC3339) are required"})
+		return
+	}
+	from, err := time.Parse(time.RFC3339, fromRaw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from must be RFC3339"})
+		return
+	}
+	to, err := time.Parse(time.RFC3339, toRaw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to must be RFC3339"})
+		return
+	}
+	opts := ledger.TaxReportOptions{From: from, To: to, Currency: q.Get("currency")}
+	for _, raw := range q["rule"] {
+		name, kind, ok := strings.Cut(raw, ":")
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": `rule must be "name:kind"`})
+			return
+		}
+		opts.Rules = append(opts.Rules, ledger.TaxRuleSpec{Name: name, Kind: kind})
+	}
+	opts.ExemptAccountPrefixes = q["exempt_prefix"]
+	opts.IncludeSignature = q.Get("sign") == "true"
+
+	report, err := s.ledgerFor(r).TaxReport(r.Context(), opts)
+	if err != nil {
+		if errors.Is(err, ledger.ErrInvalidTaxReportOptions) ||
+			errors.Is(err, ledger.ErrAnchorKeyNotConfigured) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		log.Printf("ledger-api-go: GET /tax-report: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tax report failed"})
+		return
+	}
+	switch format {
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=tax-report.csv")
+		w.WriteHeader(http.StatusOK)
+		if err := report.WriteCSV(w); err != nil {
+			log.Printf("ledger-api-go: GET /tax-report csv encode error: %v", err)
+		}
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := report.WriteJSON(w); err != nil {
+			log.Printf("ledger-api-go: GET /tax-report encode error: %v", err)
+		}
+	}
+}
+
 // handleSettlementNextWindow implements GET /settlement/next-window
 // (LG-101): the operator's "when does this currency settle next" query.
 //
@@ -6668,6 +6751,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
 	mux.HandleFunc("POST /compliance/large-tx-reports", s.handleLargeTxReports)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
+	mux.HandleFunc("GET /tax-report", s.handleTaxReport)
 	mux.HandleFunc("GET /settlement/next-window", s.handleSettlementNextWindow)
 	mux.HandleFunc("GET /settlement/deferred", s.handleListSettlementDeferrals)
 	mux.HandleFunc("POST /settlement/advance", s.handleAdvanceSettlementWindows)

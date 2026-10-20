@@ -3795,6 +3795,25 @@ Malformed `day` (`YYYY-MM-DD` required), `format`, `expected`, or
 `expected`/`tolerance` are validated by the ledger when the report runs
 (`abs_cents >= 0`, `0 <= bps <= 10000`).
 
+### `GET /tax-report` — tax/VAT report export
+
+The finance team's filing query: `GET
+/tax-report?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z&rule=vat-output:output&rule=vat-input:input`
+aggregates derived tax legs (automatic posting rules whose derived
+entries carry memo `"rule:<name>"`) per tax rule and currency over the
+period — input/output tax totals, per-rule line items, and each rule's
+rate snapshot (the bps amount expression, frozen at generation time so
+an auditor can reproduce the filing). `exempt_prefix` excludes
+tax-exempt counterparties; `currency` filters to one ISO code; `format`
+selects `json` (default) or `csv` (deterministic row order).
+`sign=true` attaches the LG-44 anchor key's Ed25519 signature over the
+report (distinct domain — a report signature never verifies as an
+anchor checkpoint); without a configured anchor key a signed request
+is `400`, never silently downgraded. The report is read-only: it books
+nothing, bumps no version, and appends no audit link. Go API:
+`Ledger.TaxReport` with `TaxReportOptions`; `VerifyTaxReportSignature`
+checks a report against a public key.
+
 ### Settlement cutoff windows
 
 Per-currency settlement cutoff windows (LG-101): the payment-rail reality
