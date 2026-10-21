@@ -3478,6 +3478,36 @@ curl -s -X POST localhost:8080/exports/pain001/<msgid>/settle \
   -H 'x-ledger-actor: night-ops'
 ```
 
+### pain.002 银行状态回盘（LG-162）
+
+`POST /exports/pain002/apply` 是 pain.001 出站状态报告的逆操作：解析银行返回的
+ISO 20022 pain.002.001.03（`CstmrPmtStsRpt`），按 `OrgnlMsgId` 找到对应的
+pain.001 付款指令，把每笔 `TxInfAndSts` 的银行 verdict 推进转账状态机。
+`OrgnlEndToEndId` 即导出时的 transfer ID（EndToEndId），天然关联原指令的幂等键。
+
+状态映射：
+
+| TxSts | 含义 | ledger 状态 |
+|---|---|---|
+| `ACSC` | AcceptedSettlementCompleted（已结算） | `accepted` |
+| `ACCP` | AcceptedCustomerProfile（已受理） | `accepted` |
+| `RJCT` | Rejected（拒绝） | `rejected`，`StsRsnInf/Rsn/Cd` + `AddtlInf` 原文进审计事件 reason |
+| `PDNG` | Pending（银行未定论） | 跳过，保持 `exported`，不记事件 |
+
+语义：
+- 解析 fail-loud：XML 非法、`OrgnlMsgNmId` 非 `pain.001.001.03`、`TxSts` 非法 → 400，整份拒绝。
+- 应用复用 `RecordPain001Receipts`：整批先校验后应用、重放幂等（same-state no-op）、每笔转移记哈希链 `pain001_status` 审计事件 + outbox。
+- 全 `PDNG` 的回盘是显式 no-op：返回指令不变，不记事件——pending 是信息，不是 verdict。
+- 刻意**不**驱动 `PayoutInstruction`：`SettlePayout`/`FailPayout` 需要银行对账单行证据并记账冲销，是操作员 attestation，read-only 的回盘不能代行；`GrpSts` 仅作参考，与逐笔 verdict 不一致时以逐笔为准。
+- `404` 未知 `OrgnlMsgId`；`422` 未知转账/非法转移。`x-ledger-actor` 取操作员身份。计数器 `ledger_pain002_applies_total`。
+
+```bash
+curl -s -X POST localhost:8080/exports/pain002/apply \
+  -H 'Content-Type: application/xml' -H 'x-ledger-actor: night-ops' \
+  --data-binary @bank-status-pain002.xml | jq '{state, txs: [.txs[] | {tx_id, state}]}'
+# 200 {"state":"exported","txs":[{"tx_id":"st1","state":"accepted"},{"tx_id":"st2","state":"rejected"}]}
+```
+
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
 The inverse of the export above: it parses an OFX 2.x bank statement

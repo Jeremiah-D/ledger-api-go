@@ -48,6 +48,10 @@ type Metrics struct {
 	// Pain001Settlements counts POST /exports/pain001/{msgid}/settle
 	// reconcile-confirmation requests served (LG-99).
 	Pain001Settlements atomic.Uint64
+	// Pain002Applies counts POST /exports/pain002/apply ISO 20022
+	// pain.002 status-report apply requests served, including
+	// rejected reports (LG-162).
+	Pain002Applies atomic.Uint64
 	// VerifyRequests counts GET /entries/verify requests served.
 	VerifyRequests atomic.Uint64
 	// AnchorsTotal counts POST /entries/anchor requests that signed a
@@ -746,6 +750,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/pain001/{msgid}/receipts bank-receipt batches served, including rejected batches.", m.Pain001Receipts.Load())
 	writeCounter(&sb, "ledger_pain001_settlements_total",
 		"Total POST /exports/pain001/{msgid}/settle reconcile-confirmation requests served.", m.Pain001Settlements.Load())
+	writeCounter(&sb, "ledger_pain002_applies_total",
+		"Total POST /exports/pain002/apply ISO 20022 pain.002 status-report apply requests served, including rejected reports.", m.Pain002Applies.Load())
 	writeCounter(&sb, "ledger_verify_requests_total",
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
 	writeCounter(&sb, "ledger_anchors_total",

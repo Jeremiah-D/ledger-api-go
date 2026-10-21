@@ -4544,6 +4544,57 @@ func (s *server) handlePain001Settle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
+// handlePain002Apply implements POST /exports/pain002/apply (LG-162):
+// applies a bank's ISO 20022 pain.002.001.03 customer payment status
+// report to the pain.001 instruction it answers. The body is the raw
+// pain.002 XML; the report's OrgnlMsgId selects the instruction and
+// each TxInfAndSts verdict advances its transfer (see
+// ledger.ApplyPain002Report): ACSC/ACCP become accepted, RJCT becomes
+// rejected with the bank's reason code in the audit event, PDNG is
+// skipped. Re-applying a report is idempotent. Error mapping: a
+// malformed report is a 400; an unknown OrgnlMsgId is a 404; an unknown
+// transfer or an illegal transition is a 422 (the report is well-formed
+// but the state machine cannot apply it). The operator identity comes
+// from the x-ledger-actor header, like the other operator actions.
+func (s *server) handlePain002Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain002Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	report, err := ledger.ParsePain002(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	rec, err := s.ledgerFor(r).ApplyPain002Report(report, ledger.ActorFromContext(actx))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrUnknownPainInstruction):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrUnknownPain001Tx),
+			errors.Is(err, ledger.ErrIllegalPain001Transition):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain002/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.002 report failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
 // handleStatement implements GET /accounts/{id}/statement: a JSON
 // account statement for the half-open window [from, to) (see
 // ledger.GenerateStatement). Query parameters: from / to (optional
@@ -8077,6 +8128,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pain001/{msgid}/status", s.handlePain001Status)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
+	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
 	mux.HandleFunc("GET /accounts/{id}/statement", s.handleStatement)
 	mux.HandleFunc("POST /ofx/import", s.handleOFXImport)
 	mux.HandleFunc("POST /camt053/import", s.handleCAMT053Import)
