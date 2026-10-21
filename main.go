@@ -4799,6 +4799,46 @@ func (s *server) handleFedNowPacs008(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"results": items})
 }
 
+// camt054ImportRequest is the POST /camt054/import body: the ledger
+// account the notification belongs to, and the raw camt.054 XML
+// document.
+type camt054ImportRequest struct {
+	Account ledger.AccountID `json:"account"`
+	CAMT054 string           `json:"camt054"`
+}
+
+// handleCAMT054Import implements POST /camt054/import (LG-164): it
+// parses an ISO 20022 camt.054 debit/credit notification document and
+// triple-matches each notification against outstanding transfers and
+// payouts (see ledger.ImportCAMT054). Matching notifications advance
+// the outstanding item's reconciliation status to reconciled; nothing
+// else moves money. Re-importing the same document returns the
+// original report with duplicate=true. A missing account, an empty
+// document, a malformed document, or a document naming a different
+// account is a 400. There is no special auth, like the /ofx/import
+// endpoint.
+func (s *server) handleCAMT054Import(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT054Imports.Add(1)
+	var req camt054ImportRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.Account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account is required"})
+		return
+	}
+	if strings.TrimSpace(req.CAMT054) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "camt054 document is required"})
+		return
+	}
+	report, err := s.ledgerFor(r).ImportCAMT054(req.Account, []byte(req.CAMT054), ledger.CAMT054ImportOptions{})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // handleBalanceHistory implements GET /balance-history: the balance time
 // series the background recorder samples (see ledger/balance_history.go),
 // for reconciliation dashboards and fintech reporting. Query parameters:
@@ -8128,6 +8168,7 @@ func (s *server) handler() http.Handler {
 	// LG-161: ACH return (dishonored entry) file booking.
 	mux.HandleFunc("POST /ach/returns", s.handleACHReturns)
 	mux.HandleFunc("POST /fednow/pacs008", s.handleFedNowPacs008)
+	mux.HandleFunc("POST /camt054/import", s.handleCAMT054Import)
 	mux.HandleFunc("POST /credit-lines", s.handleGrantCreditLine)
 	mux.HandleFunc("POST /credit-lines/reduce", s.handleReduceCreditLine)
 	mux.HandleFunc("GET /credit-lines", s.handleGetCreditLine)

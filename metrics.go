@@ -37,6 +37,9 @@ type Metrics struct {
 	// CAMT053Imports counts POST /camt053/import requests served (all
 	// attempts, including duplicates and rejected payloads; LG-103).
 	CAMT053Imports atomic.Uint64
+	// CAMT054Imports counts POST /camt054/import requests served (all
+	// attempts, including duplicates and rejected payloads; LG-164).
+	CAMT054Imports atomic.Uint64
 	// FedNowPacs008Requests counts POST /fednow/pacs008 requests
 	// received, including rejected documents (LG-163).
 	FedNowPacs008Requests atomic.Uint64
@@ -757,6 +760,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /ofx/import OFX statement pre-posting imports served, including duplicates and rejected payloads.", m.OFXImports.Load())
 	writeCounter(&sb, "ledger_camt053_imports_total",
 		"Total POST /camt053/import camt.053 statement pre-posting imports served, including duplicates and rejected payloads.", m.CAMT053Imports.Load())
+	writeCounter(&sb, "ledger_camt054_imports_total",
+		"Total POST /camt054/import camt.054 debit/credit notification imports served, including duplicates and rejected payloads.", m.CAMT054Imports.Load())
 	writeCounter(&sb, "ledger_pain001_exports_total",
 		"Total GET /exports/pain001 ISO 20022 pain.001 payment instruction exports served.", m.Pain001Exports.Load())
 	writeCounter(&sb, "ledger_pain001_status_queries_total",

@@ -3653,6 +3653,58 @@ Semantics:
   is no special auth, like the export endpoint.
   `GET /metrics` counts imports as `ledger_camt053_imports_total`.
 
+### `POST /camt054/import` — ISO 20022 camt.054 debit/credit notification import
+
+The camt.053 import matches statements against journal rows; camt.054
+matches *notifications* against outstanding **transfers and payouts**
+— orthogonal by design. A `BkToCstmrDbtCdtNtfctn` document carries
+individual `Ntry` debit/credit notifications (what the bank just
+did), and this endpoint answers the operator's question: *which of my
+outstanding items did this notification confirm?*
+
+`POST /camt054/import` (JSON body
+`{"account": "<the notification account>", "camt054": "<Document>...</Document>"}`)
+parses with `ledger.ParseCAMT054` — namespace-tolerant across
+`camt.054.001.xx` revisions, one notification per `Ntry`; a malformed
+document, a missing account, or a document naming a different account
+is a `400`. Each notification is then triple-matched with
+`ledger.ImportCAMT054`:
+
+- **Candidates** are named by the notification's `EndToEndId` via
+  the shared idempotency-key convention (payout by ID, payout by
+  idempotency key, transfer by idempotency key, transfer by ID — the
+  same `EndToEndId` the pain.001 export stamps);
+- a candidate **matches** when its amount equals the notification's
+  (exact cents, no conversion), its currency equals, and its
+  creation is within the match window (default ±24h, configurable
+  per import) of the notification's booking date;
+- several outstanding items under one `EndToEndId` is
+  `mismatched` with reason `amount_mismatch`, `currency_mismatch`,
+  or `date_out_of_window`; no candidate is `unmatched`.
+
+A matched notification advances its outstanding item's
+reconciliation status from outstanding to reconciled (recorded in
+the match registry and the hash-chained `camt054_reconciled` audit
+event). Deliberately nothing else: no money moves and no payout
+lifecycle transition happens — the operator settles via
+`POST /payouts/{id}/settle`. The ledger keeps every import report
+keyed by the document's SHA-256; a re-upload returns the original
+report with `duplicate:true`.
+
+```bash
+curl -s -X POST localhost:8080/camt054/import \
+  -H 'Content-Type: application/json' \
+  -d '{"account":"acct-notify","camt054":"<Document>...</Document>"}'
+# 200 {"document_sha256":"…","account":"acct-notify",
+#      "items":[{"notification":{...,"direction":"in","amount_cents":50000,...},
+#                "status":"matched","matched_kind":"transfer",
+#                "matched_id":"xfer-1"}, ...],
+#      "matched":1,"mismatched":0,"unmatched":0,"duplicate":false}
+```
+
+`GET /metrics` counts imports as `ledger_camt054_imports_total`.
+Go: `ledger.ParseCAMT054` / `ledger.ImportCAMT054`.
+
 ### camt.053 statement export (Go: `ledger.ExportCAMT053`)
 
 The inverse of the import above: it renders the account's effective
@@ -5657,6 +5709,9 @@ curl -s localhost:8080/metrics
   committed (idempotent replays not counted twice).
 - `ledger_fednow_rejections_total{reason}` — per-item pacs.008
   rejections by reason (idempotent replays not counted).
+- `ledger_camt054_imports_total` — `POST /camt054/import` camt.054
+  debit/credit notification imports served, including duplicates
+  and rejected payloads.
 - `ledger_statement_queries_total` — `GET /accounts/{id}/statement`
   JSON account statement requests served.
 - `ledger_audit_sink_sent_total` — outbox domain events the audit-sink

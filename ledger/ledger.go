@@ -786,6 +786,16 @@ type Ledger struct {
 	fedNowSettlementAccount AccountID
 	fedNowPostings          uint64
 	fedNowRejections        map[string]uint64
+	// camt054Imports keys camt.054 notification import reports by the
+	// document's SHA-256 (see camt054.go, LG-164): re-importing the
+	// same document returns the original report with Duplicate set.
+	// camt054Matches records per-notification triple-match outcomes by
+	// notification stable ID — the reconciliation-status advance
+	// (outstanding -> reconciled) for matched transfers/payouts. Both
+	// are in-memory only: the camt054_reconciled audit events are the
+	// durable record.
+	camt054Imports map[string]*CAMT054ImportReport
+	camt054Matches map[string]camt054MatchRecord
 	// creditLines maps (account, currency) to the granted credit line
 	// (see creditline.go): an opt-in per-account overdraft floor of
 	// -limit with daily interest on utilization. creditInterestIncome
@@ -1412,6 +1422,8 @@ func New(opts ...Option) *Ledger {
 		payoutKeys:            make(map[string]string),
 		achReturnCounts:       make(map[string]uint64),
 		fedNowRejections:       make(map[string]uint64),
+		camt054Imports:          make(map[string]*CAMT054ImportReport),
+		camt054Matches:          make(map[string]camt054MatchRecord),
 		ftpCurves:             make(map[string]*FtpCurve),
 		creditLines:           make(map[creditLineKey]CreditLine),
 		eclStageConfig:        DefaultECLStageConfig(),
