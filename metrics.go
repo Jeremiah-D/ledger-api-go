@@ -308,6 +308,17 @@ type Metrics struct {
 	// rejections (frozen/closed/overdraft/daily-limit/period) on the
 	// submit and settlement legs.
 	PayoutRejections atomic.Uint64
+	// ACHReturnRequestsTotal counts POST /ach/returns requests
+	// received (all attempts, including rejected files).
+	ACHReturnRequestsTotal atomic.Uint64
+	// ACHReturnsTotal counts ACH returns (dishonored entries) the
+	// ledger booked through POST /ach/returns, by NACHA return reason
+	// code (LG-161). It is synced from the ledgers on every GET
+	// /metrics scrape — the returns book inside ProcessACHReturns,
+	// not in a handler. Only first-time returns count: idempotent
+	// replays move nothing. The zero value is ready to use. Exported
+	// as ledger_ach_returns_total{reason_code}.
+	ACHReturnsTotal ACHReturnReasonCounter
 	// CreditLinesTotal counts POST /credit-lines requests received
 	// (all attempts, including duplicates and rejected payloads).
 	CreditLinesTotal atomic.Uint64
@@ -817,6 +828,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_payouts_rejected_total",
 		"Total payout-domain requests rejected: maker-checker violations, invalid transitions, statement mismatches, or Post-gate rejections on the submit/settlement legs.",
 		m.PayoutRejections.Load())
+	writeCounter(&sb, "ledger_ach_return_requests_total",
+		"Total POST /ach/returns requests received, including rejected files.", m.ACHReturnRequestsTotal.Load())
+	writeLabeledCounter(&sb, "ledger_ach_returns_total",
+		"Total ACH returns (dishonored entries) booked by POST /ach/returns, by NACHA return reason code (idempotent replays not counted twice).",
+		m.ACHReturnsTotal.series())
 	writeCounter(&sb, "ledger_credit_lines_total",
 		"Total POST /credit-lines requests received.", m.CreditLinesTotal.Load())
 	writeCounter(&sb, "ledger_credit_interest_accruals_total",
@@ -1178,6 +1194,46 @@ func (c *QuorumVoteCounter) series() []labeledCounterSeries {
 		parts := strings.Split(k, "\x00")
 		out = append(out, labeledCounterSeries{
 			labels: fmt.Sprintf(`approver=%q,vote=%q,outcome=%q`, parts[0], parts[1], parts[2]),
+			value:  v,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].labels < out[j].labels })
+	return out
+}
+
+// ACHReturnReasonCounter is the per-reason-code breakdown of booked ACH
+// returns (LG-161), rendered as
+// ledger_ach_returns_total{reason_code=".."}: the ledger counts the
+// returns at commit time and the HTTP layer mirrors the counts on
+// scrape, so Set overwrites (never accumulates) — the ledger is the
+// source of truth. The zero value is ready to use; Set is safe for
+// concurrent use.
+type ACHReturnReasonCounter struct {
+	mu     sync.Mutex
+	counts map[string]uint64
+}
+
+// Set records the ledger's authoritative per-reason-code return count.
+// Reason codes are NACHA R01–R85, rendered with %q so the label value
+// stays valid exposition text.
+func (c *ACHReturnReasonCounter) Set(reasonCode string, n uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = make(map[string]uint64)
+	}
+	c.counts[reasonCode] = n
+}
+
+// series renders the counter as labeled series, sorted by reason code
+// for a deterministic exposition.
+func (c *ACHReturnReasonCounter) series() []labeledCounterSeries {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]labeledCounterSeries, 0, len(c.counts))
+	for code, v := range c.counts {
+		out = append(out, labeledCounterSeries{
+			labels: fmt.Sprintf(`reason_code=%q`, code),
 			value:  v,
 		})
 	}

@@ -2673,6 +2673,64 @@ payout; `409` ID conflict or invalid state transition; `422`
 statement mismatch or overdraft/daily-limit/period rejection;
 `500` payout clearing account not configured.
 
+### ACH returns (dishonored entries / 退票拒付)
+
+The other side of an ACH origination: the bank answers the NACHA
+file with a return file when a receiver's bank dishonors an entry
+(`R01` insufficient funds, `R02` account closed, … `R85`). The
+return file is the same 94-character NACHA layout, with each
+dishonored Entry Detail (6) followed by an Addenda Type 98 record
+carrying the return reason code, the original entry's trace number,
+and the original receiving DFI.
+
+`POST /ach/returns` books a bank return file (JSON body
+`{"file": "<94-char records joined by \n>"}`). The file parses with
+`ledger.ParseNACHAReturn` — a malformed line or a reason code
+outside `R01`–`R85` refuses the whole file with `400` (fail-loud: a
+return that goes unbooked would leave the books claiming money that
+never moved). Entries with no 98 addenda are not returns and are
+skipped. Each return is then matched to its payout by the entry's
+individual ID (stamped by `ledger.PayoutToNACHAEntry`) and applied
+through `ledger.ProcessACHReturns`:
+
+- the payout must be submitted (its clearing entry journaled), else
+  a per-item rejection;
+- the return amount must equal the clearing entry's amount (a
+  mismatch is a per-item rejection — the return is evidence about a
+  different entry);
+- the clearing entry is reversed through `ReverseEntry` with the
+  deterministic idempotency key
+  `ach-return/<trace>/<reason>/<payout>` — replays return
+  `duplicate: true` and book nothing new;
+- a **return of a return** (二次退回) is explicitly rejected per
+  item: the clearing entry is already a reversal, or already
+  carries one — NACHA forbids returning a returned entry, and the
+  ledger cannot correct twice.
+
+Processing is per-item: one bad return is recorded in its item's
+`error`, the others still book. Every first-time return emits an
+`ach_return` audit event (reason code, trace, payout ID, reversal
+ID — the original clearing row, the reversal row, and the
+`reversal_of` entry link all stay in the journal, so the dishonored
+payout leaves a fully reconcilable trail) and bumps
+`ledger_ach_returns_total{reason_code}` on `GET /metrics`. Go ledger
+API plus this operator endpoint (the `x-ledger-actor` header lands
+in the hash-chained audit events).
+
+```bash
+curl -s -X POST localhost:8080/ach/returns \
+  -H 'x-ledger-actor: ops' \
+  -d '{"file": "<the bank return file>"}'
+# 200 {"results":[{"payout_id":"po-1","reason_code":"R01",
+#      "trace_number":"121042880000001",
+#      "reversal_id":"payout/po-1/clearing/reversal",
+#      "amount_cents":250000,"duplicate":false}]}
+```
+
+Status codes: `200` with the per-item results (a rejected return
+carries its error in the item, not in the status); `400` malformed
+return file, invalid reason code, or a file with no returns.
+
 ### Installment plans (分期)
 
 A BNPL-style scheduled receivable: `OpenInstallmentPlan` splits a
@@ -3595,10 +3653,12 @@ Semantics:
   NACHA but not forced.
 - **Trace numbers** — ODFI transit (8) + per-batch 7-digit sequence
   from 1; entry hash sums the receiving DFIs (last 10 digits kept).
-- Scope: CCD/PPD origination only. Same-day windows, IAT, and return
-  handling are out of scope — documented, not faked. Lines are joined
-  with `\n` (no trailing newline); convert to CRLF for the bank if
-  required.
+- Scope: CCD/PPD origination only — same-day windows and IAT are
+  out of scope, documented not faked. Return (dishonored-entry)
+  handling is covered by the ACH returns section above
+  (`ledger.ParseNACHAReturn`, `POST /ach/returns`). Lines are
+  joined with `\n` (no trailing newline); convert to CRLF for the
+  bank if required.
 
 ### SWIFT MT940 statement export (Go: `ledger.ExportMT940`)
 

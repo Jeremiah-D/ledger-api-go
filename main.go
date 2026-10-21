@@ -510,7 +510,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -682,7 +682,7 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -973,7 +973,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1165,7 +1165,7 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1230,9 +1230,9 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 // atomic multi-transfer posting (see ledger.PostBatchTransfer). Each
 // transfer decodes exactly like a POST /transfers body.
 type createBatchTransferRequest struct {
-	BatchID        string                 `json:"batch_id"`
+	BatchID        string                  `json:"batch_id"`
 	Transfers      []createTransferRequest `json:"transfers"`
-	IdempotencyKey string                 `json:"idempotency_key"`
+	IdempotencyKey string                  `json:"idempotency_key"`
 }
 
 // handleCreateBatchTransfer implements POST /transfers/batch: several
@@ -1477,7 +1477,7 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1636,7 +1636,7 @@ func (s *server) handleDryRunSweep(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1718,7 +1718,7 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1843,6 +1843,7 @@ func (s *server) handleCreateSplit(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, receipt)
 }
+
 // idempotency key is optional: the reversal ID itself
 // ("<entry ID>/reversal") is deterministic, so a keyless retry returns the
 // existing reversal with 200. A *new* key on an already-reversed entry
@@ -1892,7 +1893,7 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -2664,7 +2665,7 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -2756,7 +2757,7 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -2873,7 +2874,7 @@ func (s *server) handlePartialCaptureHold(w http.ResponseWriter, r *http.Request
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -3184,12 +3185,12 @@ func (s *server) handleGetDispute(w http.ResponseWriter, r *http.Request) {
 }
 
 type openTermDepositRequest struct {
-	ID             string           `json:"id"`
-	Account        ledger.AccountID `json:"account"`
-	AmountCents    int64            `json:"amount_cents"`
-	Currency       string           `json:"currency"`
-	TermDays       int64            `json:"term_days"`
-	RateBps        int64            `json:"rate_bps"`
+	ID          string           `json:"id"`
+	Account     ledger.AccountID `json:"account"`
+	AmountCents int64            `json:"amount_cents"`
+	Currency    string           `json:"currency"`
+	TermDays    int64            `json:"term_days"`
+	RateBps     int64            `json:"rate_bps"`
 	// RateTiers is the opt-in tiered rate ladder (LG-145), mutually
 	// exclusive with rate_bps: [{min_cents, rate_bps}], first band at 0,
 	// strictly ascending minima, rates 1..10000 bps.
@@ -3251,7 +3252,7 @@ func (s *server) handleOpenTermDeposit(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-				return
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -3704,6 +3705,86 @@ func (s *server) handleCancelPayout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+// achReturnsRequest is the POST /ach/returns body: the bank's NACHA
+// return file as text (94-character records joined by "\n").
+type achReturnsRequest struct {
+	File string `json:"file"`
+}
+
+// achReturnItemResponse is one per-item outcome in the
+// POST /ach/returns response.
+type achReturnItemResponse struct {
+	PayoutID    string `json:"payout_id"`
+	ReasonCode  string `json:"reason_code"`
+	TraceNumber string `json:"trace_number"`
+	ReversalID  string `json:"reversal_id,omitempty"`
+	AmountCents int64  `json:"amount_cents"`
+	Duplicate   bool   `json:"duplicate"`
+	Error       string `json:"error,omitempty"`
+}
+
+// handleACHReturns implements POST /ach/returns (LG-161): books a bank
+// NACHA return file. The file is parsed with
+// ledger.ParseNACHAReturn — a malformed line or an invalid return
+// reason code refuses the whole file with 400 (fail-loud: a return
+// that goes unbooked would leave the books claiming money that never
+// moved). The returns are then applied with
+// ledger.ProcessACHReturns: each return reverses its payout's
+// clearing entry through a deterministic reversal, emitting an
+// ach_return audit event and bumping
+// ledger_ach_returns_total{reason_code}. Processing is per-item — one
+// bad return is recorded in its item's error, not applied to the
+// others — so the endpoint always answers 200 with the item list. A
+// return of a return is rejected per item (ledger.ErrACHReturnOfReturn)
+// and replays return duplicate: true. The operator identity comes from
+// the x-ledger-actor header, like the other operator actions — the
+// actor lands in the hash-chained ach_return audit events.
+func (s *server) handleACHReturns(w http.ResponseWriter, r *http.Request) {
+	s.metrics.ACHReturnRequestsTotal.Add(1)
+	var req achReturnsRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.File == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	returns, err := ledger.ParseNACHAReturn(req.File)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(returns) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "return file carries no returns"})
+		return
+	}
+	results, err := s.ledgerFor(r).ProcessACHReturns(returns, ledger.ActorFromContext(actx))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	items := make([]achReturnItemResponse, 0, len(results))
+	for _, res := range results {
+		item := achReturnItemResponse{
+			PayoutID:    res.PayoutID,
+			ReasonCode:  res.Return.ReasonCode,
+			TraceNumber: res.Return.TraceNumber,
+			ReversalID:  res.ReversalID,
+			AmountCents: res.AmountCents,
+			Duplicate:   res.Duplicate,
+		}
+		if res.Err != nil {
+			item.Error = res.Err.Error()
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": items})
 }
 
 type grantCreditLineRequest struct {
@@ -6088,13 +6169,13 @@ func writeInvoiceError(w http.ResponseWriter, err error) bool {
 // open. Only id, account, amount_cents, and due_date are required;
 // currency defaults to USD, issued_at defaults to now.
 type issueInvoiceRequest struct {
-	ID        string     `json:"id"`
-	Account   string     `json:"account"`
-	Currency  string     `json:"currency"`
-	AmountCents int64    `json:"amount_cents"`
-	IssuedAt  *time.Time `json:"issued_at"`
-	DueDate   *time.Time `json:"due_date"`
-	Memo      string     `json:"memo"`
+	ID          string     `json:"id"`
+	Account     string     `json:"account"`
+	Currency    string     `json:"currency"`
+	AmountCents int64      `json:"amount_cents"`
+	IssuedAt    *time.Time `json:"issued_at"`
+	DueDate     *time.Time `json:"due_date"`
+	Memo        string     `json:"memo"`
 }
 
 // handleIssueInvoice implements POST /invoices: opens a new receivable
@@ -7915,6 +7996,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /payouts/{id}/settle", s.handleSettlePayout)
 	mux.HandleFunc("POST /payouts/{id}/fail", s.handleFailPayout)
 	mux.HandleFunc("POST /payouts/{id}/cancel", s.handleCancelPayout)
+	// LG-161: ACH return (dishonored entry) file booking.
+	mux.HandleFunc("POST /ach/returns", s.handleACHReturns)
 	mux.HandleFunc("POST /credit-lines", s.handleGrantCreditLine)
 	mux.HandleFunc("POST /credit-lines/reduce", s.handleReduceCreditLine)
 	mux.HandleFunc("GET /credit-lines", s.handleGetCreditLine)
@@ -8045,6 +8128,9 @@ func (s *server) handler() http.Handler {
 		var entryLinkChanges uint64
 		var mandateDebits uint64
 		var retentionDeletions uint64
+		// Per-reason-code ACH return counts (LG-161), aggregated
+		// across tenants like the other ledger-sourced counters above.
+		achReturns := map[string]uint64{}
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -8110,6 +8196,12 @@ func (s *server) handler() http.Handler {
 			// debits post inside DebitWithMandate, not in a handler
 			// (see ledger/mandate.go, LG-125).
 			mandateDebits += l.MandateDebitCount()
+			// The ACH return counter likewise lives in the ledger:
+			// returns book inside ProcessACHReturns, not in a handler
+			// (see ledger/ach_return.go, LG-161).
+			for code, n := range l.ACHReturnCounts() {
+				achReturns[code] += n
+			}
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -8203,6 +8295,12 @@ func (s *server) handler() http.Handler {
 		s.metrics.ExternalMappingChangesTotal.Store(extMappingChanges)
 		s.metrics.EntryLinkChangesTotal.Store(entryLinkChanges)
 		s.metrics.MandateDebitsTotal.Store(mandateDebits)
+		// The ACH return counter likewise lives in the ledger: the
+		// ledger is the source of truth, so the scrape overwrites
+		// (never accumulates) the exposed series.
+		for code, n := range achReturns {
+			s.metrics.ACHReturnsTotal.Set(code, n)
+		}
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the

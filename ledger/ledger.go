@@ -765,6 +765,14 @@ type Ledger struct {
 	payouts               map[string]PayoutInstruction
 	payoutKeys            map[string]string
 	payoutClearingAccount AccountID
+	// achReturnCounts counts processed ACH returns (see ach_return.go,
+	// LG-161) by NACHA return reason code: the ledger-side source of
+	// the ledger_ach_returns_total{reason_code} metric. Only
+	// first-time returns count — idempotent replays move nothing.
+	// In-memory only, like payout instructions: it does not round-trip
+	// through disaster-recovery snapshots; the journaled reversal rows
+	// and the ach_return audit events are the durable record.
+	achReturnCounts map[string]uint64
 	// creditLines maps (account, currency) to the granted credit line
 	// (see creditline.go): an opt-in per-account overdraft floor of
 	// -limit with daily interest on utilization. creditInterestIncome
@@ -1389,6 +1397,7 @@ func New(opts ...Option) *Ledger {
 		termDepositKeys:       make(map[string]string),
 		payouts:               make(map[string]PayoutInstruction),
 		payoutKeys:            make(map[string]string),
+		achReturnCounts:       make(map[string]uint64),
 		ftpCurves:             make(map[string]*FtpCurve),
 		creditLines:           make(map[creditLineKey]CreditLine),
 		eclStageConfig:        DefaultECLStageConfig(),
