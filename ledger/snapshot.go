@@ -581,6 +581,11 @@ type snapshotConfigLine struct {
 	// written before payout instructions existed, for the same
 	// fail-closed reason as TdInterestExpense.
 	PayoutClearingAccount AccountID `json:"payout_clearing_account,omitempty"`
+	// FedNowSettlementAccount carries the ledger-wide FedNow
+	// settlement account (see SetFedNowSettlementAccount, LG-163);
+	// absent in snapshots written before it existed, for the same
+	// fail-closed reason as PayoutClearingAccount.
+	FedNowSettlementAccount AccountID `json:"fednow_settlement_account,omitempty"`
 	// CreditInterestIncome carries the ledger-wide credit-line
 	// interest-income account (see SetCreditInterestIncome); absent in
 	// snapshots written before credit lines existed, for the same
@@ -1281,6 +1286,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		CAMT053ImportRegistry: l.camt053ImportsLocked(),
 		TdInterestExpense:     l.tdInterestExpense,
 		PayoutClearingAccount: l.payoutClearingAccount,
+		FedNowSettlementAccount: l.fedNowSettlementAccount,
 		CreditInterestIncome:  l.creditInterestIncome,
 		CreditLines:           l.creditLinesLocked(),
 		ECLExpenseAccount:     l.eclExpenseAccount,
@@ -3223,6 +3229,7 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	// overdraft-protection list.
 	l.tdInterestExpense = cfg.TdInterestExpense
 	l.payoutClearingAccount = cfg.PayoutClearingAccount
+	l.fedNowSettlementAccount = cfg.FedNowSettlementAccount
 	l.creditInterestIncome = cfg.CreditInterestIncome
 	l.creditLines = make(map[creditLineKey]CreditLine, len(cfg.CreditLines))
 	for _, cl := range cfg.CreditLines {

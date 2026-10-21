@@ -773,6 +773,19 @@ type Ledger struct {
 	// through disaster-recovery snapshots; the journaled reversal rows
 	// and the ach_return audit events are the durable record.
 	achReturnCounts map[string]uint64
+	// fedNowSettlementAccount is the ledger-wide FedNow settlement
+	// account — the credit leg of every pacs.008 receipt posting (see
+	// fednow_pacs008.go, LG-163): empty means unconfigured and
+	// ProcessPacs008 is fail-closed. fedNowPostings counts first-time
+	// pacs.008 receipt postings and fedNowRejections counts per-item
+	// rejections by reason: the ledger-side source of the
+	// ledger_fednow_postings_total / ledger_fednow_rejections_total
+	// metrics. Structural config — the account round-trips through
+	// disaster-recovery snapshots like the payout clearing account;
+	// the counters are in-memory only, like the ACH return counters.
+	fedNowSettlementAccount AccountID
+	fedNowPostings          uint64
+	fedNowRejections        map[string]uint64
 	// creditLines maps (account, currency) to the granted credit line
 	// (see creditline.go): an opt-in per-account overdraft floor of
 	// -limit with daily interest on utilization. creditInterestIncome
@@ -1398,6 +1411,7 @@ func New(opts ...Option) *Ledger {
 		payouts:               make(map[string]PayoutInstruction),
 		payoutKeys:            make(map[string]string),
 		achReturnCounts:       make(map[string]uint64),
+		fedNowRejections:       make(map[string]uint64),
 		ftpCurves:             make(map[string]*FtpCurve),
 		creditLines:           make(map[creditLineKey]CreditLine),
 		eclStageConfig:        DefaultECLStageConfig(),

@@ -2731,6 +2731,64 @@ Status codes: `200` with the per-item results (a rejected return
 carries its error in the item, not in the status); `400` malformed
 return file, invalid reason code, or a file with no returns.
 
+### FedNow inbound instant-payment receipts (pacs.008 / 入账通知)
+
+The other side of an instant payment: FedNow settles in seconds and
+the receiving bank learns about it from a `pacs.008.001.08`
+(`FIToFICstmrCdtTrf`) message — one `CdtTrfTxInf` per credit
+transfer, carrying the `EndToEndId`, the settlement amount, and the
+debtor/creditor accounts.
+
+`POST /fednow/pacs008` books a pacs.008 notification (JSON body
+`{"pacs008": "<the XML document>"}`). The document parses with
+`ledger.ParsePacs008` — namespace-tolerant across
+`pacs.008.001.xx` revisions, one item per `CdtTrfTxInf`; a malformed
+document refuses the whole request with `400` (fail-loud: an
+unbooked receipt would leave the books understating what the bank
+received). Each item is then applied with
+`ledger.ProcessPacs008`:
+
+- the item's `EndToEndId` is associated with the originating
+  transfer/payout via its idempotency key (payout by ID, then payout
+  by idempotency key, then transfer by idempotency key, then transfer
+  by ID — the same convention the pain.001 export uses for
+  `EndToEndId`);
+- when an original is found, the notification amount/currency must
+  equal the original's and the payee must be one of the original's
+  accounts, else an explicit per-item rejection;
+- without an association, the payee must already be a known ledger
+  account (an inbound payment cannot create a ledger identity out
+  of thin air);
+- the receipt books a payee-inflow entry
+  (`fednow-pacs008/<endtoendid>`, idempotent across replays)
+  against the configured FedNow settlement account
+  (`ledger.SetFedNowSettlementAccount` — unset is fail-closed,
+  like the ECL and webhook booking accounts);
+- the entry goes through the full `Post` gate (balance rules,
+  velocity checks, posting rules), and the operator identity from
+  `x-ledger-actor` lands in the hash-chained
+  `fednow_pacs008_posted` / `fednow_pacs008_rejected` audit events.
+
+Processing is per-item: one bad notification is recorded in its
+item's error, the others still book. Receipts bump
+`ledger_fednow_postings_total`; rejections bump
+`ledger_fednow_rejections_total{reason}` on `GET /metrics`. Go ledger
+API plus this operator endpoint.
+
+```bash
+curl -s -X POST localhost:8080/fednow/pacs008 \
+  -H 'x-ledger-actor: ops' \
+  -d '{"pacs008": "<the pacs.008 document>"}'
+# 200 {"results":[{"end_to_end_id":"E2E-1","entry_id":
+#      "fednow-pacs008/E2E-1","amount_cents":25000,
+#      "currency":"USD","payee_account":"acct-payee",
+#      "duplicate":false}]}
+```
+
+Status codes: `200` with the per-item results (a rejected item
+carries its error in the item, not in the status); `400` malformed
+document or empty document.
+
 ### Installment plans (分期)
 
 A BNPL-style scheduled receivable: `OpenInstallmentPlan` splits a
@@ -5591,6 +5649,14 @@ curl -s localhost:8080/metrics
 - `ledger_camt053_imports_total` — `POST /camt053/import` camt.053
   statement pre-posting imports served, including duplicates and
   rejected payloads.
+  debit/credit notification imports served, including duplicates
+  and rejected payloads.
+- `ledger_fednow_pacs008_requests_total` — `POST /fednow/pacs008`
+  requests received, including rejected documents.
+- `ledger_fednow_postings_total` — FedNow pacs.008 receipt postings
+  committed (idempotent replays not counted twice).
+- `ledger_fednow_rejections_total{reason}` — per-item pacs.008
+  rejections by reason (idempotent replays not counted).
 - `ledger_statement_queries_total` — `GET /accounts/{id}/statement`
   JSON account statement requests served.
 - `ledger_audit_sink_sent_total` — outbox domain events the audit-sink

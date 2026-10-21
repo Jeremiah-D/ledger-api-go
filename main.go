@@ -4721,6 +4721,84 @@ func (s *server) handleCAMT053Import(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
+// fedNowPacs008Request is the POST /fednow/pacs008 body: the raw
+// pacs.008 (FIToFICstmrCdtTrf) XML document as text.
+type fedNowPacs008Request struct {
+	Pacs008 string `json:"pacs008"`
+}
+
+// fedNowPacs008ItemResponse is one per-item outcome in the
+// POST /fednow/pacs008 response.
+type fedNowPacs008ItemResponse struct {
+	EndToEndID      string `json:"end_to_end_id"`
+	TxID            string `json:"tx_id,omitempty"`
+	EntryID         string `json:"entry_id,omitempty"`
+	AmountCents     int64  `json:"amount_cents"`
+	Currency        string `json:"currency"`
+	PayeeAccount    string `json:"payee_account,omitempty"`
+	MatchedOriginal string `json:"matched_original,omitempty"`
+	Duplicate       bool   `json:"duplicate"`
+	Error           string `json:"error,omitempty"`
+}
+
+// handleFedNowPacs008 implements POST /fednow/pacs008 (LG-163): books
+// a FedNow pacs.008 inbound instant-payment notification. The document
+// is parsed with ledger.ParsePacs008 — a malformed document refuses
+// the whole request with 400 (fail-loud: an unbooked receipt would
+// leave the books understating what the bank received). Items are then
+// applied with ledger.ProcessPacs008: each CdtTrfTxInf is associated
+// with its originating transfer/payout via EndToEndId, validated
+// against it (fail-closed: amount/currency must match, the payee must
+// be one of the original's accounts), and booked as a payee-inflow
+// entry against the configured FedNow settlement account. Processing
+// is per-item — one bad item is recorded in its item's error, not
+// applied to the others — so the endpoint always answers 200 with the
+// item list. The operator identity comes from the x-ledger-actor
+// header, like the other operator actions — the actor lands in the
+// hash-chained fednow_pacs008_posted / fednow_pacs008_rejected audit
+// events. Receipts that clear the gate bump
+// ledger_fednow_postings_total; rejections bump
+// ledger_fednow_rejections_total{reason}.
+func (s *server) handleFedNowPacs008(w http.ResponseWriter, r *http.Request) {
+	s.metrics.FedNowPacs008Requests.Add(1)
+	var req fedNowPacs008Request
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Pacs008) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pacs008 document is required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	results, err := s.ledgerFor(r).ProcessPacs008([]byte(req.Pacs008), ledger.ActorFromContext(actx))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	items := make([]fedNowPacs008ItemResponse, 0, len(results))
+	for _, res := range results {
+		item := fedNowPacs008ItemResponse{
+			EndToEndID:  res.Transaction.EndToEndID,
+			TxID:        res.Transaction.TxID,
+			AmountCents: res.Transaction.AmountCents,
+			Currency:    res.Transaction.Currency,
+			Duplicate:   res.Duplicate,
+		}
+		if res.Err != nil {
+			item.Error = res.Err.Error()
+		} else {
+			item.EntryID = res.EntryID
+			item.PayeeAccount = string(res.Transaction.CreditorAccount)
+			item.MatchedOriginal = res.Association.ID
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": items})
+}
+
 // handleBalanceHistory implements GET /balance-history: the balance time
 // series the background recorder samples (see ledger/balance_history.go),
 // for reconciliation dashboards and fintech reporting. Query parameters:
@@ -8049,6 +8127,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /payouts/{id}/cancel", s.handleCancelPayout)
 	// LG-161: ACH return (dishonored entry) file booking.
 	mux.HandleFunc("POST /ach/returns", s.handleACHReturns)
+	mux.HandleFunc("POST /fednow/pacs008", s.handleFedNowPacs008)
 	mux.HandleFunc("POST /credit-lines", s.handleGrantCreditLine)
 	mux.HandleFunc("POST /credit-lines/reduce", s.handleReduceCreditLine)
 	mux.HandleFunc("GET /credit-lines", s.handleGetCreditLine)
@@ -8183,6 +8262,10 @@ func (s *server) handler() http.Handler {
 		// Per-reason-code ACH return counts (LG-161), aggregated
 		// across tenants like the other ledger-sourced counters above.
 		achReturns := map[string]uint64{}
+		// FedNow pacs.008 posting/rejection counts (LG-163),
+		// aggregated across tenants the same way.
+		var fedNowPostings uint64
+		fedNowRejections := map[string]uint64{}
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -8253,6 +8336,15 @@ func (s *server) handler() http.Handler {
 			// (see ledger/ach_return.go, LG-161).
 			for code, n := range l.ACHReturnCounts() {
 				achReturns[code] += n
+			}
+			// The FedNow counters likewise live in the ledger:
+			// receipts book and rejections record inside
+			// ProcessPacs008, not in a handler (see
+			// ledger/fednow_pacs008.go, LG-163).
+			postings, rejections := l.FedNowStats()
+			fedNowPostings += postings
+			for reason, n := range rejections {
+				fedNowRejections[reason] += n
 			}
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
@@ -8352,6 +8444,11 @@ func (s *server) handler() http.Handler {
 		// (never accumulates) the exposed series.
 		for code, n := range achReturns {
 			s.metrics.ACHReturnsTotal.Set(code, n)
+		}
+		// The FedNow counters are mirrored the same way.
+		s.metrics.FedNowPostings.Store(fedNowPostings)
+		for reason, n := range fedNowRejections {
+			s.metrics.FedNowRejections.Set(reason, n)
 		}
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))

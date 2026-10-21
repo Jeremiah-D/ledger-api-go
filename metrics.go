@@ -37,6 +37,21 @@ type Metrics struct {
 	// CAMT053Imports counts POST /camt053/import requests served (all
 	// attempts, including duplicates and rejected payloads; LG-103).
 	CAMT053Imports atomic.Uint64
+	// FedNowPacs008Requests counts POST /fednow/pacs008 requests
+	// received, including rejected documents (LG-163).
+	FedNowPacs008Requests atomic.Uint64
+	// FedNowPostings counts FedNow pacs.008 receipt postings committed
+	// via POST /fednow/pacs008. It is synced from the ledgers on every
+	// GET /metrics scrape, like ACHReturnsTotal: idempotent replays
+	// are not counted twice.
+	FedNowPostings atomic.Uint64
+	// FedNowRejections counts per-item pacs.008 rejections by reason,
+	// rendered as ledger_fednow_rejections_total{reason=".."}: the
+	// ledger counts the rejections at process time and the HTTP layer
+	// mirrors the counts on scrape, so Set overwrites (never
+	// accumulates) — the ledger is the source of truth. The zero value
+	// is ready to use; Set is safe for concurrent use.
+	FedNowRejections FedNowRejectionCounter
 	// Pain001Exports counts GET /exports/pain001 requests served.
 	Pain001Exports atomic.Uint64
 	// Pain001StatusQueries counts GET /exports/pain001/{msgid}/status
@@ -839,6 +854,15 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&sb, "ledger_ach_returns_total",
 		"Total ACH returns (dishonored entries) booked by POST /ach/returns, by NACHA return reason code (idempotent replays not counted twice).",
 		m.ACHReturnsTotal.series())
+	writeCounter(&sb, "ledger_fednow_pacs008_requests_total",
+		"Total POST /fednow/pacs008 requests received, including rejected documents.",
+		m.FedNowPacs008Requests.Load())
+	writeCounter(&sb, "ledger_fednow_postings_total",
+		"Total FedNow pacs.008 receipt postings committed (idempotent replays not counted twice).",
+		m.FedNowPostings.Load())
+	writeLabeledCounter(&sb, "ledger_fednow_rejections_total",
+		"Total per-item pacs.008 rejections by reason (idempotent replays not counted).",
+		m.FedNowRejections.series())
 	writeCounter(&sb, "ledger_credit_lines_total",
 		"Total POST /credit-lines requests received.", m.CreditLinesTotal.Load())
 	writeCounter(&sb, "ledger_credit_interest_accruals_total",
@@ -1253,6 +1277,44 @@ func (c *ACHReturnReasonCounter) series() []labeledCounterSeries {
 type labeledCounterSeries struct {
 	labels string
 	value  uint64
+}
+
+// FedNowRejectionCounter is the per-reason breakdown of rejected
+// pacs.008 notification items (LG-163), rendered as
+// ledger_fednow_rejections_total{reason=".."}: the ledger counts the
+// rejections at process time and the HTTP layer mirrors the counts on
+// scrape, so Set overwrites (never accumulates) — the ledger is the
+// source of truth. The zero value is ready to use; Set is safe for
+// concurrent use.
+type FedNowRejectionCounter struct {
+	mu     sync.Mutex
+	counts map[string]uint64
+}
+
+// Set records the ledger's authoritative per-reason rejection count.
+func (c *FedNowRejectionCounter) Set(reason string, n uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = make(map[string]uint64)
+	}
+	c.counts[reason] = n
+}
+
+// series renders the counter as labeled series, sorted by reason for a
+// deterministic exposition.
+func (c *FedNowRejectionCounter) series() []labeledCounterSeries {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]labeledCounterSeries, 0, len(c.counts))
+	for reason, v := range c.counts {
+		out = append(out, labeledCounterSeries{
+			labels: fmt.Sprintf(`reason=%q`, reason),
+			value:  v,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].labels < out[j].labels })
+	return out
 }
 
 // PostingRuleLegCounter is the per-rule breakdown of derived posting
