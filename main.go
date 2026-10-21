@@ -148,6 +148,11 @@ func (s *server) writePostError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
+	if errors.Is(err, ledger.ErrVelocityLimitExceeded) {
+		s.metrics.VelocityLimitRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
 	if errors.Is(err, ledger.ErrBudgetExceeded) {
 		s.metrics.BudgetRejections.Add(1)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -347,6 +352,11 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrVelocityLimitExceeded) {
+			s.metrics.VelocityLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrBudgetExceeded) {
 			s.metrics.BudgetRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -533,6 +543,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrVelocityLimitExceeded) {
+			s.metrics.VelocityLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -987,6 +1002,11 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrVelocityLimitExceeded) {
+			s.metrics.VelocityLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1699,6 +1719,11 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrVelocityLimitExceeded) {
+			s.metrics.VelocityLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrBudgetExceeded) {
 			s.metrics.BudgetRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1798,6 +1823,11 @@ func (s *server) handleReverseEntryPartial(w http.ResponseWriter, r *http.Reques
 		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrVelocityLimitExceeded) {
+			s.metrics.VelocityLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -6312,6 +6342,148 @@ func (s *server) handleListJournalRules(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// setVelocityLimitRequest is the body of PUT /velocity-limits: one
+// rolling velocity limit. window is a Go duration string ("10m",
+// "24h"); a non-positive max_count / max_amount_cents disables that
+// dimension; at least one must be positive.
+type setVelocityLimitRequest struct {
+	Account        string `json:"account"`
+	Currency       string `json:"currency"`
+	Window         string `json:"window"`
+	MaxCount       int64  `json:"max_count"`
+	MaxAmountCents int64  `json:"max_amount_cents"`
+}
+
+// handleSetVelocityLimit implements PUT /velocity-limits: creates or
+// replaces the rolling velocity limit for one account and currency
+// (see ledger.SetVelocityLimit). Structural: no version bump. A 400
+// reports the validation failure; the request never half-applies.
+func (s *server) handleSetVelocityLimit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req setVelocityLimitRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	if req.Account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account required"})
+		return
+	}
+	window, err := time.ParseDuration(req.Window)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "window must be a Go duration (e.g. 10m, 24h)"})
+		return
+	}
+	if err := s.ledgerFor(r).SetVelocityLimit(ledger.AccountID(req.Account), req.Currency, window, req.MaxCount, req.MaxAmountCents); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	lim, _ := s.ledgerFor(r).VelocityLimit(ledger.AccountID(req.Account), req.Currency)
+	writeJSON(w, http.StatusOK, velocityLimitJSON(lim))
+}
+
+// handleClearVelocityLimit implements DELETE /velocity-limits: removes
+// the rolling velocity limit for ?account=&currency=. Clearing a limit
+// that was never set is a no-op 200.
+func (s *server) handleClearVelocityLimit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	account := r.URL.Query().Get("account")
+	if account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account query param required"})
+		return
+	}
+	s.ledgerFor(r).ClearVelocityLimit(ledger.AccountID(account), r.URL.Query().Get("currency"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
+}
+
+// handleListVelocityLimits implements GET /velocity-limits: lists every
+// configured rolling velocity limit, sorted by (account, currency).
+func (s *server) handleListVelocityLimits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	limits := s.ledgerFor(r).VelocityLimits()
+	out := make([]map[string]any, 0, len(limits))
+	for _, lim := range limits {
+		out = append(out, velocityLimitJSON(lim))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"velocity_limits": out})
+}
+
+// handleVelocityLimitUsage implements GET /velocity-limits/usage: the
+// current rolling-window usage for ?account=&currency=&direction=
+// (inflow|outflow, default outflow). Operator observability for the
+// velocity gate — a 404 names an account with no configured limit.
+func (s *server) handleVelocityLimitUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	account := r.URL.Query().Get("account")
+	if account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account query param required"})
+		return
+	}
+	dir := ledger.VelocityOutflow
+	switch d := r.URL.Query().Get("direction"); d {
+	case "", "outflow":
+	case "inflow":
+		dir = ledger.VelocityInflow
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "direction must be inflow or outflow"})
+		return
+	}
+	usage, ok := s.ledgerFor(r).VelocityUsageOf(ledger.AccountID(account), r.URL.Query().Get("currency"), dir)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no velocity limit configured for account"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":          string(usage.Account),
+		"currency":         usage.Currency,
+		"direction":        string(usage.Direction),
+		"window":           usage.Window.String(),
+		"window_start":     usage.WindowStart.UTC().Format(time.RFC3339),
+		"window_end":       usage.WindowEnd.UTC().Format(time.RFC3339),
+		"max_count":        usage.MaxCount,
+		"max_amount_cents": usage.MaxAmountCents,
+		"count":            usage.Count,
+		"amount_cents":     usage.AmountCents,
+	})
+}
+
+// velocityLimitJSON renders a ledger.VelocityLimit with the window as
+// a human-readable duration string.
+func velocityLimitJSON(lim ledger.VelocityLimit) map[string]any {
+	return map[string]any{
+		"account":          string(lim.Account),
+		"currency":         lim.Currency,
+		"window":           lim.Window.String(),
+		"max_count":        lim.MaxCount,
+		"max_amount_cents": lim.MaxAmountCents,
+	}
+}
+
 // handleClosePeriod implements POST /periods/{id}/close: locks the
 // accounting period id ("YYYY-MM", UTC month). Journal entries whose
 // timestamp falls in a closed period are rejected with 422
@@ -7574,6 +7746,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PUT /rules/{id}", s.handleSetJournalRule)
 	mux.HandleFunc("DELETE /rules/{id}", s.handleDeleteJournalRule)
 	mux.HandleFunc("GET /rules", s.handleListJournalRules)
+	mux.HandleFunc("PUT /velocity-limits", s.handleSetVelocityLimit)
+	mux.HandleFunc("DELETE /velocity-limits", s.handleClearVelocityLimit)
+	mux.HandleFunc("GET /velocity-limits", s.handleListVelocityLimits)
+	mux.HandleFunc("GET /velocity-limits/usage", s.handleVelocityLimitUsage)
 	mux.HandleFunc("POST /periods/{id}/close", s.handleClosePeriod)
 	mux.HandleFunc("POST /periods/{id}/preflight", s.handlePeriodPreflight)
 	mux.HandleFunc("POST /periods/{id}/reopen", s.handleReopenPeriod)
@@ -8580,6 +8756,26 @@ func main() {
 		}
 		opts = append(opts, ledger.WithMaxTransferChunkCents(n))
 		log.Printf("ledger-api-go: max transfer chunk = %d cents", n)
+	}
+
+	// LEDGER_VELOCITY_LIMITS configures per-account per-currency rolling
+	// velocity limits (see ledger.ParseVelocityLimits for the syntax,
+	// e.g. "cust-123:USD:10m:50:100000,cust-456:EUR:24h:500:5000000").
+	// Postings that would take the account's count or moved amount in
+	// the sliding window above the limit are rejected with 422.
+	// Orthogonal to the daily outflow limits (UTC-day buckets) and the
+	// API-key rate limiter. Unset means no limits. An invalid value
+	// fails the startup fast (log.Fatal): a misconfigured risk control
+	// must never silently run unenforced.
+	if raw := os.Getenv("LEDGER_VELOCITY_LIMITS"); raw != "" {
+		limits, err := ledger.ParseVelocityLimits(raw)
+		if err != nil {
+			log.Fatalf("ledger-api-go: %v", err)
+		}
+		for _, vl := range limits {
+			opts = append(opts, ledger.WithVelocityLimit(vl.Account, vl.Currency, vl.Window, vl.MaxCount, vl.MaxAmountCents))
+		}
+		log.Printf("ledger-api-go: velocity limits = %d configured", len(limits))
 	}
 
 	// LEDGER_DAILY_OUTFLOW_LIMITS configures per-account per-currency daily

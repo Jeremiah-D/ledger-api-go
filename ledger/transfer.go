@@ -878,16 +878,34 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		return TransferReceipt{}, ErrBudgetExceeded
 	}
 
+	// The transfer's effective post time is finalized before the
+	// velocity and period gates: a backdated transfer's window usage
+	// counts toward its own timestamp, and an un-timestamped transfer
+	// counts toward now.
+	vat := t.CreatedAt
+	if vat.IsZero() {
+		vat = time.Now()
+	}
+
+	// Rolling velocity limits (see velocity.go) run after the monthly
+	// spend budget and before the period gate: the payer's total
+	// outflow (amount + fee) counts toward the payer's outflow window,
+	// the principal counts toward the payee's inflow window. Only
+	// transfers that book something new reach this gate — a replay
+	// returned above.
+	if err := l.velocityRejectedLocked(t.To, t.Currency, VelocityInflow, t.AmountCents, vat, "PostTransfer"); err != nil {
+		return TransferReceipt{}, err
+	}
+	if err := l.velocityRejectedLocked(t.From, t.Currency, VelocityOutflow, totalOutflow, vat, "PostTransfer"); err != nil {
+		return TransferReceipt{}, err
+	}
+
 	// The period gate is keyed on the transfer's effective post time: a
 	// backdated transfer landing in a closed accounting period is rejected
 	// with ErrPeriodClosed. It runs after the idempotency replay check
 	// above, so replaying a key posted before the period closed returns
 	// the original receipt.
-	at := t.CreatedAt
-	if at.IsZero() {
-		at = time.Now()
-	}
-	if err := l.periodRejectedLocked(at); err != nil {
+	if err := l.periodRejectedLocked(vat); err != nil {
 		return TransferReceipt{}, err
 	}
 
@@ -1206,4 +1224,12 @@ func (l *Ledger) commitEntryLocked(e JournalEntry) {
 	l.creditTotals[creditKey] += e.AmountCents
 	l.version++
 	l.appendChainLink(e)
+	// Rolling velocity windows (see velocity.go) feed from this single
+	// commit funnel: every journal write — Post, transfer legs, batch,
+	// sweep, split, merge, reversal, hold capture, FX, closing, and
+	// system postings — records its two directional events, so the
+	// windows reflect real booked movement. Idempotent replays skip
+	// the commit and never record; accounts without a configured
+	// limit record nothing, keeping memory bounded.
+	l.recordVelocityLocked(e.DebitAccount, e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt)
 }

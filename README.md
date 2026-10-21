@@ -1908,6 +1908,53 @@ with its subtree's booked outflow, utilization fraction, and account
 count for the report day, so risk tooling can watch velocity-limit
 pressure per hierarchy.
 
+### Rolling velocity limits
+
+Per-account, per-currency cap on money movement inside a sliding window
+(fintech/AML risk control — burst detection on customer cash-outs). Where
+the daily outflow limit above uses UTC-calendar-day buckets, velocity
+limits watch a rolling window (e.g. `10m`, `24h`): within any window
+ending at the posting's timestamp, the account's inflow and outflow are
+each bounded by a posting count and a moved-amount cap. Either dimension
+rejects with `422` (`ErrVelocityLimitExceeded`) before anything is booked.
+
+Configure with the `LEDGER_VELOCITY_LIMITS` environment variable
+(`"<account>:<currency>:<window>:<maxCount>:<maxAmountCents>[,...]"`,
+e.g. `"cust-123:USD:10m:50:100000"`), the `ledger.WithVelocityLimit` /
+`SetVelocityLimit` API, or `PUT /velocity-limits`. A non-positive
+`max_count` / `max_amount_cents` disables that dimension; at least one
+must be positive. Windows are capped at 30 days.
+
+The check runs after the monthly spend budget and before the period gate
+— the last of the account risk controls — on `POST /entries` (debit leg
+counts toward inflow, credit leg toward outflow), `POST /transfers`
+(payer's total outflow incl. fee, payee's inflow), and reversals. Every
+committed journal row feeds the windows (batch, sweep, hold capture, FX
+legs, and system postings included); idempotent replays consume no
+budget. The three controls are orthogonal and compose: a posting must
+clear the daily limit (UTC-day outflow), the velocity limit (sliding
+window, count + amount, both directions), and the API-key rate limiter
+(request rates).
+
+Windows start when the limit is configured — history before that is not
+backfilled, and only accounts with a configured limit accumulate events,
+so memory stays bounded by the configured windows. The configuration
+(not the windows) round-trips through disaster-recovery snapshots;
+`GET /velocity-limits` lists limits, `GET /velocity-limits/usage`
+reports the current window usage, and the reconcile report lists every
+configured limit (`velocity_limits`). Breaches land in the structured
+audit log as `velocity_limit_breach` and are counted in
+`ledger_velocity_limit_rejections_total`.
+
+```bash
+LEDGER_VELOCITY_LIMITS="cust-123:USD:10m:50:100000" ./ledger-api-go
+curl -s -X PUT localhost:8080/velocity-limits \
+  -d '{"account":"cust-123","currency":"USD","window":"10m","max_count":50,"max_amount_cents":100000}'
+# 200 {"account":"cust-123","currency":"USD","window":"10m0s","max_count":50,"max_amount_cents":100000}
+curl -s localhost:8080/velocity-limits/usage?account=cust-123\&direction=outflow
+# {"account":"cust-123","currency":"USD","direction":"outflow","window":"10m0s",...,"count":0,"amount_cents":0}
+```
+
 ### Monthly spend budgets
 
 Per-account, per-currency cap on how much money an account may spend in

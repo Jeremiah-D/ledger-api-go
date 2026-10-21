@@ -198,6 +198,11 @@ type ReconciliationReport struct {
 	// this to know which accounts are capped on daily outflow and at
 	// what level.
 	DailyLimits []DailyLimit `json:"daily_limits"`
+	// VelocityLimits lists every configured rolling velocity limit
+	// (see SetVelocityLimit), sorted by (account, currency). Risk
+	// tooling reads this to know which accounts are capped on
+	// short-horizon movement and at what level.
+	VelocityLimits []VelocityLimit `json:"velocity_limits"`
 	// SweepReserves lists every configured sweep reserve floor (see
 	// SetSweepReserve), sorted by (account, currency). Risk tooling
 	// reads this to know which accounts keep an operating float that
@@ -815,6 +820,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		Kyc:                        l.kycSummaryLocked(),
 		ReceivablesAging:            l.receivablesAgingLocked(now),
 		DailyLimits:                l.dailyLimitsLocked(),
+		VelocityLimits:             l.velocityLimitsLocked(),
 		SweepReserves:              l.sweepReservesLocked(),
 		SubtreeLimitUtilization:    l.subtreeLimitUtilizationLocked(now),
 		LargeTxReports:             l.largeTxReportsForDayLocked(utcDay(now)),

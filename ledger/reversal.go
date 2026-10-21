@@ -300,6 +300,15 @@ func (l *Ledger) reverseEntryLocked(entryID string, idempotencyKey string, metad
 	if l.dailyLimitRejectedLocked(reversal.CreditAccount, reversal.Currency, reversal.AmountCents, reversal.CreatedAt) {
 		return JournalEntry{}, false, ErrDailyLimitExceeded
 	}
+	// Rolling velocity limits (see velocity.go): the reversal is a new
+	// journal row, so it counts toward both legs' windows like any
+	// other posting.
+	if err := l.velocityRejectedLocked(reversal.DebitAccount, reversal.Currency, VelocityInflow, reversal.AmountCents, reversal.CreatedAt, "ReverseEntry"); err != nil {
+		return JournalEntry{}, false, err
+	}
+	if err := l.velocityRejectedLocked(reversal.CreditAccount, reversal.Currency, VelocityOutflow, reversal.AmountCents, reversal.CreatedAt, "ReverseEntry"); err != nil {
+		return JournalEntry{}, false, err
+	}
 	// The period gate is keyed on the reversal's own timestamp: the books
 	// are corrected as of now, so a reversal whose post time falls in a
 	// closed period is rejected — it can never rewrite a locked month.
@@ -598,6 +607,15 @@ func (l *Ledger) reverseEntryPartialLocked(entryID string, amountCents int64, id
 	}
 	if l.dailyLimitRejectedLocked(reversal.CreditAccount, reversal.Currency, reversal.AmountCents, reversal.CreatedAt) {
 		return JournalEntry{}, false, ErrDailyLimitExceeded
+	}
+	// Rolling velocity limits (see velocity.go), like the full
+	// reversal above: a partial reversal is a new journal row and
+	// counts toward both legs' windows.
+	if err := l.velocityRejectedLocked(reversal.DebitAccount, reversal.Currency, VelocityInflow, reversal.AmountCents, reversal.CreatedAt, "ReverseEntryPartial"); err != nil {
+		return JournalEntry{}, false, err
+	}
+	if err := l.velocityRejectedLocked(reversal.CreditAccount, reversal.Currency, VelocityOutflow, reversal.AmountCents, reversal.CreatedAt, "ReverseEntryPartial"); err != nil {
+		return JournalEntry{}, false, err
 	}
 	// The period gate is keyed on the reversal's own timestamp, like
 	// ReverseEntry: the books are corrected as of now.

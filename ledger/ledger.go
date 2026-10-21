@@ -416,6 +416,20 @@ type Ledger struct {
 	// currency; structural config, like frozen and noOverdraft.
 	dailyLimits  map[dailyLimitKey]int64
 	dailyOutflow map[dailyLimitKey]int64
+	// velocityLimits maps (account, currency) to the account's rolling
+	// velocity limit, and velocityEvents accumulates the per-account
+	// journal activity feeding the sliding windows (see velocity.go).
+	// A Post that would take the window's count or amount above the
+	// limit is rejected with ErrVelocityLimitExceeded. Opt-in per
+	// account and currency; structural config, like dailyLimits —
+	// setting or clearing a limit does not bump the journal version.
+	// The configuration (not the windows) survives snapshots; the
+	// windows restart at the restore point.
+	velocityLimits map[velocityLimitKey]VelocityLimit
+	velocityEvents map[velocityLimitKey][]velocityEvent
+	// velocityNow is the injectable clock for velocity-window
+	// evaluation (see WithVelocityClock). Nil means time.Now.
+	velocityNow func() time.Time
 	// sweepReserves maps (account, currency) to the account's sweep
 	// reserve floor in cents (see sweep_reserve.go): PostSweep moves
 	// only the balance in excess of the floor to the target. Opt-in
@@ -1333,6 +1347,8 @@ func New(opts ...Option) *Ledger {
 		erasedMemos:           make(map[string]ErasureRecord),
 		dailyLimits:           make(map[dailyLimitKey]int64),
 		dailyOutflow:          make(map[dailyLimitKey]int64),
+		velocityLimits:        make(map[velocityLimitKey]VelocityLimit),
+		velocityEvents:        make(map[velocityLimitKey][]velocityEvent),
 		sweepReserves:         make(map[accountCurrency]int64),
 		transferAllowlist:     make(map[AccountID]map[AccountID]bool),
 		largeTxThresholds:     make(map[string]int64),
@@ -1768,6 +1784,21 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 	// control) and accumulate independently: a posting must clear both.
 	if l.budgetRejectedLocked(e.CreditAccount, e.Currency, e.AmountCents, e.CreatedAt) {
 		return JournalEntry{}, false, ErrBudgetExceeded
+	}
+
+	// Rolling velocity limits (see velocity.go) run after the monthly
+	// spend budget and before the period gate: they are the last of the
+	// account risk controls, so only postings that book something new
+	// are evaluated — a replay returned above. The debit side counts
+	// toward the account's inflow window, the credit side toward its
+	// outflow window. Orthogonal to the daily outflow limit (UTC-day
+	// buckets) and the API-key rate limiter (request rates): a posting
+	// must clear all three.
+	if err := l.velocityRejectedLocked(e.DebitAccount, e.Currency, VelocityInflow, e.AmountCents, e.CreatedAt, "Post"); err != nil {
+		return JournalEntry{}, false, err
+	}
+	if err := l.velocityRejectedLocked(e.CreditAccount, e.Currency, VelocityOutflow, e.AmountCents, e.CreatedAt, "Post"); err != nil {
+		return JournalEntry{}, false, err
 	}
 
 	// The period gate is the last risk control overall, and it is keyed

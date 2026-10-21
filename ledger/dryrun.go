@@ -120,6 +120,15 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		noOverdraft:          make(map[AccountID]bool, len(l.noOverdraft)),
 		dailyLimits:          make(map[dailyLimitKey]int64, len(l.dailyLimits)),
 		dailyOutflow:         make(map[dailyLimitKey]int64, len(l.dailyOutflow)),
+		// Velocity limits and their rolling windows travel with the
+		// twin: the dry-run's velocity gate must see the same config
+		// and window activity the real Post applies, or a dry-run
+		// would wrongly report success. The twin's simulated commits
+		// are discarded with the copy. velocityNow is a pure function
+		// value and is shared.
+		velocityLimits: make(map[velocityLimitKey]VelocityLimit, len(l.velocityLimits)),
+		velocityEvents: make(map[velocityLimitKey][]velocityEvent, len(l.velocityEvents)),
+		velocityNow:    l.velocityNow,
 		sweepReserves:        make(map[accountCurrency]int64, len(l.sweepReserves)),
 		// The transfer beneficiary allowlists travel with the twin: the
 		// dry-run's allowlist gate must see the same lists the real
@@ -216,6 +225,12 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	}
 	for k, v := range l.dailyOutflow {
 		c.dailyOutflow[k] = v
+	}
+	for k, v := range l.velocityLimits {
+		c.velocityLimits[k] = v
+	}
+	for k, v := range l.velocityEvents {
+		c.velocityEvents[k] = append([]velocityEvent(nil), v...)
 	}
 	for k, v := range l.sweepReserves {
 		c.sweepReserves[k] = v

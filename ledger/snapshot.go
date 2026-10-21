@@ -265,6 +265,14 @@ type snapshotConfigLine struct {
 	// zero, which fail-opens for the remainder of that day — operators
 	// should treat a restore as a risk-control reset event.
 	DailyLimits []DailyLimit `json:"daily_limits,omitempty"`
+	// VelocityLimits carries the rolling velocity limits (see
+	// SetVelocityLimit); absent in snapshots written before velocity
+	// limits existed. Like the daily outflow counters, the rolling
+	// windows themselves are deliberately NOT restored: a
+	// disaster-recovery restore restarts the windows at the restore
+	// point, which fail-opens for the first window length — operators
+	// should treat a restore as a risk-control reset event.
+	VelocityLimits []VelocityLimit `json:"velocity_limits,omitempty"`
 	// SweepReserves carries the sweep reserve floors (see
 	// SetSweepReserve); absent in snapshots written before sweep
 	// reserves existed, which import as unreserved. The floor is
@@ -1189,6 +1197,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		SplitFeePerChunk:         l.splitFeePerChunk,
 		IdempotencyTTL:           l.idempotencyTTL.String(),
 		DailyLimits:              l.dailyLimitsLocked(),
+		VelocityLimits:           l.velocityLimitsLocked(),
 		SweepReserves:            l.sweepReservesLocked(),
 		Allowlists:               l.allowlistSnapshotLocked(),
 		LargeTxThresholds:        l.largeTxThresholdsLocked(),
@@ -2109,6 +2118,11 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		limit int64
 	}
 	var limits []validatedLimit
+	type validatedVelocityLimit struct {
+		key velocityLimitKey
+		lim VelocityLimit
+	}
+	var vlimits []validatedVelocityLimit
 	for _, dl := range cfg.DailyLimits {
 		if dl.Account == "" {
 			return bad("daily limit with empty account")
@@ -2121,6 +2135,24 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("negative daily limit for account %q (%s)", dl.Account, dl.Currency)
 		}
 		limits = append(limits, validatedLimit{dailyLimitKey{account: dl.Account, currency: cur}, dl.LimitCents})
+	}
+	// Velocity limits restore like the daily outflow limits: a row
+	// that could never have been installed (bad currency, bad window,
+	// no positive dimension) fails the whole import instead of
+	// silently dropping a risk control. The rolling windows restart
+	// empty — see the field comment on snapshotConfigLine.
+	for _, vl := range cfg.VelocityLimits {
+		cur, err := normalizeCurrency(vl.Currency)
+		if err != nil {
+			return bad("bad velocity limit currency %q: %v", vl.Currency, err)
+		}
+		if err := checkVelocityLimit(vl.Account, cur, vl.Window, vl.MaxCount, vl.MaxAmountCents); err != nil {
+			return bad("bad velocity limit for account %q (%s): %v", vl.Account, vl.Currency, err)
+		}
+		vlimits = append(vlimits, validatedVelocityLimit{
+			key: velocityLimitKey{account: vl.Account, currency: cur},
+			lim: VelocityLimit{Account: vl.Account, Currency: cur, Window: vl.Window, MaxCount: vl.MaxCount, MaxAmountCents: vl.MaxAmountCents},
+		})
 	}
 	// Sweep reserve floors restore like the daily outflow limits: an
 	// empty account, a bad currency, or a non-positive floor fails the
@@ -2972,6 +3004,9 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, vl := range limits {
 		l.dailyLimits[vl.key] = vl.limit
 	}
+	for _, vl := range vlimits {
+		l.velocityLimits[vl.key] = vl.lim
+	}
 	for _, vr := range reserves {
 		l.sweepReserves[vr.key] = vr.floor
 	}
@@ -3747,6 +3782,9 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if !reflect.DeepEqual(a.dailyLimits, b.dailyLimits) {
+		return false
+	}
+	if !reflect.DeepEqual(a.velocityLimits, b.velocityLimits) {
 		return false
 	}
 	if !reflect.DeepEqual(a.budgets, b.budgets) {

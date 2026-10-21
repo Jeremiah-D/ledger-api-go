@@ -172,6 +172,13 @@ type Metrics struct {
 	// have taken the account's cumulative outflow for the UTC day above
 	// its configured daily outflow limit.
 	DailyLimitRejections atomic.Uint64
+	// VelocityLimitRejections counts POST /entries, POST /transfers,
+	// and POST /entries/{id}/reverse requests rejected with 422
+	// because they would have taken the account's rolling-window
+	// count or amount above its configured velocity limit (see
+	// ledger.SetVelocityLimit). Orthogonal to the daily outflow
+	// limit (UTC-day buckets) and the API-key rate limiter.
+	VelocityLimitRejections atomic.Uint64
 	// BudgetRejections counts POST /entries, POST /entries/batch,
 	// POST /transfers, POST /sweeps, and POST /holds/{id}/capture
 	// requests rejected with 422 because they would have taken the
@@ -913,6 +920,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_daily_limit_rejections_total",
 		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected because they would have taken the account's daily outflow above its configured limit.",
 		m.DailyLimitRejections.Load())
+	writeCounter(&sb, "ledger_velocity_limit_rejections_total",
+		"Total POST /entries, POST /transfers, and POST /entries/{id}/reverse requests rejected because they would have taken the account's rolling-window posting count or moved amount above its configured velocity limit (LG-156).",
+		m.VelocityLimitRejections.Load())
 	writeCounter(&sb, "ledger_budget_rejections_total",
 		"Total POST /entries, POST /entries/batch, POST /transfers, POST /sweeps, and POST /holds/{id}/capture requests rejected because they would have taken the account's UTC-calendar-month cumulative spend above its configured monthly spend budget.",
 		m.BudgetRejections.Load())
