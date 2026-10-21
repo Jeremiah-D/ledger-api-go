@@ -3453,6 +3453,54 @@ Semantics:
   is no special auth, like the export endpoint.
   `GET /metrics` counts imports as `ledger_camt053_imports_total`.
 
+### NACHA ACH file generation (Go: `ledger.GenerateNACHAFile`)
+
+From payout instructions (or any caller-built entry list) the ledger
+renders a NACHA origination file — File Header (1), per-batch Batch
+Header (5) / Entry Detail (6) / optional Addenda (7) / Batch Control
+(8), File Control (9). Every record is exactly 94 characters; the file
+is padded with `9` records to a 10-record block. Go-only (no HTTP
+endpoint): the operator builds the file from reviewed payouts and
+hands it to the bank's uploader.
+
+```go
+entry, _ := ledger.PayoutToNACHAEntry(payout, ledger.NACHAReceiver{
+    Routing: "021000089", AccountNumber: "987654321",
+    IndividualName: "ACME SUPPLIER", // payouts are outflows -> credit (22/32)
+})
+doc, err := ledger.GenerateNACHAFile(ledger.NACHAFileConfig{
+    ImmediateDestination: "021000089", ImmediateOrigin: "121042882",
+    DestinationName: "FEDERAL RESERVE", OriginName: "FIRST NATIONAL",
+}, []ledger.NACHABatch{{Config: ledger.NACHABatchConfig{
+    ServiceClassCode: "220", CompanyName: "ACME CORP", CompanyID: "1122334455",
+    EntryClassCode: "CCD", CompanyEntryDescription: "VENDOR PAY",
+    EffectiveEntryDate: time.Now(), OriginatingDFI: "12104288", BatchNumber: 1,
+}, Entries: []ledger.NACHAEntry{entry}}})
+```
+
+Semantics:
+
+- **Routing check digits** — every receiving DFI and both immediate
+  destination/origin routings are 9-digit validated with the ABA 3-7-1
+  checksum (`ledger.NACHACheckDigit`); a bad digit fails the whole
+  file, never ships.
+- **Direction checks** — transaction codes `22/32` (credit) and
+  `27/37` (debit); a debit entry in a `220` credits-only batch (or a
+  credit in `225`) is rejected, and batch/file control debit/credit
+  totals are split by that same direction, so totals always reconcile
+  with the entry list. Zero-dollar prenotes (`23/28/33/38`) are
+  allowed only with a zero amount.
+- **Fail-loud fields** — a text field that exceeds its fixed width or
+  carries non-printable-ASCII is an error; the builder never silently
+  truncates names or account numbers. Uppercase is recommended by
+  NACHA but not forced.
+- **Trace numbers** — ODFI transit (8) + per-batch 7-digit sequence
+  from 1; entry hash sums the receiving DFIs (last 10 digits kept).
+- Scope: CCD/PPD origination only. Same-day windows, IAT, and return
+  handling are out of scope — documented, not faked. Lines are joined
+  with `\n` (no trailing newline); convert to CRLF for the bank if
+  required.
+
 ### `GET /accounts/{id}/statement` — JSON account statement
 
 A bank-style account statement for one account over the half-open
