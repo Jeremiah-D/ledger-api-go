@@ -410,6 +410,13 @@ type Metrics struct {
 	// an already-posted batch idempotency key and returned the original
 	// receipt.
 	BatchIdempotencyHits atomic.Uint64
+	// TransferBatchTotal counts POST /transfers/batch requests received
+	// (all attempts, including duplicates and rejected payloads).
+	TransferBatchTotal atomic.Uint64
+	// TransferBatchIdempotencyHits counts POST /transfers/batch requests
+	// that replayed an already-posted transfer-batch idempotency key and
+	// returned the original receipt.
+	TransferBatchIdempotencyHits atomic.Uint64
 	// AuditEventsTotal counts audit-log events written to disk. It is
 	// synced from the ledger's audit log on every GET /metrics scrape,
 	// so it stays meaningful even though the events are produced inside
@@ -873,6 +880,11 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_batch_idempotency_hits_total",
 		"Total POST /entries/batch requests that replayed an existing batch idempotency key.",
 		m.BatchIdempotencyHits.Load())
+	writeCounter(&sb, "ledger_transfer_batch_total",
+		"Total POST /transfers/batch requests received.", m.TransferBatchTotal.Load())
+	writeCounter(&sb, "ledger_transfer_batch_idempotency_hits_total",
+		"Total POST /transfers/batch requests that replayed an existing transfer-batch idempotency key.",
+		m.TransferBatchIdempotencyHits.Load())
 	writeCounter(&sb, "ledger_audit_events_total",
 		"Total audit-log events written to disk.", m.AuditEventsTotal.Load())
 	writeCounter(&sb, "ledger_audit_dropped_total",

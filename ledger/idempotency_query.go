@@ -170,6 +170,9 @@ func (l *Ledger) ListIdempotencyKeys(prefix, namespace string, limit int) []Idem
 	for key, r := range l.batchKeys {
 		add("batches", key, r.batchID, r.createdAt)
 	}
+	for key, r := range l.batchTransferKeys {
+		add("transfer-batches", key, r.batchID, r.createdAt)
+	}
 	for key, r := range l.allocKeys {
 		add("allocations", key, r.ruleID+"/"+r.month, r.createdAt)
 	}

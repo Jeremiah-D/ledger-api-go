@@ -809,6 +809,12 @@ type Ledger struct {
 	// expiring with the TTL like every other key index (see
 	// pruneBatchKeysLocked in batch.go).
 	batchKeys map[string]batchRecord
+	// batchTransferKeys maps a transfer batch's idempotency key to its
+	// batchTransferRecord, so replays rebuild the full receipt (see
+	// batch_transfer.go). Its own namespace, expiring with the TTL like
+	// every other key index (see pruneBatchTransferKeysLocked in
+	// batch_transfer.go).
+	batchTransferKeys map[string]batchTransferRecord
 	// allocRules is the registry of cost-allocation rules (see
 	// allocation.go), keyed by rule ID. allocRuleVersion is the
 	// rule-set mutation counter, bumped on every set/delete so
@@ -1390,6 +1396,7 @@ func New(opts ...Option) *Ledger {
 		sweepKeys:             make(map[string]sweepRecord),
 		sweepFXKeys:           make(map[string]sweepFXRecord),
 		batchKeys:             make(map[string]batchRecord),
+		batchTransferKeys:   make(map[string]batchTransferRecord),
 		allocRules:            make(map[string]AllocationRule),
 		allocKeys:             make(map[string]allocRecord),
 		nettingKeys:           make(map[string]nettingRecord),
@@ -2020,6 +2027,7 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	removed += l.pruneMergeKeysLocked(now)
 	removed += l.pruneSplitKeysLocked(now)
 	removed += l.pruneBatchKeysLocked(now)
+	removed += l.pruneBatchTransferKeysLocked(now)
 	removed += l.pruneNettingKeysLocked(now)
 	removed += l.pruneInstallmentKeysLocked(now)
 	removed += l.pruneClearingKeysLocked(now)

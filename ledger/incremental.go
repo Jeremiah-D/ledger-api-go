@@ -182,6 +182,7 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	splits := map[string]splitRecord{}
 	splitKeys := map[string]string{}
 	batchKeys := map[string]batchRecord{}
+	batchTransferKeys := map[string]batchTransferRecord{}
 	allocKeys := map[string]allocRecord{}
 	var cfg *snapshotConfigLine
 	lineNo := 0
@@ -447,6 +448,18 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 					batchID:   il.Batch.BatchID,
 					entryIDs:  il.Batch.EntryIDs,
 					createdAt: il.Batch.CreatedAt,
+				}
+			case snapshotNSTransferBatch:
+				if il.TransferBatch == nil {
+					return fail("line %d: transfer_batch-namespace record without transfer_batch", lineNo)
+				}
+				if _, dup := batchTransferKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				batchTransferKeys[il.Key] = batchTransferRecord{
+					batchID:     il.TransferBatch.BatchID,
+					transferIDs: il.TransferBatch.TransferIDs,
+					createdAt:   il.TransferBatch.CreatedAt,
 				}
 			case snapshotNSAlloc:
 				if il.Allocation == nil {
@@ -815,6 +828,19 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 			}
 		}
 	}
+	for k, rec := range batchTransferKeys {
+		for _, id := range rec.transferIDs {
+			if _, ok := entryVisible(id); !ok {
+				return fail("transfer batch idempotency key %q references missing transfer entry %q", k, id)
+			}
+		}
+		if existing, ok := l.batchTransferKeys[k]; ok {
+			if existing.batchID != rec.batchID || !reflect.DeepEqual(existing.transferIDs, rec.transferIDs) ||
+				existing.createdAt.UnixNano() != rec.createdAt.UnixNano() {
+				return fail("transfer batch idempotency key %q conflicts with the ledger's registry: refusing merge", k)
+			}
+		}
+	}
 
 	// Commit: everything above checked out, so nothing below can fail.
 	// The journal fold applies the same effects commitEntryLocked does,
@@ -935,6 +961,11 @@ func (l *Ledger) ImportIncrementalSnapshot(r io.Reader) error {
 	for k, rec := range batchKeys {
 		if _, ok := l.batchKeys[k]; !ok {
 			l.batchKeys[k] = rec
+		}
+	}
+	for k, rec := range batchTransferKeys {
+		if _, ok := l.batchTransferKeys[k]; !ok {
+			l.batchTransferKeys[k] = rec
 		}
 	}
 	for k, rec := range allocKeys {

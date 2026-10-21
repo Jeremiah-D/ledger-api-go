@@ -135,6 +135,14 @@ type snapshotBatch struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// snapshotTransferBatch is the exportable form of the unexported
+// batchTransferRecord (see batch_transfer.go).
+type snapshotTransferBatch struct {
+	BatchID     string    `json:"batch_id"`
+	TransferIDs []string  `json:"transfer_ids"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // snapshotAllocation is the exportable form of the unexported
 // allocRecord: one committed cost allocation (see allocation.go).
 type snapshotAllocation struct {
@@ -190,6 +198,7 @@ const (
 	snapshotNSMergeKey    = "merge_key"       // key -> merge ID (mergeKeys)
 	snapshotNSSplitKey    = "split_key"       // key -> split ID (splitKeys)
 	snapshotNSBatch       = "batch"           // key -> snapshotBatch (batchKeys)
+	snapshotNSTransferBatch = "transfer_batch" // key -> snapshotTransferBatch (batchTransferKeys)
 	snapshotNSAlloc       = "allocation"      // key -> snapshotAllocation (allocKeys)
 	snapshotNSTermDeposit = "term_deposit"    // key -> deposit ID (termDepositKeys)
 )
@@ -214,6 +223,9 @@ type snapshotIdempotencyLine struct {
 	MergeID        string                 `json:"merge_id,omitempty"`
 	SplitID        string                 `json:"split_id,omitempty"`
 	Batch          *snapshotBatch         `json:"batch,omitempty"`
+	// TransferBatch carries the transfer-batch receipt row for the
+	// "transfer_batch" namespace (see batch_transfer.go).
+	TransferBatch *snapshotTransferBatch `json:"transfer_batch,omitempty"`
 	// Allocation carries the allocation receipt row for the
 	// "allocation" namespace (see allocation.go).
 	Allocation *snapshotAllocation `json:"allocation,omitempty"`
@@ -1138,6 +1150,19 @@ func (l *Ledger) exportIdempotencyLocked(enc *json.Encoder) error {
 			return fmt.Errorf("ledger: snapshot export: %w", err)
 		}
 	}
+	batchTransferKeyList := make([]string, 0, len(l.batchTransferKeys))
+	for k := range l.batchTransferKeys {
+		batchTransferKeyList = append(batchTransferKeyList, k)
+	}
+	for _, k := range sortedKeys(batchTransferKeyList) {
+		rec := l.batchTransferKeys[k]
+		if err := enc.Encode(snapshotIdempotencyLine{
+			Record: "idempotency", Namespace: snapshotNSTransferBatch, Key: k,
+			TransferBatch: &snapshotTransferBatch{BatchID: rec.batchID, TransferIDs: rec.transferIDs, CreatedAt: rec.createdAt},
+		}); err != nil {
+			return fmt.Errorf("ledger: snapshot export: %w", err)
+		}
+	}
 	allocKeyList := make([]string, 0, len(l.allocKeys))
 	for k := range l.allocKeys {
 		allocKeyList = append(allocKeyList, k)
@@ -1468,6 +1493,7 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 	splits := map[string]splitRecord{}
 	splitKeys := map[string]string{}
 	batchKeys := map[string]batchRecord{}
+	batchTransferKeys := map[string]batchTransferRecord{}
 	allocKeys := map[string]allocRecord{}
 	schedules := map[string]TransferSchedule{}
 	reviews := map[string]*TransferReview{}
@@ -1724,6 +1750,18 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 					batchID:   il.Batch.BatchID,
 					entryIDs:  il.Batch.EntryIDs,
 					createdAt: il.Batch.CreatedAt,
+				}
+			case snapshotNSTransferBatch:
+				if il.TransferBatch == nil {
+					return fail("line %d: transfer_batch-namespace record without transfer_batch", lineNo)
+				}
+				if _, dup := batchTransferKeys[il.Key]; dup {
+					return fail("line %d: duplicate idempotency key %q", lineNo, il.Key)
+				}
+				batchTransferKeys[il.Key] = batchTransferRecord{
+					batchID:     il.TransferBatch.BatchID,
+					transferIDs: il.TransferBatch.TransferIDs,
+					createdAt:   il.TransferBatch.CreatedAt,
 				}
 			case snapshotNSAlloc:
 				if il.Allocation == nil {
@@ -2059,6 +2097,14 @@ func ImportSnapshot(r io.Reader) (*Ledger, error) {
 			}
 		}
 		l.batchKeys[k] = rec
+	}
+	for k, rec := range batchTransferKeys {
+		for _, id := range rec.transferIDs {
+			if _, ok := l.entries[id]; !ok {
+				return fail("transfer batch idempotency key %q references missing transfer entry %q", k, id)
+			}
+		}
+		l.batchTransferKeys[k] = rec
 	}
 	for k, rec := range allocKeys {
 		for _, id := range rec.entryIDs {
@@ -3735,6 +3781,17 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	}
 	if !reflect.DeepEqual(a.splitKeys, b.splitKeys) {
 		return false
+	}
+	if len(a.batchTransferKeys) != len(b.batchTransferKeys) {
+		return false
+	}
+	for k, ra := range a.batchTransferKeys {
+		rb, ok := b.batchTransferKeys[k]
+		if !ok || ra.batchID != rb.batchID ||
+			!reflect.DeepEqual(ra.transferIDs, rb.transferIDs) ||
+			ra.createdAt.UnixNano() != rb.createdAt.UnixNano() {
+			return false
+		}
 	}
 	if len(a.schedules) != len(b.schedules) {
 		return false

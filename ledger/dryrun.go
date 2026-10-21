@@ -144,6 +144,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		captureKeys:          make(map[string]CaptureReceipt, len(l.captureKeys)),
 		sweepKeys:            make(map[string]sweepRecord, len(l.sweepKeys)),
 		batchKeys:            make(map[string]batchRecord, len(l.batchKeys)),
+		batchTransferKeys:    make(map[string]batchTransferRecord, len(l.batchTransferKeys)),
 		merges:               make(map[string]mergeRecord, len(l.merges)),
 		mergeKeys:            make(map[string]string, len(l.mergeKeys)),
 		painTransfers:        make(map[string]PainTransfer, len(l.painTransfers)),
@@ -276,6 +277,9 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	}
 	for k, v := range l.batchKeys {
 		c.batchKeys[k] = v
+	}
+	for k, v := range l.batchTransferKeys {
+		c.batchTransferKeys[k] = v
 	}
 	for k, v := range l.merges {
 		c.merges[k] = v

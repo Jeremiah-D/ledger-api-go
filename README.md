@@ -178,6 +178,60 @@ curl -s -X POST localhost:8080/entries/batch \
 - Attempts and replays are counted in `ledger_batch_total` and
   `ledger_batch_idempotency_hits_total`.
 
+### `POST /transfers/batch`
+
+Atomic bulk transfers: one request commits several transfers (a payroll
+run, a merchant batch settlement) — either every transfer lands or none
+do (Go: `ledger.PostBatchTransfer`). Each transfer is a full
+`POST /transfers` (fee resolution, FX conversion, idempotency replay,
+frozen/overdraft/daily-limit/period risk controls, dual-control review);
+the batch is the unit of atomicity.
+
+```bash
+curl -s -X POST localhost:8080/transfers/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"batch_id":"payroll-2026-10","idempotency_key":"btk-001","transfers":[
+    {"transfer_id":"t-001","from_account":"payroll","to_account":"alice","amount_cents":500000,"currency":"USD"},
+    {"transfer_id":"t-002","from_account":"payroll","to_account":"bob","amount_cents":450000,"currency":"USD","fee_cents":200,"fee_account":"fees"}
+  ]}'
+# 201 {"batch_id":"payroll-2026-10","receipts":[{"transfer_id":"t-001","entries":[...]}, ...],"duplicate":false}
+```
+
+- Atomicity is two-phase: every transfer first runs the exact
+  production code path on a private deep copy of the ledger (the LG-36
+  dry-run twin pattern), in batch order, under the single write lock.
+  Any rejection — validation, denylist, ID conflict, frozen,
+  overdraft, daily-limit, budget, period, FX — aborts the whole batch
+  with zero records. Only when every transfer commits on the twin does
+  the live ledger commit them. A twin-accepted transfer is
+  live-accepted: there is never a half-committed batch to roll back.
+- First-time batch → `201` with the receipt (per-transfer receipts with
+  leg detail: principal + fee + FX legs). The server generates
+  `batch_id` and per-transfer `transfer_id` values when the client
+  omits them.
+- Re-post with the same batch `idempotency_key` → `200` with the
+  original receipt (`duplicate: true`); nothing is booked again. The
+  key lives in its own namespace (`transfer-batches` in
+  `GET /idempotency-keys`), expires with the idempotency TTL, and
+  survives disaster-recovery snapshots (full and incremental).
+- Each transfer's own `idempotency_key` shares the `POST /transfers`
+  key namespace: a key already posted resolves to the originally posted
+  receipt (returned in the batch receipt, booked nothing); a batch may
+  freely mix fresh transfers and replays.
+- Invalid batch (empty batch, bad transfer, duplicate transfer IDs in
+  the batch, or a duplicated new transfer key) → `400`. A transfer
+  through a **frozen** account → `403`; a transfer that would overdraw
+  an **overdraft-protected** payer, breach a **daily outflow limit**, hit
+  a **closed period**, or miss an **FX rate** → `422`.
+- A transfer at or above its payer's review threshold journals with the
+  pending-review marker, atomically with the settled ones — approve or
+  reject it with the usual review endpoints.
+- The batch emits one `post_transfer_batch` audit event; each
+  transfer's own audit events, metrics, balance hooks, and outbox
+  events fire exactly as `POST /transfers` would emit them.
+- Attempts and replays are counted in `ledger_transfer_batch_total`
+  and `ledger_transfer_batch_idempotency_hits_total`.
+
 ### `POST /transfers`
 
 The payment-domain view of a posting: instead of debit/credit legs, the
