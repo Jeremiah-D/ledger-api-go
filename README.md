@@ -3546,6 +3546,51 @@ Semantics:
   with `\n` (no trailing newline); convert to CRLF for the bank if
   required.
 
+### SWIFT MT940 statement export (Go: `ledger.ExportMT940`)
+
+The tag block a bank's statement downloader would produce — `:20:`
+(transaction reference), `:25:` (account identification), `:28C:`
+(statement/sequence number), `:60F:` (opening balance), one `:61:`
+(+ optional `:86:` supplementary) per statement line, `:62F:`
+(closing balance), `:64:` (available balance) — from the account's
+effective journal rows. Go-only (like NACHA and camt.053 export): the
+operator builds the file and hands it to the bank's statement
+processor.
+
+```go
+doc, err := l.ExportMT940(ledger.MT940ExportOptions{
+    Account: "DE89370400440532013000", StatementID: "2026-10",
+    Since: start, Until: end, // half-open [Since, Until); Currency required
+})
+// doc is the MT940 customer statement message, lines joined with "\n".
+```
+
+Semantics:
+
+- **Reconciliation is structural** — the closing balance is computed
+  as opening + signed sum of the lines, and `ledger.RenderMT940Statement`
+  re-derives it and fails loud if the two disagree: a statement that
+  does not foot is never rendered.
+- **Direction** — account-centric like camt.053/OFX: the account as
+  the debit leg reads `C` (money in), as the credit leg `D` (money
+  out); amounts are absolute (`1500,00` with a comma decimal
+  separator), the sign lives in the `C`/`D` mark.
+- **Fail-loud lines** — a statement line missing its value date,
+  amount, or reference is an error, never a silently degraded tag.
+  The `:61:` reference is the entry's idempotency key (the journal
+  entry ID when the row carries none), truncated to the `16x` field
+  width — stable across exports, so the bank dedupes on it.
+- **Read-only** — same contract as `GenerateStatement`/`ExportOFX`/
+  `ExportCAMT053`: the read lock is held throughout, no version bump,
+  nothing booked, no audit-chain link. Pending-review rows are
+  excluded (they never touched balances).
+- **Account naming** — `:25:` names the external identifier mapped
+  under the `mt940` system when one exists (usually the IBAN; see
+  `SetExternalMapping`), else the internal account ID.
+- `:64:` repeats `:62F:` exactly: the ledger has no intraday
+  credit-line concept, so the available balance is the honest
+  closing balance.
+
 ### `GET /accounts/{id}/statement` — JSON account statement
 
 A bank-style account statement for one account over the half-open

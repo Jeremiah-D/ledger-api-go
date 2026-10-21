@@ -97,6 +97,14 @@ const ExternalSystemOFX = "ofx"
 // internal account ID as before.
 const ExternalSystemCAMT053 = "camt053"
 
+// ExternalSystemMT940 is the well-known system name for the account
+// identifier MT940 statement exports name in :25: (see ExportMT940):
+// the identifier the bank expects for the account (usually the IBAN),
+// which may differ from the internal account ID. When an account has
+// no mapping in this system, exports name the internal account ID as
+// before.
+const ExternalSystemMT940 = "mt940"
+
 // ExternalAccountMapping is one row of the external account mapping
 // (see the package doc above): the internal Account, the external System
 // that knows it by ExternalID, and an optional human Note (which system
