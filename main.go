@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -314,6 +315,7 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -498,6 +500,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -664,6 +667,7 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -954,6 +958,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1140,6 +1145,7 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1251,6 +1257,7 @@ func (s *server) handleCreateSweep(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1409,6 +1416,7 @@ func (s *server) handleDryRunSweep(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1490,6 +1498,7 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -1663,6 +1672,7 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -2424,6 +2434,7 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -2515,6 +2526,7 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -2631,6 +2643,7 @@ func (s *server) handlePartialCaptureHold(w http.ResponseWriter, r *http.Request
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -3008,6 +3021,7 @@ func (s *server) handleOpenTermDeposit(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrAccountClosed) {
 			s.metrics.ClosedRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
 		}
 		if errors.Is(err, ledger.ErrAccountFrozen) {
 			s.metrics.FrozenRejections.Add(1)
@@ -7830,7 +7844,7 @@ func (s *server) handler() http.Handler {
 		}
 		s.metrics.handleMetrics(w, r)
 	})
-	return s.tenantMiddleware(s.apiKeyMiddleware(mux))
+	return s.apiVersionMiddleware(s.tenantMiddleware(s.apiKeyMiddleware(mux)))
 }
 
 // apiKeyCtxKey carries the authenticated API key through the request
@@ -8132,6 +8146,161 @@ func (s *server) handleListPIIErasures(w http.ResponseWriter, r *http.Request) {
 // tenantCtxKey carries the resolved tenant ID through the request
 // context from the tenant middleware to ledgerFor.
 type tenantCtxKey struct{}
+
+// apiVersionCtxKey carries the resolved API version (see
+// ledger.ParseAPIVersion) through the request context, so handlers can
+// vary behavior by version when a future version needs it.
+type apiVersionCtxKey struct{}
+
+// apiVersionFromContext returns the API version resolved for the
+// request by apiVersionMiddleware (ledger.APIVersionLatest when the
+// request named none).
+func apiVersionFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(apiVersionCtxKey{}).(string); ok && v != "" {
+		return v
+	}
+	return ledger.APIVersionLatest
+}
+
+// apiVersionMiddleware implements LG-155 API version negotiation. It
+// resolves the version from the /vN/ path prefix or the
+// application/vnd.ledger.vN+json Accept header (see
+// ledger.ParseAPIVersion), strips the prefix before downstream routing
+// so the existing route table serves every version, and wraps JSON
+// response bodies in the versioned envelope
+// {"api_version": "v1", "data": ...} when the client explicitly named
+// a version. Requests that name no version keep the legacy bare-JSON
+// shape byte-for-byte.
+//
+// Every response — JSON or not, enveloped or not — carries
+// X-API-Version with the resolved version. Endpoints in the central
+// deprecation registry (ledger.DeprecatedEndpoints) additionally get
+// Deprecation: true, a Sunset date, and a
+// Link: <successor>; rel="successor-version" header.
+//
+// Streaming responses (SSE etc.) are detected on Flush: capture is
+// abandoned and the buffered bytes are passed through untouched, so
+// streams keep working exactly as before.
+func (s *server) apiVersionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		version, stripped, explicit, err := ledger.ParseAPIVersion(r.URL.Path, r.Header.Get("Accept"))
+		if err != nil {
+			writeJSON(w, http.StatusNotAcceptable, map[string]any{
+				"error":              err.Error(),
+				"supported_versions": ledger.SupportedAPIVersions,
+				"latest":             ledger.APIVersionLatest,
+			})
+			return
+		}
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = stripped
+		if r2.URL.RawPath != "" {
+			// Keep EscapedPath() consistent: the ASCII version prefix
+			// encodes to itself, so the same byte prefix applies.
+			if prefix := r.URL.Path[:len(r.URL.Path)-len(stripped)]; strings.HasPrefix(r2.URL.RawPath, prefix) {
+				r2.URL.RawPath = r2.URL.RawPath[len(prefix):]
+			}
+		}
+		ctx := context.WithValue(r2.Context(), apiVersionCtxKey{}, version)
+		r2 = r2.WithContext(ctx)
+		cap := &apiVersionCapture{
+			header:   make(http.Header),
+			status:   http.StatusOK,
+			w:        w,
+			version:  version,
+			explicit: explicit,
+			method:   r.Method,
+			path:     stripped,
+		}
+		next.ServeHTTP(cap, r2)
+		cap.finish()
+	})
+}
+
+// apiVersionCapture buffers one handler response so the versioning
+// middleware can envelope JSON bodies and attach version/deprecation
+// headers before anything hits the wire.
+type apiVersionCapture struct {
+	header   http.Header
+	status   int
+	body     bytes.Buffer
+	flushed  bool // handler flushed: streaming passthrough from here on
+	w        http.ResponseWriter
+	version  string
+	explicit bool
+	method   string
+	path     string
+}
+
+func (c *apiVersionCapture) Header() http.Header { return c.header }
+
+func (c *apiVersionCapture) WriteHeader(status int) { c.status = status }
+
+func (c *apiVersionCapture) Write(p []byte) (int, error) {
+	if c.flushed {
+		return c.w.Write(p)
+	}
+	return c.body.Write(p)
+}
+
+// Flush implements http.Flusher: the first Flush abandons capture and
+// switches to passthrough, so streaming handlers (SSE) keep working.
+// Headers accumulated so far plus the version/deprecation headers go
+// out before the buffered body.
+func (c *apiVersionCapture) Flush() {
+	if !c.flushed {
+		c.flushed = true
+		c.writeHeaders()
+		c.w.WriteHeader(c.status)
+		_, _ = c.w.Write(c.body.Bytes())
+		c.body.Reset()
+	}
+	if f, ok := c.w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// writeHeaders copies the captured headers plus the versioning
+// headers onto the real response writer. It must run before the
+// first WriteHeader on the real writer.
+func (c *apiVersionCapture) writeHeaders() {
+	dst := c.w.Header()
+	for k, vs := range c.header {
+		dst[k] = vs
+	}
+	dst.Set("X-API-Version", c.version)
+	if d := ledger.MatchDeprecatedEndpoint(c.method, c.path); d != nil {
+		dst.Set("Deprecation", "true")
+		dst.Set("Sunset", d.Sunset.UTC().Format(http.TimeFormat))
+		dst.Set("Link", fmt.Sprintf("<%s>; rel=\"successor-version\"", d.SuccessorPath()))
+	}
+}
+
+// finish flushes the captured response: JSON bodies on explicitly
+// versioned requests are wrapped in the versioned envelope; everything
+// else goes out unchanged.
+func (c *apiVersionCapture) finish() {
+	if c.flushed {
+		return // already streaming passthrough
+	}
+	ct := c.header.Get("Content-Type")
+	body := c.body.Bytes()
+	if c.explicit && len(body) > 0 && isJSONContentType(ct) {
+		if wrapped, err := json.Marshal(ledger.APIVersionEnvelope{
+			APIVersion: c.version,
+			Data:       json.RawMessage(body),
+		}); err == nil {
+			body = wrapped
+		}
+	}
+	c.writeHeaders()
+	c.w.WriteHeader(c.status)
+	_, _ = c.w.Write(body)
+}
+
+func isJSONContentType(ct string) bool {
+	return strings.HasPrefix(strings.ToLower(ct), "application/json")
+}
 
 // tenantFromContext returns the tenant ID the middleware resolved for
 // the request, or false when the request named no tenant (default

@@ -24,6 +24,41 @@ The design borrows its posting semantics from a publicly described concept: **"i
 
 ## API
 
+### API versioning
+
+The API negotiates versions two ways, with identical semantics:
+
+- **Path prefix:** `GET /v1/entries` (preferred for servers)
+- **Accept header:** `Accept: application/vnd.ledger.v1+json` (preferred for client negotiation)
+
+A request that names no version keeps the legacy behavior exactly: it is
+served the latest stable version (currently `v1`) with the legacy
+bare-JSON response shape, so existing integrations keep working. A
+request that names a version explicitly gets the versioned envelope
+`{"api_version": "v1", "data": ...}` around every JSON response body.
+Non-JSON surfaces (Prometheus exposition on `/metrics`, CSV/SQL exports,
+JSONL audit streams, SSE) keep their own content types and carry the
+resolved version in the `X-API-Version` header instead. Naming an unknown
+version (e.g. `/v2/entries`) or conflicting signals (path says `v1`,
+Accept says `v9`) is a `406` listing the supported versions.
+
+Deprecated endpoints stay fully functional until their sunset date but
+answer with `Deprecation: true`, a `Sunset` date, and a
+`Link: <successor>; rel="successor-version"` header:
+
+| Endpoint | Sunset | Successor |
+|---|---|---|
+| `POST /entries` | 2027-06-30 | `POST /entries/batch` (a one-entry batch carries identical semantics and gate coverage) |
+| `POST /transfers/reviews/approve` | 2027-06-30 | `POST /transfers/{id}/approve` (bulk approval bypasses per-transfer review scrutiny) |
+
+```bash
+curl -s localhost:8080/v1/entries?limit=1 | head -c 120
+# {"api_version":"v1","data":{"entries":[...],"next_cursor":...}}
+curl -s -D - -o /dev/null -X POST localhost:8080/entries -d '{}' | grep -i -E 'deprecation|sunset|link|x-api-version'
+# Deprecation: true / Sunset: Wed, 30 Jun 2027 00:00:00 GMT /
+# Link: </entries/batch>; rel="successor-version" / X-API-Version: v1
+```
+
 ### `POST /entries`
 
 ```bash
