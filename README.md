@@ -3453,6 +3453,51 @@ Semantics:
   is no special auth, like the export endpoint.
   `GET /metrics` counts imports as `ledger_camt053_imports_total`.
 
+### camt.053 statement export (Go: `ledger.ExportCAMT053`)
+
+The inverse of the import above: it renders the account's effective
+journal rows as an ISO 20022 `camt.053.001.02`
+`BankToCustomerStatement` document — one `Stmt` block, one `Ntry` per
+entry — for the bank, the auditor, or any camt.053 reader. Go-only
+(like the NACHA builder below): `ledger.ExportCAMT053` /
+`ledger.RenderCAMT053Statement`.
+
+```go
+doc, err := l.ExportCAMT053(ledger.CAMT053ExportOptions{
+    Account: "DE89370400440532013000", StmtID: "STMT-2026-10",
+    Since: start, Until: end, // half-open [Since, Until); Currency optional
+})
+// doc is a namespaced camt.053.001.02 XML document.
+```
+
+Semantics:
+
+- **Round-trip** — the document carries exactly what
+  `ledger.ParseCAMT053` reads back: `Stmt/Id`, `Acct/Id/Othr/Id`,
+  `Amt`+`Ccy`, `CdtDbtInd`, the booking date as `BookgDt/DtTm` (UTC,
+  full RFC 3339 so the instant survives), `Refs/EndToEndId`, and the
+  remittance text. `ParseCAMT053(ExportCAMT053(...))` returns the same
+  transactions.
+- **Direction** — account-centric like the importer: the account as
+  the debit leg reads `CRDT` (money in), as the credit leg `DBIT`
+  (money out); amounts are absolute, the sign lives in the indicator.
+- **Entry refs carry the idempotency key** — `Refs/EndToEndId` is the
+  entry's idempotency key (the entry ID when the row has none), so the
+  bank's references trace back to ledger rows.
+- **Read-only** — same contract as `GenerateStatement`/`ExportOFX`:
+  read lock held throughout, no journal rows, no hash chain, no
+  version bump. Pending-review rows are excluded (they never touched
+  balances); re-export after approval.
+- **Account naming** — `Stmt/Acct` names the external identifier
+  mapped under the `camt053` system when one exists (usually the IBAN
+  the bank expects; see `SetExternalMapping`), else the internal
+  account ID.
+- An account with no rows in the window exports a valid empty
+  statement. Asymmetry, documented: `ParseCAMT053` rejects documents
+  with zero entries, so an empty export does not re-parse — the
+  exporter is honest about the window, the parser is strict about
+  importing only real statements.
+
 ### NACHA ACH file generation (Go: `ledger.GenerateNACHAFile`)
 
 From payout instructions (or any caller-built entry list) the ledger

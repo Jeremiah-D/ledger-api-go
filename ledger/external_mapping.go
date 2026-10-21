@@ -32,6 +32,10 @@ import (
 //     <ACCTID> (see ExportOFX) — the identifier the importing bank or
 //     accounting package expects, which may differ from the internal
 //     account ID.
+//   - "camt053": the account identifier camt.053 statement exports
+//     name in Stmt/Acct (see ExportCAMT053) — the identifier the bank
+//     expects for the account (usually the IBAN), which may differ
+//     from the internal account ID.
 //
 // Mappings are structural config, like freezes, tags, and aliases: they
 // do not bump the journal version, they round-trip through snapshots
@@ -84,6 +88,14 @@ const maxExternalMappingNoteRunes = 255
 // account has no mapping in this system, exports name the internal
 // account ID as before.
 const ExternalSystemOFX = "ofx"
+
+// ExternalSystemCAMT053 is the well-known system name for the account
+// identifier camt.053 statement exports name in Stmt/Acct (see
+// ExportCAMT053): the identifier the bank expects for the account
+// (usually the IBAN), which may differ from the internal account ID.
+// When an account has no mapping in this system, exports name the
+// internal account ID as before.
+const ExternalSystemCAMT053 = "camt053"
 
 // ExternalAccountMapping is one row of the external account mapping
 // (see the package doc above): the internal Account, the external System
