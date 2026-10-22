@@ -6,6 +6,20 @@ import (
 	"time"
 )
 
+// camt054DocOn returns the shared CAMT054 fixture with its hardcoded booking
+// date (2026-10-21) rewritten to the given date. The triple-match window is
+// ±24h around each candidate's creation time, so a fixed fixture date goes
+// stale and deterministically fails the suite a day later.
+func camt054DocOn(date string) string {
+	return strings.ReplaceAll(testCAMT054Doc, "2026-10-21", date)
+}
+
+// camt054DocDated is camt054DocOn for today: the fixture the suite's
+// match-window assertions are written against.
+func camt054DocDated() string {
+	return camt054DocOn(time.Now().UTC().Format("2006-01-02"))
+}
+
 const testCAMT054Doc = `<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.054.001.08">
   <BkToCstmrDbtCdtNtfctn>
@@ -114,7 +128,7 @@ func TestImportCAMT054TripleMatch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PostTransfer: %v", err)
 	}
-	report, err := l.ImportCAMT054("acct-notify", []byte(testCAMT054Doc), CAMT054ImportOptions{})
+	report, err := l.ImportCAMT054("acct-notify", []byte(camt054DocDated()), CAMT054ImportOptions{})
 	if err != nil {
 		t.Fatalf("ImportCAMT054: %v", err)
 	}
@@ -134,12 +148,12 @@ func TestImportCAMT054TripleMatch(t *testing.T) {
 		t.Errorf("second item status = %q, want unmatched", second.Status)
 	}
 	// The reconciliation advance is recorded in the match registry.
-	rec, ok := l.camt054Matches["camt054/NTF-2026-10-21-A/1"]
+	rec, ok := l.camt054Matches["camt054/NTF-"+time.Now().UTC().Format("2006-01-02")+"-A/1"]
 	if !ok || rec.status != CAMT054Matched {
 		t.Errorf("match registry: %+v, want matched record", rec)
 	}
 	// Re-importing the same document replays the original report.
-	dup, err := l.ImportCAMT054("acct-notify", []byte(testCAMT054Doc), CAMT054ImportOptions{})
+	dup, err := l.ImportCAMT054("acct-notify", []byte(camt054DocDated()), CAMT054ImportOptions{})
 	if err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
@@ -161,7 +175,7 @@ func TestImportCAMT054AmountMismatch(t *testing.T) {
 		t.Fatalf("PostTransfer: %v", err)
 	}
 	// The notification claims 500.00 for a 100.00 transfer.
-	doc := strings.Replace(testCAMT054Doc, "xfer-camt054-1", "xfer-camt054-2", 1)
+	doc := strings.Replace(camt054DocDated(), "xfer-camt054-1", "xfer-camt054-2", 1)
 	start := strings.Index(doc, "<Ntry>")
 	mid := strings.Index(doc, "</Ntry>") + len("</Ntry>")
 	end := strings.LastIndex(doc, "</Ntfctn>")
@@ -196,8 +210,8 @@ func TestImportCAMT054DateOutOfWindow(t *testing.T) {
 	}
 	// The transfer was created now; the notification is booked a year
 	// later — outside the default ±24h window.
-	doc := strings.Replace(testCAMT054Doc, "xfer-camt054-1", "xfer-camt054-3", 1)
-	doc = strings.Replace(doc, "2026-10-21T09:30:00Z", "2027-10-21T09:30:00Z", 1)
+	yod := time.Now().UTC().AddDate(1, 0, 0).Format("2006-01-02")
+	doc := strings.Replace(camt054DocOn(yod), "xfer-camt054-1", "xfer-camt054-3", 1)
 	start := strings.Index(doc, "<Ntry>")
 	mid := strings.Index(doc, "</Ntry>") + len("</Ntry>")
 	end := strings.LastIndex(doc, "</Ntfctn>")
@@ -211,7 +225,7 @@ func TestImportCAMT054DateOutOfWindow(t *testing.T) {
 	}
 	// A wide window resolves it (a fresh document: document-level
 	// idempotency would replay the narrow-window report).
-	wideDoc := strings.Replace(single, "NTF-2026-10-21-A", "NTF-2026-10-21-B", 1)
+	wideDoc := strings.Replace(single, "NTF-"+yod+"-A", "NTF-"+yod+"-B", 1)
 	wide, err := l.ImportCAMT054("acct-notify", []byte(wideDoc), CAMT054ImportOptions{MatchWindow: 400 * 24 * time.Hour})
 	if err != nil {
 		t.Fatalf("wide-window ImportCAMT054: %v", err)
@@ -234,7 +248,7 @@ func TestImportCAMT054PayoutAssociation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreatePayout: %v", err)
 	}
-	doc := strings.Replace(testCAMT054Doc, "xfer-camt054-1", "po-camt054-1", 1)
+	doc := strings.Replace(camt054DocDated(), "xfer-camt054-1", "po-camt054-1", 1)
 	start := strings.Index(doc, "<Ntry>")
 	mid := strings.Index(doc, "</Ntry>") + len("</Ntry>")
 	end := strings.LastIndex(doc, "</Ntfctn>")
@@ -253,14 +267,14 @@ func TestImportCAMT054PayoutAssociation(t *testing.T) {
 
 func TestImportCAMT054WrongAccount(t *testing.T) {
 	l := New()
-	if _, err := l.ImportCAMT054("acct-other", []byte(testCAMT054Doc), CAMT054ImportOptions{}); err == nil {
+	if _, err := l.ImportCAMT054("acct-other", []byte(camt054DocDated()), CAMT054ImportOptions{}); err == nil {
 		t.Errorf("expected account-mismatch error, got nil")
 	}
 }
 
 func TestImportCAMT054EmptyAccount(t *testing.T) {
 	l := New()
-	if _, err := l.ImportCAMT054("", []byte(testCAMT054Doc), CAMT054ImportOptions{}); err == nil {
+	if _, err := l.ImportCAMT054("", []byte(camt054DocDated()), CAMT054ImportOptions{}); err == nil {
 		t.Errorf("expected empty-account error, got nil")
 	}
 }
