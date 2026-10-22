@@ -4100,6 +4100,44 @@ curl -s -X POST localhost:8080/camt054/import \
 `GET /metrics` counts imports as `ledger_camt054_imports_total`.
 Go: `ledger.ParseCAMT054` / `ledger.ImportCAMT054`.
 
+### Nostro/vostro correspondent reconciliation (Go: `ledger.MatchNostro`)
+
+The camt.053/camt.054 imports above match **customer** statements
+against the books; this matches **correspondent-bank** statements
+against the books — orthogonal by design (same `StatementLine` type,
+nothing else shared).
+
+A nostro account is our money at a correspondent bank, a vostro
+account their money with us:
+
+```go
+l.RegisterNostroAccount("nostro-usd", "CHASE", ledger.NostroKindNostro)
+// 期望行：camt.053 入站行经 ledger.NewStatementLineFromCAMT053 归一化，
+// 或手写 StatementLine（camt.052 在本账本中无入站解析器）
+l.RecordNostroExpectations("nostro-usd", lines)
+rep, _ := l.MatchNostro("nostro-usd", time.Now().UTC(), ledger.NostroMatchOptions{})
+```
+
+Every expected (correspondent) line is claimed against an effective
+journaled row on the nostro account, and every journaled row against
+an expected line. Identity (external reference — the journal's
+`ExternalRef` is unique per ledger) wins over fuzzy amount/date
+candidates; direction is pinned account-centrically (`in` = the
+account was the debit leg). The remainder is the break list:
+
+| break | 含义 |
+|---|---|
+| `expected_unreached` | 对手方有这笔，账上没记（在途/漏记） |
+| `actual_unreported` | 账上记了，对手方没报（对账单滞后/未释放） |
+| `amount_mismatch` | 身份一致、金额超容差 |
+
+每条 break 按发生时间做账龄（`age_days` + `age_bucket`：
+`0-1d` / `2-7d` / `8-30d` / `>30d`）。`Reconcile` 报告聚合所有
+nostro 账户的 breaks 为 `nostro_breaks`（无 nostro 账户时该节缺省，
+报告形状不变）。匹配是纯查询：不 bump version、不记账、不写审计；
+注册与期望录入各记一条哈希链审计事件（`nostro_account_registered`
+/ `nostro_expectations_recorded`）。
+
 ### camt.053 statement export (Go: `ledger.ExportCAMT053`)
 
 The inverse of the import above: it renders the account's effective

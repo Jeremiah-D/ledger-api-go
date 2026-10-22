@@ -487,6 +487,15 @@ type ReconciliationReport struct {
 	// record reproduces the pricing basis.
 	FtpTotals        []FtpTotals        `json:"ftp_totals"`
 	FtpCurveVersions []FtpCurveSnapshot `json:"ftp_curve_versions"`
+	// NostroBreaks lists the bilateral nostro/vostro breaks (see
+	// nostro.go, LG-175), sorted by account: expected_unreached
+	// (the correspondent shows a line the ledger never booked),
+	// actual_unreported (the ledger booked a row the correspondent
+	// does not show), and amount_mismatch (identity agrees, amounts
+	// disagree), each aged as of the report time. Empty (and omitted)
+	// when no nostro account is registered — the report shape is
+	// unchanged for ledgers that never touch correspondent banking.
+	NostroBreaks []NostroBreak `json:"nostro_breaks,omitempty"`
 }
 
 // TermDepositReport is one term deposit's Reconcile disclosure: the
@@ -898,6 +907,9 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// journal so the section can never disagree with the books.
 		FtpTotals:        l.ftpTotalsLocked(),
 		FtpCurveVersions: l.ftpCurveVersionsLocked(),
+		// LG-175: the bilateral nostro/vostro breaks across every
+		// registered correspondent account — a pure read, no mutation.
+		NostroBreaks: l.nostroBreaksLocked(now),
 	}
 	report.ECLExposures, report.ECLCoverage = l.eclReportsLocked()
 

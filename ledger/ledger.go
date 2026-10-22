@@ -790,6 +790,16 @@ type Ledger struct {
 	// cancellation_resolved audit events are the durable record.
 	payoutCancellations map[string]*PayoutCancellation
 	cancellationSeqs    map[string]int
+	// nostroAccounts maps account IDs to their nostro/vostro
+	// registrations, and nostroExpectations maps a nostro account to
+	// the correspondent's expected statement lines keyed by line ID
+	// (see nostro.go, LG-175). Both are in-memory operational
+	// registries: the hash-chained nostro_account_registered /
+	// nostro_expectations_recorded audit events are the durable
+	// record, and they do not round-trip through disaster-recovery
+	// snapshots.
+	nostroAccounts     map[AccountID]*NostroAccount
+	nostroExpectations map[AccountID]map[string]StatementLine
 	// gpiTracked, gpiSettled, gpiRejected count gpi-tracked payments
 	// (see GPICounts): tracks opened, tracks that reached ACCP, and
 	// tracks that reached RJCT. In-memory only, like the mandate
@@ -1473,6 +1483,10 @@ func New(opts ...Option) *Ledger {
 		// records open as operators request cancellations.
 		payoutCancellations: make(map[string]*PayoutCancellation),
 		cancellationSeqs:    make(map[string]int),
+		// LG-175: the nostro/vostro registry starts empty; accounts
+		// are registered and expectations recorded by operator calls.
+		nostroAccounts:     make(map[AccountID]*NostroAccount),
+		nostroExpectations: make(map[AccountID]map[string]StatementLine),
 		achReturnCounts:       make(map[string]uint64),
 		fedNowRejections:       make(map[string]uint64),
 		camt054Imports:          make(map[string]*CAMT054ImportReport),
