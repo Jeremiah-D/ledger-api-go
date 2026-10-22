@@ -2958,7 +2958,6 @@ or bad account/currency/rate; `404` unknown line; `409` duplicate grant;
 `422` reducing below utilization, interest breaching the floor, or
 posting past the credit limit.
 
-### ECL provisions (预期信用损失)
 
 `POST /ecl/exposures` registers a manual credit exposure for an obligor
 without a credit line (`exposure_cents`, `days_past_due`) — the
@@ -3839,6 +3838,47 @@ curl -s 'localhost:8080/exports/pacs004?uetr=9f2c8e1a-…&reason=DUPL' -o return
 ```
 
 Go: `ledger.ExportPacs004`。
+
+### `GET /exports/pacs009` — ISO 20022 pacs.009 银行间大额贷记转账导出
+
+已过账的 transfer 可以用 ISO 20022 `pacs.009.001.06`
+（`FinancialInstitutionCreditTransfer`）渲染银行间（FI-to-FI）大额贷记
+转账报文：代理行/大额结算场景的资金划转。`GET
+/exports/pacs009?transfer=` 按 transfer ID 定位主分录（payer = debtor
+机构，payee = creditor 机构），`IntrBkSttlmAmt` 携带结算金额（币种 +
+金额），`SttlmMtd` 携带结算方式，`DbtrAgt`/`CdtrAgt` 携带代理行链，
+`ChrgsBr` 携带费用承担方。
+
+与 fednow_pacs008（LG-163，即时支付客户转账）、gpi（LG-165，追踪）正交：
+pacs.009 无客户腿、无 UETR——它是机构间的资金划拨。
+
+语义：
+- ledger 用账户建模 FI 对手方，没有 BIC 注册表，所以代理行走专有标识
+  （`FinInstnId/Othr/Id` = 账户 ID），诚实映射、绝不编造 BIC；直接
+  FI-to-FI 模型下 `Dbtr`/`DbtrAgt`/`InstgAgt` 收敛为 payer 账户、
+  `CdtrAgt`/`Cdtr`/`InstdAgt` 收敛为 payee 账户，中介代理行链
+  （`IntrmyAgt1..3`）不在范围内、永不输出。
+- 结算方式（ISO 真实词汇，闭集校验）：`INDA`（instructed agent，默认，
+  普通代理行借记/贷记）、`INGA`、`COVE`、`CLRG`；费用承担方（ISO 真实
+  词汇，闭集校验）：`DEBT`（OUR）、`CRED`（BEN）、`SHAR`（SHA）、
+  `SLEV`（按服务级别，默认）。
+- `MsgId` 确定性：`<transfer ID>/ficdt`——导出不开记录，重复导出 MsgId
+  不变。
+- fail-closed：未知 transfer（`404`）、跨币种 transfer（`422`——主分录只
+  记录了 payer 侧对 FX 清算账户的腿，渲染成单笔 FI 转账会 misstate 资金
+  流向）、结算方式/费用承担方不在闭集（`400`）、缺 `transfer` 参数
+  （`400`）。
+- 只读：读锁快照、无 version bump、无记账、无审计链追加——与
+  `ExportPacs004` 同契约。计数器 `ledger_pacs009_exports_total`。
+
+```bash
+curl -s 'localhost:8080/exports/pacs009?transfer=tx-2026-1042' -o ficdt.xml
+# 200 pacs.009.001.06: <FICdtTrf>/.../<MsgId>tx-2026-1042/ficdt</MsgId>/.../<SttlmMtd>INDA</SttlmMtd>/.../<ChrgsBr>SLEV</ChrgsBr>
+curl -s 'localhost:8080/exports/pacs009?transfer=tx-2026-1042&sttlm_mtd=COVE&chrgs_br=DEBT' -o ficdt-cove.xml
+```
+
+Go: `ledger.ExportPacs009(transferID, ledger.Pacs009Options{SettlementMethod,
+ChargesBearer})`。
 
 ### `GET /exports/camt052` — ISO 20022 camt.052 日间账户报告导出
 
@@ -6189,6 +6229,9 @@ curl -s localhost:8080/metrics
   accrual requests received.
 - `ledger_credit_limit_rejections_total` — postings and accruals rejected
   at the credit-line floor (`ErrCreditLimitExceeded`).
+- `ledger_pacs009_exports_total` — `GET /exports/pacs009` ISO 20022
+  pacs.009 FI-to-FI credit transfer exports served, including rejected
+  exports.
 - `ledger_ecl_exposure_requests_total` — `POST /ecl/exposures` requests
   received.
 - `ledger_ecl_provision_requests_total` — `POST /ecl/provisions`
