@@ -3703,6 +3703,58 @@ curl -s 'localhost:8080/exports/pacs002?uetr=9f2c8e1a-…' -o status.xml
 
 Go: `ledger.ExportPacs002`。
 
+### camt.056 支付撤销 + camt.029 决议（`POST /cancellations`）
+
+已发出但未结算的 payout 可用 ISO 20022 `camt.056.001.02`
+（`FIToFICancellationRequest`）向银行发起撤销：`POST /cancellations`
+`{"uetr","reason_code"}` 按 UETR 定位原指令并附撤销原因码（CxRsn），
+打开一条撤销记录（状态 `requested`）；`GET /exports/camt056?uetr=`
+渲染出真正发给银行的 camt.056 报文。对手方以 `camt.029.001.03`
+（`FIToFICancellationStatusReport`）决议：`POST /exports/camt029/apply`
+送入对手方回盘。
+
+撤销状态机：
+
+| 状态 | 含义 |
+|---|---|
+| `requested` | 已请求，待对手方决议 |
+| `confirmed` | 对手方接受（camt.029 `ACCR`）：payout 标记 `cancelled` |
+| `rejected` | 对手方拒绝（camt.029 `RJCR`）：payout 保持 `submitted`，原因码进审计 |
+
+语义：
+- fail-closed：未知 UETR、已结算（gpi `ACCP`）/终态（`RJCT`）的跟踪、
+  已撤销的 payout、未发出（draft/approved，用 `CancelPayout`）或已失败
+  的 payout、无原因码的请求一律拒绝；已结算资金的撤销请走冲正
+  （reversal）——camt.056 只召回在途指令。
+- 幂等：`requested` 状态下重复请求返回原记录（200）；确认后重请求
+  409；拒绝后可发起新一轮（新 seq、新 `MsgId`）。
+- `confirmed` 时 payout `submitted`→`cancelled`，记 `payout_cancelled`
+  审计事件 + outbox 事件（`CancelPayout` 惯例）——钱从未离账，不记
+  冲销分录；gpi 跟踪**不**动（撤销不是银行的结算 verdict）。
+- camt.029 解析 fail-loud：XML 非法、无 `RslvdCxl`、空 `OrgnlUETR`、
+  `CxlSts` 非 `ACCR`/`RJCR` → 400；决议重放幂等（同决议 no-op），
+  冲突决议 422；无 open 请求的决议 404（有请求才有决议）。
+- 记录为内存态（payout/gpi 惯例）：持久记录是哈希链
+  `cancellation_requested` / `cancellation_resolved` 审计事件。
+- 计数器 `ledger_camt056_exports_total` /
+  `ledger_camt029_applies_total`。
+
+```bash
+curl -s -X POST localhost:8080/cancellations \
+  -H 'Content-Type: application/json' -H 'x-ledger-actor: night-ops' \
+  -d '{"uetr":"9f2c8e1a-…","reason_code":"DUPL"}'
+# 201 {"uetr":"9f2c8e1a-…","status":"requested","msg_id":"9f2c8e1a-…/cxl/1",...}
+curl -s 'localhost:8080/exports/camt056?uetr=9f2c8e1a-…' -o cancel.xml
+# 200 camt.056.001.02: <FIToFICxlReq>/.../<CxlId>9f2c8e1a-…/cxl/1</CxlId>/<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>
+curl -s -X POST localhost:8080/exports/camt029/apply \
+  -H 'Content-Type: application/xml' --data-binary @bank-camt029.xml
+# 200 {"uetr":"9f2c8e1a-…","status":"confirmed",...}  # payout -> cancelled
+```
+
+Go: `ledger.RequestPayoutCancellation` /
+`ledger.ExportCancellationRequest` / `ledger.ParseCAMT029` /
+`ledger.ApplyCAMT029Report` / `ledger.ResolvePayoutCancellation`。
+
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
 The inverse of the export above: it parses an OFX 2.x bank statement
@@ -5956,6 +6008,12 @@ curl -s localhost:8080/metrics
 - `ledger_pacs002_exports_total` — `GET /exports/pacs002` ISO 20022
   pacs.002 FI-to-FI payment status report exports served, including
   rejected exports.
+- `ledger_camt056_exports_total` — `GET /exports/camt056` ISO 20022
+  camt.056 FI-to-FI cancellation request exports served, including
+  rejected exports.
+- `ledger_camt029_applies_total` — `POST /exports/camt029/apply` ISO
+  20022 camt.029 cancellation status report applies served, including
+  rejected reports.
 - `ledger_camt056_exports_total` — `GET /exports/camt056` ISO 20022
   camt.056 FI-to-FI cancellation request exports served, including
   rejected exports.

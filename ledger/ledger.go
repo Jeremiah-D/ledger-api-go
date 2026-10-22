@@ -775,6 +775,15 @@ type Ledger struct {
 	gpiTracks     map[string]*GPITrack
 	gpiByPayout   map[string]string
 	gpiByTransfer map[string]string
+	// payoutCancellations maps SWIFT gpi UETRs to their cancellation
+	// records (see camt056.go, LG-168): at most one open cancellation
+	// per UETR. cancellationSeqs counts cancellation attempts per
+	// UETR, so retried requests (after a rejection) get distinct
+	// MsgIds. Both are in-memory only, like payout instructions and
+	// gpi tracks: the hash-chained cancellation_requested /
+	// cancellation_resolved audit events are the durable record.
+	payoutCancellations map[string]*PayoutCancellation
+	cancellationSeqs    map[string]int
 	// gpiTracked, gpiSettled, gpiRejected count gpi-tracked payments
 	// (see GPICounts): tracks opened, tracks that reached ACCP, and
 	// tracks that reached RJCT. In-memory only, like the mandate
@@ -1442,6 +1451,10 @@ func New(opts ...Option) *Ledger {
 		gpiTracks:     make(map[string]*GPITrack),
 		gpiByPayout:   make(map[string]string),
 		gpiByTransfer: make(map[string]string),
+		// LG-168: the payout cancellation registry starts empty;
+		// records open as operators request cancellations.
+		payoutCancellations: make(map[string]*PayoutCancellation),
+		cancellationSeqs:    make(map[string]int),
 		achReturnCounts:       make(map[string]uint64),
 		fedNowRejections:       make(map[string]uint64),
 		camt054Imports:          make(map[string]*CAMT054ImportReport),
