@@ -4794,6 +4794,43 @@ func (s *server) handlePacs002Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePacs004Export implements GET /exports/pacs004 (LG-169): an
+// ISO 20022 pacs.004.001.02 PaymentReturn for one settled payout (see
+// ledger.ExportPacs004). Query parameters: uetr (required), reason
+// (required, the RtrRsn return reason code — one of DUPL, AM09, AC03,
+// CUST). The export is the settled-side mirror of the camt.056
+// cancellation: it renders the return of already-settled funds, and
+// is read-only: no version bump, no audit event. Error mapping: a
+// missing uetr or reason is a 400; an unknown reason code is a 400;
+// an unknown UETR is a 404; a payout that is not settled is a 422.
+func (s *server) handlePacs004Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs004Exports.Add(1)
+	uetr := r.URL.Query().Get("uetr")
+	reason := r.URL.Query().Get("reason")
+	if uetr == "" || reason == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "uetr and reason are required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPacs004(uetr, reason)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrPacs004UnknownUETR):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrPacs004NotSettled):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrPacs004ReasonRequired),
+			errors.Is(err, ledger.ErrPacs004InvalidReason):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // cancellationRequest is the POST /cancellations body.
 type cancellationRequest struct {
 	UETR       string `json:"uetr"`
@@ -8580,6 +8617,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
 	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
+	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("GET /exports/camt056", s.handleCAMT056Export)
 	mux.HandleFunc("POST /exports/camt029/apply", s.handleCAMT029Apply)

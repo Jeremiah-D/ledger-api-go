@@ -3755,6 +3755,45 @@ Go: `ledger.RequestPayoutCancellation` /
 `ledger.ExportCancellationRequest` / `ledger.ParseCAMT029` /
 `ledger.ApplyCAMT029Report` / `ledger.ResolvePayoutCancellation`。
 
+### `GET /exports/pacs004` — ISO 20022 pacs.004 跨境支付退汇导出
+
+已结算的 payout 可以用 ISO 20022 `pacs.004.001.02`
+（`PaymentReturn`）渲染银行间退汇报文：资金已离账，对手方（或
+银行）把钱退回。`GET /exports/pacs004?uetr=&reason=` 按 UETR 定位
+原支付，`OrgnlUETR` 关联原支付，`RtrdIntrBkSttlmAmt` 携带退回金额
+（币种 + 金额），`RtrRsnInf/Rsn/Prtry` 携带退汇原因码（RtrRsn）。
+
+退汇原因码（银行间真实词汇，闭集校验）：
+
+| 代码 | 含义 |
+|---|---|
+| `DUPL` | 重复支付：已贷记的支付又来一笔重复 |
+| `AM09` | 金额错误：结算金额与指令金额不符 |
+| `AC03` | 收款账户无效：受益人账户关闭/误填，资金退回发起方 |
+| `CUST` | 受益人要求退回：收款方拒收（如不愿保留超额汇款） |
+
+语义：
+- 与 camt.056（LG-168）正交：camt.056 是**结算前**召回在途指令
+  （钱从未离账），pacs.004 是**结算后**退汇（钱已离账又回来）；
+  两条报文互补不重叠——未结算（draft/approved/submitted/
+  cancelled/failed）的 payout 一律拒绝，未知 UETR、空原因码、
+  不在闭集内的原因码同样拒绝（fail-closed，不做新 verdict）。
+- `OrgnlGrpInf` 把原指令建模为 `pacs.008.001.02`（payout 结算的
+  FI-to-FI 客户贷记转账，pacs.002 惯例）；`MsgId` 确定性：
+  `<uetr>/rtr`——导出不开记录，同支付同原因重复导出 MsgId 不变。
+- 只读：读锁快照、无 version bump、无记账、无审计链追加——与
+  `ExportPacs002` / `ExportCAMT053` 同契约；刻意**不**驱动 payout
+  指令（退汇报告是事实陈述，不是操作员 attestation）。
+- `400` 缺 `uetr`/`reason` 或原因码不在闭集；`404` 未知 UETR；
+  `422` 支付未结算。计数器 `ledger_pacs004_exports_total`。
+
+```bash
+curl -s 'localhost:8080/exports/pacs004?uetr=9f2c8e1a-…&reason=DUPL' -o return.xml
+# 200 pacs.004.001.02: <PmtRtr>/.../<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>/.../<Prtry>DUPL</Prtry>
+```
+
+Go: `ledger.ExportPacs004`。
+
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
 The inverse of the export above: it parses an OFX 2.x bank statement
