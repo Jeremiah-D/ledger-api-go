@@ -728,6 +728,12 @@ type Ledger struct {
 	// account so Available only scans that account's holds.
 	holds          map[string]Hold
 	holdsByAccount map[AccountID][]string
+	// rfps maps request-for-payment IDs to RfP records (see rfp.go).
+	// RfPs are in-memory only, like payout instructions: the rfpID is
+	// its own idempotency key, so no separate key namespace is needed.
+	// rfpSeq backs server-generated RfP IDs.
+	rfps   map[string]RfP
+	rfpSeq uint64
 	// holdKeys maps a hold's idempotency key to its hold ID, and
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the
@@ -1440,6 +1446,9 @@ func New(opts ...Option) *Ledger {
 		holds:                 make(map[string]Hold),
 		holdsByAccount:        make(map[AccountID][]string),
 		holdKeys:              make(map[string]string),
+		// LG-171: the RfP registry starts empty; records are issued by
+		// CreateRfP.
+		rfps: make(map[string]RfP),
 		captureKeys:           make(map[string]CaptureReceipt),
 		partialCaptureKeys:    make(map[string]PartialCaptureReceipt),
 		termDeposits:          make(map[string]TermDeposit),
