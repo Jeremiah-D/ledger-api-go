@@ -1080,6 +1080,52 @@ can wire it into dunning escalation. Retry policies and pending
 retries are in-memory operational state (like sweeper flags): they do
 not round-trip through snapshots.
 
+### Request for Payment (`POST /rfp`, RfP 即时支付收款请求)
+
+The pull-side dual of a transfer: instead of the payer pushing money,
+the creditor (merchant/biller) issues a request and the debtor
+(customer) accepts or rejects each request individually — the
+FedNow/RTP "request for payment" flow. 与代扣协议（mandate）正交：
+mandate 是长期有效的自动扣款授权，RfP 是逐笔请求、逐笔接受的
+即时支付。
+
+生命周期：`issued -> paid | rejected | expired`。`POST /rfp`
+签发请求（creditor/debtor/amount_cents/currency/expires_at；
+`id` 可选，缺省服务端生成；rfpID 即幂等键，重复签发返回原记录
+`200`）；`POST /rfp/{id}/accept` 接受——授权与 payout 落账原子
+完成（debtor -> creditor 的 transfer 走完整 `PostTransfer` 门控：
+denylist/frozen/overdraft/daily-limit/period……；payout 落账失败时
+RfP 保持 issued，错误原样返回）；`POST /rfp/{id}/reject` 拒绝。
+
+语义：
+- 接受前零分录、零 version bump、零哈希链：RfP 是纯结构态
+  （hold 同惯例），只有 payout 落账才记账。
+- 过期惰性失效（hold 同惯例）：`expires_at` 必填且必须在未来；
+  过期后 accept/reject 一律 `422`；`ExpireRfPs` 显式清扫供运维
+  观测。
+- payout transfer ID 确定性：`rfp/<id>/payout`，memo
+  `rfp_of:<id>`（`GET /entries?memo=` 可检索）；重复 accept 重放
+  原 receipt（`duplicate: true`）。
+- 审计：`rfp_issued` / `rfp_accepted` / `rfp_paid` /
+  `rfp_rejected` / `rfp_expired` 进结构化审计链；`x-ledger-actor`
+  透传操作员身份。
+- 内存态：RfP 记录不进灾难恢复快照（payout 指令同惯例）——落账
+  的 transfer 行在 journal 里，钱是安全的。
+- `400` 字段非法；`404` 未知 RfP；`422` 已过期/非 issued 状态；
+  accept 时 payout 被风控门控拦下按 `POST /transfers` 同口径映射
+  （frozen `403`、overdraft/limit/period `422`）。
+
+```bash
+curl -s -X POST localhost:8080/rfp -H 'Content-Type: application/json' \
+  -d '{"id":"rfp-1","creditor":"merchant","debtor":"customer","amount_cents":5000,"expires_at":"2030-01-01T00:00:00Z"}'
+# 201 {"id":"rfp-1","status":"issued",...}
+curl -s -X POST localhost:8080/rfp/rfp-1/accept -H 'Content-Type: application/json' -d '{}'
+# 200 {"transfer_id":"rfp/rfp-1/payout",...}
+```
+
+Go: `ledger.CreateRfP` / `ledger.AcceptRfP` / `ledger.RejectRfP` /
+`ledger.ExpireRfPs` / `ledger.GetRfP`。
+
 ### What-if dry-run (`POST /entries/dry-run`, `POST /transfers/dry-run`, `POST /sweeps/dry-run`)
 
 Answers "what would happen if I submitted this now?" without changing

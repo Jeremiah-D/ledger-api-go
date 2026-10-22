@@ -4935,6 +4935,141 @@ func (s *server) handleRequestCancellation(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, status, c)
 }
 
+// rfpRequest is the POST /rfp body: the creditor's request for
+// payment. id is optional — when empty the server mints one
+// (ledger.NewRfPID). expires_at is required (RFC 3339) and must be in
+// the future; currency defaults to USD.
+type rfpRequest struct {
+	ID          string `json:"id"`
+	Creditor    string `json:"creditor"`
+	Debtor      string `json:"debtor"`
+	AmountCents int64  `json:"amount_cents"`
+	Currency    string `json:"currency"`
+	ExpiresAt   string `json:"expires_at"`
+}
+
+// handleCreateRfP implements POST /rfp (LG-171): the creditor issues a
+// request for payment to the debtor (see ledger.CreateRfP). The call
+// books nothing — the payout posts only when the debtor accepts. A
+// repeat request with an existing ID is idempotent (200 with the
+// original record); a fresh request is 201. Error mapping: malformed
+// body or invalid fields are 400. The operator identity comes from
+// the x-ledger-actor header.
+func (s *server) handleCreateRfP(w http.ResponseWriter, r *http.Request) {
+	var req rfpRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	id := req.ID
+	if id == "" {
+		id = s.ledgerFor(r).NewRfPID()
+	}
+	var expiresAt time.Time
+	if req.ExpiresAt != "" {
+		var err error
+		expiresAt, err = time.Parse(time.RFC3339, req.ExpiresAt)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid expires_at: " + err.Error()})
+			return
+		}
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	_, existed := l.GetRfP(id)
+	rec, dup, err := l.CreateRfP(actx, ledger.RfP{
+		ID:          id,
+		Creditor:    ledger.AccountID(req.Creditor),
+		Debtor:      ledger.AccountID(req.Debtor),
+		AmountCents: req.AmountCents,
+		Currency:    req.Currency,
+		ExpiresAt:   expiresAt,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	status := http.StatusCreated
+	if existed || dup {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, rec)
+}
+
+// handleAcceptRfP implements POST /rfp/{id}/accept (LG-171): the
+// debtor accepts the request, atomically authorizing and posting the
+// payout transfer debtor -> creditor (see ledger.AcceptRfP).
+// Re-accepting a paid RfP replays the original receipt. Error mapping:
+// an unknown ID is 404; an expired or non-issued RfP is 422; a payout
+// blocked by account risk gates maps like POST /transfers (frozen ->
+// 403, overdraft/limit/period -> 422).
+func (s *server) handleAcceptRfP(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rfp id is required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	receipt, err := s.ledgerFor(r).AcceptRfP(actx, id, ledger.ActorFromContext(actx))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrRfPNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrRfPExpired),
+			errors.Is(err, ledger.ErrRfPNotIssued):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrAccountFrozen),
+			errors.Is(err, ledger.ErrAccountClosed),
+			errors.Is(err, ledger.ErrAccountSuspended):
+			status = http.StatusForbidden
+		case errors.Is(err, ledger.ErrAccountOverdraft),
+			errors.Is(err, ledger.ErrDailyLimitExceeded),
+			errors.Is(err, ledger.ErrPeriodClosed),
+			errors.Is(err, ledger.ErrBudgetExceeded),
+			errors.Is(err, ledger.ErrAccountDenied):
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, receipt)
+}
+
+// handleRejectRfP implements POST /rfp/{id}/reject (LG-171): the
+// debtor refuses the request (see ledger.RejectRfP). Error mapping: an
+// unknown ID is 404; an expired or non-issued RfP is 422.
+func (s *server) handleRejectRfP(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rfp id is required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	rec, err := s.ledgerFor(r).RejectRfP(actx, id, ledger.ActorFromContext(actx))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrRfPNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrRfPExpired),
+			errors.Is(err, ledger.ErrRfPNotIssued):
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
 // handleCAMT056Export implements GET /exports/camt056 (LG-168): the
 // ISO 20022 camt.056.001.02 FI-to-FI cancellation request document for
 // the open cancellation of one tracked payment (see
@@ -8671,6 +8806,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
+	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
+	mux.HandleFunc("POST /rfp/{id}/accept", s.handleAcceptRfP)
+	mux.HandleFunc("POST /rfp/{id}/reject", s.handleRejectRfP)
 	mux.HandleFunc("GET /exports/camt056", s.handleCAMT056Export)
 	mux.HandleFunc("POST /exports/camt029/apply", s.handleCAMT029Apply)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
