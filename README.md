@@ -3824,7 +3824,14 @@ Go: `ledger.ExportPacs002`。
 - 记录为内存态（payout/gpi 惯例）：持久记录是哈希链
   `cancellation_requested` / `cancellation_resolved` 审计事件。
 - 计数器 `ledger_camt056_exports_total` /
-  `ledger_camt029_applies_total`。
+  `ledger_camt029_applies_total` /
+  `ledger_camt029_exports_total`（出站 camt.029 决议导出）。
+- 出站 camt.029 决议导出：`GET /exports/camt029?cancellation=<uetr>`
+  把已决议（`confirmed`/`rejected`）的撤销记录渲染为
+  `camt.029.001.03`（`FIToFICancellationStatusReport`）报文
+  （`ACCR`/`RJCR` + 决议理由），只读不落账——`ExportCAMT029Resolution`
+  → `ParseCAMT029` → `ApplyCAMT029Report` 为精确往返（重放为幂等
+  no-op）；未决议/未知 UETR 返回 404。
 
 ```bash
 curl -s -X POST localhost:8080/cancellations \
@@ -3837,10 +3844,13 @@ curl -s -X POST localhost:8080/exports/camt029/apply \
   -H 'Content-Type: application/xml' --data-binary @bank-camt029.xml
 # 200 {"uetr":"9f2c8e1a-…","status":"confirmed",...}  # payout -> cancelled
 ```
+curl -s 'localhost:8080/exports/camt029?cancellation=9f2c8e1a-…' -o resolution.xml
+# 200 camt.029.001.03: <FIToFICxlStsRpt>/.../<CxlSts><Cd>ACCR</Cd></CxlSts>/<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>
 
 Go: `ledger.RequestPayoutCancellation` /
 `ledger.ExportCancellationRequest` / `ledger.ParseCAMT029` /
-`ledger.ApplyCAMT029Report` / `ledger.ResolvePayoutCancellation`。
+`ledger.ApplyCAMT029Report` / `ledger.ResolvePayoutCancellation` /
+`ledger.ExportCAMT029Resolution`。
 
 ### `GET /exports/pacs004` — ISO 20022 pacs.004 跨境支付退汇导出
 
@@ -6213,12 +6223,18 @@ curl -s localhost:8080/metrics
 - `ledger_camt029_applies_total` — `POST /exports/camt029/apply` ISO
   20022 camt.029 cancellation status report applies served, including
   rejected reports.
+- `ledger_camt029_exports_total` — `GET /exports/camt029` ISO 20022
+  camt.029 cancellation status report exports served, including
+  rejected exports.
 - `ledger_camt056_exports_total` — `GET /exports/camt056` ISO 20022
   camt.056 FI-to-FI cancellation request exports served, including
   rejected exports.
 - `ledger_camt029_applies_total` — `POST /exports/camt029/apply` ISO
   20022 camt.029 cancellation status report applies served, including
   rejected reports.
+- `ledger_camt029_exports_total` — `GET /exports/camt029` ISO 20022
+  camt.029 cancellation status report exports served, including
+  rejected exports.
 - `ledger_gpi_track_queries_total` — `GET /gpi/track/{uetr}` tracking
   queries served.
 - `ledger_gpi_advances_total` — `POST /gpi/track/{uetr}/advance`

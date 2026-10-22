@@ -5247,6 +5247,35 @@ func (s *server) handleCAMT029Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c)
 }
 
+// handleCAMT029Export implements GET /exports/camt029 (LG-174): the
+// ISO 20022 camt.029.001.03 FI-to-FI cancellation status report for
+// the resolved cancellation of one tracked payment (see
+// ledger.ExportCAMT029Resolution). Query parameter: cancellation
+// (required, the gpi UETR). Read-only: the document mirrors the
+// resolution already recorded — nothing is written. Error mapping: a
+// missing cancellation is a 400; an unknown UETR or a UETR with no
+// recorded resolution is a 404.
+func (s *server) handleCAMT029Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT029Exports.Add(1)
+	uetr := r.URL.Query().Get("cancellation")
+	if uetr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cancellation is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportCAMT029Resolution(uetr)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrNoOpenCancellation) || errors.Is(err, ledger.ErrCancellationUnresolved) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleStatement implements GET /accounts/{id}/statement: a JSON
 // account statement for the half-open window [from, to) (see
 // ledger.GenerateStatement). Query parameters: from / to (optional
@@ -8915,6 +8944,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /rfp/{id}/reject", s.handleRejectRfP)
 	mux.HandleFunc("GET /exports/camt056", s.handleCAMT056Export)
 	mux.HandleFunc("POST /exports/camt029/apply", s.handleCAMT029Apply)
+	mux.HandleFunc("GET /exports/camt029", s.handleCAMT029Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
 	mux.HandleFunc("POST /gpi/track/{uetr}/advance", s.handleGPIAdvance)
 	mux.HandleFunc("POST /gpi/link", s.handleGPILink)
