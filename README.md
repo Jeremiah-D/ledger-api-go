@@ -3664,6 +3664,45 @@ curl -s 'localhost:8080/exports/pain008?mandate=m-sub&creditor_scheme_id=DE98ZZZ
 
 Go: `ledger.ExportPain008`。
 
+### `GET /exports/pacs002` — ISO 20022 pacs.002 银行间状态报告导出
+
+gpi 跟踪的 FI-to-FI 视角：`pacs.002.001.03`（`FIToFIPaymentStatusReport`）
+是银行间状态报告——与客户级的 pain.002（LG-162）正交：pain.002 回答
+pain.001 给客户看，pacs.002 报告底层 FI-to-FI 转账的结算状态给代理行链路。
+`ExportPacs002` 把一条 gpi 跟踪记录（LG-165）渲染成 pacs.002 报文：
+
+状态映射（gpi 镜像，不做新 verdict）：
+
+| gpi 状态 | TxSts |
+|---|---|
+| `tracked`（初始，无银行 verdict） | `ACSP`（在链路中） |
+| `ACSP` | `ACSP` |
+| `ACSC` | `ACSC` |
+| `ACCP` | `ACCP` |
+| `RJCT` | `RJCT`，`StsRsnInf/Rsn/Prtry` 携带原因码原文 |
+
+语义：
+- `TxInfAndSts/OrgnlUETR` 携带原始 UETR——UETR 是整条 pacs 链的
+  end-to-end key；`OrgnlEndToEndId` 为已关联的 transfer ID（未关联时为
+  payout ID）；`OrgnlGrpInfAndSts` 把原指令建模为 `pacs.008.001.02`
+ （payout 结算的 FI-to-FI 客户贷记转账）。
+- `MsgId` 确定性：`<uetr>/<seq>`，seq = 已记录的 gpi 转移数——同状态
+  重复导出 MsgId 不变，每次推进产生新 MsgId。
+- 只读：读锁快照、无 version bump、无记账、无审计链追加——与
+  `ExportCAMT053` / `GenerateStatement` 同契约；跟踪旅程的持久记录
+  仍是哈希链 `gpi_status` 审计事件。
+- 刻意**不**驱动 payout 指令：状态报告是事实陈述，不是操作员
+  attestation（与 pain.002 回盘同理）。
+- `400` 缺 `uetr`；`404` 未知 UETR。计数器
+  `ledger_pacs002_exports_total`。
+
+```bash
+curl -s 'localhost:8080/exports/pacs002?uetr=9f2c8e1a-…' -o status.xml
+# 200 pacs.002.001.03: <FIToFIPmtStsRpt>/.../<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>/<TxSts>ACSP</TxSts>
+```
+
+Go: `ledger.ExportPacs002`。
+
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
 The inverse of the export above: it parses an OFX 2.x bank statement
@@ -5914,6 +5953,15 @@ curl -s localhost:8080/metrics
   replays of a debit key are not counted.
 - `ledger_pain008_exports_total` — `GET /exports/pain008` ISO 20022
   pain.008 direct-debit initiation exports served.
+- `ledger_pacs002_exports_total` — `GET /exports/pacs002` ISO 20022
+  pacs.002 FI-to-FI payment status report exports served, including
+  rejected exports.
+- `ledger_camt056_exports_total` — `GET /exports/camt056` ISO 20022
+  camt.056 FI-to-FI cancellation request exports served, including
+  rejected exports.
+- `ledger_camt029_applies_total` — `POST /exports/camt029/apply` ISO
+  20022 camt.029 cancellation status report applies served, including
+  rejected reports.
 - `ledger_gpi_track_queries_total` — `GET /gpi/track/{uetr}` tracking
   queries served.
 - `ledger_gpi_advances_total` — `POST /gpi/track/{uetr}/advance`

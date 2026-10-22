@@ -4766,6 +4766,34 @@ func (s *server) handlePain008Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePacs002Export implements GET /exports/pacs002 (LG-167): an
+// ISO 20022 pacs.002.001.03 FI-to-FI payment status report for one
+// gpi-tracked payment (see ledger.ExportPacs002). Query parameter:
+// uetr (required). The report is the gpi mirror — TxSts from the
+// track's status, OrgnlUETR naming the payment — and is read-only: no
+// version bump, no audit event. Error mapping: a missing uetr is a
+// 400; an unknown UETR is a 404.
+func (s *server) handlePacs002Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs002Exports.Add(1)
+	uetr := r.URL.Query().Get("uetr")
+	if uetr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "uetr is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPacs002(uetr)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrPacs002UnknownUETR) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleStatement implements GET /accounts/{id}/statement: a JSON
 // account statement for the half-open window [from, to) (see
 // ledger.GenerateStatement). Query parameters: from / to (optional
@@ -8421,6 +8449,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
 	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
+	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
 	mux.HandleFunc("POST /gpi/track/{uetr}/advance", s.handleGPIAdvance)
 	mux.HandleFunc("POST /gpi/link", s.handleGPILink)
