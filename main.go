@@ -4982,6 +4982,42 @@ func (s *server) handlePacs009Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePacs008Export implements GET /exports/pacs008 (LG-176): an
+// ISO 20022 pacs.008.001.08 FIToFICstmrCdtTrf customer credit transfer
+// for one payout (see ledger.ExportPacs008). Query parameters:
+// payout (required, the payout instruction ID). The E2E Id reuses
+// the payout idempotency key, the UETR rides the gpi track (LG-165),
+// and the MsgId is deterministic "<payout>/pacs008". The export is
+// read-only: no version bump, no journal rows, no audit event; the
+// ledger_pacs008_exports_total counter is the only side effect. Error
+// mapping: a missing payout parameter is a 400; an unknown payout ID
+// is a 404; a payout without a gpi track, a non-USD payout, or a
+// non-positive amount is a 422.
+func (s *server) handlePacs008Export(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("payout")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "payout is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPacs008(id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrPacs008ExportNoGPITrack),
+			errors.Is(err, ledger.ErrPacs008ExportNonUSD),
+			errors.Is(err, ledger.ErrPacs008ExportNonPositiveAmount):
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // cancellationRequest is the POST /cancellations body.
 type cancellationRequest struct {
 	UETR       string `json:"uetr"`
@@ -8937,6 +8973,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
+	mux.HandleFunc("GET /exports/pacs008", s.handlePacs008Export)
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
@@ -9007,6 +9044,9 @@ func (s *server) handler() http.Handler {
 		// aggregated across tenants the same way.
 		var fedNowPostings uint64
 		fedNowRejections := map[string]uint64{}
+		// FedNow pacs.008 outbound export count (LG-176),
+		// aggregated across tenants the same way.
+		var pacs008Exports uint64
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -9095,6 +9135,10 @@ func (s *server) handler() http.Handler {
 			for reason, n := range rejections {
 				fedNowRejections[reason] += n
 			}
+			// The pacs.008 export counter likewise lives in the
+			// ledger: exports render inside ExportPacs008, not in a
+			// handler (see ledger/pacs008_export.go, LG-176).
+			pacs008Exports += l.Pacs008ExportCount()
 		}
 		s.metrics.AuditEventsTotal.Store(auditWritten)
 		s.metrics.AuditDroppedTotal.Store(auditDropped)
@@ -9203,6 +9247,10 @@ func (s *server) handler() http.Handler {
 		for reason, n := range fedNowRejections {
 			s.metrics.FedNowRejections.Set(reason, n)
 		}
+		// The pacs.008 export counter is mirrored the same way: the
+		// ledger is the source of truth, so the scrape overwrites
+		// (never accumulates) the exposed series.
+		s.metrics.Pacs008Exports.Store(pacs008Exports)
 		// The tenant count is process-level, like the counters above.
 		s.metrics.TenantsTotal.Store(uint64(s.tenants.Count()))
 		// The audit-sink counters live in the sink itself (it is the

@@ -3932,6 +3932,36 @@ curl -s 'localhost:8080/exports/pacs009?transfer=tx-2026-1042&sttlm_mtd=COVE&chr
 Go: `ledger.ExportPacs009(transferID, ledger.Pacs009Options{SettlementMethod,
 ChargesBearer})`。
 
+### `GET /exports/pacs008` — ISO 20022 pacs.008 即时客户贷记出站报文导出
+
+入站 pacs.008（LG-163）是银行转发的客户贷记通知，本节是它的出站
+兄弟：payout 指令渲染为 ISO 20022 `pacs.008.001.08`
+（`FIToFICstmrCdtTrf`）——FedNow 网络上的即时客户贷记转账。`GET
+/exports/pacs008?payout=` 按 payout ID 定位指令，`EndToEndId` 复用
+transfer 幂等键（为空时退回 payout ID），`UETR` 关联 gpi 追踪记录
+（LG-165），`MsgId` 确定性 `<payout>/pacs008`。
+
+语义：
+- 金额/币种/收付方代理行映射复用 pacs009（LG-172）惯例：代理行走
+  `FinInstnId/Othr/Id` = 账户 ID 专有标识，绝不编造 BIC；
+  `IntrBkSttlmAmt` 币种属性 + 金额，`SttlmMtd=INDA`。
+- 只读：读锁快照、不 bump version、不 append 链、不追加审计——与
+  `ExportPacs009` 同契约。唯一副作用是计数器
+  `ledger_pacs008_exports_total`（/metrics 镜像，ledger 是 source
+  of truth）。
+- fail-closed：未知 payout（`404`）、指令无 gpi 追踪记录（`422`——
+  没有 UETR 的 pacs.008 不是完整的网络报文）、非 USD（`422`——FedNow
+  只结算美元）、非正金额（`422`）、缺 `payout` 参数（`400`）。
+- 与入站解析（`ParsePacs008`/`ProcessPacs008`，LG-163）正交（本项为
+  出站生成）：导出的 XML 可被入站解析器原样读回（round-trip）。
+
+```bash
+curl -s 'localhost:8080/exports/pacs008?payout=po-2026-1042' -o cstmr.xml
+# 200 pacs.008.001.08: <FIToFICstmrCdtTrf>/.../<MsgId>po-2026-1042/pacs008</MsgId>/.../<UETR>...</UETR>/.../<EndToEndId>idem-po-2026-1042</EndToEndId>
+```
+
+Go: `ledger.ExportPacs008(payoutID)`。
+
 ### `GET /exports/camt052` — ISO 20022 camt.052 日间账户报告导出
 
 camt.053（LG-158）是日终对账单，camt.052（LG-170）是它的日间

@@ -828,6 +828,13 @@ type Ledger struct {
 	fedNowSettlementAccount AccountID
 	fedNowPostings          uint64
 	fedNowRejections        map[string]uint64
+	// pacs008Exports counts successful pacs.008.001.08 outbound
+	// exports (see pacs008_export.go, LG-176): the ledger-side source
+	// of the ledger_pacs008_exports_total metric. Counted at export
+	// time inside ExportPacs008 — the HTTP layer only mirrors it on
+	// scrape, like FedNowPostings. In-memory only, like the other
+	// export and process counters.
+	pacs008Exports atomic.Uint64
 	// camt054Imports keys camt.054 notification import reports by the
 	// document's SHA-256 (see camt054.go, LG-164): re-importing the
 	// same document returns the original report with Duplicate set.

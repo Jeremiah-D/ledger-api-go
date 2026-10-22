@@ -55,6 +55,13 @@ type Metrics struct {
 	// accumulates) — the ledger is the source of truth. The zero value
 	// is ready to use; Set is safe for concurrent use.
 	FedNowRejections FedNowRejectionCounter
+	// Pacs008Exports counts pacs.008.001.08 customer credit transfer
+	// exports served (see ledger.ExportPacs008, LG-176). It is synced
+	// from the ledgers on every GET /metrics scrape, like
+	// FedNowPostings: the ledger counts successful exports at process
+	// time and is the source of truth, so Set overwrites (never
+	// accumulates).
+	Pacs008Exports atomic.Uint64
 	// Pain001Exports counts GET /exports/pain001 requests served.
 	Pain001Exports atomic.Uint64
 	// Pain001StatusQueries counts GET /exports/pain001/{msgid}/status
@@ -951,6 +958,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&sb, "ledger_fednow_rejections_total",
 		"Total per-item pacs.008 rejections by reason (idempotent replays not counted).",
 		m.FedNowRejections.series())
+	writeCounter(&sb, "ledger_pacs008_exports_total",
+		"Total pacs.008.001.08 customer credit transfer exports served (successful exports only).",
+		m.Pacs008Exports.Load())
 	writeCounter(&sb, "ledger_credit_lines_total",
 		"Total POST /credit-lines requests received.", m.CreditLinesTotal.Load())
 	writeCounter(&sb, "ledger_credit_interest_accruals_total",
