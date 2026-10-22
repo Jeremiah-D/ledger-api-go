@@ -70,6 +70,10 @@ type Metrics struct {
 	// pain.002 status-report apply requests served, including
 	// rejected reports (LG-162).
 	Pain002Applies atomic.Uint64
+	// Pain008Exports counts GET /exports/pain008 ISO 20022 pain.008
+	// direct-debit initiation export requests served (see
+	// ledger.ExportPain008, LG-166).
+	Pain008Exports atomic.Uint64
 	// GPITrackQueries counts GET /gpi/track/{uetr} tracking-record
 	// queries served (see ledger.GetGPITrack, LG-165).
 	GPITrackQueries atomic.Uint64
@@ -794,6 +798,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/pain001/{msgid}/settle reconcile-confirmation requests served.", m.Pain001Settlements.Load())
 	writeCounter(&sb, "ledger_pain002_applies_total",
 		"Total POST /exports/pain002/apply ISO 20022 pain.002 status-report apply requests served, including rejected reports.", m.Pain002Applies.Load())
+	writeCounter(&sb, "ledger_pain008_exports_total",
+		"Total GET /exports/pain008 ISO 20022 pain.008 direct-debit initiation exports served.", m.Pain008Exports.Load())
 	writeCounter(&sb, "ledger_gpi_track_queries_total",
 		"Total GET /gpi/track/{uetr} gpi tracking-record queries served.", m.GPITrackQueries.Load())
 	writeCounter(&sb, "ledger_gpi_advances_total",

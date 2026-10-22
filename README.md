@@ -3620,6 +3620,50 @@ curl -s -X POST localhost:8080/gpi/link \
 Go: `ledger.AdvanceGPI` / `ledger.LinkGPITransfer` / `ledger.GetGPITrack` /
 `ledger.GPICounts`。
 
+### `GET /exports/pain008` — ISO 20022 pain.008 直接扣款指令导出
+
+`pain.001` 的反向：`pain.001` 是付款人主动贷记（credit transfer），
+`pain.008.001.02`（`CstmrDrctDbtInitn`）是债权人发起的直接扣款——
+merchant 凭 debtor 的授权（mandate）从 debtor 银行扣款。`ExportPain008`
+把一条 mandate（代扣协议，LG-125）下已记账的扣款渲染成发给银行的
+pain.008 指令文件；与 pain.001 正交（借记 vs 贷记），与 pain.002 正交
+（pain.002 只回答 pain.001，`OrgnlMsgNmId` 非 `pain.001.001.03` 的回盘
+会被拒绝）。
+
+SeqTp（sequence type）按 mandate 自身扣款历史自动判定——账本是
+mandate 使用情况的 system of record：
+
+| SeqTp | 含义 | 判定 |
+|---|---|---|
+| `FRST` | 首次扣款 | 该 mandate 下无历史扣款 |
+| `RCUR` | 周期性扣款 | 有历史扣款，且还有后续窗口 |
+| `FNAL` | 末次扣款 | 本笔落在 mandate 最后一个可扣款窗口 |
+| `OOFF` | 一次性扣款 | mandate 整个有效期落在单个扣款窗口内（至多只能扣一次） |
+
+语义（SEPA 分组规则：同一 creditor、同一 `ReqdColltnDt`、同一 SeqTp
+为一组 `PmtInf`，每组携带自己的 SeqTp）：
+- 每笔已记账扣款一条 `DrctDbtTxInf`；`EndToEndId` 即 journal entry ID，
+  跨导出稳定，银行可据此去重。
+- debtor = mandate payer（客户），creditor = mandate payee（商户）；
+  账户标识为注册 IBAN（BIC 走 `DbtrAgt`/`CdtrAgt`）。
+- `MndtId` = mandate ID；`DtOfSgntr` = mandate `ValidFrom` 日期（债务人
+  授权日）；`ReqdColltnDt` = 扣款记账日。
+- `CdtrSchmeId` 必填（SEPA 强制，账本不存 creditor identifier，无
+  默认值可编——缺失 fail-closed）。
+- fail-closed：未知/暂停/取消/过期的 mandate 拒绝导出；缺 creditor
+  scheme、缺 debtor/creditor IBAN 拒绝整个导出（不伪造标识）。
+- `MsgId` 确定性（同 mandate+scheme+窗口+内容重渲字节一致）；
+  `CtrlSum` 溢出检查（`int64` 上溢则拒绝导出）。
+- 只读：读锁、无 version bump、无链追加、无幂等键消耗；照例记一条
+  `pain008_exported` 审计事件。计数器 `ledger_pain008_exports_total`。
+
+```bash
+curl -s 'localhost:8080/exports/pain008?mandate=m-sub&creditor_scheme_id=DE98ZZZ09999999999' -o collections.xml
+# 200 pain.008.001.02: <CstmrDrctDbtInitn>/<PmtInf>/<SeqTp>FRST</SeqTp>/...
+```
+
+Go: `ledger.ExportPain008`。
+
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
 The inverse of the export above: it parses an OFX 2.x bank statement
@@ -5868,6 +5912,8 @@ curl -s localhost:8080/metrics
   (see "Direct-debit mandates" above): pulls authorized by a mandate
   and booked through the full `POST` validation sequence. Idempotent
   replays of a debit key are not counted.
+- `ledger_pain008_exports_total` — `GET /exports/pain008` ISO 20022
+  pain.008 direct-debit initiation exports served.
 - `ledger_gpi_track_queries_total` — `GET /gpi/track/{uetr}` tracking
   queries served.
 - `ledger_gpi_advances_total` — `POST /gpi/track/{uetr}/advance`

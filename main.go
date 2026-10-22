@@ -4708,6 +4708,64 @@ func (s *server) handleGPILink(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, track)
 }
 
+// handlePain008Export implements GET /exports/pain008 (LG-166): an
+// ISO 20022 pain.008.001.02 customer direct debit initiation for the
+// booked collections of one mandate (see ledger.ExportPain008).
+// Query parameters: mandate (required), creditor_scheme_id (required,
+// the SEPA creditor identifier), from / to (optional RFC 3339 window
+// bounds). The mandate must be effectively active — unknown,
+// suspended, cancelled, or expired mandates are refused. Error
+// mapping: missing parameters or an invalid window are 400; an
+// unknown mandate is a 404; an inactive mandate, a missing creditor
+// scheme, or missing IBANs are 422 (the request is well-formed but
+// the export cannot be produced).
+func (s *server) handlePain008Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain008Exports.Add(1)
+	q := r.URL.Query()
+	mandateID := q.Get("mandate")
+	schemeID := q.Get("creditor_scheme_id")
+	if mandateID == "" || schemeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mandate and creditor_scheme_id are required"})
+		return
+	}
+	var from, to time.Time
+	if raw := q.Get("from"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from must be RFC 3339"})
+			return
+		}
+		from = t
+	}
+	if raw := q.Get("to"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to must be RFC 3339"})
+			return
+		}
+		to = t
+	}
+	doc, err := s.ledgerFor(r).ExportPain008(mandateID, ledger.Pain008ExportOptions{
+		CreditorSchemeID: schemeID,
+		Since:            from,
+		Until:            to,
+	})
+	if err != nil {
+		status := http.StatusUnprocessableEntity
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrInvalidPain008Range):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleStatement implements GET /accounts/{id}/statement: a JSON
 // account statement for the half-open window [from, to) (see
 // ledger.GenerateStatement). Query parameters: from / to (optional
@@ -8362,6 +8420,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
+	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
 	mux.HandleFunc("POST /gpi/track/{uetr}/advance", s.handleGPIAdvance)
 	mux.HandleFunc("POST /gpi/link", s.handleGPILink)
