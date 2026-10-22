@@ -4418,6 +4418,57 @@ func (s *server) handlePain001Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handleCAMT052Export implements GET /exports/camt052 (LG-170): an
+// ISO 20022 camt.052.001.02 BankToCustomerAccountReport — the intraday
+// sibling of the camt.053 end-of-day statement (see
+// ledger.ExportCAMT052). Query parameters: account (required), rpt_id
+// (required), since (required, RFC 3339), until (required, RFC 3339),
+// currency (optional ISO 4217 filter), msg_id (optional, defaults to
+// rpt_id). The report is read-only: no version bump, no audit event.
+// Error mapping: missing/invalid parameters are 400; an unknown
+// account exports a valid empty report (banks do send those).
+func (s *server) handleCAMT052Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT052Exports.Add(1)
+	q := r.URL.Query()
+	account := q.Get("account")
+	rptID := q.Get("rpt_id")
+	if account == "" || rptID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account and rpt_id are required"})
+		return
+	}
+	since, err := time.Parse(time.RFC3339, q.Get("since"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since: " + err.Error()})
+		return
+	}
+	until, err := time.Parse(time.RFC3339, q.Get("until"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid until: " + err.Error()})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportCAMT052(ledger.CAMT052ReportOptions{
+		Account:  ledger.AccountID(account),
+		RptID:    rptID,
+		MsgID:    q.Get("msg_id"),
+		Since:    since,
+		Until:    until,
+		Currency: q.Get("currency"),
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrEmptyAccountID) ||
+			errors.Is(err, ledger.ErrInvalidCAMT052Report) ||
+			errors.Is(err, ledger.ErrInvalidCurrency) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // pain001ReceiptRequest is one bank receipt in the POST
 // /exports/pain001/{msgid}/receipts body: the pain.002-style per-tx
 // status report. Unknown JSON fields fail fast, like every other POST
@@ -8618,6 +8669,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
+	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("GET /exports/camt056", s.handleCAMT056Export)
 	mux.HandleFunc("POST /exports/camt029/apply", s.handleCAMT029Apply)

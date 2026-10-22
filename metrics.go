@@ -92,6 +92,10 @@ type Metrics struct {
 	// payment return export requests served, including rejected
 	// exports (see ledger.ExportPacs004, LG-169).
 	Pacs004Exports atomic.Uint64
+	// CAMT052Exports counts GET /exports/camt052 ISO 20022 camt.052
+	// intraday account report export requests served, including
+	// rejected exports (see ledger.ExportCAMT052, LG-170).
+	CAMT052Exports atomic.Uint64
 	// GPITrackQueries counts GET /gpi/track/{uetr} tracking-record
 	// queries served (see ledger.GetGPITrack, LG-165).
 	GPITrackQueries atomic.Uint64
@@ -826,6 +830,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/camt029/apply ISO 20022 camt.029 cancellation status report apply requests served, including rejected reports.", m.CAMT029Applies.Load())
 	writeCounter(&sb, "ledger_pacs004_exports_total",
 		"Total GET /exports/pacs004 ISO 20022 pacs.004 payment return exports served, including rejected exports.", m.Pacs004Exports.Load())
+	writeCounter(&sb, "ledger_camt052_exports_total",
+		"Total GET /exports/camt052 ISO 20022 camt.052 intraday account report exports served, including rejected exports.", m.CAMT052Exports.Load())
 	writeCounter(&sb, "ledger_gpi_track_queries_total",
 		"Total GET /gpi/track/{uetr} gpi tracking-record queries served.", m.GPITrackQueries.Load())
 	writeCounter(&sb, "ledger_gpi_advances_total",

@@ -3794,6 +3794,35 @@ curl -s 'localhost:8080/exports/pacs004?uetr=9f2c8e1a-…&reason=DUPL' -o return
 
 Go: `ledger.ExportPacs004`。
 
+### `GET /exports/camt052` — ISO 20022 camt.052 日间账户报告导出
+
+camt.053（LG-158）是日终对账单，camt.052（LG-170）是它的日间
+兄弟：同一个账户在 intraday 切片 `[since, until)` 内的分录渲染为
+`camt.052.001.02`（`BankToCustomerAccountReport`）——`Ntry` 行是
+窗口内的 journal 分录（pending-review 行除外：它们从未触碰余额，
+camt.053 同规则），外加每币种两条余额快照：`OPBD`（窗口开启前
+一刻的 booked balance）和 `CLBD`（窗口关闭前一刻）。
+
+语义：
+- 与 camt.053 导入/导出（LG-103/LG-158）正交：camt.053 是日终
+  statement 往返（导入解析 ↔ 导出渲染），camt.052 只回答"现在
+  账上多少钱"，不做 round-trip 解析。
+- 恒等式：`CLBD == OPBD + 窗口内分录净额`（每币种），测试钉死；
+  自转账净零、负余额渲染为 `DBIT` + 绝对金额。
+- `account`/`rpt_id`/`since`/`until` 必填（RFC 3339），`currency`
+  可选过滤单币种，`msg_id` 缺省回退 `rpt_id`；账户级外部映射
+  （camt053 IBAN 映射）同样适用。未知账户导出合法空报告
+  （银行也会发空的日间报告）。
+- 只读：读锁快照、无 version bump、无记账、无审计链追加——与
+  `ExportCAMT053` 同契约。计数器 `ledger_camt052_exports_total`。
+
+```bash
+curl -s 'localhost:8080/exports/camt052?account=ops&rpt_id=RPT-1&since=2026-10-22T09:00:00Z&until=2026-10-23T09:00:00Z' -o intraday.xml
+# 200 camt.052.001.02: <BkToCstmrAcctRpt>/<Rpt>/.../<Cd>OPBD</Cd>/<Amt Ccy="USD">150.00</Amt>
+```
+
+Go: `ledger.ExportCAMT052` / `ledger.RenderCAMT052Report`。
+
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
 The inverse of the export above: it parses an OFX 2.x bank statement
@@ -6044,6 +6073,9 @@ curl -s localhost:8080/metrics
   replays of a debit key are not counted.
 - `ledger_pain008_exports_total` — `GET /exports/pain008` ISO 20022
   pain.008 direct-debit initiation exports served.
+- `ledger_camt052_exports_total` — `GET /exports/camt052` ISO 20022
+  camt.052 intraday account report exports served, including rejected
+  exports.
 - `ledger_pacs002_exports_total` — `GET /exports/pacs002` ISO 20022
   pacs.002 FI-to-FI payment status report exports served, including
   rejected exports.
