@@ -3566,6 +3566,60 @@ curl -s -X POST localhost:8080/exports/pain002/apply \
 # 200 {"state":"exported","txs":[{"tx_id":"st1","state":"accepted"},{"tx_id":"st2","state":"rejected"}]}
 ```
 
+### SWIFT gpi UETR 跨境追踪（`GET /gpi/track/{uetr}`）
+
+每笔 payout 指令都是跨境支付发起：`POST /payouts` 起草时自动分配
+UETR（Unique End-to-end Transaction Reference，RFC 4122 UUID v4，
+`crypto/rand` 生成），并打开一条 gpi 跟踪记录，状态 `tracked`。
+记录镜像该笔跨境支付在代理行链路中的旅程：
+
+| 状态 | 含义 |
+|---|---|
+| `tracked` | 已跟踪（初始） |
+| `ACSP` | AcceptedSettlementInProcess（银行已受理） |
+| `ACSC` | AcceptedSettlementCompleted（已结算） |
+| `ACCP` | AcceptedCustomerProfile（已入账受益人，终态） |
+| `RJCT` | Rejected（拒绝，终态，需原因码） |
+
+语义：
+- 状态机只向前：允许跳步（如 `tracked`→`ACSC`），永不回退；
+  同状态推进是幂等 no-op；`ACCP`/`RJCT` 为终态。
+- `RJCT` 必须带原因码（fail-closed），原因码原文进审计——拒绝必须说明原因。
+- 两条推进路径：操作员经 `POST /gpi/track/{uetr}/advance`（`{"status","reason_code?"}`，
+  `x-ledger-actor` 记身份）；银行经 pain.002 回盘自动推进——`POST /gpi/link`
+  把 transfer（其 EndToEndId）关联到 UETR 后，`POST /exports/pain002/apply`
+  的每笔 verdict 自动镜像到 gpi 状态（`ACSC`→`ACSC`、`ACCP`→`ACCP`、
+  `RJCT`→`RJCT` 带银行原因码；`PDNG` 不动）。EndToEndId 仍是 pain.001
+  的幂等键；gpi 只做镜像，且迟到的回盘永不把已 `ACCP` 的记录往回拨。
+- 一笔 transfer 只关联一个 UETR（冲突 409）；关联是操作员 attestation，
+  进哈希链审计（`gpi_linked` / `gpi_status`）。
+- 跟踪记录与 payout 指令一样是内存态（in-memory）：持久记录是哈希链
+  `gpi_status` 审计事件。计数器 `ledger_gpi_tracked_total` /
+  `ledger_gpi_settled_total` / `ledger_gpi_rejected_total` 进 `/metrics`。
+
+```bash
+# 起草 payout 即得 UETR
+curl -s -X POST localhost:8080/payouts \
+  -d '{"id":"po-x","payee_account":"saver","amount_cents":250000,"destination":"FPS:6222000012345678","maker":"alice"}' | jq .uetr
+# "9f2c8e1a-3b4d-4f5a-8c6d-7e8f9a0b1c2d"
+
+# 查询跟踪记录（含完整 transition history）
+curl -s localhost:8080/gpi/track/9f2c8e1a-3b4d-4f5a-8c6d-7e8f9a0b1c2d | jq '{status, history}'
+
+# 操作员推进（银行已受理）
+curl -s -X POST localhost:8080/gpi/track/<uetr>/advance \
+  -H 'x-ledger-actor: night-ops' -d '{"status":"ACSP"}' | jq .status
+# "ACSP"
+
+# 关联 transfer，后续 pain.002 回盘自动推进 gpi
+curl -s -X POST localhost:8080/gpi/link \
+  -H 'x-ledger-actor: night-ops' -d '{"uetr":"<uetr>","transfer_id":"st1"}' | jq .transfer_id
+# "st1"
+```
+
+Go: `ledger.AdvanceGPI` / `ledger.LinkGPITransfer` / `ledger.GetGPITrack` /
+`ledger.GPICounts`。
+
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
 The inverse of the export above: it parses an OFX 2.x bank statement
@@ -5814,6 +5868,16 @@ curl -s localhost:8080/metrics
   (see "Direct-debit mandates" above): pulls authorized by a mandate
   and booked through the full `POST` validation sequence. Idempotent
   replays of a debit key are not counted.
+- `ledger_gpi_track_queries_total` — `GET /gpi/track/{uetr}` tracking
+  queries served.
+- `ledger_gpi_advances_total` — `POST /gpi/track/{uetr}/advance`
+  operator advances served, including rejected advances.
+- `ledger_gpi_links_total` — `POST /gpi/link` transfer-UETR
+  associations served, including rejected links.
+- `ledger_gpi_tracked_total` — gpi-tracked cross-border payments opened
+  (one per payout drafted), synced from the ledger on every scrape.
+- `ledger_gpi_settled_total` — gpi-tracked payments that reached `ACCP`.
+- `ledger_gpi_rejected_total` — gpi-tracked payments that reached `RJCT`.
 - `ledger_holds_total` — every `POST /holds` request received.
 - `ledger_hold_idempotency_hits_total` — holds that replayed an existing
   idempotency key (returned the original hold, reserved nothing).

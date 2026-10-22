@@ -4595,6 +4595,119 @@ func (s *server) handlePain002Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
+// handleGPITrack implements GET /gpi/track/{uetr} (LG-165): the gpi
+// tracking record of one cross-border payment — its UETR, linked
+// payout/transfer, current status, and full transition history. An
+// unknown UETR is a 404; an empty one is a 400.
+func (s *server) handleGPITrack(w http.ResponseWriter, r *http.Request) {
+	s.metrics.GPITrackQueries.Add(1)
+	uetr := r.PathValue("uetr")
+	if uetr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "uetr required"})
+		return
+	}
+	track, ok := s.ledgerFor(r).GetGPITrack(uetr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown gpi UETR"})
+		return
+	}
+	writeJSON(w, http.StatusOK, track)
+}
+
+// gpiAdvanceRequest is the POST /gpi/track/{uetr}/advance body: the
+// target gpi status, plus the bank's reason code when rejecting.
+type gpiAdvanceRequest struct {
+	Status     string `json:"status"`
+	ReasonCode string `json:"reason_code,omitempty"`
+}
+
+// handleGPIAdvance implements POST /gpi/track/{uetr}/advance
+// (LG-165): the operator-driven leg of the gpi state machine —
+// "the bank acknowledged the instruction". The machine is
+// forward-only (tracked -> ACSP -> ACSC -> ACCP, RJCT terminal from
+// any non-terminal state); same-state advances are idempotent
+// no-ops. RJCT requires a reason code. Error mapping: an unknown
+// UETR is a 404; an unknown status, an illegal transition, or a
+// missing rejection reason is a 422 (the request is well-formed but
+// the state machine cannot apply it). The operator identity comes
+// from the x-ledger-actor header, like the other operator actions.
+func (s *server) handleGPIAdvance(w http.ResponseWriter, r *http.Request) {
+	s.metrics.GPIAdvances.Add(1)
+	uetr := r.PathValue("uetr")
+	if uetr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "uetr required"})
+		return
+	}
+	var req gpiAdvanceRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	track, err := s.ledgerFor(r).AdvanceGPI(uetr, req.Status, req.ReasonCode, ledger.ActorFromContext(actx))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrGPIUnknownUETR):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrGPIInvalidStatus),
+			errors.Is(err, ledger.ErrGPIInvalidTransition),
+			errors.Is(err, ledger.ErrGPIReasonRequired):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /gpi/track/%s/advance: %v", uetr, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "advancing gpi track failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, track)
+}
+
+// gpiLinkRequest is the POST /gpi/link body: the UETR to link and the
+// transfer (its EndToEndId) whose bank verdicts should advance the
+// gpi mirror.
+type gpiLinkRequest struct {
+	UETR       string `json:"uetr"`
+	TransferID string `json:"transfer_id"`
+}
+
+// handleGPILink implements POST /gpi/link (LG-165): associates a
+// transfer with a tracked UETR, so pain.002 reports naming that
+// transfer's EndToEndId advance the gpi mirror automatically. The
+// link is the operator's attestation that the transfer settles the
+// tracked payment. Error mapping: an unknown UETR is a 404; a
+// transfer already linked to a different UETR is a 409; an empty UETR
+// or transfer ID is a 400.
+func (s *server) handleGPILink(w http.ResponseWriter, r *http.Request) {
+	s.metrics.GPILinks.Add(1)
+	var req gpiLinkRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.UETR == "" || req.TransferID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "uetr and transfer_id are required"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	track, err := s.ledgerFor(r).LinkGPITransfer(req.UETR, req.TransferID, ledger.ActorFromContext(actx))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrGPIUnknownUETR):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrGPITransferConflict):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, track)
+}
+
 // handleStatement implements GET /accounts/{id}/statement: a JSON
 // account statement for the half-open window [from, to) (see
 // ledger.GenerateStatement). Query parameters: from / to (optional
@@ -8249,6 +8362,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
+	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
+	mux.HandleFunc("POST /gpi/track/{uetr}/advance", s.handleGPIAdvance)
+	mux.HandleFunc("POST /gpi/link", s.handleGPILink)
 	mux.HandleFunc("GET /accounts/{id}/statement", s.handleStatement)
 	mux.HandleFunc("POST /ofx/import", s.handleOFXImport)
 	mux.HandleFunc("POST /camt053/import", s.handleCAMT053Import)
@@ -8299,6 +8415,7 @@ func (s *server) handler() http.Handler {
 		var extMappingChanges uint64
 		var entryLinkChanges uint64
 		var mandateDebits uint64
+		var gpiTracked, gpiSettled, gpiRejected uint64
 		var retentionDeletions uint64
 		// Per-reason-code ACH return counts (LG-161), aggregated
 		// across tenants like the other ledger-sourced counters above.
@@ -8372,6 +8489,14 @@ func (s *server) handler() http.Handler {
 			// debits post inside DebitWithMandate, not in a handler
 			// (see ledger/mandate.go, LG-125).
 			mandateDebits += l.MandateDebitCount()
+			// The gpi lifecycle counters likewise live in the ledger:
+			// tracks open inside CreatePayout and advance inside
+			// AdvanceGPI / the pain.002 apply path, not in a handler
+			// (see ledger/gpi.go, LG-165).
+			tr, se, rj := l.GPICounts()
+			gpiTracked += tr
+			gpiSettled += se
+			gpiRejected += rj
 			// The ACH return counter likewise lives in the ledger:
 			// returns book inside ProcessACHReturns, not in a handler
 			// (see ledger/ach_return.go, LG-161).
@@ -8480,6 +8605,10 @@ func (s *server) handler() http.Handler {
 		s.metrics.ExternalMappingChangesTotal.Store(extMappingChanges)
 		s.metrics.EntryLinkChangesTotal.Store(entryLinkChanges)
 		s.metrics.MandateDebitsTotal.Store(mandateDebits)
+		// The gpi counters mirror the ledger the same way.
+		s.metrics.GPITrackedTotal.Store(gpiTracked)
+		s.metrics.GPISettledTotal.Store(gpiSettled)
+		s.metrics.GPIRejectedTotal.Store(gpiRejected)
 		// The ACH return counter likewise lives in the ledger: the
 		// ledger is the source of truth, so the scrape overwrites
 		// (never accumulates) the exposed series.

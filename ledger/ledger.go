@@ -765,6 +765,23 @@ type Ledger struct {
 	payouts               map[string]PayoutInstruction
 	payoutKeys            map[string]string
 	payoutClearingAccount AccountID
+	// gpiTracks maps SWIFT gpi UETRs to their tracking records (see
+	// gpi.go, LG-165): opened automatically when a payout is drafted,
+	// advanced by operator actions and pain.002 bank verdicts.
+	// gpiByPayout maps payout IDs to their UETR; gpiByTransfer maps
+	// transfer IDs to their UETR for the pain.002 join. All three are
+	// in-memory only, like payout instructions: the hash-chained
+	// gpi_status audit events are the durable record.
+	gpiTracks     map[string]*GPITrack
+	gpiByPayout   map[string]string
+	gpiByTransfer map[string]string
+	// gpiTracked, gpiSettled, gpiRejected count gpi-tracked payments
+	// (see GPICounts): tracks opened, tracks that reached ACCP, and
+	// tracks that reached RJCT. In-memory only, like the mandate
+	// debit counter.
+	gpiTracked  atomic.Uint64
+	gpiSettled  atomic.Uint64
+	gpiRejected atomic.Uint64
 	// achReturnCounts counts processed ACH returns (see ach_return.go,
 	// LG-161) by NACHA return reason code: the ledger-side source of
 	// the ledger_ach_returns_total{reason_code} metric. Only
@@ -1420,6 +1437,11 @@ func New(opts ...Option) *Ledger {
 		termDepositKeys:       make(map[string]string),
 		payouts:               make(map[string]PayoutInstruction),
 		payoutKeys:            make(map[string]string),
+		// LG-165: the gpi tracking registry starts empty; tracks open
+		// automatically as payouts are drafted.
+		gpiTracks:     make(map[string]*GPITrack),
+		gpiByPayout:   make(map[string]string),
+		gpiByTransfer: make(map[string]string),
 		achReturnCounts:       make(map[string]uint64),
 		fedNowRejections:       make(map[string]uint64),
 		camt054Imports:          make(map[string]*CAMT054ImportReport),

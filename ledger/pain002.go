@@ -292,5 +292,39 @@ func (l *Ledger) ApplyPain002Report(report *Pain002Report, actor string) (PainIn
 		rec, _ := l.PainInstruction(report.OrgnlMsgID)
 		return rec, nil
 	}
-	return l.RecordPain001Receipts(report.OrgnlMsgID, receipts, actor)
+	rec, err := l.RecordPain001Receipts(report.OrgnlMsgID, receipts, actor)
+	if err != nil {
+		return PainInstruction{}, err
+	}
+	// LG-165: the bank's verdict also advances the gpi mirror. For
+	// every decided transaction, a transfer linked to a UETR (see
+	// LinkGPITransfer) moves that track forward — ACSC -> ACSC,
+	// ACCP -> ACCP, RJCT -> RJCT with the bank's reason code. The
+	// EndToEndId stays the pain.001 idempotency key; the gpi track
+	// only mirrors, and it never moves backward past a state already
+	// recorded (a late ACSC report does not un-settle an ACCP track).
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, tx := range report.Txs {
+		var target string
+		switch tx.TxSts {
+		case Pain002TxACSC:
+			target = GPIStatusACSC
+		case Pain002TxACCP:
+			target = GPIStatusACCP
+		case Pain002TxRJCT:
+			target = GPIStatusRJCT
+		default:
+			// PDNG: the bank has not decided; the mirror stays.
+			continue
+		}
+		reason := ""
+		if target == GPIStatusRJCT {
+			reason = pain002ReceiptReason(tx)
+		}
+		if _, _, err := l.advanceGPITowardLocked(tx.EndToEndID, target, reason, actor); err != nil {
+			return PainInstruction{}, err
+		}
+	}
+	return rec, nil
 }

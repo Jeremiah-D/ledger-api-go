@@ -161,6 +161,12 @@ type PayoutInstruction struct {
 	// settlement (see SettlePayout).
 	StatementLineID string `json:"statement_line_id,omitempty"`
 	FailReason      string `json:"fail_reason,omitempty"`
+	// UETR is the SWIFT gpi Unique End-to-end Transaction Reference
+	// (UUID v4, RFC 4122), assigned automatically at draft time (see
+	// gpi.go, LG-165): the cross-border payment's end-to-end
+	// identifier from inception, tracked through the gpi state
+	// machine.
+	UETR string `json:"uetr"`
 }
 
 // payoutClearingEntryID builds the deterministic submit-leg entry ID:
@@ -249,6 +255,12 @@ func (l *Ledger) CreatePayout(p PayoutInstruction) (PayoutInstruction, bool, err
 	l.maybePruneIdempotencyKeys(now)
 	p.Status = PayoutDraft
 	p.CreatedAt = now
+	// LG-165: every payout is a cross-border payment initiation, so it
+	// gets a UETR at draft time and opens a gpi tracking record in the
+	// "tracked" state — the payment is tracked end-to-end from
+	// inception.
+	p.UETR = newUETR()
+	l.registerGPITrackLocked(p.UETR, p.ID, now)
 	l.payouts[p.ID] = p
 	if p.IdempotencyKey != "" {
 		l.payoutKeys[p.IdempotencyKey] = p.ID
@@ -265,6 +277,7 @@ func (l *Ledger) CreatePayout(p PayoutInstruction) (PayoutInstruction, bool, err
 			"currency":     p.Currency,
 			"destination":  p.Destination,
 			"maker":        p.Maker,
+			"uetr":         p.UETR,
 		},
 	})
 	l.emitOutboxLocked(OutboxEvent{

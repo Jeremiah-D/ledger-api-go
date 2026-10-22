@@ -70,6 +70,15 @@ type Metrics struct {
 	// pain.002 status-report apply requests served, including
 	// rejected reports (LG-162).
 	Pain002Applies atomic.Uint64
+	// GPITrackQueries counts GET /gpi/track/{uetr} tracking-record
+	// queries served (see ledger.GetGPITrack, LG-165).
+	GPITrackQueries atomic.Uint64
+	// GPIAdvances counts POST /gpi/track/{uetr}/advance operator
+	// state-machine advances served (see ledger.AdvanceGPI, LG-165).
+	GPIAdvances atomic.Uint64
+	// GPILinks counts POST /gpi/link transfer-UETR associations served
+	// (see ledger.LinkGPITransfer, LG-165).
+	GPILinks atomic.Uint64
 	// VerifyRequests counts GET /entries/verify requests served.
 	VerifyRequests atomic.Uint64
 	// AnchorsTotal counts POST /entries/anchor requests that signed a
@@ -729,6 +738,19 @@ type Metrics struct {
 	// GET /metrics). It is synced from the ledger on every GET /metrics
 	// scrape, like EntryLinkChangesTotal.
 	MandateDebitsTotal atomic.Uint64
+	// GPITrackedTotal counts gpi-tracked cross-border payments (see
+	// ledger.GPICounts, LG-165): one per payout drafted, across all
+	// tenants (see GET /metrics). It is synced from the ledger on
+	// every GET /metrics scrape, like MandateDebitsTotal.
+	GPITrackedTotal atomic.Uint64
+	// GPISettledTotal counts gpi-tracked payments that reached ACCP
+	// (see ledger.GPICounts, LG-165), across all tenants. It is synced
+	// from the ledger on every GET /metrics scrape.
+	GPISettledTotal atomic.Uint64
+	// GPIRejectedTotal counts gpi-tracked payments that reached RJCT
+	// (see ledger.GPICounts, LG-165), across all tenants. It is synced
+	// from the ledger on every GET /metrics scrape.
+	GPIRejectedTotal atomic.Uint64
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -772,6 +794,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/pain001/{msgid}/settle reconcile-confirmation requests served.", m.Pain001Settlements.Load())
 	writeCounter(&sb, "ledger_pain002_applies_total",
 		"Total POST /exports/pain002/apply ISO 20022 pain.002 status-report apply requests served, including rejected reports.", m.Pain002Applies.Load())
+	writeCounter(&sb, "ledger_gpi_track_queries_total",
+		"Total GET /gpi/track/{uetr} gpi tracking-record queries served.", m.GPITrackQueries.Load())
+	writeCounter(&sb, "ledger_gpi_advances_total",
+		"Total POST /gpi/track/{uetr}/advance gpi state-machine advances served, including rejected advances.", m.GPIAdvances.Load())
+	writeCounter(&sb, "ledger_gpi_links_total",
+		"Total POST /gpi/link transfer-UETR associations served, including rejected links.", m.GPILinks.Load())
 	writeCounter(&sb, "ledger_verify_requests_total",
 		"Total GET /entries/verify requests served.", m.VerifyRequests.Load())
 	writeCounter(&sb, "ledger_anchors_total",
@@ -1176,6 +1204,15 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_mandate_debits_total",
 		"Total direct-debit mandate debits posted (see ledger.DebitWithMandate): pulls authorized by a mandate and booked through the full Post validation sequence. Idempotent replays of a debit key are not counted.",
 		m.MandateDebitsTotal.Load())
+	writeCounter(&sb, "ledger_gpi_tracked_total",
+		"Total SWIFT gpi cross-border payments tracked (see ledger.GPICounts): one per payout drafted. In-memory only, synced from the ledger on every scrape.",
+		m.GPITrackedTotal.Load())
+	writeCounter(&sb, "ledger_gpi_settled_total",
+		"Total gpi-tracked payments that reached ACCP (see ledger.GPICounts). In-memory only, synced from the ledger on every scrape.",
+		m.GPISettledTotal.Load())
+	writeCounter(&sb, "ledger_gpi_rejected_total",
+		"Total gpi-tracked payments that reached RJCT (see ledger.GPICounts). In-memory only, synced from the ledger on every scrape.",
+		m.GPIRejectedTotal.Load())
 	_, _ = w.Write([]byte(sb.String()))
 }
 
