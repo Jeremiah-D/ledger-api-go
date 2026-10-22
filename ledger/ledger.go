@@ -888,6 +888,11 @@ type Ledger struct {
 	// replays rebuild the full receipt (see sweep.go). Its own namespace,
 	// like holdKeys/captureKeys, expiring with the TTL.
 	sweepKeys map[string]sweepRecord
+	// autoSweepRules is the registry of automatic sweep rules (see
+	// autosweep.go): rule ID -> rule plus its firing history. In-memory
+	// operational config, like the hold sweeper's interval — it does
+	// not round-trip through disaster-recovery snapshots.
+	autoSweepRules map[string]*autoSweepRuleState
 	// sweepFXKeys maps a cross-currency sweep's idempotency key to its
 	// sweepFXRecord, so replays rebuild the full receipt (see
 	// sweep_fx.go). Its own namespace, expiring with the TTL like every
@@ -1505,6 +1510,7 @@ func New(opts ...Option) *Ledger {
 		eclStageConfig:        DefaultECLStageConfig(),
 		eclExposures:          make(map[eclExposureKey]eclExposureRow),
 		sweepKeys:             make(map[string]sweepRecord),
+		autoSweepRules:        make(map[string]*autoSweepRuleState),
 		sweepFXKeys:           make(map[string]sweepFXRecord),
 		batchKeys:             make(map[string]batchRecord),
 		batchTransferKeys:   make(map[string]batchTransferRecord),

@@ -803,6 +803,61 @@ journal version — and are audited as `sweep_reserve_set` /
 disaster-recovery snapshots and are disclosed on the reconcile report
 (`sweep_reserves`).
 
+### Automatic sweep rules (Go API: `RegisterAutoSweepRule` / `RunAutoSweepRules`)
+
+Scheduled treasury sweeps: register a rule once, then fire it from the
+operator's scheduler (cron/systemd). Three trigger kinds:
+
+- `threshold` — when a source's balance exceeds `threshold_cents`, sweep
+  the excess down to `target_cents` (e.g. sweep nightly when a
+  sub-merchant's settlement balance tops 800.00, leaving a 500.00 float).
+- `periodic` — once per UTC day at `cutoff` (`"HH:MM"`, e.g. `"23:55"`),
+  sweep every source's full positive balances: the day-end cutoff sweep.
+- `target-balance` — whenever a source's balance exceeds `target_cents`,
+  sweep the excess down to `target_cents`, keeping the account at its
+  target float.
+
+```go
+l := ledger.New()
+err := l.RegisterAutoSweepRule(ledger.AutoSweepRule{
+    ID:             "eod-cutoff",
+    Kind:           ledger.AutoSweepPeriodic,
+    From:           []ledger.AccountID{"sub-merchant-1", "sub-merchant-2"},
+    To:             "treasury",
+    Cutoff:         "23:55",
+    Enabled:        true,
+})
+
+// Cron entry point, e.g. every 5 minutes:
+//   */5 * * * * curl -s -X POST localhost:8080/autosweep/run >/dev/null
+// (wire RunAutoSweepRules to an operator endpoint or call it directly)
+results := l.RunAutoSweepRules(time.Now().UTC())
+for _, r := range results {
+    if r.Fired && r.Error != nil {
+        log.Printf("auto-sweep %s rejected: %v", r.RuleID, r.Error)
+    }
+}
+
+// Dry-run: plan the legs without booking anything.
+preview, _ := l.PreviewAutoSweepRule("eod-cutoff", time.Now().UTC())
+fmt.Println(preview.Eligible, preview.Legs) // true [{sub-merchant-1 USD 12500}]
+```
+
+Execution reuses the `POST /sweeps` machinery: every firing books
+through the same gate chain (frozen/closed/suspended accounts, monthly
+spend budgets, the period gate, automatic posting rules) and the same
+atomic commit — a rule firing never charges a fee, and sweep-reserve
+floors do not apply (the rule's own target is the authoritative floor).
+Thresholds are evaluated per `(account, currency)` balance in that
+currency's minor units.
+
+Each firing emits an `autosweep_triggered` audit event (rule id, kind,
+sweep id, leg count) next to the sweep's own `sweep` event; rule
+registration and removal are audited as `autosweep_rule_registered` /
+`autosweep_rule_unregistered`. Rules are in-memory operational config —
+they do not round-trip through disaster-recovery snapshots, so register
+them at process start alongside the other operator wiring.
+
 ### `POST /merges`
 
 Account merge: atomically moves **every** currency balance of the source

@@ -175,6 +175,23 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 	// book — no concurrent Post can slip in between.
 	legs := l.sweepLegsLocked(s)
 
+	return l.postSweepLegsLocked(s, legs, true)
+}
+
+// postSweepLegsLocked runs the sweep gate chain (idempotency replay,
+// ID-conflict, frozen/closed/suspended, monthly budgets, the period
+// gate, automatic posting rules) and the atomic commit for precomputed
+// legs. Callers must hold l.mu (the write lock); the Sweep must already
+// be field-validated and the legs planned against current balances, so
+// the commit describes exactly what was checked — no concurrent Post
+// can slip in between planning and commit.
+//
+// When applyReserves is true, sweep-reserve floors shrink the legs
+// first (the manual PostSweep path). Auto-sweep rules (see
+// autosweep.go) pass false: the rule's own target is the authoritative
+// floor, so reserve floors — a manual-sweep feature — do not shrink
+// rule executions.
+func (l *Ledger) postSweepLegsLocked(s Sweep, legs []SweepLeg, applyReserves bool) (SweepReceipt, error) {
 	if s.IdempotencyKey != "" {
 		if rec, ok := l.sweepKeys[s.IdempotencyKey]; ok {
 			entries := make([]JournalEntry, 0, len(rec.entryIDs))
@@ -230,8 +247,12 @@ func (l *Ledger) PostSweep(s Sweep) (SweepReceipt, error) {
 	// contributes no journal row. The reserve calculation runs here — not
 	// in sweepLegsLocked — so a frozen source rejects first: a frozen
 	// account never silently sweeps a reduced amount, and a zero-leg
-	// sweep still succeeds with an empty receipt.
-	legs = l.applySweepReservesLocked(legs)
+	// sweep still succeeds with an empty receipt. Auto-sweep rules pass
+	// applyReserves=false (see postSweepLegsLocked): the rule's own
+	// target is the authoritative floor.
+	if applyReserves {
+		legs = l.applySweepReservesLocked(legs)
+	}
 
 	// The sweep's effective post time is finalized before the budget and
 	// period checks: spend is booked against the sweep's own UTC calendar

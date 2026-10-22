@@ -143,6 +143,12 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		holdKeys:             make(map[string]string, len(l.holdKeys)),
 		captureKeys:          make(map[string]CaptureReceipt, len(l.captureKeys)),
 		sweepKeys:            make(map[string]sweepRecord, len(l.sweepKeys)),
+		// The auto-sweep rule registry travels with the twin like the
+		// other structural registries: the simulated post sees the same
+		// rules the real ledger would fire (see autosweep.go). Rule
+		// state is shallow-copied — the twin never fires rules, so
+		// lastRunAt cannot drift.
+		autoSweepRules:     make(map[string]*autoSweepRuleState, len(l.autoSweepRules)),
 		batchKeys:            make(map[string]batchRecord, len(l.batchKeys)),
 		batchTransferKeys:    make(map[string]batchTransferRecord, len(l.batchTransferKeys)),
 		merges:               make(map[string]mergeRecord, len(l.merges)),
@@ -262,6 +268,15 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 			set[b] = true
 		}
 		c.transferAllowlist[k] = set
+	}
+	// The auto-sweep rule registry travels with the twin: a simulated
+	// post must see the same rules the live ledger fires. States are
+	// shallow-copied (the twin never fires rules, so lastRunAt cannot
+	// drift) with the rule's From slice re-sliced to avoid aliasing.
+	for k, v := range l.autoSweepRules {
+		cp := *v
+		cp.rule.From = append([]AccountID(nil), v.rule.From...)
+		c.autoSweepRules[k] = &cp
 	}
 	for k, v := range l.budgets {
 		c.budgets[k] = v
