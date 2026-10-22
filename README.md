@@ -2484,6 +2484,47 @@ the un-settled remainder, and `Reconcile` reports per-hold
 status). Every `POST /holds/{id}/capture/partial` is counted by
 `ledger_partial_captures_total`.
 
+### Payment repair queue (支付修复队列，预发出修复)
+
+与争议（dispute.go，LG-129）正交：争议是事后——钱已经动了，payer
+发起扣回；而修复队列是预发出——payout 指令 STP（直通处理）校验失败
+（字段缺失/格式非法/路由未知）时，指令被停放在修复队列而不是直接拒绝，
+operator 补全字段后可重新走完整的 `CreatePayout` 门控重新提交。
+修复队列里不流转资金——记录是运营状态（与 payout 指令本身同类），不进
+灾难恢复快照，enqueue/resubmit 不 bump journal version，只追加审计链。
+
+语义：
+- `RepairRecord`：指令快照（enqueue 时的防御性拷贝——`PayoutInstruction`
+  全值字段，struct copy 即深拷贝）、失败原因码（闭集：`missing_field` /
+  `invalid_format` / `unknown_route`，闭集外 enqueue 直接拒绝）、修复次数
+  （每次 `RepairAndResubmit` 调用都计数）、状态机 `open` →
+  `resubmitted`（成功，指向创建出的 payout）或 `open` → `expired`（TTL
+  7 天无操作，终态只读），记录 ID `repair-<seq>`。
+- `RepairAndResubmit` 把 operator 的补全应用到快照的工作拷贝上，再调用
+  真正的 `CreatePayout`（复用 STP 门控，绝不复制校验逻辑）。成功则原指令
+  的幂等键沿用（幂等重提）；仍失败则保留补全、修复次数 +1、原因码按新
+  拒绝重新推导、记录保持 open。字段名闭集（`payee_account` /
+  `amount_cents` / `currency` / `destination` / `idempotency_key` /
+  `maker`）——不存在的字段名 fail-closed。
+- 队列有界（1000）：满时 `EnqueueRepair` 报 `ErrRepairQueueFull`，
+  fail-closed，永不静默淘汰最旧记录。
+- 审计链：`repair_enqueued`（before 快照）、`repair_resubmitted`
+  （before + after，含 `success` 标志）、TTL 路径 `repair_expired`。
+- HTTP：`POST /repairs/{id}/fix`（body `{"fixed_fields": {...}}`，
+  operator 身份走 `x-ledger-actor` 头）。错误映射：未知记录 `404`、终态
+  记录 `409`、未知字段名/非法金额 `400`、重提仍过不了 STP 门控 `422`
+  （记录保持 open 可再修——这是队列的正常工作状态，不是 500）。
+
+```bash
+curl -s -X POST -H 'x-ledger-actor: ops' localhost:8080/repairs/repair-3/fix \
+  -d '{"fixed_fields":{"destination":"FPS:6222000012345678"}}'
+# 200 {"payout":{"id":"po-2026-1043",...}}  —— payout 按原指令幂等键创建
+```
+
+Go: `ledger.EnqueueRepair(instruction, ledger.RepairReasonMissingField, actor)` /
+`ledger.RepairAndResubmit(id, fixedFields, actor)` / `ledger.GetRepair(id)` /
+`ledger.SweepExpiredRepairs(now)`。
+
 ### Transfer disputes (chargeback-style, 转账争议)
 
 Payer-initiated chargeback-style claims against a posted same-currency

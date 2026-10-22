@@ -5018,6 +5018,62 @@ func (s *server) handlePacs008Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// repairFixRequest is the POST /repairs/{id}/fix body: the admitted
+// field names (see ledger.RepairAndResubmit) the operator completed
+// on the parked instruction snapshot.
+type repairFixRequest struct {
+	FixedFields map[string]string `json:"fixed_fields"`
+}
+
+// handleRepairFix implements POST /repairs/{id}/fix (LG-177): the
+// operator completes fields on a parked repair record and resubmits
+// the instruction through the full CreatePayout STP gate — the exact
+// gate that rejected it (see ledger.RepairAndResubmit). A success
+// returns 200 with the payout draft (idempotently keyed on the
+// original instruction); a still-broken instruction is re-enqueued
+// with the fixes retained, the reason re-derived, and the repair
+// count incremented — the endpoint answers 422, never a 500, because
+// "still broken" is the queue's normal operating state. Error
+// mapping: an unknown repair ID is a 404; a terminal (resubmitted or
+// expired) record is a 409; an unknown field name or unparseable
+// amount is a 400. The operator identity comes from the
+// x-ledger-actor header, like the other operator actions — it lands
+// in the hash-chained repair_resubmitted audit event.
+func (s *server) handleRepairFix(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req repairFixRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	payout, err := s.ledgerFor(r).RepairAndResubmit(id, req.FixedFields, ledger.ActorFromContext(actx))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrRepairNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrRepairTerminal):
+			status = http.StatusConflict
+		case errors.Is(err, ledger.ErrRepairUnknownField),
+			errors.Is(err, ledger.ErrRepairInvalidAmount),
+			errors.Is(err, ledger.ErrRepairEmptyActor):
+			status = http.StatusBadRequest
+		default:
+			// The resubmit still fails the STP gate: the record
+			// stays open with the fixes retained and the reason
+			// re-derived. That is the queue's normal operating
+			// state, not a server error.
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"payout": payout})
+}
+
 // cancellationRequest is the POST /cancellations body.
 type cancellationRequest struct {
 	UETR       string `json:"uetr"`
@@ -8974,6 +9030,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
 	mux.HandleFunc("GET /exports/pacs008", s.handlePacs008Export)
+	mux.HandleFunc("POST /repairs/{id}/fix", s.handleRepairFix)
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
