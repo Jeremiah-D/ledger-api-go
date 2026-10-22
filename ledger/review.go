@@ -732,6 +732,13 @@ func (l *Ledger) settleReviewLocked(ctx context.Context, r *TransferReview, revi
 		l.balances[accountCurrency{account: r.Transfer.From, currency: r.Transfer.Currency}] < r.TotalOutflowCents {
 		return TransferReceipt{}, ErrAccountOverdraft
 	}
+	// Collateral coverage re-runs against current state like the
+	// overdraft check: a covered payer whose coverage dropped below
+	// the required ratio since review creation cannot settle, and the
+	// review stays pending.
+	if err := l.collateralRejectedLocked(r.Transfer.From, r.Transfer.Currency, r.TotalOutflowCents); err != nil {
+		return TransferReceipt{}, err
+	}
 	// The period gate is keyed on the legs' timestamps: a period closed
 	// after review creation blocks settlement with ErrPeriodClosed, and
 	// the review stays pending (see the doc comment above).

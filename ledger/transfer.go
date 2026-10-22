@@ -849,6 +849,17 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		return TransferReceipt{}, ErrAccountOverdraft
 	}
 
+	// Collateral coverage (see collateral.go) guards the payer's total
+	// outflow like the overdraft gate: a new draw must keep the
+	// projected utilization covered at the required ratio. It runs
+	// right after the overdraft check — both are funding risk controls
+	// on the payer's outflow — and after the idempotency replay check
+	// above, so a replay never fails on a requirement set after the
+	// original transfer.
+	if err := l.collateralRejectedLocked(t.From, t.Currency, totalOutflow); err != nil {
+		return TransferReceipt{}, err
+	}
+
 	// KYC/尽调门控 (see kyc.go): after the overdraft check — both are
 	// account risk controls — and after the idempotency replay check
 	// above: a replay books nothing new, so it must not fail on an

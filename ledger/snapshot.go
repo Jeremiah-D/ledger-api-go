@@ -597,6 +597,18 @@ type snapshotConfigLine struct {
 	// dropped them would silently lift the -limit floor back to zero,
 	// so they round-trip like the overdraft-protection list.
 	CreditLines []CreditLine `json:"credit_lines,omitempty"`
+	// CollateralPledges carries the pledged collateral positions (see
+	// PledgeCollateral), sorted by (account, asset); absent in
+	// snapshots written before collateral existed. A restore that
+	// dropped them would silently lift the coverage gate, so they
+	// round-trip like the credit-line registry.
+	CollateralPledges []CollateralPledge `json:"collateral_pledges,omitempty"`
+	// CollateralRequirements carries the per-(account, currency)
+	// minimum coverage ratios (see SetCollateralRequirement), sorted
+	// by (account, currency); absent in snapshots written before
+	// collateral existed, for the same fail-closed reason as the
+	// pledges above.
+	CollateralRequirements []CollateralRequirement `json:"collateral_requirements,omitempty"`
 	// ECLStageConfig carries the IFRS 9 staging configuration (see
 	// SetECLStageConfig); absent in snapshots written before ECL
 	// existed, in which case the restore keeps the ledger's default
@@ -1289,6 +1301,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FedNowSettlementAccount: l.fedNowSettlementAccount,
 		CreditInterestIncome:  l.creditInterestIncome,
 		CreditLines:           l.creditLinesLocked(),
+		CollateralPledges:     l.collateralPledgesLocked(),
+		CollateralRequirements: l.collateralReqsLocked(),
 		ECLExpenseAccount:     l.eclExpenseAccount,
 		ECLAllowanceAccount:   l.eclAllowanceAccount,
 		ECLExposures:          l.eclExposureRecordsLocked(),
@@ -3235,6 +3249,18 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	for _, cl := range cfg.CreditLines {
 		l.creditLines[creditLineKey{account: cl.Account, currency: cl.Currency}] = cl
 	}
+	// Collateral state restores like the credit-line registry: the
+	// pledged positions and the coverage requirements. A restore that
+	// dropped them would silently lift the coverage gate on draws, so
+	// both round-trip.
+	l.collateralPledges = make(map[collateralKey]CollateralPledge, len(cfg.CollateralPledges))
+	for _, p := range cfg.CollateralPledges {
+		l.collateralPledges[collateralKey{account: p.Account, asset: p.AssetID}] = p
+	}
+	l.collateralReqs = make(map[collateralReqKey]CollateralRequirement, len(cfg.CollateralRequirements))
+	for _, r := range cfg.CollateralRequirements {
+		l.collateralReqs[collateralReqKey{account: r.Account, currency: r.Currency}] = r
+	}
 	// ECL config restores like the other structural config: the staging
 	// configuration (validated — a corrupt snapshot must not install an
 	// inverted boundary), the fail-closed booking accounts (an absent
@@ -3603,6 +3629,25 @@ func creditLinesEqual(a, b CreditLine) bool {
 		a.GrantedAt.UnixNano() == b.GrantedAt.UnixNano()
 }
 
+// collateralPledgesEqual compares two collateral pledge records field
+// by field, ignoring time.Location representation (see holdsEqual).
+func collateralPledgesEqual(a, b CollateralPledge) bool {
+	return a.Account == b.Account &&
+		a.AssetID == b.AssetID &&
+		a.Quantity == b.Quantity &&
+		a.UnitValueCents == b.UnitValueCents &&
+		a.HaircutBps == b.HaircutBps &&
+		a.PledgedAt.UnixNano() == b.PledgedAt.UnixNano()
+}
+
+// collateralReqsEqual compares two collateral requirement records
+// field by field.
+func collateralReqsEqual(a, b CollateralRequirement) bool {
+	return a.Account == b.Account &&
+		a.Currency == b.Currency &&
+		a.MinCoverageBps == b.MinCoverageBps
+}
+
 // eclExposureRowsEqual compares two ECL exposure rows field by field,
 // ignoring time.Location representation (see holdsEqual).
 func eclExposureRowsEqual(a, b eclExposureRow) bool {
@@ -3910,6 +3955,28 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	}
 	if a.creditInterestIncome != b.creditInterestIncome {
 		return false
+	}
+	// Collateral state must round-trip: the pledged positions and the
+	// coverage requirements. A restore that dropped them would
+	// silently lift the coverage gate on draws. Times compare by
+	// UnixNano (see holdsEqual).
+	if len(a.collateralPledges) != len(b.collateralPledges) {
+		return false
+	}
+	for k, p := range a.collateralPledges {
+		other, ok := b.collateralPledges[k]
+		if !ok || !collateralPledgesEqual(p, other) {
+			return false
+		}
+	}
+	if len(a.collateralReqs) != len(b.collateralReqs) {
+		return false
+	}
+	for k, r := range a.collateralReqs {
+		other, ok := b.collateralReqs[k]
+		if !ok || !collateralReqsEqual(r, other) {
+			return false
+		}
 	}
 	// ECL config must round-trip: the staging configuration, the
 	// fail-closed booking accounts, and the exposure registry with

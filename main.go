@@ -138,6 +138,11 @@ func (s *server) writePostError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
+	if errors.Is(err, ledger.ErrInsufficientCollateral) {
+		s.metrics.CollateralRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
 	if errors.Is(err, ledger.ErrAccountDirectionMismatch) {
 		s.metrics.ChartDirectionRejections.Add(1)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -342,6 +347,11 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountDirectionMismatch) {
 			s.metrics.ChartDirectionRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -541,6 +551,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -701,6 +716,11 @@ func (s *server) handleApproveTransferReview(w http.ResponseWriter, r *http.Requ
 		}
 		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
 			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1000,6 +1020,11 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
 			s.metrics.DailyLimitRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1187,6 +1212,11 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountDirectionMismatch) {
 			s.metrics.ChartDirectionRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1352,6 +1382,11 @@ func (s *server) handleCreateBatchTransfer(w http.ResponseWriter, r *http.Reques
 		}
 		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
 			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1740,6 +1775,11 @@ func (s *server) handleCreateMerge(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrPeriodClosed) {
 			s.metrics.PeriodRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -1912,6 +1952,11 @@ func (s *server) handleReverseEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
 			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -2779,6 +2824,11 @@ func (s *server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrAccountDenied) {
 			s.metrics.DenylistRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -2893,6 +2943,11 @@ func (s *server) handlePartialCaptureHold(w http.ResponseWriter, r *http.Request
 		}
 		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
 			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -3954,6 +4009,11 @@ func (s *server) handleAccrueCreditInterest(w http.ResponseWriter, r *http.Reque
 		}
 		if errors.Is(err, ledger.ErrCreditLimitExceeded) {
 			s.metrics.CreditLimitRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInsufficientCollateral) {
+			s.metrics.CollateralRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -7596,6 +7656,9 @@ func (s *server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			case errors.Is(err, ledger.ErrCreditLimitExceeded):
 				s.metrics.CreditLimitRejections.Add(1)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			case errors.Is(err, ledger.ErrInsufficientCollateral):
+				s.metrics.CollateralRejections.Add(1)
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			case errors.Is(err, ledger.ErrDailyLimitExceeded):
 				s.metrics.DailyLimitRejections.Add(1)

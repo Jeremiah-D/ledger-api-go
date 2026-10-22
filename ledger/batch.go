@@ -307,6 +307,23 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 				return BatchReceipt{}, ErrAccountOverdraft
 			}
 		}
+		// Collateral coverage simulation in batch order: a covered
+		// account cannot dodge the gate by splitting one uncovered
+		// draw into small legs — each entry's credit leg is checked
+		// against the coverage requirement with the batch's earlier
+		// entries applied. The effective collateral is static across
+		// the batch (pledges are structural config, not journaled).
+		if req, ok := l.collateralReqs[collateralReqKey{account: e.CreditAccount, currency: e.Currency}]; ok && req.MinCoverageBps > 0 {
+			after := satAddInt64(sim.balance(l, accountCurrency{account: e.CreditAccount, currency: e.Currency}), -e.AmountCents)
+			if after < 0 {
+				if after == math.MinInt64 {
+					return BatchReceipt{}, ErrInsufficientCollateral
+				}
+				if !collateralCovers(l.collateralEffectiveLocked(e.CreditAccount), -after, req.MinCoverageBps) {
+					return BatchReceipt{}, ErrInsufficientCollateral
+				}
+			}
+		}
 		sim.apply(e)
 	}
 

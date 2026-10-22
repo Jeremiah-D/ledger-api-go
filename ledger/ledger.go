@@ -838,6 +838,15 @@ type Ledger struct {
 	// survives disaster-recovery snapshots.
 	creditLines          map[creditLineKey]CreditLine
 	creditInterestIncome AccountID
+	// collateralPledges maps (account, asset) to the pledged collateral
+	// position (see collateral.go): off-ledger assets pledged against
+	// the account's drawn utilization, each with its per-asset
+	// haircut. collateralReqs maps (account, currency) to the minimum
+	// coverage ratio that gates new draws. Structural config, like
+	// creditLines — it never bumps the journal version and it
+	// survives disaster-recovery snapshots.
+	collateralPledges map[collateralKey]CollateralPledge
+	collateralReqs    map[collateralReqKey]CollateralRequirement
 	// eclStageConfig is the IFRS 9 staging configuration (see ecl.go):
 	// the DPD buckets and per-stage provision rates. eclExposures
 	// tracks the per-(account, currency) exposure state: manually
@@ -1470,6 +1479,8 @@ func New(opts ...Option) *Ledger {
 		camt054Matches:          make(map[string]camt054MatchRecord),
 		ftpCurves:             make(map[string]*FtpCurve),
 		creditLines:           make(map[creditLineKey]CreditLine),
+		collateralPledges:     make(map[collateralKey]CollateralPledge),
+		collateralReqs:        make(map[collateralReqKey]CollateralRequirement),
 		eclStageConfig:        DefaultECLStageConfig(),
 		eclExposures:          make(map[eclExposureKey]eclExposureRow),
 		sweepKeys:             make(map[string]sweepRecord),
@@ -1830,6 +1841,17 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 	// the entry's currency: within-line postings clear the gate, and
 	// breaching the floor is rejected with ErrCreditLimitExceeded.
 	if err := l.overdraftRejectedLocked(e); err != nil {
+		return JournalEntry{}, false, err
+	}
+
+	// Collateral coverage (see collateral.go) is a funding risk
+	// control like the overdraft gate: a new draw through a covered
+	// account must keep the projected utilization covered at the
+	// required ratio. It runs after the overdraft check — both guard
+	// the credit (payer) account's outflow — and after the idempotency
+	// replay check above: a replay books nothing new, so it must not
+	// fail on an account covered after the original posting.
+	if err := l.collateralRejectedLocked(e.CreditAccount, e.Currency, e.AmountCents); err != nil {
 		return JournalEntry{}, false, err
 	}
 

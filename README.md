@@ -2959,6 +2959,48 @@ or bad account/currency/rate; `404` unknown line; `409` duplicate grant;
 posting past the credit limit.
 
 
+### Collateral (抵押品)
+
+账户可以质押表外资产（ledger 不记账的证券、存货、应收账款等）来覆盖
+其透支提用。与授信（credit line）正交：授信决定余额**最低能到多负**
+（提用上限），抵押品决定透支部分**必须有多少价值覆盖**（覆盖率下限）。
+账户可以只配其一、两者都配、或都不配。
+
+Go: `ledger.PledgeCollateral(account, assetID, quantity,
+unitValueCents, haircutBps)` 质押（同 `(account, asset)` 累积，追加时按
+新单价/折扣率 mark-to-market，保留原 `PledgedAt`）；
+`ledger.ReleaseCollateral` 部分/全部释放（超额释放 fail-closed）；
+`ledger.RevalueCollateral` 市值重估；
+`ledger.SetCollateralRequirement(account, currency, minCoverageBps)`
+设置最低覆盖率（basis points，`12500` = 125%；`0` 清除）。
+
+每笔质押资产的有效价值 = `⌊quantity × unitValueCents × (10000 −
+haircutBps) / 10000⌋`（溢出安全，饱和不回绕），`haircut` 为该资产的
+风险折扣（波动大的资产折扣高）。覆盖率按 `(account, currency)` 计算：
+`drawn` = 该币种余额的负数部分（与授信共用 utilization 定义），
+`coverage = effective × 10000 / drawn`。**新增提用**（Post / PostTransfer /
+batch / review 结算的 payer 流出）使预计 `drawn × minCoverageBps /
+10000` 超过有效抵押时，以 `ErrInsufficientCollateral` 拒绝（`422`，
+计数器 `ledger_collateral_rejections_total`），不记账、不 bump version。
+batch 按顺序模拟（防拆单绕过），review 结算按当前状态重检，dry-run
+走同一 gate。
+
+市值重估/释放/上调覆盖率导致覆盖率跌破要求时触发 **margin call**：
+调用返回 `MarginCall{account, currency, effective, drawn, coverageBps,
+requiredBps}`（告警惯例：返回结构体，不另设通道），同时记
+`collateral_margin_call` 审计事件。`ledger.CheckMarginCall` 随时查询
+当前是否触发。抵押物单价以被评估的 requirement 币种计价（多币种账户
+逐币种重估；模块**不**做静默 FX 折算）。质押与覆盖率要求随灾难恢复
+快照往返（config 行），不进对账报告。
+
+```go
+l.PledgeCollateral("trader", "bond-2028", 10, 10000, 2500) // 有效 75000c
+l.SetCollateralRequirement("trader", "USD", 12500)          // 125%
+// 提用 50000 -> drawn 50000，需 62500 <= 75000：通过
+// 提用 100000 -> drawn 100000，需 125000 > 75000：422
+```
+
+### ECL provisions (预期信用损失)
 `POST /ecl/exposures` registers a manual credit exposure for an obligor
 without a credit line (`exposure_cents`, `days_past_due`) — the
 standalone source. Where a credit line exists, its drawn utilization is
@@ -6229,6 +6271,9 @@ curl -s localhost:8080/metrics
   accrual requests received.
 - `ledger_credit_limit_rejections_total` — postings and accruals rejected
   at the credit-line floor (`ErrCreditLimitExceeded`).
+- `ledger_collateral_rejections_total` — postings rejected because a new
+  draw would leave utilization uncovered at the required collateral
+  coverage ratio (`ErrInsufficientCollateral`).
 - `ledger_pacs009_exports_total` — `GET /exports/pacs009` ISO 20022
   pacs.009 FI-to-FI credit transfer exports served, including rejected
   exports.

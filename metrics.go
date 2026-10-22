@@ -390,6 +390,11 @@ type Metrics struct {
 	// because they would breach a credit line's floor
 	// (ErrCreditLimitExceeded).
 	CreditLimitRejections atomic.Uint64
+	// CollateralRejections counts postings rejected with 422 because a
+	// new draw would leave the account's utilization uncovered at the
+	// required collateral coverage ratio (ErrInsufficientCollateral,
+	// see collateral.go).
+	CollateralRejections atomic.Uint64
 	// ECLExposureRequestsTotal counts POST /ecl/exposures requests
 	// received (all attempts, including rejected payloads).
 	ECLExposureRequestsTotal atomic.Uint64
@@ -947,6 +952,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_credit_limit_rejections_total",
 		"Total postings rejected with 422 because they would breach a credit line's floor.",
 		m.CreditLimitRejections.Load())
+	writeCounter(&sb, "ledger_collateral_rejections_total",
+		"Total postings rejected with 422 because a new draw would leave the account's utilization uncovered at the required collateral coverage ratio.",
+		m.CollateralRejections.Load())
 	writeCounter(&sb, "ledger_ecl_exposure_requests_total",
 		"Total POST /ecl/exposures requests received.", m.ECLExposureRequestsTotal.Load())
 	writeCounter(&sb, "ledger_ecl_provision_requests_total",

@@ -158,6 +158,12 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		linkChain:            append([]entryLinkChainLink(nil), l.linkChain...),
 		virtualAccounts:      make(map[AccountID]AccountID, len(l.virtualAccounts)),
 		creditLines:          make(map[creditLineKey]CreditLine, len(l.creditLines)),
+		// Collateral pledges and coverage requirements travel with
+		// the twin: the dry-run's collateral gate must see the same
+		// coverage the real Post applies, or a dry-run would wrongly
+		// report success on an uncovered draw.
+		collateralPledges:  make(map[collateralKey]CollateralPledge, len(l.collateralPledges)),
+		collateralReqs:     make(map[collateralReqKey]CollateralRequirement, len(l.collateralReqs)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
 		closedPeriods:        make(map[string]bool, len(l.closedPeriods)),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch, len(l.balanceWatches)),
@@ -216,6 +222,15 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	// within-line dry-run would wrongly report a rejection.
 	for k, v := range l.creditLines {
 		c.creditLines[k] = v
+	}
+	// Collateral positions and requirements travel with the twin like
+	// the credit lines: the dry-run's collateral gate must see the
+	// same coverage the real Post applies.
+	for k, v := range l.collateralPledges {
+		c.collateralPledges[k] = v
+	}
+	for k, v := range l.collateralReqs {
+		c.collateralReqs[k] = v
 	}
 	for k, v := range l.statementMatches {
 		cp := *v
