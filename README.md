@@ -4036,6 +4036,52 @@ curl -s 'localhost:8080/exports/pacs004?uetr=9f2c8e1a-…&reason=DUPL' -o return
 
 Go: `ledger.ExportPacs004`。
 
+### `POST /exports/mt103` — SWIFT FIN MT103 跨境汇款导出
+
+已审批（approved）或已提交（submitted）的 payout 可以用 SWIFT FIN
+`MT103`（single customer credit transfer）渲染跨境汇款报文：银行把
+指令交给代理行（correspondent）的电文。报文含 block 1（基本头：
+发送方 LT 地址）、block 2（应用头：接收方 LT 地址）、block 3
+（`{108:MUR}` 消息用户引用）与 block 4 字段集 `:20:` / `:23B:` /
+`:32A:` / `:50K:` / `:52A:` / `:57A:` / `:59:` / `:70:` / `:71A:`。
+
+语义：
+- 与 pacs.008 出站（LG-176）正交：pacs.008 走 FedNow 即时支付
+  （USD-only、XML），MT103 走代理行网络（多币种、FIN）；与
+  nacha.go（ACH）、pain001.go（SEPA）共同构成境内/区域/跨境三通道。
+- 生命周期 fail-closed：payout 必须是 approved 或 submitted——MT103
+  是结算**前**的出款指令；draft（未授权）、failed、cancelled、
+  settled（一笔钱只发一次指令，防 double-pay）一律拒绝。settled
+  后的资金退回走 pacs.004（LG-169）。
+- 身份接线（不做 SWIFT 会员假设）：发送方 BIC 取自请求
+  `sender_bic`，或回退到 payee 账户已注册的 IBAN BIC
+  （`SetAccountIBAN`，LG-150）；两者皆无则拒绝，绝不猜测。
+  `receiver_lt` 必填（账本无路由表，不替操作员选代理行）；
+  BIC8/BIC11 自动补齐为 12 字符 LT 地址。
+- 字段纪律（nacha.go 惯例）：`x` 字符集校验（`a-zA-Z0-9` +
+  `/-?:().,'+` + CR/LF/空格 + `*=!"%_#&$@<>{}`；花括号在 block-4
+  内容中另行拒绝，防 FIN 分帧破坏）、`:20:` 16 字符上限、
+  `:32A:` 金额 15d（12 位整数 + 逗号 + 2 位小数，`2500,00`）、
+  `:52A:`/`:57A:` opt-in（直汇省略、代理行路径填写）。
+- `:20:` 即 payout ID（也是 `{108:MUR}`），是账本连回 gpi UETR 的
+  join key（MT103 本身无 UETR 字段）；`:59:` 受益人账户默认取
+  payout destination 去掉 `<scheme>:` 前缀（如 `FPS:6222…` → 账号）。
+- 只读：读锁快照、无 version bump、无记账、无审计链追加；重复导出
+  字节一致（value date 默认取 payout 的 submit/approve/create 时间）。
+- block 5 省略：CHK 由 SWIFT 网络在接收时计算，生成器不伪造校验和；
+  block 1 的 session/sequence 填零（由发送方 SWIFT 接口在发送时分配）。
+- `400` 请求体非法/选项值非法；`404` 未知 payout；`422` payout 未
+  approved/submitted。计数器 `ledger_mt103_exports_total`。
+
+```bash
+curl -s -X POST localhost:8080/exports/mt103 \
+  -H 'Content-Type: application/json' \
+  -d '{"payout_id":"po-1","receiver_lt":"BANKDEFF","beneficiary_account":"DE75512108001245126199","remittance_info":"invoice 42"}' -o mt103.fin
+# 200 text/plain: {1:F01BANKUS33XXX0000000000} ... :20:po-1 ... :32A:261022USD2500,00 ... :71A:SHA
+```
+
+Go: `ledger.ExportMT103` / `ledger.MT103ExportOptions`。
+
 ### `GET /exports/pacs009` — ISO 20022 pacs.009 银行间大额贷记转账导出
 
 已过账的 transfer 可以用 ISO 20022 `pacs.009.001.06`

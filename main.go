@@ -5162,6 +5162,92 @@ func (s *server) handlePacs004Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+
+// mt103ExportRequest is the JSON body of POST /exports/mt103: the
+// per-export options of ledger.MT103ExportOptions, with the value date
+// as an ISO date string.
+type mt103ExportRequest struct {
+	PayoutID                  string   `json:"payout_id"`
+	SenderBIC                 string   `json:"sender_bic,omitempty"`
+	SenderLT                  string   `json:"sender_lt,omitempty"`
+	ReceiverLT                string   `json:"receiver_lt"`
+	BankOperationCode         string   `json:"bank_operation_code,omitempty"`
+	OrderingCustomerName      []string `json:"ordering_customer_name,omitempty"`
+	OrderingInstitutionBIC    string   `json:"ordering_institution_bic,omitempty"`
+	BeneficiaryInstitutionBIC string   `json:"beneficiary_institution_bic,omitempty"`
+	BeneficiaryAccount        string   `json:"beneficiary_account,omitempty"`
+	BeneficiaryName           []string `json:"beneficiary_name,omitempty"`
+	RemittanceInfo            string   `json:"remittance_info,omitempty"`
+	DetailsOfCharges          string   `json:"details_of_charges,omitempty"`
+	ValueDate                 string   `json:"value_date,omitempty"`
+}
+
+// handleMT103Export implements POST /exports/mt103 (LG-183): a SWIFT
+// FIN MT103 single customer credit transfer for one approved or
+// submitted payout (see ledger.ExportMT103). The JSON body names the
+// payout and the export options; the body is strictly decoded
+// (unknown fields fail fast). The export is read-only: no version
+// bump, no audit event. Error mapping: a malformed body or an invalid
+// option value is a 400; an unknown payout ID is a 404; a payout that
+// is not approved or submitted is a 422.
+func (s *server) handleMT103Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT103Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt103ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	opts := ledger.MT103ExportOptions{
+		SenderBIC:                 req.SenderBIC,
+		SenderLT:                  req.SenderLT,
+		ReceiverLT:                req.ReceiverLT,
+		BankOperationCode:         req.BankOperationCode,
+		OrderingCustomerName:      req.OrderingCustomerName,
+		OrderingInstitutionBIC:    req.OrderingInstitutionBIC,
+		BeneficiaryInstitutionBIC: req.BeneficiaryInstitutionBIC,
+		BeneficiaryAccount:        req.BeneficiaryAccount,
+		BeneficiaryName:           req.BeneficiaryName,
+		RemittanceInfo:            req.RemittanceInfo,
+		DetailsOfCharges:          req.DetailsOfCharges,
+	}
+	if req.ValueDate != "" {
+		vd, err := time.Parse("2006-01-02", req.ValueDate)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid value_date: want YYYY-MM-DD"})
+			return
+		}
+		opts.ValueDate = vd
+	}
+	msg, err := s.ledgerFor(r).ExportMT103(req.PayoutID, opts)
+	if err != nil {
+		status := http.StatusBadRequest
+		switch {
+		case errors.Is(err, ledger.ErrMT103PayoutNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrMT103BadStatus):
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(msg))
+}
+
+
 // handlePacs009Export implements GET /exports/pacs009 (LG-172): an
 // ISO 20022 pacs.009.001.06 FinancialInstitutionCreditTransfer for one
 // posted transfer (see ledger.ExportPacs009). Query parameters:
@@ -9250,6 +9336,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
+	mux.HandleFunc("POST /exports/mt103", s.handleMT103Export)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
 	mux.HandleFunc("GET /exports/pacs008", s.handlePacs008Export)
 	mux.HandleFunc("POST /repairs/{id}/fix", s.handleRepairFix)

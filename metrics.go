@@ -103,6 +103,10 @@ type Metrics struct {
 	// payment return export requests served, including rejected
 	// exports (see ledger.ExportPacs004, LG-169).
 	Pacs004Exports atomic.Uint64
+	// MT103Exports counts POST /exports/mt103 SWIFT FIN MT103 single
+	// customer credit transfer export requests served, including
+	// rejected exports (see ledger.ExportMT103, LG-183).
+	MT103Exports atomic.Uint64
 	// Pacs009Exports counts GET /exports/pacs009 ISO 20022 pacs.009
 	// FI-to-FI credit transfer export requests served, including
 	// rejected exports (see ledger.ExportPacs009, LG-172).
@@ -876,6 +880,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/camt029 ISO 20022 camt.029 cancellation status report exports served, including rejected exports.", m.CAMT029Exports.Load())
 	writeCounter(&sb, "ledger_pacs004_exports_total",
 		"Total GET /exports/pacs004 ISO 20022 pacs.004 payment return exports served, including rejected exports.", m.Pacs004Exports.Load())
+	writeCounter(&sb, "ledger_mt103_exports_total",
+		"Total POST /exports/mt103 SWIFT FIN MT103 single customer credit transfer exports served, including rejected exports.", m.MT103Exports.Load())
 	writeCounter(&sb, "ledger_pacs009_exports_total",
 		"Total GET /exports/pacs009 ISO 20022 pacs.009 FI-to-FI credit transfer exports served, including rejected exports.", m.Pacs009Exports.Load())
 	writeCounter(&sb, "ledger_camt052_exports_total",
