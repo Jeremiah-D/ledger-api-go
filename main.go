@@ -1187,6 +1187,73 @@ type createBatchRequest struct {
 // (a payroll run, a merchant batch settlement) and the ledger commits them
 // atomically — either every new entry lands or nothing does. One bad leg
 // rejects the whole batch; a batch through a frozen account, or one that
+// handleFeeEstimate implements POST /transfers/fee-estimate (LG-186):
+// an itemized all-in cost quote for a transfer — the ledger's own fee
+// leg, the FX dealing spread, and the corridor's correspondent fee —
+// computed read-only, before anything is submitted. The request body is
+// decoded exactly like POST /transfers (the same createTransferRequest),
+// and the same status codes apply: pricing failures surface like the
+// real submission's failures (400 for bad fields, 422 for a missing or
+// expired FX rate or an unrepresentable total). Nothing is recorded: no
+// journal, no version bump, no idempotency registration, no audit
+// events. Use it to show the caller their all-in cost before they
+// submit; use POST /transfers/dry-run for the full submission preview.
+func (s *server) handleFeeEstimate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	s.metrics.FeeEstimateRequests.Add(1)
+
+	// Same transport contract as POST /transfers: bounded body, strict
+	// decoding, no trailing garbage.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req createTransferRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	estimate, err := s.ledgerFor(r).EstimateTransferFees(ledger.FeeEstimateRequest{
+		From:        req.FromAccount,
+		To:          req.ToAccount,
+		AmountCents: req.AmountCents,
+		Currency:    req.Currency,
+		ToCurrency:  req.ToCurrency,
+		FXSide:      req.FXSide,
+		FeeCents:    req.FeeCents,
+		FeeAccount:  req.FeeAccount,
+		FeeSplits:   req.FeeSplits,
+		SkipFee:     req.SkipFee,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrFXRateMissing) || errors.Is(err, ledger.ErrFXRateExpired):
+			s.metrics.CurrencyRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrAmountOverflow):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, estimate)
+}
+
 // would overdraw an overdraft-protected payer or breach a daily outflow
 // limit, is rejected the same way.
 //
@@ -9308,6 +9375,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /transfers", s.handleCreateTransfer)
 	mux.HandleFunc("POST /transfers/batch", s.handleCreateBatchTransfer)
 	mux.HandleFunc("POST /transfers/dry-run", s.handleDryRunTransfer)
+	mux.HandleFunc("POST /transfers/fee-estimate", s.handleFeeEstimate)
 	mux.HandleFunc("POST /transfers/reviews/expire", s.handleExpireReviews)
 	mux.HandleFunc("POST /transfers/reviews/approve", s.handleBatchApproveTransferReviews)
 	mux.HandleFunc("POST /transfers/{id}/approve", s.handleApproveTransferReview)

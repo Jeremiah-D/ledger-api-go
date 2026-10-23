@@ -647,6 +647,13 @@ type Ledger struct {
 	// config — like frozen and feeTiers — and survive snapshots.
 	fxRates   map[fxPair]ExchangeRate
 	fxAccount AccountID
+	// correspondentFees is the per-corridor flat fee charged by the
+	// correspondent banks on cross-currency transfers (see fee_estimate.go,
+	// LG-186): a corridor's fee is booked in the source currency, on top
+	// of the ledger's own fee leg and the FX dealing spread. An absent
+	// corridor means no correspondent fee — the ledger never invents one.
+	// Structural config — it survives snapshots.
+	correspondentFees map[fxPair]int64
 	// fxIncomeAccount is the ledger-wide FX spread-income account (see
 	// WithFXIncomeAccount, fx_spread.go): the credit counterparty of
 	// cross-currency spread legs. Structural config — it survives
@@ -1612,6 +1619,7 @@ func New(opts ...Option) *Ledger {
 		reportScheduleRuns:   make(map[string][]ReportRun),
 		reportScheduleFiring: make(map[string]bool),
 		fxRates:              make(map[fxPair]ExchangeRate),
+		correspondentFees:    make(map[fxPair]int64),
 		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
 		forwards:             make(map[string]*FXForward),
 		rateOverrides:        make(map[fxPair]*RateOverride),

@@ -193,6 +193,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		collateralPledges:    make(map[collateralKey]CollateralPledge, len(l.collateralPledges)),
 		collateralReqs:       make(map[collateralReqKey]CollateralRequirement, len(l.collateralReqs)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
+		correspondentFees:    make(map[fxPair]int64, len(l.correspondentFees)),
 		closedPeriods:        make(map[string]bool, len(l.closedPeriods)),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch, len(l.balanceWatches)),
 		balanceWatchBreached: make(map[balanceWatchKey]watchBreachState, len(l.balanceWatchBreached)),
@@ -360,6 +361,9 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		c.fxRates[k] = v
 	}
 	c.fxAccount = l.fxAccount
+	for k, v := range l.correspondentFees {
+		c.correspondentFees[k] = v
+	}
 	c.fxIncomeAccount = l.fxIncomeAccount
 	// The spread-booking counters travel with the twin like the other
 	// in-memory counters, so the simulated post sees the same income

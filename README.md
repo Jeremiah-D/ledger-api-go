@@ -1221,6 +1221,27 @@ simulation ran. A concurrent writer can change the outcome between the dry
 run and the real submission, so the real call must still handle
 rejections. Dry-run requests are counted in `ledger_dry_runs_total`.
 
+### Fee estimation (`POST /transfers/fee-estimate`)
+
+All-in cost quote before a transfer is submitted: the ledger's own fee
+leg (explicit `fee_cents` or the tiered transfer fee policy — the tier
+index and rate are disclosed), the FX dealing spread the desk would keep
+(`fx_spread_cents`, in the settlement currency, bid/ask by `fx_side`),
+and the corridor's flat correspondent-banking fee (`correspondent_cents`,
+configured with `SetCorrespondentFee`; an unconfigured corridor estimates
+zero, never a guess). `total_cents` is the source-currency all-in number:
+fee + correspondent + spread converted back at the reference mid
+(`fx_mid_num`/`fx_mid_den`, exactly disclosed).
+
+Read-only by construction: no journal rows, no version bump, no
+idempotency registration, no audit events, no hash-chain links. It is
+the read-only twin of the fee/FX math `PostTransfer` runs — a missing
+or expired FX rate rejects like the real submission (`422`), bad
+fields reject as `400`. Risk gates (frozen, overdraft, daily limits,
+periods, dual-control review) are not evaluated: this is a price quote,
+not a submission preview — use `POST /transfers/dry-run` for the full
+check sequence. Requests are counted in `ledger_fee_estimates_total`.
+
 ### `POST /accounts/{id}/freeze` and `POST /accounts/{id}/unfreeze`
 
 Risk-control stop for an account (fintech wind-down / fraud hold). A frozen
@@ -6484,6 +6505,9 @@ curl -s localhost:8080/metrics
 - `ledger_dry_runs_total` — what-if dry-run requests received
   (`POST /entries/dry-run`, `POST /transfers/dry-run`,
   `POST /sweeps/dry-run`), including would-be rejections.
+- `ledger_fee_estimates_total` — transfer fee estimate requests received
+  (`POST /transfers/fee-estimate`), including would-be rejections.
+  Estimates are read-only: nothing is booked.
 - `ledger_sweeps_total` — every `POST /sweeps` request received.
 - `ledger_sweep_idempotency_hits_total` — sweeps that replayed an existing
   idempotency key (returned the original receipt, booked nothing).

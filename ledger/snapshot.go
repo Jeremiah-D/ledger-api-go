@@ -353,6 +353,10 @@ type snapshotConfigLine struct {
 	// WithFXIncomeAccount, LG-93); absent in snapshots written before
 	// spread support existed.
 	FXIncomeAccount AccountID `json:"fx_income_account,omitempty"`
+	// CorrespondentFees carries the corridor correspondent fees (see
+	// SetCorrespondentFee, LG-186); absent in snapshots written before
+	// fee estimation existed, which import as unconfigured.
+	CorrespondentFees []CorrespondentFee `json:"correspondent_fees,omitempty"`
 	// FXSnapshotVersion and FXRateTableSnapshots carry the FX rate-table
 	// snapshot history (LG-45, see fx_snapshot.go): the current version
 	// counter and the per-version table copies. Absent in snapshots
@@ -1260,6 +1264,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FXRates:                  l.fxRatesLocked(),
 		FXAccount:                l.fxAccount,
 		FXIncomeAccount:          l.fxIncomeAccount,
+		CorrespondentFees:        l.correspondentFeesLocked(),
 		FXSnapshotVersion:        l.fxSnapshotVersion,
 		FXRateTableSnapshots:     l.fxRateTableSnapshotsLocked(),
 		FXForwards:               l.fxForwardsSnapshotLocked(),
@@ -3325,6 +3330,28 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	l.fxRates = fx
 	l.fxAccount = cfg.FXAccount
 	l.fxIncomeAccount = cfg.FXIncomeAccount
+	// Correspondent fees (LG-186): rebuild the corridor table from the
+	// snapshot rows, validated like SetCorrespondentFee — a snapshot row
+	// that could never have been installed fails the import instead of
+	// silently pricing corridors wrong.
+	l.correspondentFees = make(map[fxPair]int64, len(cfg.CorrespondentFees))
+	for _, cf := range cfg.CorrespondentFees {
+		if cf.Cents < 0 {
+			return fmt.Errorf("ledger: snapshot correspondent fee %s->%s has negative cents", cf.FromCurrency, cf.ToCurrency)
+		}
+		f, err := normalizeCurrency(cf.FromCurrency)
+		if err != nil || cf.FromCurrency == "" {
+			return fmt.Errorf("ledger: snapshot correspondent fee from currency %q invalid", cf.FromCurrency)
+		}
+		t, err := normalizeCurrency(cf.ToCurrency)
+		if err != nil || cf.ToCurrency == "" {
+			return fmt.Errorf("ledger: snapshot correspondent fee to currency %q invalid", cf.ToCurrency)
+		}
+		if f == t {
+			return fmt.Errorf("ledger: snapshot correspondent fee %s->%s is a self-pair", f, t)
+		}
+		l.correspondentFees[fxPair{from: f, to: t}] = cf.Cents
+	}
 	// FX snapshot history (LG-45): restore the version counter and the
 	// per-version tables. Legacy snapshots predate versioning — rebuild
 	// version 1 from the imported table when it is non-empty, so the
