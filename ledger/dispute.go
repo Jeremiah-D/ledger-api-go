@@ -370,7 +370,16 @@ func (l *Ledger) RaiseDispute(d Dispute) (dispute Dispute, duplicate bool, err e
 func (l *Ledger) ResolveDispute(id string, uphold bool) (Dispute, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.resolveDisputeLocked(id, uphold)
+}
 
+// resolveDisputeLocked is the lock-held core of ResolveDispute; see
+// its doc comment for the full contract. Internal callers that already
+// hold the write lock (the representment adjudication in
+// representment.go, the expired-window sweep) resolve through here so
+// the resolution's atomic commit composes with theirs. Callers must
+// hold l.mu (the write lock).
+func (l *Ledger) resolveDisputeLocked(id string, uphold bool) (Dispute, error) {
 	d, ok := l.disputes[id]
 	if !ok {
 		return Dispute{}, ErrDisputeNotFound

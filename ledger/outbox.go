@@ -104,6 +104,12 @@ const (
 	// or rejects (the payee keeps the funds) and releases the hold.
 	OutboxDisputeRaised   = "dispute_raised"
 	OutboxDisputeResolved = "dispute_resolved"
+	// Dispute representment lifecycle (see representment.go, LG-179):
+	// the payee's second-phase defense against a filed claim — one
+	// evidence package submitted inside the window, then the
+	// operator/arbiter adjudicates and the dispute resolves.
+	OutboxRepresentmentSubmitted  = "representment_submitted"
+	OutboxRepresentmentAdjudicated = "representment_adjudicated"
 	// Direct-debit mandate lifecycle (see mandate.go, LG-125): the
 	// mandate is structural config, but its lifecycle moves are domain
 	// facts downstream consumers track — creation, suspension,

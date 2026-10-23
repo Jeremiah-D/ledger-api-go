@@ -486,6 +486,18 @@ type Metrics struct {
 	// count — the uphold decision rides the dispute_resolved audit and
 	// outbox events. Rendered as ledger_disputes_resolved_total.
 	DisputesResolvedTotal atomic.Uint64
+	// RepresentmentsSubmittedTotal counts payee evidence packages
+	// submitted by POST /disputes/{id}/representment (see
+	// ledger.SubmitRepresentment): one per first-time submission —
+	// idempotent replays return the original and are not counted
+	// twice. Rendered as ledger_representments_submitted_total.
+	RepresentmentsSubmittedTotal atomic.Uint64
+	// RepresentmentsAdjudicatedTotal counts operator/arbiter
+	// adjudications by POST /disputes/{id}/adjudicate (see
+	// ledger.AdjudicateRepresentment): uphold and reverse alike — the
+	// decision rides the representment_adjudicated audit and outbox
+	// events. Rendered as ledger_representments_adjudicated_total.
+	RepresentmentsAdjudicatedTotal atomic.Uint64
 	// RevaluationsTotal counts revaluation journal entries committed by
 	// POST /revaluations (see ledger.RevalueBalances): one per
 	// (account, currency) whose base-currency carrying value moved. Runs
@@ -1019,6 +1031,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_disputes_resolved_total",
 		"Total transfer disputes terminally resolved by POST /disputes/{id}/resolve (upheld or rejected).",
 		m.DisputesResolvedTotal.Load())
+	writeCounter(&sb, "ledger_representments_submitted_total",
+		"Total payee evidence packages submitted by POST /disputes/{id}/representment (idempotent replays not counted twice).",
+		m.RepresentmentsSubmittedTotal.Load())
+	writeCounter(&sb, "ledger_representments_adjudicated_total",
+		"Total operator/arbiter adjudications by POST /disputes/{id}/adjudicate (uphold or reverse).",
+		m.RepresentmentsAdjudicatedTotal.Load())
 	writeCounter(&sb, "ledger_revaluations_total",
 		"Total revaluation journal entries committed by POST /revaluations (one per account/currency whose carrying value moved).",
 		m.RevaluationsTotal.Load())

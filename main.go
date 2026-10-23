@@ -3165,56 +3165,194 @@ func (s *server) handleResolveDispute(w http.ResponseWriter, r *http.Request) {
 
 	d, err := s.ledgerFor(r).ResolveDispute(id, req.Uphold)
 	if err != nil {
-		if errors.Is(err, ledger.ErrDisputeNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrDisputeAlreadyResolved) || errors.Is(err, ledger.ErrAlreadyReversed) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrAccountClosed) {
-			s.metrics.ClosedRejections.Add(1)
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrAccountFrozen) {
-			s.metrics.FrozenRejections.Add(1)
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrAccountSuspended) {
-			s.metrics.SuspendedRejections.Add(1)
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrAccountOverdraft) {
-			s.metrics.OverdraftRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrDailyLimitExceeded) {
-			s.metrics.DailyLimitRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrBudgetExceeded) {
-			s.metrics.BudgetRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ledger.ErrPeriodClosed) {
-			s.metrics.PeriodRejections.Add(1)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		s.writeDisputeResolutionError(w, err)
 		return
 	}
 	// ledger_disputes_resolved_total counts committed resolutions:
 	// upheld and rejected alike — the decision rides the
 	// dispute_resolved audit and outbox events.
 	s.metrics.DisputesResolvedTotal.Add(1)
+	writeJSON(w, http.StatusOK, d)
+}
+
+// writeDisputeResolutionError maps the terminal dispute-resolution
+// errors (see ledger.ResolveDispute and the representment adjudication
+// in ledger.AdjudicateRepresentment, which resolves through the same
+// atomic commit): unknown dispute 404, terminal states 409, account
+// stops 403, risk-gate rejections 422, everything else 400.
+func (s *server) writeDisputeResolutionError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ledger.ErrDisputeNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrDisputeAlreadyResolved) || errors.Is(err, ledger.ErrAlreadyReversed) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrAccountClosed) {
+		s.metrics.ClosedRejections.Add(1)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrAccountFrozen) {
+		s.metrics.FrozenRejections.Add(1)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrAccountSuspended) {
+		s.metrics.SuspendedRejections.Add(1)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrAccountOverdraft) {
+		s.metrics.OverdraftRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrDailyLimitExceeded) {
+		s.metrics.DailyLimitRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrBudgetExceeded) {
+		s.metrics.BudgetRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ledger.ErrPeriodClosed) {
+		s.metrics.PeriodRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+}
+
+// submitRepresentmentRequest is the body of
+// POST /disputes/{id}/representment: the payee's evidence package —
+// document hashes plus an optional defense statement. At least one of
+// the two is required; an empty package defends nothing.
+type submitRepresentmentRequest struct {
+	DocumentHashes []string `json:"document_hashes"`
+	Statement      string   `json:"statement"`
+}
+
+// handleSubmitRepresentment implements POST /disputes/{id}/representment,
+// the payee's second-phase defense against a filed chargeback claim
+// (see ledger.SubmitRepresentment): one evidence package per dispute,
+// submitted inside the 7-day evidence window.
+//
+// A first-time submission returns 201 with the representment.
+// Resubmitting the same evidence returns 200 with the original — the
+// replay books nothing new. An unknown dispute ID returns 404;
+// submitting against a resolved dispute, a second package, or a
+// closed window returns 409; malformed evidence returns 400.
+func (s *server) handleSubmitRepresentment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req submitRepresentmentRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "dispute id required"})
+		return
+	}
+
+	rep, duplicate, err := s.ledgerFor(r).SubmitRepresentment(id, req.DocumentHashes, req.Statement)
+	if err != nil {
+		if errors.Is(err, ledger.ErrDisputeNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDisputeAlreadyResolved) ||
+			errors.Is(err, ledger.ErrRepresentmentAlreadySubmitted) ||
+			errors.Is(err, ledger.ErrRepresentmentWindowExpired) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, rep)
+		return
+	}
+	// ledger_representments_submitted_total counts first-time
+	// submissions: idempotent replays book nothing new and are not
+	// counted twice.
+	s.metrics.RepresentmentsSubmittedTotal.Add(1)
+	writeJSON(w, http.StatusCreated, rep)
+}
+
+// adjudicateRepresentmentRequest is the body of
+// POST /disputes/{id}/adjudicate: the operator/arbiter's decision on
+// the submitted evidence — "uphold" keeps the claim standing (the
+// payer is refunded), "reverse" reverses it (the payee keeps the
+// funds). Every adjudication names its adjudicator.
+type adjudicateRepresentmentRequest struct {
+	Decision    string `json:"decision"`
+	Adjudicator string `json:"adjudicator"`
+}
+
+// handleAdjudicateRepresentment implements POST /disputes/{id}/adjudicate,
+// the operator/arbiter's decision on the payee's representment (see
+// ledger.AdjudicateRepresentment). The dispute resolves through the
+// same atomic commit as POST /disputes/{id}/resolve, so an upheld
+// refund rejected by the reversal's risk gates leaves the dispute
+// open: the adjudication never half-commits.
+//
+// A first-time adjudication returns 200 with the resolved dispute. An
+// unknown dispute ID returns 404; adjudicating without evidence, twice,
+// or after resolution returns 409; an unknown decision or an empty
+// adjudicator returns 400.
+func (s *server) handleAdjudicateRepresentment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req adjudicateRepresentmentRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "dispute id required"})
+		return
+	}
+
+	d, err := s.ledgerFor(r).AdjudicateRepresentment(id, req.Decision, req.Adjudicator)
+	if err != nil {
+		if errors.Is(err, ledger.ErrDisputeNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrDisputeAlreadyResolved) ||
+			errors.Is(err, ledger.ErrRepresentmentNotSubmitted) ||
+			errors.Is(err, ledger.ErrRepresentmentAlreadyAdjudicated) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidRepresentmentDecision) ||
+			errors.Is(err, ledger.ErrEmptyAdjudicator) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		// The adjudication resolved through the dispute resolution's
+		// atomic commit: its risk-gate rejections map like a resolve.
+		s.writeDisputeResolutionError(w, err)
+		return
+	}
+	// ledger_representments_adjudicated_total counts committed
+	// adjudications: uphold and reverse alike — the decision rides the
+	// representment_adjudicated audit and outbox events.
+	s.metrics.RepresentmentsAdjudicatedTotal.Add(1)
 	writeJSON(w, http.StatusOK, d)
 }
 
@@ -8925,6 +9063,8 @@ func (s *server) handler() http.Handler {
 	// claims that freeze the disputed amount on the payee via a hold.
 	mux.HandleFunc("POST /disputes", s.handleRaiseDispute)
 	mux.HandleFunc("POST /disputes/{id}/resolve", s.handleResolveDispute)
+	mux.HandleFunc("POST /disputes/{id}/representment", s.handleSubmitRepresentment)
+	mux.HandleFunc("POST /disputes/{id}/adjudicate", s.handleAdjudicateRepresentment)
 	mux.HandleFunc("GET /disputes/{id}", s.handleGetDispute)
 	mux.HandleFunc("POST /term-deposits", s.handleOpenTermDeposit)
 	mux.HandleFunc("POST /term-deposits/sweep", s.handleSweepTermDeposits)

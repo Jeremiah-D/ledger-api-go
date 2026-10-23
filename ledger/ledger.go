@@ -1081,6 +1081,16 @@ type Ledger struct {
 	// events — the structured audit trail is the durable record.
 	disputes    map[string]Dispute
 	disputeKeys map[string]string
+	// representments maps dispute IDs to the payee's evidence package
+	// (see representment.go): one optional representment per dispute,
+	// submitted inside the evidence window after the claim is filed and
+	// adjudicated by an operator or arbiter. representmentWindow is the
+	// window (default 7 days, see defaultRepresentmentWindow),
+	// measured from the dispute's CreatedAt. Like dispute records,
+	// representments are operational state that does not round-trip
+	// through disaster-recovery snapshots.
+	representments      map[string]Representment
+	representmentWindow time.Duration
 	// healthViolations counts balance-health violations found by the
 	// background watchdog (see health_watch.go): the number of
 	// "balance_health_violation" audit events emitted. In-memory only —
@@ -1550,6 +1560,8 @@ func New(opts ...Option) *Ledger {
 		dunningStates:               make(map[dunningKey]DunningState),
 		disputes:                    make(map[string]Dispute),
 		disputeKeys:                 make(map[string]string),
+		representments:              make(map[string]Representment),
+		representmentWindow:         defaultRepresentmentWindow,
 		journalRules:                make(map[string]JournalRule),
 		fixedAssets:                 make(map[string]FixedAsset),
 		revalBaselines:              make(map[revalKey]revalBaseline),
