@@ -120,6 +120,14 @@ type Metrics struct {
 	// FI-to-FI credit transfer export requests served, including
 	// rejected exports (see ledger.ExportPacs009, LG-172).
 	Pacs009Exports atomic.Uint64
+	// Pacs010Exports counts GET /exports/pacs010 ISO 20022 pacs.010
+	// FI-to-FI direct debit export requests served, including
+	// rejected exports (see ledger.ExportPacs010, LG-190).
+	Pacs010Exports atomic.Uint64
+	// Pacs010Reconciles counts GET /mandates/{id}/pacs010/reconcile
+	// camt.054 reconciliation reports served, including rejected
+	// requests (see ledger.ReconcilePacs010, LG-190).
+	Pacs010Reconciles atomic.Uint64
 	// UboSets counts POST /accounts/{id}/ubo UBO ownership
 	// declaration installs served, including rejected declarations
 	// (see ledger.SetUbo, LG-189).
@@ -932,6 +940,10 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/accounting/quickbooks QuickBooks general-journal IIF exports served, including rejected exports.", m.QuickBooksExports.Load())
 	writeCounter(&sb, "ledger_pacs009_exports_total",
 		"Total GET /exports/pacs009 ISO 20022 pacs.009 FI-to-FI credit transfer exports served, including rejected exports.", m.Pacs009Exports.Load())
+	writeCounter(&sb, "ledger_pacs010_exports_total",
+		"Total GET /exports/pacs010 ISO 20022 pacs.010 FI-to-FI direct debit exports served, including rejected exports.", m.Pacs010Exports.Load())
+	writeCounter(&sb, "ledger_pacs010_reconciles_total",
+		"Total GET /mandates/{id}/pacs010/reconcile camt.054 reconciliation reports served, including rejected requests.", m.Pacs010Reconciles.Load())
 	writeCounter(&sb, "ledger_ubo_sets_total",
 		"Total POST /accounts/{id}/ubo UBO ownership declaration installs served, including rejected declarations.", m.UboSets.Load())
 	writeCounter(&sb, "ledger_camt052_exports_total",

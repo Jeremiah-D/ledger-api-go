@@ -4299,6 +4299,42 @@ curl -s 'localhost:8080/exports/pacs009?transfer=tx-2026-1042&sttlm_mtd=COVE&chr
 Go: `ledger.ExportPacs009(transferID, ledger.Pacs009Options{SettlementMethod,
 ChargesBearer})`。
 
+### `GET /exports/pacs010` — ISO 20022 pacs.010 银行间直接扣款导出
+
+pain.008（LG-166）把已记账的 mandate 扣款集合渲染为债权人发往其银行的
+客户直接扣款发起报文，本节是它的银行间对应物：同一批已记账集合渲染为
+ISO 20022 `pacs.010.001.02`（`FinancialInstitutionDirectDebit`）——债权人
+银行发往债务人银行的银行间直接扣款，是真正在两家机构之间划拨资金的那
+一跳。它与 pacs.009（LG-172，机构间贷记）互为镜像：pacs.009 是机构间
+"推"（debtor 机构发起），pacs.010 是机构间"拉"（creditor 机构发起）。
+
+报文：`GrpHdr`（`MsgId` 确定性 `pacs010-<mandate>-<窗口>-<分录>…`，
+`NbOfTxs`/`CtrlSum`/`SttlmInf/SttlmMtd`）+ 每个已记账扣款一个
+`CdtInstr`：`PmtId`（`InstrId`/`EndToEndId` 均为分录 ID，跨导出稳定，
+债务人银行可去重）、`InstdAmt`、`ReqdColltnDt`（记账日期）、`Cdtr`
+（mandate payee，发起机构）/`Dbtr`（mandate payer，被扣机构）及各自账
+户 IBAN，`DrctDbtTx/MndtRltdInf` 携带 `MndtId` 与 `DtOfSgntr`
+（mandate `ValidFrom` 日期，即债务人授权日）。代理行标识复用 pacs009
+惯例：有注册 BIC 走 `FinInstnId/BIC`，否则 `FinInstnId/Othr/Id` = 账户
+ID，绝不编造 BIC。
+
+与 camt.054 借记通知的对账勾稽：`GET /mandates/{id}/pacs010/reconcile`
+把本窗口的已记账集合按 `EndToEndId` 与已导入的 camt.054 借记/贷记通知
+逐笔勾稽，逐笔报告 `notified`（银行已确认）/`pending`（仍在途），并给
+出通知的 `ntfctn_id` 与三元匹配状态。pain.002 只回答 pain.001：命名
+pacs.010 `MsgId` 的 pain.002 报文被 `ErrPain002ForeignMsgID` 显式拒绝（pain.008 同理，沿 LG-166 惯例）。
+
+```bash
+curl -s 'localhost:8080/exports/pacs010?mandate=m-2026-042' -o fidbt.xml
+# 200 pacs.010.001.02: <FIDrctDbt>/.../<MsgId>pacs010-…</MsgId>/.../<MndtId>m-2026-042</MndtId>
+curl -s localhost:8080/mandates/m-2026-042/pacs010/reconcile  # {"notified":N,"pending":M,...}
+```
+
+Go: `ledger.ExportPacs010(mandateID, ledger.Pacs010ExportOptions{SettlementMethod, Since, Until})`，
+`ledger.ReconcilePacs010(mandateID, ledger.Pacs010ReconOptions{Since, Until})`。
+导出与对账均为只读（不 bump 版本、不写分录），但各 emits 一条审计事件
+（`pacs010_exported` / `pacs010_reconciled`）。
+
 ### `GET /exports/pacs008` — ISO 20022 pacs.008 即时客户贷记出站报文导出
 
 入站 pacs.008（LG-163）是银行转发的客户贷记通知，本节是它的出站
@@ -6887,6 +6923,12 @@ curl -s localhost:8080/metrics
 - `ledger_pacs009_exports_total` — `GET /exports/pacs009` ISO 20022
   pacs.009 FI-to-FI credit transfer exports served, including rejected
   exports.
+- `ledger_pacs010_exports_total` — `GET /exports/pacs010` ISO 20022
+  pacs.010 FI-to-FI direct debit exports served, including rejected
+  exports.
+- `ledger_pacs010_reconciles_total` — `GET
+  /mandates/{id}/pacs010/reconcile` camt.054 reconciliation reports
+  served, including rejected requests.
 - `ledger_ubo_sets_total` — `POST /accounts/{id}/ubo` UBO ownership
   declaration installs served, including rejected declarations.
 - `ledger_ecl_exposure_requests_total` — `POST /ecl/exposures` requests

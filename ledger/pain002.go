@@ -59,6 +59,15 @@ var (
 	// (e.g. a pain.008 direct debit), and applying it to a pain.001
 	// instruction would misattribute the bank's verdict.
 	ErrPain002UnexpectedMsgName = errors.New("ledger: pain.002 report is not for a pain.001 message")
+	// ErrPain002ForeignMsgID is returned when OrgnlMsgId belongs to
+	// another message family — a pain.008 ("pain008-…") or pacs.010
+	// ("pacs010-…") MsgId: pain.002 answers pain.001 customer credit
+	// transfers only. A status report for another family's message is a
+	// category error, not a pain.001 verdict — the same rule that has
+	// always kept pain.008 MsgIds out of the pain.002 path, now stated
+	// explicitly so a mis-addressed pacs.010 report fails loud instead
+	// of parsing as a pain.001 answer (see pacs010.go, LG-190).
+	ErrPain002ForeignMsgID = errors.New("ledger: pain.002 report answers a non-pain.001 message")
 	// ErrInvalidPain002TxSts is returned when a transaction carries a
 	// TxSts outside the pain.002 vocabulary
 	// (ACSC/ACCP/RJCT/PDNG): unknown statuses are refused, not
@@ -188,6 +197,9 @@ func ParsePain002(data []byte) (*Pain002Report, error) {
 	orgnlMsgID := strings.TrimSpace(grp.OrgnlMsgID)
 	if orgnlMsgID == "" {
 		return nil, fmt.Errorf("%w: missing OrgnlMsgId", ErrInvalidPain002)
+	}
+	if strings.HasPrefix(orgnlMsgID, "pain008-") || strings.HasPrefix(orgnlMsgID, "pacs010-") {
+		return nil, fmt.Errorf("%w: %q", ErrPain002ForeignMsgID, orgnlMsgID)
 	}
 	report := &Pain002Report{
 		MsgID:        strings.TrimSpace(doc.Report.GrpHdr.MsgID),

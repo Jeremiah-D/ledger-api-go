@@ -5278,6 +5278,122 @@ func (s *server) handlePain008Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+
+// handlePacs010Export implements GET /exports/pacs010 (LG-190): an
+// ISO 20022 pacs.010.001.02 FinancialInstitutionDirectDebit for the
+// booked mandate collections (see ledger.ExportPacs010) — the
+// bank-to-bank direct debit the creditor's bank sends to the debtor's
+// bank. Query parameters: mandate (required, the mandate ID), from/to
+// (optional RFC 3339, the half-open window on the booking timestamp),
+// sttlm_mtd (optional, one of INDA/INGA/COVE/CLRG, default INDA). The
+// export is read-only: no version bump, no journal rows, no
+// idempotency keys — one audit event per export. Error mapping: a
+// missing mandate parameter is a 400; an unknown mandate is a 404; a
+// suspended/cancelled/expired mandate or a mandate whose parties lack
+// IBANs is a 422; a bad range or settlement method is a 400.
+func (s *server) handlePacs010Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs010Exports.Add(1)
+	q := r.URL.Query()
+	mandateID := q.Get("mandate")
+	if mandateID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mandate is required"})
+		return
+	}
+	var from, to time.Time
+	if raw := q.Get("from"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from must be RFC 3339"})
+			return
+		}
+		from = t
+	}
+	if raw := q.Get("to"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to must be RFC 3339"})
+			return
+		}
+		to = t
+	}
+	doc, err := s.ledgerFor(r).ExportPacs010(mandateID, ledger.Pacs010ExportOptions{
+		SettlementMethod: q.Get("sttlm_mtd"),
+		Since:            from,
+		Until:            to,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrMandateNotActive),
+			errors.Is(err, ledger.ErrMandateExpired),
+			errors.Is(err, ledger.ErrMissingAccountIBAN):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrInvalidPacs010Range),
+			errors.Is(err, ledger.ErrPacs010InvalidSettlementMethod):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
+// handlePacs010Reconcile implements GET /mandates/{id}/pacs010/reconcile
+// (LG-190): joins the mandate's booked collections against the
+// imported camt.054 debit/credit notifications and reports, per
+// collection, whether the debtor's bank confirmed the pull (notified)
+// or it is still outstanding (pending). Query parameters: from/to
+// (optional RFC 3339, the half-open window on the booking timestamp).
+// An unknown mandate is a 404.
+func (s *server) handlePacs010Reconcile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.Pacs010Reconciles.Add(1)
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mandate id required"})
+		return
+	}
+	q := r.URL.Query()
+	var from, to time.Time
+	if raw := q.Get("from"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from must be RFC 3339"})
+			return
+		}
+		from = t
+	}
+	if raw := q.Get("to"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to must be RFC 3339"})
+			return
+		}
+		to = t
+	}
+	rep, err := s.ledgerFor(r).ReconcilePacs010(id, ledger.Pacs010ReconOptions{Since: from, Until: to})
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrInvalidPacs010Range):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+
 // handlePacs002Export implements GET /exports/pacs002 (LG-167): an
 // ISO 20022 pacs.002.001.03 FI-to-FI payment status report for one
 // gpi-tracked payment (see ledger.ExportPacs002). Query parameter:
@@ -9762,6 +9878,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /mandates/{id}", s.handleGetMandate)
 	mux.HandleFunc("POST /mandates/{id}/debits", s.handleDebitMandate)
 	mux.HandleFunc("GET /mandates/{id}/debits", s.handleListMandateDebits)
+	mux.HandleFunc("GET /mandates/{id}/pacs010/reconcile", s.handlePacs010Reconcile)
 	mux.HandleFunc("POST /mandates/{id}/suspend", s.handleSuspendMandate)
 	mux.HandleFunc("POST /mandates/{id}/cancel", s.handleCancelMandate)
 	mux.HandleFunc("POST /revaluations", s.handleCreateRevaluation)
@@ -9904,6 +10021,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
+	mux.HandleFunc("GET /exports/pacs010", s.handlePacs010Export)
 	mux.HandleFunc("GET /exports/pacs008", s.handlePacs008Export)
 	mux.HandleFunc("POST /repairs/{id}/fix", s.handleRepairFix)
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
