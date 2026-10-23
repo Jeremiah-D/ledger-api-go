@@ -1377,6 +1377,11 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	if t.ExternalRef != "" {
 		fxDetails["external_ref"] = t.ExternalRef
 	}
+	if t.Rail != "" {
+		// LG-185: the settlement rail rides the audit trail, like
+		// the memo and the external reference.
+		fxDetails["rail"] = t.Rail
+	}
 	l.emitAudit(AuditEvent{
 		Op:            "transfer",
 		Actor:         "PostTransfer",
@@ -1414,6 +1419,12 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
 	l.fireBalanceHooksLocked(hookTouched, hookOld, t.ID)
+
+	// LG-185: a rail-bound FX transfer opens its settlement-SLA watch
+	// at commit, like the same-currency path above.
+	if t.Rail != "" {
+		l.openSLAWatchLocked(t.ID, SLAWatchKindTransfer, t.Rail, now)
+	}
 
 	return TransferReceipt{
 		TransferID:       t.ID,

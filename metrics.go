@@ -834,6 +834,15 @@ type Metrics struct {
 	// (see ledger.GPICounts, LG-165), across all tenants. It is synced
 	// from the ledger on every GET /metrics scrape.
 	GPIRejectedTotal atomic.Uint64
+	// SLABreachTotal counts settlement-SLA breaches by rail (see
+	// ledger.SLABreachCounts, LG-185): payouts/transfers that were
+	// still unsettled when their rail's settlement SLA expired. It is
+	// synced from the ledgers on every GET /metrics scrape — the
+	// breaches fire inside CheckSLAClocks, not in a handler — so Set
+	// overwrites (never accumulates). The zero value is ready to use;
+	// Set is safe for concurrent use. Exported as
+	// ledger_sla_breaches_total{rail}.
+	SLABreachTotal SLABreachCounter
 }
 
 // handleMetrics implements GET /metrics. It emits the counters in the
@@ -1336,6 +1345,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_gpi_rejected_total",
 		"Total gpi-tracked payments that reached RJCT (see ledger.GPICounts). In-memory only, synced from the ledger on every scrape.",
 		m.GPIRejectedTotal.Load())
+	writeLabeledCounter(&sb, "ledger_sla_breaches_total",
+		"Total settlement-SLA breaches by rail (see ledger.SLABreachCounts, LG-185): payouts/transfers that were still unsettled when their rail's settlement SLA expired. In-memory only, synced from the ledger on every scrape.",
+		m.SLABreachTotal.series())
 	_, _ = w.Write([]byte(sb.String()))
 }
 
@@ -1475,6 +1487,46 @@ func (c *FedNowRejectionCounter) series() []labeledCounterSeries {
 	for reason, v := range c.counts {
 		out = append(out, labeledCounterSeries{
 			labels: fmt.Sprintf(`reason=%q`, reason),
+			value:  v,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].labels < out[j].labels })
+	return out
+}
+
+// SLABreachCounter is the per-rail breakdown of settlement-SLA
+// breaches (LG-185), rendered as ledger_sla_breaches_total{rail=".."}:
+// the ledger counts the breaches at CheckSLAClocks time and the HTTP
+// layer mirrors the counts on scrape, so Set overwrites (never
+// accumulates) — the ledger is the source of truth. The zero value is
+// ready to use; Set is safe for concurrent use.
+type SLABreachCounter struct {
+	mu     sync.Mutex
+	counts map[string]uint64
+}
+
+// Set records the ledger's authoritative per-rail breach count. Rail
+// names are the closed SLA vocabulary (fednow, rtp, sepa, swift,
+// gpi), rendered with %q so the label value stays valid exposition
+// text.
+func (c *SLABreachCounter) Set(rail string, n uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = make(map[string]uint64)
+	}
+	c.counts[rail] = n
+}
+
+// series renders the counter as labeled series, sorted by rail for a
+// deterministic exposition.
+func (c *SLABreachCounter) series() []labeledCounterSeries {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]labeledCounterSeries, 0, len(c.counts))
+	for rail, v := range c.counts {
+		out = append(out, labeledCounterSeries{
+			labels: fmt.Sprintf(`rail=%q`, rail),
 			value:  v,
 		})
 	}

@@ -3852,6 +3852,50 @@ curl -s -X POST localhost:8080/gpi/link \
 Go: `ledger.AdvanceGPI` / `ledger.LinkGPITransfer` / `ledger.GetGPITrack` /
 `ledger.GPICounts`。
 
+### `POST /sla/check` — 结算 SLA 达成监控（LG-185）
+
+gpi 回答"钱在哪"，SLA 回答"钱迟到了吗"：与 LG-165 的 gpi 状态追踪正交，
+本项是 SLA 合规监控层。per-rail 结算 SLA 可配（`ledger.SetSLAConfig`）：
+
+| rail | 默认 SLA | 含义 |
+|---|---|---|
+| `fednow` | 20s | FedNow 即时结算承诺 |
+| `rtp` | 20s | RTP 即时结算 |
+| `sepa` | 24h | SEPA 当日 |
+| `swift` | 48h | 非 gpi 跨境汇款 |
+| `gpi` | 24h | SWIFT gpi 按 UETR 预期（同日 value） |
+
+- `POST /payouts` / `POST /transfers` 接受可选 `rail`（rail 词汇表外 fail-closed）；
+  payout 提交（`POST /payouts/{id}/submit`）即按 rail 打开 SLA watch（`OpenedAt` +
+  该 rail SLA = `Deadline`）；未声明 rail 的 payout 默认走 `gpi` rail（每笔
+  payout 都是带 UETR 的跨境发起，LG-165）；未声明 rail 的 transfer 不开 watch。
+- gpi 状态机推进时同步更新 SLA 时钟：每次 transition 刷新 watch 的
+  `last_progress_at`（但 deadline 不动——SLA 是 deadline，进展不重谈判），
+  `ACCP` 按 settled 关闭、`RJCT` 按 rejected 关闭；`POST /payouts/{id}/settle` /
+  `fail` 同样关闭 watch。
+- `POST /sla/check` 评估所有 open watch：超过 deadline 未结算的触发一次
+  `sla_breached` 哈希链审计事件（`{id,kind,rail,opened_at,deadline,overdue}`），
+  并 bump `ledger_sla_breaches_total{rail}` 计数器；每个 watch 最多 breach 一次，
+  breach 标记 sticky（事后结算也不抹掉——breach 发生过就是发生过）。
+- 生产可用后台 sweeper：`LEDGER_SLA_SWEEP_INTERVAL`（如 `30s`，未设置=禁用），
+  每 tick 对默认租户跑一次 `CheckSLAClocks(time.Now().UTC())`。
+- watch 是内存态（与 payout/gpi 同惯例）；持久记录是 `sla_breached` 审计事件。
+
+```bash
+# 起草一条 fednow rail 的 payout 并提交
+curl -s -X POST localhost:8080/payouts \
+  -d '{"id":"po-sla","payee_account":"saver","amount_cents":250000,"destination":"FPS:6222000012345678","maker":"alice","rail":"fednow"}'
+curl -s -X POST localhost:8080/payouts/po-sla/approve -d '{"approver":"bob"}'
+curl -s -X POST localhost:8080/payouts/po-sla/submit
+# 评估 SLA 时钟（20s 内无 breach，返回空列表）
+curl -s -X POST localhost:8080/sla/check | jq .breached
+# []
+```
+
+Go: `ledger.SetSLAConfig` / `ledger.SLADuration` / `ledger.CheckSLAClocks` /
+`ledger.SLAWatch` / `ledger.SLAWatches` / `ledger.SLABreachCounts` /
+`ledger.StartSLASweeper`。
+
 ### `GET /exports/pain008` — ISO 20022 pain.008 直接扣款指令导出
 
 `pain.001` 的反向：`pain.001` 是付款人主动贷记（credit transfer），
@@ -6644,6 +6688,11 @@ curl -s localhost:8080/metrics
   (one per payout drafted), synced from the ledger on every scrape.
 - `ledger_gpi_settled_total` — gpi-tracked payments that reached `ACCP`.
 - `ledger_gpi_rejected_total` — gpi-tracked payments that reached `RJCT`.
+- `ledger_sla_breaches_total{rail}` — settlement-SLA breaches by rail
+  (LG-185): payouts/transfers still unsettled when their rail's
+  settlement SLA expired (fednow/rtp 20s, sepa 24h, swift 48h,
+  gpi 24h, all operator-configurable); fired by `POST /sla/check` or
+  the background SLA sweeper, synced from the ledger on every scrape.
 - `ledger_holds_total` — every `POST /holds` request received.
 - `ledger_hold_idempotency_hits_total` — holds that replayed an existing
   idempotency key (returned the original hold, reserved nothing).
@@ -6776,6 +6825,15 @@ Environment:
   The first tick fires after one full interval; SIGINT/SIGTERM stops the
   worker with the server. Unset or invalid means disabled — expiry stays
   lazy by predicate and available on demand via `POST /holds/expire`.
+- `LEDGER_SLA_SWEEP_INTERVAL` — enables the background settlement-SLA
+  clock evaluator (LG-185), e.g. `LEDGER_SLA_SWEEP_INTERVAL=30s`. While
+  enabled, the server evaluates the default tenant's open SLA watches on
+  the interval (the same `CheckSLAClocks` sweep `POST /sla/check` runs):
+  watches past their rail's settlement deadline fire one `sla_breached`
+  audit event each and bump `ledger_sla_breaches_total{rail}`. The first
+  tick fires after one full interval; SIGINT/SIGTERM stops the worker
+  with the server. Unset or invalid means disabled — breaches are
+  evaluated on demand via `POST /sla/check`.
 - `LEDGER_PERIOD_AUTOCLOSE_INTERVAL` — enables the background period
   auto-close worker, e.g. `LEDGER_PERIOD_AUTOCLOSE_INTERVAL=1m`. While
   enabled, the server fires due plans registered with `POST

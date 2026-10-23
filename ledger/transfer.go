@@ -168,6 +168,12 @@ type Transfer struct {
 	// stated"; a code outside the admitted subset is rejected
 	// fail-closed with ErrInvalidPurposeCode.
 	PurposeCode string `json:"purpose_code,omitempty"`
+	// Rail is the settlement rail the transfer travels (see sla.go,
+	// LG-185): one of fednow, rtp, sepa, swift, gpi. Empty means "no
+	// rail stated" and opens no SLA watch — a domestic book transfer
+	// has no rail SLA to miss. A name outside the rail vocabulary is
+	// rejected fail-closed with ErrInvalidRail.
+	Rail string `json:"rail,omitempty"`
 	// MaxSlippageBps is the opt-in LG-86 slippage cap for
 	// cross-currency transfers, in basis points: the request's FX rate
 	// is locked at admission (see FXRateQuote), and when the effective
@@ -621,6 +627,14 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 	// checkPurposeCode), or the transfer is rejected fail-closed
 	// before anything is recorded, on both paths.
 	if err := checkPurposeCode(t.PurposeCode); err != nil {
+		return t, "", err
+	}
+	// The rail is field validation, like the purpose code: an empty
+	// rail means "no rail stated" (no SLA watch); anything else must
+	// be an exact match in the SLA rail vocabulary (see sla.go), or
+	// the transfer is rejected fail-closed before anything is
+	// recorded, on both paths. The value is normalized to lowercase.
+	if t.Rail, err = normalizeRail(t.Rail); err != nil {
 		return t, "", err
 	}
 	// The slippage cap (see Transfer.MaxSlippageBps) is field
@@ -1077,6 +1091,11 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	if t.ExternalRef != "" {
 		transferDetails["external_ref"] = t.ExternalRef
 	}
+	if t.Rail != "" {
+		// LG-185: the settlement rail rides the audit trail, like
+		// the memo and the external reference.
+		transferDetails["rail"] = t.Rail
+	}
 	l.emitAudit(AuditEvent{
 		Op:            "transfer",
 		Actor:         "PostTransfer",
@@ -1104,6 +1123,15 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	// Balance-change notification: strictly after the atomic commit
 	// zone, advisory only — async dispatch, hook failures isolated.
 	l.fireBalanceHooksLocked(hookTouched, hookOld, t.ID)
+
+	// LG-185: a rail-bound transfer opens its settlement-SLA watch at
+	// commit — the payment's timeliness is tracked from here.
+	// Review-routed transfers returned above (they are pending, not
+	// committed), and rail-less transfers open no watch: a domestic
+	// book transfer has no rail SLA to miss.
+	if t.Rail != "" {
+		l.openSLAWatchLocked(t.ID, SLAWatchKindTransfer, t.Rail, now)
+	}
 
 	return TransferReceipt{
 		TransferID:       t.ID,

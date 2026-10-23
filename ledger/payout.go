@@ -174,6 +174,13 @@ type PayoutInstruction struct {
 	// rejected fail-closed with ErrInvalidPurposeCode. It rides the
 	// pacs.008 outbound export as <Purp><Cd> (see pacs008_export.go).
 	PurposeCode string `json:"purpose_code,omitempty"`
+	// Rail is the settlement rail the payout travels (see sla.go,
+	// LG-185): one of fednow, rtp, sepa, swift, gpi. Empty means "no
+	// rail stated": the SLA watch opened at submit then uses the gpi
+	// rail, since every payout is a cross-border payment initiation
+	// with a UETR and a gpi track (LG-165). A name outside the rail
+	// vocabulary is rejected fail-closed with ErrInvalidRail.
+	Rail string `json:"rail,omitempty"`
 }
 
 // payoutClearingEntryID builds the deterministic submit-leg entry ID:
@@ -249,6 +256,15 @@ func (l *Ledger) CreatePayout(p PayoutInstruction) (PayoutInstruction, bool, err
 	if err := checkPurposeCode(p.PurposeCode); err != nil {
 		return PayoutInstruction{}, false, err
 	}
+	// The rail is field validation, like the purpose code: empty
+	// means "no rail stated"; anything else must be an exact match in
+	// the SLA rail vocabulary (see sla.go), or the payout is rejected
+	// fail-closed before anything is recorded.
+	rail, err := normalizeRail(p.Rail)
+	if err != nil {
+		return PayoutInstruction{}, false, err
+	}
+	p.Rail = rail
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -279,6 +295,16 @@ func (l *Ledger) CreatePayout(p PayoutInstruction) (PayoutInstruction, bool, err
 	if p.IdempotencyKey != "" {
 		l.payoutKeys[p.IdempotencyKey] = p.ID
 	}
+	openDetails := map[string]any{
+		"amount_cents": p.AmountCents,
+		"currency":     p.Currency,
+		"destination":  p.Destination,
+		"maker":        p.Maker,
+		"uetr":         p.UETR,
+	}
+	if p.Rail != "" {
+		openDetails["rail"] = p.Rail
+	}
 	l.emitAudit(AuditEvent{
 		Op:            "payout_open",
 		Actor:         "CreatePayout",
@@ -286,13 +312,7 @@ func (l *Ledger) CreatePayout(p PayoutInstruction) (PayoutInstruction, bool, err
 		VersionBefore: l.version,
 		VersionAfter:  l.version,
 		Accounts:      []AccountID{p.PayeeAccount},
-		Details: map[string]any{
-			"amount_cents": p.AmountCents,
-			"currency":     p.Currency,
-			"destination":  p.Destination,
-			"maker":        p.Maker,
-			"uetr":         p.UETR,
-		},
+		Details:       openDetails,
 	})
 	l.emitOutboxLocked(OutboxEvent{
 		Type:        OutboxPayoutCreated,
@@ -441,6 +461,16 @@ func (l *Ledger) SubmitPayout(id string) (PayoutInstruction, error) {
 	p.SubmittedAt = now
 	p.ClearingEntryID = posted.ID
 	l.payouts[id] = p
+	// LG-185: submitting opens the settlement-SLA watch — the
+	// payment's timeliness is tracked from here. A payout with no
+	// stated rail rides the gpi rail: every payout is a cross-border
+	// initiation with a UETR and a gpi track (LG-165), so the
+	// gpi/UETR settlement expectation governs.
+	rail := p.Rail
+	if rail == "" {
+		rail = RailGPI
+	}
+	l.openSLAWatchLocked(p.ID, SLAWatchKindPayout, rail, now)
 	l.emitAudit(AuditEvent{
 		Op:            "payout_submitted",
 		Actor:         "SubmitPayout",
@@ -528,6 +558,10 @@ func (l *Ledger) SettlePayout(id string, line StatementLine, opts StatementMatch
 	p.SettlementEntryID = posted.ID
 	p.StatementLineID = line.ID
 	l.payouts[id] = p
+	// LG-185: settlement closes the SLA watch — the payment met its
+	// rail's settlement expectation (the breach check runs on open
+	// watches only, so a watch that closed on time never breaches).
+	l.closeSLAWatchLocked(id, SLACloseSettled, now)
 	l.emitAudit(AuditEvent{
 		Op:            "payout_settled",
 		Actor:         "SettlePayout",
@@ -598,6 +632,9 @@ func (l *Ledger) FailPayout(id, reason string) (PayoutInstruction, error) {
 	p.SettlementEntryID = posted.ID
 	p.FailReason = reason
 	l.payouts[id] = p
+	// LG-185: a failed payout resolves the SLA watch as failed — the
+	// money is not moving, so the timeliness question is moot.
+	l.closeSLAWatchLocked(id, SLACloseFailed, now)
 	l.emitAudit(AuditEvent{
 		Op:            "payout_failed",
 		Actor:         "FailPayout",

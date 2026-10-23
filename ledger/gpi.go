@@ -339,6 +339,14 @@ func (l *Ledger) applyGPITransitionLocked(t *GPITrack, status, reasonCode, actor
 		VersionAfter:  l.version,
 		Details:       details,
 	})
+	// LG-185: the gpi transition drives the payout's SLA clock — every
+	// advance refreshes the watch's last-progress timestamp, and a
+	// terminal transition (ACCP/RJCT) closes it. This covers the
+	// operator leg (AdvanceGPI) and the bank leg (the pain.002
+	// auto-advance in advanceGPITowardLocked) alike: both funnel
+	// through here. Orthogonal to the gpi state tracking itself —
+	// this is the SLA compliance layer reading the same transitions.
+	l.updateSLAWatchForGPILocked(t.PayoutID, status, now)
 	if status == GPIStatusACCP {
 		l.gpiSettled.Add(1)
 	} else if status == GPIStatusRJCT {

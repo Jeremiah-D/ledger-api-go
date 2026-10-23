@@ -842,6 +842,16 @@ type Ledger struct {
 	// snapshots.
 	nostroAccounts     map[AccountID]*NostroAccount
 	nostroExpectations map[AccountID]map[string]StatementLine
+	// slaWatches maps payout/transfer IDs to their settlement-SLA
+	// watches (see sla.go, LG-185): opened by SubmitPayout and
+	// rail-bound PostTransfer commits, evaluated by CheckSLAClocks.
+	// slaDurations holds operator-configured per-rail SLA overrides
+	// (see SetSLAConfig); rails without an override use the
+	// defaults in sla.go. Both are in-memory only, like payout
+	// instructions and gpi tracks: the hash-chained sla_breached
+	// audit events are the durable record.
+	slaWatches   map[string]*SLAWatch
+	slaDurations map[string]time.Duration
 	// gpiTracked, gpiSettled, gpiRejected count gpi-tracked payments
 	// (see GPICounts): tracks opened, tracks that reached ACCP, and
 	// tracks that reached RJCT. In-memory only, like the mandate
@@ -849,6 +859,11 @@ type Ledger struct {
 	gpiTracked  atomic.Uint64
 	gpiSettled  atomic.Uint64
 	gpiRejected atomic.Uint64
+	// slaBreaches counts SLA breaches per rail (see SLABreachCounts):
+	// the ledger-side source of the ledger_sla_breaches_total{rail}
+	// metric. Slots are ordered by slaRails in sla.go; the breach
+	// counter bumps inside CheckSLAClocks, not in a handler.
+	slaBreaches [len(slaRails)]atomic.Uint64
 	// achReturnCounts counts processed ACH returns (see ach_return.go,
 	// LG-161) by NACHA return reason code: the ledger-side source of
 	// the ledger_ach_returns_total{reason_code} metric. Only
@@ -1555,9 +1570,13 @@ func New(opts ...Option) *Ledger {
 		cancellationSeqs:    make(map[string]int),
 		// LG-175: the nostro/vostro registry starts empty; accounts
 		// are registered and expectations recorded by operator calls.
-		nostroAccounts:       make(map[AccountID]*NostroAccount),
-		nostroExpectations:   make(map[AccountID]map[string]StatementLine),
-		achReturnCounts:      make(map[string]uint64),
+		nostroAccounts:     make(map[AccountID]*NostroAccount),
+		nostroExpectations: make(map[AccountID]map[string]StatementLine),
+		achReturnCounts:    make(map[string]uint64),
+		// LG-185: the SLA watch registry starts empty; watches open
+		// as payouts are submitted and rail-bound transfers post.
+		slaWatches:           make(map[string]*SLAWatch),
+		slaDurations:         make(map[string]time.Duration),
 		fedNowRejections:     make(map[string]uint64),
 		camt054Imports:       make(map[string]*CAMT054ImportReport),
 		camt054Matches:       make(map[string]camt054MatchRecord),

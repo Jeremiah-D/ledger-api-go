@@ -463,6 +463,9 @@ type createTransferRequest struct {
 	// purpose stated"; anything else is validated and stamped on the
 	// principal journal entry.
 	PurposeCode string `json:"purpose_code"`
+	// Rail is the settlement rail (see ledger.RailFedNow and friends,
+	// LG-185): empty means "no rail stated" and opens no SLA watch.
+	Rail string `json:"rail"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
@@ -552,6 +555,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		FXSide:          req.FXSide,
 		FXIncomeAccount: req.FXIncomeAccount,
 		PurposeCode:     req.PurposeCode,
+		Rail:            req.Rail,
 		CreatedAt:       time.Now(),
 	}
 	if req.ToCurrency != "" {
@@ -1033,6 +1037,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		FXSide:          req.FXSide,
 		FXIncomeAccount: req.FXIncomeAccount,
 		PurposeCode:     req.PurposeCode,
+		Rail:            req.Rail,
 		CreatedAt:       time.Now(),
 	}
 
@@ -1409,6 +1414,7 @@ func (s *server) handleCreateBatchTransfer(w http.ResponseWriter, r *http.Reques
 			MaxSlippageBps:  rt.MaxSlippageBps,
 			FXSide:          rt.FXSide,
 			FXIncomeAccount: rt.FXIncomeAccount,
+			Rail:            rt.Rail,
 			CreatedAt:       time.Now(),
 		})
 	}
@@ -3102,6 +3108,35 @@ func (s *server) handleExpireHolds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"expired": s.ledgerFor(r).ExpireHolds()})
 }
 
+// handleCheckSLA implements POST /sla/check (LG-185): the
+// operator-facing sweep that evaluates the tenant's open settlement-SLA
+// watches against the current time and fires breaches for watches past
+// their rail's settlement deadline (see ledger.CheckSLAClocks). Like
+// POST /holds/expire, it is observability and bookkeeping: breaches
+// are evaluated on demand here (or by the background SLA sweeper),
+// each breach emits one hash-chained sla_breached audit event and
+// bumps the rail's ledger_sla_breaches_total{rail} counter. It returns
+// 200 {"breached": [...]} with one entry per newly fired breach.
+func (s *server) handleCheckSLA(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	breached := s.ledgerFor(r).CheckSLAClocks(time.Now().UTC())
+	out := make([]map[string]any, 0, len(breached))
+	for _, b := range breached {
+		out = append(out, map[string]any{
+			"id":        b.ID,
+			"kind":      b.Kind,
+			"rail":      b.Rail,
+			"opened_at": b.OpenedAt.UTC().Format(time.RFC3339),
+			"deadline":  b.Deadline.UTC().Format(time.RFC3339),
+			"fired_at":  b.FiredAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"breached": out})
+}
+
 // raiseDisputeRequest is the body of POST /disputes. dispute_id is the
 // caller-chosen dispute identity (replays return the original dispute),
 // transfer_id names the posted same-currency transfer being disputed,
@@ -3739,6 +3774,9 @@ type createPayoutRequest struct {
 	Maker          string           `json:"maker"`
 	IdempotencyKey string           `json:"idempotency_key"`
 	PurposeCode    string           `json:"purpose_code"`
+	// Rail is the settlement rail (see ledger.RailFedNow and friends,
+	// LG-185): empty means "no rail stated".
+	Rail string `json:"rail"`
 }
 
 // handleCreatePayout implements POST /payouts: drafts a payout
@@ -3768,6 +3806,7 @@ func (s *server) handleCreatePayout(w http.ResponseWriter, r *http.Request) {
 		Maker:          req.Maker,
 		IdempotencyKey: req.IdempotencyKey,
 		PurposeCode:    req.PurposeCode,
+		Rail:           req.Rail,
 	})
 	if err != nil {
 		if errors.Is(err, ledger.ErrPayoutIDConflict) {
@@ -9319,6 +9358,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /liquidity/intraday", s.handleIntradayLiquidity)
 	mux.HandleFunc("POST /holds", s.handleCreateHold)
 	mux.HandleFunc("POST /holds/expire", s.handleExpireHolds)
+	// LG-185: settlement-SLA clock evaluation — the operator-facing
+	// sweep that fires breaches for watches past their rail's
+	// settlement SLA (see ledger.CheckSLAClocks).
+	mux.HandleFunc("POST /sla/check", s.handleCheckSLA)
 	// LG-129: transfer disputes — payer-initiated chargeback-style
 	// claims that freeze the disputed amount on the payee via a hold.
 	mux.HandleFunc("POST /disputes", s.handleRaiseDispute)
@@ -9507,6 +9550,9 @@ func (s *server) handler() http.Handler {
 		// FedNow pacs.008 outbound export count (LG-176),
 		// aggregated across tenants the same way.
 		var pacs008Exports uint64
+		// SLA breach counts by rail (LG-185), aggregated across
+		// tenants like the other ledger-sourced counters above.
+		slaBreaches := map[string]uint64{}
 		for _, l := range s.tenants.Ledgers() {
 			if written, dropped, ok := l.AuditStats(); ok {
 				auditWritten += written
@@ -9580,6 +9626,12 @@ func (s *server) handler() http.Handler {
 			gpiTracked += tr
 			gpiSettled += se
 			gpiRejected += rj
+			// The SLA breach counter likewise lives in the ledger:
+			// breaches fire inside CheckSLAClocks, not in a handler
+			// (see ledger/sla.go, LG-185).
+			for rail, n := range l.SLABreachCounts() {
+				slaBreaches[rail] += n
+			}
 			// The ACH return counter likewise lives in the ledger:
 			// returns book inside ProcessACHReturns, not in a handler
 			// (see ledger/ach_return.go, LG-161).
@@ -9696,6 +9748,12 @@ func (s *server) handler() http.Handler {
 		s.metrics.GPITrackedTotal.Store(gpiTracked)
 		s.metrics.GPISettledTotal.Store(gpiSettled)
 		s.metrics.GPIRejectedTotal.Store(gpiRejected)
+		// The SLA breach counter likewise lives in the ledger:
+		// the ledger is the source of truth, so the scrape
+		// overwrites (never accumulates) the exposed series.
+		for rail, n := range slaBreaches {
+			s.metrics.SLABreachTotal.Set(rail, n)
+		}
 		// The ACH return counter likewise lives in the ledger: the
 		// ledger is the source of truth, so the scrape overwrites
 		// (never accumulates) the exposed series.
@@ -10954,6 +11012,17 @@ func main() {
 		defer sweeper.Stop()
 	}
 
+	// Optional background settlement-SLA clock evaluator (LG-185):
+	// periodically fires sla_breached for watches past their rail's
+	// settlement deadline, so operators don't need to poll
+	// POST /sla/check. It shares the server context, so SIGINT/SIGTERM
+	// stops it. Unset or invalid means disabled.
+	if interval, ok := slaSweepInterval(); ok {
+		slaSweeper := ledger.StartSLASweeper(ctx, srv.ledger, interval, nil)
+		log.Printf("ledger-api-go: SLA sweep worker started (interval %v)", interval)
+		defer slaSweeper.Stop()
+	}
+
 	// Optional background period auto-close worker (LG-151): fires due
 	// auto-close plans registered with POST /periods/{id}/auto-close.
 	// It shares the server context, so SIGINT/SIGTERM stops it, and every
@@ -11296,6 +11365,25 @@ func holdSweepInterval() (time.Duration, bool) {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		log.Printf("ledger-api-go: ignoring invalid LEDGER_HOLD_SWEEP_INTERVAL %q, hold sweep worker disabled", raw)
+		return 0, false
+	}
+	return d, true
+}
+
+// slaSweepInterval reads LEDGER_SLA_SWEEP_INTERVAL (a Go duration
+// string, e.g. "30s") for the background settlement-SLA clock
+// evaluator (LG-185): each tick fires breaches for watches past
+// their rail's settlement deadline. Unset or invalid values mean the
+// worker is disabled; a non-positive duration is invalid and falls
+// back to disabled with a log line.
+func slaSweepInterval() (time.Duration, bool) {
+	raw := os.Getenv("LEDGER_SLA_SWEEP_INTERVAL")
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_SLA_SWEEP_INTERVAL %q, SLA sweep worker disabled", raw)
 		return 0, false
 	}
 	return d, true
