@@ -423,6 +423,16 @@ type Ledger struct {
 	// journal version and survive disaster-recovery snapshots.
 	kyc               map[AccountID]KycProfile
 	kycThresholdCents int64
+	// ubo maps an account to its UBO/受益所有人 ownership declaration
+	// (see ubo.go, LG-189): opt-in per account. uboThresholdBP is the
+	// ledger-wide substantive-control threshold in basis points —
+	// DefaultUboControlThresholdBP (25%) unless the operator changes it:
+	// a natural person whose penetrated effective share reaches it
+	// counts as a controlling beneficial owner. Structural config,
+	// like kyc: declaration changes do not bump the journal version
+	// and survive disaster-recovery snapshots.
+	ubo            map[AccountID]UboDeclaration
+	uboThresholdBP int64
 	// invoices maps invoice IDs to issued invoices (see invoice.go):
 	// off-journal receivables. invoicesByAccount indexes them per
 	// payer account for FIFO payment application. Invoices never
@@ -1523,6 +1533,8 @@ func New(opts ...Option) *Ledger {
 		accountAliases:        make(map[AccountID]string),
 		noOverdraft:           make(map[AccountID]bool),
 		kyc:                   make(map[AccountID]KycProfile),
+		ubo:                   make(map[AccountID]UboDeclaration),
+		uboThresholdBP:        DefaultUboControlThresholdBP,
 		invoices:              make(map[string]Invoice),
 		invoicesByAccount:     make(map[AccountID][]string),
 		deniedExact:           make(map[AccountID]DenylistEntry),

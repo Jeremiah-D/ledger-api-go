@@ -120,6 +120,10 @@ type Metrics struct {
 	// FI-to-FI credit transfer export requests served, including
 	// rejected exports (see ledger.ExportPacs009, LG-172).
 	Pacs009Exports atomic.Uint64
+	// UboSets counts POST /accounts/{id}/ubo UBO ownership
+	// declaration installs served, including rejected declarations
+	// (see ledger.SetUbo, LG-189).
+	UboSets atomic.Uint64
 	// CAMT052Exports counts GET /exports/camt052 ISO 20022 camt.052
 	// intraday account report export requests served, including
 	// rejected exports (see ledger.ExportCAMT052, LG-170).
@@ -928,6 +932,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/accounting/quickbooks QuickBooks general-journal IIF exports served, including rejected exports.", m.QuickBooksExports.Load())
 	writeCounter(&sb, "ledger_pacs009_exports_total",
 		"Total GET /exports/pacs009 ISO 20022 pacs.009 FI-to-FI credit transfer exports served, including rejected exports.", m.Pacs009Exports.Load())
+	writeCounter(&sb, "ledger_ubo_sets_total",
+		"Total POST /accounts/{id}/ubo UBO ownership declaration installs served, including rejected declarations.", m.UboSets.Load())
 	writeCounter(&sb, "ledger_camt052_exports_total",
 		"Total GET /exports/camt052 ISO 20022 camt.052 intraday account report exports served, including rejected exports.", m.CAMT052Exports.Load())
 	writeCounter(&sb, "ledger_gpi_track_queries_total",

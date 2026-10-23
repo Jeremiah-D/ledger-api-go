@@ -1705,6 +1705,40 @@ profile counts by state, expired accounts), profiles and the threshold
 round-trip through disaster-recovery snapshots, and rejections are
 counted on `ledger_kyc_rejections_total`.
 
+### UBO/受益所有人登记与穿透 (Go API: `SetUbo` / `GetUbo` / `ResolveUbos` / `SetUboControlThreshold`)
+
+Per-account beneficial-ownership declarations map who ultimately owns
+the counterparty — orthogonal to KYC by construction: KYC identifies
+the account holder (尽调, "who is the counterparty"), UBO maps the
+ownership graph behind it ("who ultimately owns the counterparty").
+Each declaration lists the account's direct owners as natural persons
+(`kind: "person"`, terminal nodes) or legal entities (`kind: "entity"`,
+penetrated through their own declarations), with each link's share in
+basis points (1..10000, links per entity summing to at most 100%).
+
+`GET /accounts/{id}/ubo/resolved` penetrates multi-layer chains down to
+the ultimate natural persons and reports each one's effective share,
+flagging the ones that reach the ledger-wide substantive-control
+threshold (default 25% = 2500bp, tunable via `POST /ubo/threshold`).
+A penetration that revisits an account is refused as a cycle
+(`422`) — ownership graphs are DAGs — and an entity owner with no
+declaration reports as unresolved rather than silently dropped.
+
+Declarations never gate postings and never bump the journal version;
+every change lands in the audit chain (`ubo_set` /
+`ubo_threshold_set`), and declarations plus the threshold round-trip
+through disaster-recovery snapshots.
+
+```bash
+curl -s -X POST localhost:8080/accounts/corp-a/ubo \
+  -d '{"owners":[{"name":"Alice","kind":"person","share_bp":6000},{"name":"HoldCo","kind":"entity","share_bp":4000}]}'
+curl -s localhost:8080/accounts/corp-a/ubo/resolved   # penetration report
+curl -s -X POST localhost:8080/ubo/threshold -d '{"threshold_bp":5000}'
+```
+
+Go: `ledger.SetUbo(account, owners)`,
+`ledger.ResolveUbos(account)` → `UboResolution{Owners []ResolvedUbo{EffectiveBP, Controlling, Unresolved}}`.
+
 ### Chart of accounts (Go API: `RegisterAccountType`)
 
 Opt-in five-category classification — `asset`, `liability`, `equity`,
@@ -6853,6 +6887,8 @@ curl -s localhost:8080/metrics
 - `ledger_pacs009_exports_total` — `GET /exports/pacs009` ISO 20022
   pacs.009 FI-to-FI credit transfer exports served, including rejected
   exports.
+- `ledger_ubo_sets_total` — `POST /accounts/{id}/ubo` UBO ownership
+  declaration installs served, including rejected declarations.
 - `ledger_ecl_exposure_requests_total` — `POST /ecl/exposures` requests
   received.
 - `ledger_ecl_provision_requests_total` — `POST /ecl/provisions`

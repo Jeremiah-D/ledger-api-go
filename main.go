@@ -7686,6 +7686,147 @@ func writeInvoiceError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
+
+// uboOwnerRequest is one ownership link in the POST /accounts/{id}/ubo
+// body: name is the natural person's name (kind "person") or the
+// owning entity's account ID (kind "entity"); share_bp is the owner's
+// share of the account in basis points (1..10000).
+type uboOwnerRequest struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	ShareBP int64  `json:"share_bp"`
+}
+
+// uboSetRequest is the body of POST /accounts/{id}/ubo: the account's
+// UBO/受益所有人 ownership declaration. An empty owners list is a
+// valid declaration ("no beneficial owners declared").
+type uboSetRequest struct {
+	Owners []uboOwnerRequest `json:"owners"`
+}
+
+// handleSetUbo implements POST /accounts/{id}/ubo (LG-189): installs
+// (or replaces) the account's UBO ownership declaration. Returns the
+// stored declaration. Setting a declaration is idempotent and does
+// not bump the ledger version; the change lands in the audit chain.
+func (s *server) handleSetUbo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.metrics.UboSets.Add(1)
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	var req uboSetRequest
+	if r.ContentLength != 0 {
+		if !s.decodeJSONBody(w, r, &req) {
+			return
+		}
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	owners := make([]ledger.UboOwner, len(req.Owners))
+	for i, o := range req.Owners {
+		owners[i] = ledger.UboOwner{Name: o.Name, Kind: ledger.UboOwnerKind(o.Kind), ShareBP: o.ShareBP}
+	}
+	if err := s.ledgerFor(r).SetUboCtx(actx, ledger.AccountID(id), owners); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	stored, _ := s.ledgerFor(r).GetUbo(ledger.AccountID(id))
+	writeJSON(w, http.StatusOK, stored)
+}
+
+// handleGetUbo implements GET /accounts/{id}/ubo (LG-189): returns the
+// account's UBO ownership declaration, or 404 when the account has
+// none.
+func (s *server) handleGetUbo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	decl, ok := s.ledgerFor(r).GetUbo(ledger.AccountID(id))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no UBO declaration for account"})
+		return
+	}
+	writeJSON(w, http.StatusOK, decl)
+}
+
+// handleResolveUbo implements GET /accounts/{id}/ubo/resolved
+// (LG-189): penetrates the account's ownership chain down to the
+// ultimate natural persons and reports each one's effective share,
+// flagging the ones that reach the control threshold. A 404 means no
+// declaration; a 422 means the chain is cyclic or too deep to resolve.
+func (s *server) handleResolveUbo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	if _, ok := s.ledgerFor(r).GetUbo(ledger.AccountID(id)); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no UBO declaration for account"})
+		return
+	}
+	res, err := s.ledgerFor(r).ResolveUbos(ledger.AccountID(id))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrUboCycle), errors.Is(err, ledger.ErrUboTooDeep):
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// uboThresholdRequest is the body of POST /ubo/threshold: the
+// ledger-wide substantive-control threshold in basis points
+// (1..10000).
+type uboThresholdRequest struct {
+	ThresholdBP int64 `json:"threshold_bp"`
+}
+
+// handleSetUboThreshold implements POST /ubo/threshold (LG-189): sets
+// the ledger-wide UBO substantive-control threshold. The change lands
+// in the audit chain and does not bump the ledger version.
+func (s *server) handleSetUboThreshold(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req uboThresholdRequest
+	if r.ContentLength != 0 {
+		if !s.decodeJSONBody(w, r, &req) {
+			return
+		}
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	if err := s.ledgerFor(r).SetUboControlThresholdCtx(actx, req.ThresholdBP); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"threshold_bp": s.ledgerFor(r).UboControlThreshold()})
+}
+
+
 // issueInvoiceRequest is the body of POST /invoices: the receivable to
 // open. Only id, account, amount_cents, and due_date are required;
 // currency defaults to USD, issued_at defaults to now.
@@ -9689,6 +9830,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /accounts/{id}/kyc", s.handleSetKyc)
 	mux.HandleFunc("GET /accounts/{id}/kyc", s.handleGetKyc)
 	mux.HandleFunc("POST /kyc/expire", s.handleExpireKyc)
+	mux.HandleFunc("POST /accounts/{id}/ubo", s.handleSetUbo)
+	mux.HandleFunc("GET /accounts/{id}/ubo", s.handleGetUbo)
+	mux.HandleFunc("GET /accounts/{id}/ubo/resolved", s.handleResolveUbo)
+	mux.HandleFunc("POST /ubo/threshold", s.handleSetUboThreshold)
 	mux.HandleFunc("POST /invoices", s.handleIssueInvoice)
 	mux.HandleFunc("GET /invoices", s.handleListInvoices)
 	mux.HandleFunc("GET /invoices/{id}", s.handleGetInvoice)

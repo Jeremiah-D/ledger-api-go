@@ -709,6 +709,19 @@ type snapshotConfigLine struct {
 	// empty account) fails the import.
 	KycProfiles       []KycProfile `json:"kyc_profiles,omitempty"`
 	KycThresholdCents int64        `json:"kyc_threshold_cents,omitempty"`
+	// UboDeclarations carries the per-account UBO/受益所有人 ownership
+	// declarations (see ubo.go, LG-189), sorted by account, and
+	// UboThresholdBP the ledger-wide substantive-control threshold in
+	// basis points. Absent in snapshots written before UBO support
+	// existed, which restore with no declarations and the default 25%
+	// threshold. Declarations are re-validated on import — a snapshot
+	// row that could never have been declared (empty account, unknown
+	// owner kind, a share outside 1..10000bp, links summing past 100%)
+	// fails the import. A zero threshold is never written
+	// (SetUboControlThreshold requires 1..10000bp), so a missing
+	// threshold means "before UBO support" and keeps the default.
+	UboDeclarations []UboDeclaration `json:"ubo_declarations,omitempty"`
+	UboThresholdBP  int64             `json:"ubo_threshold_bp,omitempty"`
 	// Invoices carries the issued invoice register (see invoice.go,
 	// LG-148), sorted by invoice ID; absent in snapshots written
 	// before invoice support existed. The register is re-validated on
@@ -1338,6 +1351,11 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		// counterparty stops exactly as the source.
 		KycProfiles:       l.kycProfilesLocked(),
 		KycThresholdCents: l.kycThresholdCents,
+		// LG-189: the UBO declarations and the control threshold
+		// round-trip, so a restored ledger keeps its ownership map
+		// exactly as the source.
+		UboDeclarations: l.uboDeclarationsLocked(),
+		UboThresholdBP:  l.uboThresholdBP,
 		// LG-148: the invoice register round-trips, so a restored
 		// ledger keeps its open receivables exactly as the source.
 		Invoices: l.invoicesLocked(),
@@ -2874,6 +2892,29 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		return bad("negative KYC threshold %d", cfg.KycThresholdCents)
 	}
 	l.kycThresholdCents = cfg.KycThresholdCents
+	// UBO declarations restore like the KYC profiles: every row is
+	// re-validated — a row that could never have been declared fails
+	// the import instead of installing a corrupt ownership map. The
+	// threshold restores too; a missing threshold (snapshots written
+	// before UBO support) keeps the default 25%.
+	for _, d := range cfg.UboDeclarations {
+		if d.Account == "" {
+			return bad("UBO declaration with empty account")
+		}
+		if err := validateUboOwners(d.Owners); err != nil {
+			return bad("UBO declaration for account %s: %v", d.Account, err)
+		}
+		owners := make([]UboOwner, len(d.Owners))
+		copy(owners, d.Owners)
+		d.Owners = owners
+		l.ubo[d.Account] = d
+	}
+	if cfg.UboThresholdBP != 0 {
+		if cfg.UboThresholdBP < 1 || cfg.UboThresholdBP > 10000 {
+			return bad("UBO threshold %d outside 1..10000bp", cfg.UboThresholdBP)
+		}
+		l.uboThresholdBP = cfg.UboThresholdBP
+	}
 	// Invoices restore like the KYC profiles: every row is re-validated
 	// — an empty ID or account, a non-positive amount, a bad currency,
 	// an unknown status, paid cents outside [0, amount], or a due date
