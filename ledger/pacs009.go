@@ -195,6 +195,27 @@ type pacs009TxInf struct {
 	CdtrAgt        pacs009Agent   `xml:"CdtrAgt"`
 	Cdtr           pacs009Agent   `xml:"Cdtr"`
 	ChrgsBr        string         `xml:"ChrgsBr"`
+	// Purp carries the transfer's ISO 20022 business purpose
+	// (ExternalPurpose1Code, see purpose.go, LG-180) as
+	// <Purp><Cd>. It is omitted when the transfer states no purpose —
+	// the wire stays identical to the pre-purpose export.
+	Purp *pacs009Purpose `xml:"Purp,omitempty"`
+}
+
+// pacs009Purpose renders one ISO 20022 purpose code: <Purp><Cd>SALA</Cd></Purp>.
+type pacs009Purpose struct {
+	Cd string `xml:"Cd"`
+}
+
+// pacs009PurposeFor maps a journaled purpose code to the wire
+// element: nil for "no purpose stated", so the export omits Purp
+// entirely. The code is already validated at post time (see
+// checkPurposeCode), so this is a pure projection.
+func pacs009PurposeFor(code string) *pacs009Purpose {
+	if code == "" {
+		return nil
+	}
+	return &pacs009Purpose{Cd: code}
 }
 
 type pacs009PmtID struct {
@@ -311,6 +332,7 @@ func (l *Ledger) ExportPacs009(transferID string, opts Pacs009Options) ([]byte, 
 				CdtrAgt:       pacs009AgentFor(e.DebitAccount),
 				Cdtr:          pacs009AgentFor(e.DebitAccount),
 				ChrgsBr:       chrgsBr,
+				Purp:          pacs009PurposeFor(e.PurposeCode),
 			},
 		},
 	}

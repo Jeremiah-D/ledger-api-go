@@ -80,6 +80,14 @@ func hashChainLink(prevHash [32]byte, e JournalEntry) [32]byte {
 	writeString(e.IdempotencyKey)
 	writeString(e.Memo)
 	writeString(e.ExternalRef)
+	// The purpose code is covered like the metadata (see LG-112):
+	// rewriting a journaled business purpose breaks the chain exactly
+	// like rewriting an amount. Entries without a code skip the
+	// section entirely, so their encoding stays byte-identical to the
+	// pre-purpose-code chain.
+	if e.PurposeCode != "" {
+		writeString(e.PurposeCode)
+	}
 	writeInt(int64(len(e.Attachments)))
 	for _, a := range e.Attachments {
 		writeString(a)

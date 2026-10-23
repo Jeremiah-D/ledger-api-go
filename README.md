@@ -2660,6 +2660,55 @@ Observability: every raise emits a `dispute_raised` audit event and a
 the outbox twin. `GET /metrics` exposes
 `ledger_disputes_raised_total` and `ledger_disputes_resolved_total`.
 
+#### Dispute representment (争议举证， payee's second-phase defense)
+
+A filed claim opens a **7-day evidence window** (configurable via
+`Ledger.SetRepresentmentWindow`). Inside the window the payee may submit
+one evidence package — document hashes (a receipt scan, a delivery
+confirmation, a signed contract; the hashes prove the documents existed,
+the documents stay off-ledger) plus a free-form defense statement —
+and an operator or arbiter adjudicates it:
+
+- `POST /disputes/{id}/representment` — submit. Body:
+  `document_hashes` (at most 32, each at most 128 chars) and/or
+  `statement` (at most 4000 chars); at least one of the two is
+  required. Returns `201` with the representment, `200` on idempotent
+  replay of the same evidence; `404` on an unknown dispute; `409` when
+  the dispute is resolved, a different package was already submitted,
+  or the window has closed (late evidence is rejected fail-closed).
+- `POST /disputes/{id}/adjudicate` — adjudicate. Body:
+  `{"decision": "uphold"|"reverse", "adjudicator": "..."}`.
+  `uphold` keeps the claim standing (the payer is refunded — the
+  dispute resolves upheld); `reverse` reverses it (the payee keeps the
+  funds). Returns `200` with the resolved dispute; `404` on an unknown
+  ID; `409` when no evidence was submitted, the representment was
+  already adjudicated, or the dispute is already resolved; `400` on an
+  unknown decision or an empty adjudicator.
+
+The window is fail-closed: a dispute with no representment when the
+window expires is **auto-upheld** by `Ledger.SweepExpiredRepresentments`
+(a cron entry point, like the hold expiry sweep) — the original claim
+stands and the payer is refunded. A submitted representment stops the
+auto-uphold; the dispute then waits for the operator's decision (the
+window gates the submission, not the adjudication). Audit events:
+`representment_submitted`, `representment_adjudicated`, and
+`representment_auto_upheld` (the marker on the sweep's upholds), plus
+`representment_submitted` / `representment_adjudicated` outbox events.
+`GET /metrics` exposes `ledger_representments_submitted_total` and
+`ledger_representments_adjudicated_total`.
+
+```bash
+# The payee defends within the window.
+curl -s -X POST localhost:8080/disputes/d1/representment \
+  -d '{"document_hashes":["sha256:receipt-001"],"statement":"authorized in writing"}'
+# 201 {"dispute_id":"d1","document_hashes":[...],"adjudicated":false,...}
+
+# The arbiter upholds the claim: refund the payer, release the hold.
+curl -s -X POST localhost:8080/disputes/d1/adjudicate \
+  -d '{"decision":"uphold","adjudicator":"arbiter-7"}'
+# 200 {"id":"d1","status":"resolved","upheld":true,...}
+```
+
 ### Term deposits (定存)
 
 A bank-style time deposit: `POST /term-deposits` locks a principal for a
@@ -4018,6 +4067,10 @@ pacs.009 无客户腿、无 UETR——它是机构间的资金划拨。
   （`400`）。
 - 只读：读锁快照、无 version bump、无记账、无审计链追加——与
   `ExportPacs004` 同契约。计数器 `ledger_pacs009_exports_total`。
+- 业务用途码（LG-180）：transfer 携带 ISO 20022 purpose code 时
+  （`Transfer.PurposeCode`），`CdtTrfTxInf` 渲染
+  `<Purp><Cd>SALA</Cd></Purp>`；无码时 Purp 元素完全省略——wire
+  与 purpose-code 引入前逐字节一致。
 
 ```bash
 curl -s 'localhost:8080/exports/pacs009?transfer=tx-2026-1042' -o ficdt.xml
@@ -4050,6 +4103,9 @@ transfer 幂等键（为空时退回 payout ID），`UETR` 关联 gpi 追踪记�
   只结算美元）、非正金额（`422`）、缺 `payout` 参数（`400`）。
 - 与入站解析（`ParsePacs008`/`ProcessPacs008`，LG-163）正交（本项为
   出站生成）：导出的 XML 可被入站解析器原样读回（round-trip）。
+- 业务用途码（LG-180）：payout 携带 ISO 20022 purpose code 时
+  （`PayoutInstruction.PurposeCode`），`CdtTrfTxInf` 渲染
+  `<Purp><Cd>SUPP</Cd></Purp>`；无码时 Purp 元素完全省略。
 
 ```bash
 curl -s 'localhost:8080/exports/pacs008?payout=po-2026-1042' -o cstmr.xml
@@ -4057,6 +4113,49 @@ curl -s 'localhost:8080/exports/pacs008?payout=po-2026-1042' -o cstmr.xml
 ```
 
 Go: `ledger.ExportPacs008(payoutID)`。
+
+### ISO 20022 purpose codes (业务用途码)
+
+`POST /entries`、`POST /transfers`、`POST /payouts` 接受 ISO 20022
+`ExternalPurpose1Code` 业务用途码（`purpose_code` 字段）：`SALA`（工资）、
+`GDDS`（货款）、`SUPP`（供应商）、`PENS`（养老金）、`DIVI`（分红）、
+`TAXS`（税款）、`RENT`（租金）、`LOAN`（贷款）等 23 个策展子集
+（见 `ledger.AdmittedPurposeCodes()`）——全是 ISO 20022 真实条目，
+闭集校验、绝不编造。
+
+语义：
+- 空码 = "未声明用途"：行为与从前完全一致（omitempty，无 Purp
+  元素、无对账行）。
+- 非法码 fail-closed：`422` + `ledger.ErrInvalidPurposeCode`——
+  校验发生在记账之前（Post/PostTransfer/CreatePayout），大小写敏感、
+  精确匹配；近似码（`sala`、`SALA `）一律拒绝。
+- transfer 的码盖在主分录上（fee 腿不带；跨币种 transfer 盖在
+  `/fx` 源币种腿上，mirror memo 惯例）；payout 的码盖在指令上。
+- 审计链覆盖：purpose code 进链哈希（无码条目跳过该节，与
+  purpose-code 引入前的链逐字节兼容）；快照携带；`GET /entries`
+  回显。
+- 日终对账披露：`POST /reconcile` 报告新增 `purpose_code_totals`
+  ——按（用途码，币种）汇总借/贷方金额与分录数，合规侧直接看到
+  "工资发了多少、货款付了多少"。
+- 出线映射：`GET /exports/pacs009`（transfer 主分录）与
+  `GET /exports/pacs008`（payout 指令）在 `CdtTrfTxInf` 渲染
+  `<Purp><Cd>`。
+- 指标：`GET /metrics` 的 `ledger_purpose_code_rejections_total`。
+
+```bash
+# 工资发放：transfer 声明 SALA。
+curl -s -X POST localhost:8080/transfers \
+  -d '{"transfer_id":"payroll-oct","from_account":"corp","to_account":"alice","amount_cents":2500000,"currency":"USD","purpose_code":"SALA"}'
+# 201；主分录 purpose_code=SALA；对账报告 purpose_code_totals 出现 SALA/USD 行。
+
+# 非法码：422。
+curl -s -X POST localhost:8080/transfers \
+  -d '{"transfer_id":"x","from_account":"corp","to_account":"alice","amount_cents":1,"currency":"USD","purpose_code":"BOGUS"}' -w '\n%{http_code}\n'
+# {"error":"ledger: invalid ISO 20022 purpose code: \"BOGUS\""} / 422
+```
+
+Go: `ledger.IsValidPurposeCode(code)`、`ledger.AdmittedPurposeCodes()`、
+`ledger.LookupPurposeCode(code)`。
 
 ### `GET /exports/camt052` — ISO 20022 camt.052 日间账户报告导出
 

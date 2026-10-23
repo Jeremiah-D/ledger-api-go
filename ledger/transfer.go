@@ -158,6 +158,16 @@ type Transfer struct {
 	// On cross-currency transfers it rides the source-currency leg
 	// (the /fx leg), mirroring the memo.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// PurposeCode is the transfer's ISO 20022 business purpose (see
+	// JournalEntry.PurposeCode, purpose.go, LG-180): one of the
+	// admitted ExternalPurpose1Code entries, e.g. SALA (salaries),
+	// GDDS (goods), SUPP (suppliers). It is stamped on the principal
+	// journal entry (the fee leg carries none), mirroring the memo;
+	// on cross-currency transfers it rides the source-currency leg
+	// (the /fx leg), mirroring the memo. Empty means "no purpose
+	// stated"; a code outside the admitted subset is rejected
+	// fail-closed with ErrInvalidPurposeCode.
+	PurposeCode string `json:"purpose_code,omitempty"`
 	// MaxSlippageBps is the opt-in LG-86 slippage cap for
 	// cross-currency transfers, in basis points: the request's FX rate
 	// is locked at admission (see FXRateQuote), and when the effective
@@ -598,12 +608,19 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 	// recorded, on both paths.
 	if err := checkAttachments(t.Attachments); err != nil {
 		return t, "", err
-	}
-	// Metadata is field validation, like the attachments: more than
+	}	// Metadata is field validation, like the attachments: more than
 	// maxMetadataPairs pairs, a key outside the tag-segment charset,
 	// or a value longer than maxMetadataValueRunes UTF-8 characters is
 	// rejected before anything is recorded, on both paths.
 	if err := checkMetadata(t.Metadata); err != nil {
+		return t, "", err
+	}
+	// The purpose code is field validation, like the metadata: an
+	// empty code means "no purpose stated"; anything else must be an
+	// exact match in the admitted ISO 20022 subset (see
+	// checkPurposeCode), or the transfer is rejected fail-closed
+	// before anything is recorded, on both paths.
+	if err := checkPurposeCode(t.PurposeCode); err != nil {
 		return t, "", err
 	}
 	// The slippage cap (see Transfer.MaxSlippageBps) is field
@@ -932,6 +949,7 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		ExternalRef:    t.ExternalRef,
 		Attachments:    t.Attachments,
 		Metadata:       t.Metadata,
+		PurposeCode:    t.PurposeCode,
 		CreatedAt:      t.CreatedAt,
 	}
 	if principal.CreatedAt.IsZero() {

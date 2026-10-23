@@ -74,6 +74,11 @@ type createEntryRequest struct {
 	ExternalRef    string            `json:"external_ref"`
 	Attachments    []string          `json:"attachments"`
 	Metadata       map[string]string `json:"metadata"`
+	// PurposeCode is the entry's ISO 20022 business purpose (see
+	// ledger.JournalEntry.PurposeCode, LG-180): an admitted
+	// ExternalPurpose1Code, e.g. SALA, GDDS, SUPP. Empty means "no
+	// purpose stated".
+	PurposeCode string `json:"purpose_code"`
 }
 
 func newID() string {
@@ -178,6 +183,11 @@ func (s *server) writePostError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
+	if errors.Is(err, ledger.ErrInvalidPurposeCode) {
+		s.metrics.PurposeCodeRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
 	if errors.Is(err, ledger.ErrInvalidCurrency) {
 		s.metrics.CurrencyRejections.Add(1)
 	}
@@ -248,6 +258,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		ExternalRef:    req.ExternalRef,
 		Attachments:    req.Attachments,
 		Metadata:       req.Metadata,
+		PurposeCode:    req.PurposeCode,
 		CreatedAt:      time.Now(),
 	}
 
@@ -314,6 +325,7 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		ExternalRef:    req.ExternalRef,
 		Attachments:    req.Attachments,
 		Metadata:       req.Metadata,
+		PurposeCode:    req.PurposeCode,
 		CreatedAt:      time.Now(),
 	}
 
@@ -421,6 +433,12 @@ type createTransferRequest struct {
 	// for this transfer (see ledger.Transfer.FXIncomeAccount, LG-93):
 	// the credit counterparty of the "<transfer_id>/spread" leg.
 	FXIncomeAccount ledger.AccountID `json:"fx_income_account"`
+	// PurposeCode is the transfer's ISO 20022 business purpose (see
+	// ledger.Transfer.PurposeCode, LG-180): an admitted
+	// ExternalPurpose1Code, e.g. SALA, GDDS, SUPP. Empty means "no
+	// purpose stated"; anything else is validated and stamped on the
+	// principal journal entry.
+	PurposeCode string `json:"purpose_code"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
@@ -509,6 +527,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		MaxSlippageBps:  req.MaxSlippageBps,
 		FXSide:          req.FXSide,
 		FXIncomeAccount: req.FXIncomeAccount,
+		PurposeCode:     req.PurposeCode,
 		CreatedAt:       time.Now(),
 	}
 	if req.ToCurrency != "" {
@@ -611,6 +630,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrInvalidFXSide) || errors.Is(err, ledger.ErrFXIncomeAccountNotConfigured) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidPurposeCode) {
+			s.metrics.PurposeCodeRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ledger.ErrInvalidCurrency) {
@@ -984,6 +1008,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		MaxSlippageBps:  req.MaxSlippageBps,
 		FXSide:          req.FXSide,
 		FXIncomeAccount: req.FXIncomeAccount,
+		PurposeCode:     req.PurposeCode,
 		CreatedAt:       time.Now(),
 	}
 
@@ -1082,6 +1107,11 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ledger.ErrInvalidPurposeCode) {
+			s.metrics.PurposeCodeRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ledger.ErrInvalidCurrency) {
 			s.metrics.CurrencyRejections.Add(1)
 		}
@@ -1102,6 +1132,9 @@ type batchEntryRequest struct {
 	ExternalRef    string            `json:"external_ref"`
 	Attachments    []string          `json:"attachments"`
 	Metadata       map[string]string `json:"metadata"`
+	// PurposeCode is the entry's ISO 20022 business purpose (see
+	// ledger.JournalEntry.PurposeCode, LG-180).
+	PurposeCode string `json:"purpose_code"`
 }
 
 type createBatchRequest struct {
@@ -1175,6 +1208,7 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			ExternalRef:    re.ExternalRef,
 			Attachments:    re.Attachments,
 			Metadata:       re.Metadata,
+			PurposeCode:    re.PurposeCode,
 			CreatedAt:      time.Now(),
 		})
 	}
@@ -1445,6 +1479,11 @@ func (s *server) handleCreateBatchTransfer(w http.ResponseWriter, r *http.Reques
 		}
 		if errors.Is(err, ledger.ErrInvalidFXSide) || errors.Is(err, ledger.ErrFXIncomeAccountNotConfigured) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidPurposeCode) {
+			s.metrics.PurposeCodeRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ledger.ErrInvalidCurrency) {
@@ -3663,6 +3702,7 @@ type createPayoutRequest struct {
 	Destination    string           `json:"destination"`
 	Maker          string           `json:"maker"`
 	IdempotencyKey string           `json:"idempotency_key"`
+	PurposeCode    string           `json:"purpose_code"`
 }
 
 // handleCreatePayout implements POST /payouts: drafts a payout
@@ -3691,10 +3731,16 @@ func (s *server) handleCreatePayout(w http.ResponseWriter, r *http.Request) {
 		Destination:    req.Destination,
 		Maker:          req.Maker,
 		IdempotencyKey: req.IdempotencyKey,
+		PurposeCode:    req.PurposeCode,
 	})
 	if err != nil {
 		if errors.Is(err, ledger.ErrPayoutIDConflict) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidPurposeCode) {
+			s.metrics.PurposeCodeRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ledger.ErrInvalidCurrency) {

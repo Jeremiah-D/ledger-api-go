@@ -167,6 +167,13 @@ type PayoutInstruction struct {
 	// identifier from inception, tracked through the gpi state
 	// machine.
 	UETR string `json:"uetr"`
+	// PurposeCode is the payout's ISO 20022 business purpose (see
+	// purpose.go, LG-180): one of the admitted ExternalPurpose1Code
+	// entries, e.g. SALA (salaries), SUPP (suppliers). Empty means
+	// "no purpose stated"; a code outside the admitted subset is
+	// rejected fail-closed with ErrInvalidPurposeCode. It rides the
+	// pacs.008 outbound export as <Purp><Cd> (see pacs008_export.go).
+	PurposeCode string `json:"purpose_code,omitempty"`
 }
 
 // payoutClearingEntryID builds the deterministic submit-leg entry ID:
@@ -234,6 +241,13 @@ func (l *Ledger) CreatePayout(p PayoutInstruction) (PayoutInstruction, bool, err
 	p.Currency = currency
 	if p.Maker == "" {
 		return PayoutInstruction{}, false, ErrEmptyPayoutMaker
+	}
+	// The purpose code is field validation, like the currency: empty
+	// means "no purpose stated"; anything else must be an exact match
+	// in the admitted ISO 20022 subset (see checkPurposeCode), or the
+	// payout is rejected fail-closed before anything is recorded.
+	if err := checkPurposeCode(p.PurposeCode); err != nil {
+		return PayoutInstruction{}, false, err
 	}
 
 	l.mu.Lock()

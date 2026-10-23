@@ -116,6 +116,22 @@ type CurrencyHoldTotals struct {
 	ActiveHolds int    `json:"active_holds"`
 }
 
+// PurposeCodeTotals is one row of the per-purpose rollup of journaled
+// entries carrying an ISO 20022 purpose code (see purpose.go,
+// LG-180): the debit and credit cents booked under that purpose in
+// that currency, and how many journal rows carried it. Rows are
+// sorted by (purpose code, currency). Entries without a purpose code
+// are absent — the report discloses what was stated, it never
+// invents a purpose.
+type PurposeCodeTotals struct {
+	PurposeCode       string `json:"purpose_code"`
+	Description       string `json:"description"`
+	Currency          string `json:"currency"`
+	TotalDebitsCents  int64  `json:"total_debits_cents"`
+	TotalCreditsCents int64  `json:"total_credits_cents"`
+	EntryCount        int64  `json:"entry_count"`
+}
+
 // PartialCaptureSummary is one authorization hold that has been
 // partially captured (see hold_partial.go): how much of the original
 // hold has settled, how much is still reserved, and how many partial
@@ -255,6 +271,14 @@ type ReconciliationReport struct {
 	// cents currently reserved from available balances. Expired holds
 	// count as inactive even before the ExpireHolds sweep.
 	HeldTotals []CurrencyHoldTotals `json:"held_totals"`
+	// PurposeCodeTotals is the per-purpose rollup of journaled
+	// entries carrying an ISO 20022 purpose code (see purpose.go,
+	// LG-180), sorted by (purpose code, currency): the debit and
+	// credit cents booked under each business purpose. Compliance
+	// tooling reads this to see where the money went by purpose —
+	// salaries, goods, suppliers, taxes — without scanning the
+	// journal. Empty when no entry states a purpose.
+	PurposeCodeTotals []PurposeCodeTotals `json:"purpose_code_totals"`
 	// PartialCaptures lists every authorization hold with at least
 	// one partial capture (see hold_partial.go), sorted by hold ID:
 	// the settled, still-reserved, and original cents per hold, so an
@@ -838,6 +862,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		BalanceWatches:             l.balanceWatchesLocked(),
 		AccountTypeTotals:          l.accountTypeTotalsLocked(),
 		HeldTotals:                 l.heldTotalsLocked(now),
+		PurposeCodeTotals:          l.purposeCodeTotalsLocked(),
 		PartialCaptures:            l.partialCaptureSummaryLocked(),
 		FXRates:                    l.fxRatesLocked(),
 		FXRateVersions:             l.fxRateVersionReportLocked(),
@@ -1068,6 +1093,61 @@ func (l *Ledger) heldTotalsLocked(now time.Time) []CurrencyHoldTotals {
 	out := make([]CurrencyHoldTotals, 0, len(currencies))
 	for _, c := range currencies {
 		out = append(out, *byCurrency[c])
+	}
+	return out
+}
+
+// purposeCodeTotalsLocked rolls up every journaled entry carrying an
+// ISO 20022 purpose code (see purpose.go) by (purpose code, currency):
+// the debit and credit cents booked under each purpose, and the
+// journal-row count. Double-entry means each row contributes its
+// amount to both its debit and credit totals — the per-row equation
+// holds like the per-currency one. Rows are sorted by (purpose code,
+// currency); the description rides the admitted-code table, so a row
+// never carries a code the table does not know. Callers must hold
+// l.mu (the read lock suffices).
+func (l *Ledger) purposeCodeTotalsLocked() []PurposeCodeTotals {
+	type key struct {
+		code     string
+		currency string
+	}
+	byKey := make(map[key]*PurposeCodeTotals)
+	for _, e := range l.entries {
+		if e.PurposeCode == "" {
+			continue
+		}
+		k := key{code: e.PurposeCode, currency: e.Currency}
+		row, ok := byKey[k]
+		if !ok {
+			info, known := LookupPurposeCode(e.PurposeCode)
+			desc := ""
+			if known {
+				desc = info.Description
+			}
+			row = &PurposeCodeTotals{
+				PurposeCode: e.PurposeCode,
+				Description: desc,
+				Currency:    e.Currency,
+			}
+			byKey[k] = row
+		}
+		row.TotalDebitsCents += e.AmountCents
+		row.TotalCreditsCents += e.AmountCents
+		row.EntryCount++
+	}
+	keys := make([]key, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].code != keys[j].code {
+			return keys[i].code < keys[j].code
+		}
+		return keys[i].currency < keys[j].currency
+	})
+	out := make([]PurposeCodeTotals, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, *byKey[k])
 	}
 	return out
 }

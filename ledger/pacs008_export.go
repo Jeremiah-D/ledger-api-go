@@ -139,6 +139,28 @@ type pacs008OutTxInf struct {
 	CdtrAgt        pacs008OutAgent `xml:"CdtrAgt"`
 	Cdtr           pacs008OutAgent `xml:"Cdtr"`
 	CdtrAcct       pacs008OutAcct  `xml:"CdtrAcct"`
+	// Purp carries the payout's ISO 20022 business purpose
+	// (ExternalPurpose1Code, see purpose.go, LG-180) as
+	// <Purp><Cd>. It is omitted when the payout states no purpose —
+	// the wire stays identical to the pre-purpose export.
+	Purp *pacs008OutPurpose `xml:"Purp,omitempty"`
+}
+
+// pacs008OutPurpose renders one ISO 20022 purpose code:
+// <Purp><Cd>SALA</Cd></Purp>.
+type pacs008OutPurpose struct {
+	Cd string `xml:"Cd"`
+}
+
+// pacs008OutPurposeFor maps a payout's purpose code to the wire
+// element: nil for "no purpose stated", so the export omits Purp
+// entirely. The code is already validated at draft time (see
+// checkPurposeCode), so this is a pure projection.
+func pacs008OutPurposeFor(code string) *pacs008OutPurpose {
+	if code == "" {
+		return nil
+	}
+	return &pacs008OutPurpose{Cd: code}
 }
 
 type pacs008OutPmtID struct {
@@ -280,6 +302,7 @@ func (l *Ledger) ExportPacs008(payoutID string) ([]byte, error) {
 				CdtrAgt:        pacs008OutAgentFor(dest),
 				Cdtr:           pacs008OutAgentFor(dest),
 				CdtrAcct:       pacs008OutAcctFor(dest),
+				Purp:           pacs008OutPurposeFor(p.PurposeCode),
 			},
 		},
 	}

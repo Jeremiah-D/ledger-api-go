@@ -285,6 +285,11 @@ type Metrics struct {
 	// currency code (400), a cross-currency transfer (422), or an expired
 	// FX rate (422).
 	CurrencyRejections atomic.Uint64
+	// PurposeCodeRejections counts POST /entries, POST /transfers, and
+	// POST /payouts requests rejected with 422 because the named ISO
+	// 20022 purpose code is outside the admitted subset (see
+	// ledger.ErrInvalidPurposeCode).
+	PurposeCodeRejections atomic.Uint64
 	// FXTransfersTotal counts POST /transfers requests that attempted a
 	// cross-currency transfer (all attempts, including rejected ones).
 	FXTransfersTotal atomic.Uint64
@@ -1115,6 +1120,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_currency_rejections_total",
 		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected for currency reasons: malformed currency code, cross-currency transfer, or expired FX rate.",
 		m.CurrencyRejections.Load())
+	writeCounter(&sb, "ledger_purpose_code_rejections_total",
+		"Total POST /entries, POST /transfers, and POST /payouts requests rejected with 422 because the ISO 20022 purpose code is outside the admitted subset.",
+		m.PurposeCodeRejections.Load())
 	writeCounter(&sb, "ledger_fx_transfers_total",
 		"Total POST /transfers requests that attempted a cross-currency transfer, including rejected ones.",
 		m.FXTransfersTotal.Load())

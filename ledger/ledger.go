@@ -58,6 +58,17 @@ type JournalEntry struct {
 	// rejected with a 400 before anything is recorded. Transfers carry
 	// the memo on the principal entry (see Transfer.Memo).
 	Memo string `json:"memo,omitempty"`
+	// PurposeCode is the entry's ISO 20022 business purpose: one of
+	// the admitted ExternalPurpose1Code entries (see purpose.go,
+	// LG-180) — SALA for salaries, GDDS for goods, SUPP for
+	// suppliers, and so on. It is journal metadata like the memo: the
+	// audit-chain hash covers it (entries without a code hash exactly
+	// as before — the section is skipped entirely), snapshots carry
+	// it, and GET /entries echoes it. Empty means "no purpose
+	// stated". Transfers stamp the purpose on the principal entry
+	// (see Transfer.PurposeCode); fee legs, FX conversion legs, and
+	// other internal/system postings carry none.
+	PurposeCode string `json:"purpose_code,omitempty"`
 	// ExternalRef is the caller's external business reference for the
 	// entry (a payment provider's transaction ID, an external order
 	// number, a reconciliation reference). Unlike the memo it is a
@@ -1659,6 +1670,13 @@ func validateJournalEntry(e *JournalEntry) error {
 		return err
 	}
 	e.Currency = currency
+	// The purpose code is field validation like the currency: empty
+	// means "no purpose stated", anything else must be an exact match
+	// in the admitted ISO 20022 subset (see checkPurposeCode), or the
+	// posting is rejected fail-closed before anything is recorded.
+	if err := checkPurposeCode(e.PurposeCode); err != nil {
+		return err
+	}
 	return nil
 }
 
