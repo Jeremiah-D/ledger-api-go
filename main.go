@@ -5247,6 +5247,98 @@ func (s *server) handleMT103Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msg))
 }
 
+// accountingExportQuery parses the shared query parameters of the
+// accounting export endpoints: account, since/until (RFC 3339,
+// optional), currency (optional ISO 4217 filter), and repeated
+// name=<account>:<display> parameters for the 科目映射表.
+func accountingExportQuery(q map[string][]string) (ledger.AccountingExportOptions, error) {
+	var opts ledger.AccountingExportOptions
+	if v := firstQuery(q, "account"); v != "" {
+		opts.Account = ledger.AccountID(v)
+	}
+	for _, p := range []struct {
+		key string
+		dst *time.Time
+	}{
+		{"since", &opts.Since},
+		{"until", &opts.Until},
+	} {
+		if v := firstQuery(q, p.key); v != "" {
+			t, err := time.Parse(time.RFC3339, v)
+			if err != nil {
+				return opts, err
+			}
+			*p.dst = t
+		}
+	}
+	opts.Currency = firstQuery(q, "currency")
+	for _, nv := range q["name"] {
+		i := strings.Index(nv, ":")
+		if i < 0 {
+			return opts, errors.New("invalid name mapping: want <account>:<display>")
+		}
+		if opts.AccountNames == nil {
+			opts.AccountNames = map[ledger.AccountID]string{}
+		}
+		opts.AccountNames[ledger.AccountID(nv[:i])] = nv[i+1:]
+	}
+	return opts, nil
+}
+
+// handleAccountingXeroExport implements GET /exports/accounting/xero
+// (LG-184): the Xero bank-statement CSV for one account (see
+// ledger.ExportAccounting). Query parameters: account (required),
+// since/until (optional, RFC 3339), currency (optional ISO 4217
+// filter), name (repeatable <account>:<display> mappings). The export
+// is read-only: no version bump, no audit event. The per-currency
+// summary rides the X-Accounting-Summary response header; the file
+// itself stays import-clean. Error mapping: missing/invalid
+// parameters are 400.
+func (s *server) handleAccountingXeroExport(w http.ResponseWriter, r *http.Request) {
+	s.metrics.XeroExports.Add(1)
+	opts, err := accountingExportQuery(r.URL.Query())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid query: " + err.Error()})
+		return
+	}
+	opts.Format = ledger.AccountingXero
+	exp, err := s.ledgerFor(r).ExportAccounting(opts)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("X-Accounting-Summary", ledger.AccountingSummaryHeader(exp.Summary))
+	w.WriteHeader(http.StatusOK)
+	w.Write(exp.Content)
+}
+
+// handleAccountingQuickBooksExport implements
+// GET /exports/accounting/quickbooks (LG-184): the QuickBooks
+// general-journal IIF for the journal (see ledger.ExportAccounting).
+// Query parameters: account (optional entry filter), since/until
+// (optional, RFC 3339), currency (optional ISO 4217 filter), name
+// (repeatable <account>:<display> mappings). The export is read-only:
+// no version bump, no audit event. Error mapping: missing/invalid
+// parameters are 400.
+func (s *server) handleAccountingQuickBooksExport(w http.ResponseWriter, r *http.Request) {
+	s.metrics.QuickBooksExports.Add(1)
+	opts, err := accountingExportQuery(r.URL.Query())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid query: " + err.Error()})
+		return
+	}
+	opts.Format = ledger.AccountingQuickBooks
+	exp, err := s.ledgerFor(r).ExportAccounting(opts)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Accounting-Summary", ledger.AccountingSummaryHeader(exp.Summary))
+	w.WriteHeader(http.StatusOK)
+	w.Write(exp.Content)
+}
 
 // handlePacs009Export implements GET /exports/pacs009 (LG-172): an
 // ISO 20022 pacs.009.001.06 FinancialInstitutionCreditTransfer for one
@@ -9337,6 +9429,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("POST /exports/mt103", s.handleMT103Export)
+	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
+	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
 	mux.HandleFunc("GET /exports/pacs008", s.handlePacs008Export)
 	mux.HandleFunc("POST /repairs/{id}/fix", s.handleRepairFix)

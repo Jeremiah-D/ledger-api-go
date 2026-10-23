@@ -107,6 +107,15 @@ type Metrics struct {
 	// customer credit transfer export requests served, including
 	// rejected exports (see ledger.ExportMT103, LG-183).
 	MT103Exports atomic.Uint64
+	// XeroExports counts GET /exports/accounting/xero Xero
+	// bank-statement CSV export requests served, including rejected
+	// exports (see ledger.ExportAccounting, LG-184).
+	XeroExports atomic.Uint64
+	// QuickBooksExports counts GET /exports/accounting/quickbooks
+	// QuickBooks general-journal IIF export requests served,
+	// including rejected exports (see ledger.ExportAccounting,
+	// LG-184).
+	QuickBooksExports atomic.Uint64
 	// Pacs009Exports counts GET /exports/pacs009 ISO 20022 pacs.009
 	// FI-to-FI credit transfer export requests served, including
 	// rejected exports (see ledger.ExportPacs009, LG-172).
@@ -882,6 +891,10 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/pacs004 ISO 20022 pacs.004 payment return exports served, including rejected exports.", m.Pacs004Exports.Load())
 	writeCounter(&sb, "ledger_mt103_exports_total",
 		"Total POST /exports/mt103 SWIFT FIN MT103 single customer credit transfer exports served, including rejected exports.", m.MT103Exports.Load())
+	writeCounter(&sb, "ledger_xero_exports_total",
+		"Total GET /exports/accounting/xero Xero bank-statement CSV exports served, including rejected exports.", m.XeroExports.Load())
+	writeCounter(&sb, "ledger_quickbooks_exports_total",
+		"Total GET /exports/accounting/quickbooks QuickBooks general-journal IIF exports served, including rejected exports.", m.QuickBooksExports.Load())
 	writeCounter(&sb, "ledger_pacs009_exports_total",
 		"Total GET /exports/pacs009 ISO 20022 pacs.009 FI-to-FI credit transfer exports served, including rejected exports.", m.Pacs009Exports.Load())
 	writeCounter(&sb, "ledger_camt052_exports_total",

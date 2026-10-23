@@ -4082,6 +4082,51 @@ curl -s -X POST localhost:8080/exports/mt103 \
 
 Go: `ledger.ExportMT103` / `ledger.MT103ExportOptions`。
 
+### `GET /exports/accounting/xero` · `GET /exports/accounting/quickbooks` — 会计软件对接导出
+
+日记账可以导出给外部会计软件，做账/报税/审计对账：
+- `GET /exports/accounting/xero?account=` — Xero 银行对账 CSV：
+  `Date,Amount,Payee,Description,Reference,CheckNumber`（Xero 官方
+  bank statement 导入列集）；按账户导出，金额按账户视角带符号
+  （入账正、出账负）。
+- `GET /exports/accounting/quickbooks` — QuickBooks 总账 IIF：
+  每笔分录一对 `TRNS`（借方）/`SPL`（贷方）+ `ENDTRNS`，制表符
+  分隔，`DATE` 为 `MM/DD/YYYY`；`account` 可选过滤（两腿照常渲染，
+  试算平衡）。
+
+语义：
+- 与 audit_export.go（审计链证据导出）、export.go（签名对账导出）
+  正交：那两个面向审计方，这个面向会计系统；与支付通道导出
+  （nacha/pain.001/pacs/MT103）正交：那些是资金 movement，这个是
+  账簿 movement。
+- 科目映射表可配：重复 `name=<账本账户>:<显示名>` 参数（如
+  `name=saver:Savings+Account`），映射 Xero 的 payee 与 QuickBooks
+  的 chart-of-accounts 科目名；未映射的账户渲染原始 ID。
+- 单币种规则：两种格式都没有币种列——无 `currency` 过滤且账簿混币
+  种时 fail-closed 拒绝（绝不静默折算）；`currency=EUR` 即按币种过滤。
+- 多币种汇总行（`多币种汇总行`）：每币种借/贷合计 + 行数，走
+  `X-Accounting-Summary` 响应头与 `AccountingExport.Summary` 返回，
+  **不**写进导入文件（多余行会破坏 Xero/QuickBooks 导入）。
+- 范围诚实：Xero 的税码列映射不在范围内（银行对账单格式本无税码
+  列，发票/账单才有；文档注明，不伪造）；IIF 的制表符/换行/控制
+  字符 fail-loud 拒绝（防 TSV 分帧破坏），Xero CSV 则按 RFC 4180
+  引用转义。
+- 经济日期：行日期取分录的 value date（LG-181），无则记账日期；
+  `since`/`until`（RFC 3339，可选）同样按经济日期半开区间过滤。
+- 只读：读锁快照、无 version bump、无记账、无审计链追加；重复导出
+  字节一致。计数器 `ledger_xero_exports_total` /
+  `ledger_quickbooks_exports_total`。
+
+```bash
+curl -s 'localhost:8080/exports/accounting/xero?account=saver&name=saver:Savings+Account' -o xero.csv
+# 200 text/csv: Date,Amount,Payee,Description,Reference,CheckNumber
+curl -s 'localhost:8080/exports/accounting/quickbooks?currency=USD' -o qb.iif
+# 200 text/plain: !TRNS ... TRNS  GENERAL JOURNAL ... ENDTRNS
+```
+
+Go: `ledger.ExportAccounting` / `ledger.AccountingExportOptions` /
+`ledger.AccountingExport`。
+
 ### `GET /exports/pacs009` — ISO 20022 pacs.009 银行间大额贷记转账导出
 
 已过账的 transfer 可以用 ISO 20022 `pacs.009.001.06`
