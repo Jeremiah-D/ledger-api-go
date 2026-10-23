@@ -169,7 +169,7 @@ type Transfer struct {
 	// fail-closed with ErrInvalidPurposeCode.
 	PurposeCode string `json:"purpose_code,omitempty"`
 	// Rail is the settlement rail the transfer travels (see sla.go,
-	// LG-185): one of fednow, rtp, sepa, swift, gpi. Empty means "no
+	// LG-185/LG-187): one of fednow, rtp, sepa, swift, gpi, ach. Empty means "no
 	// rail stated" and opens no SLA watch — a domestic book transfer
 	// has no rail SLA to miss. A name outside the rail vocabulary is
 	// rejected fail-closed with ErrInvalidRail.

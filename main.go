@@ -1254,6 +1254,81 @@ func (s *server) handleFeeEstimate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, estimate)
 }
 
+// routePaymentRequest is the wire form of POST /routing/decide: the
+// payment to route, an optional RFC3339 settlement deadline, and the
+// routing strategy (cost, speed, or deadline).
+type routePaymentRequest struct {
+	AmountCents int64  `json:"amount_cents"`
+	Currency    string `json:"currency"`
+	Deadline    string `json:"deadline,omitempty"`
+	Strategy    string `json:"strategy,omitempty"`
+}
+
+// handleRoutePayment implements POST /routing/decide (LG-187): smart
+// payment routing — pick the best settlement rail (fednow, rtp, sepa,
+// swift, gpi, ach) for a payment of an amount in a currency with an
+// optional deadline, under a cost-first, speed-first, or hard-deadline
+// strategy. The decision is durable: it is written to the structured
+// audit log as a routing_decision event and counted in
+// ledger_routing_decisions_total{rail,reason}. A 422 means no rail is
+// feasible — the response still carries the decision with the per-rail
+// feasibility list, so the caller can see the blocking constraint.
+func (s *server) handleRoutePayment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	s.metrics.RoutingRequests.Add(1)
+
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req routePaymentRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+
+	routeReq := ledger.RouteRequest{
+		AmountCents: req.AmountCents,
+		Currency:    req.Currency,
+		Strategy:    req.Strategy,
+	}
+	if req.Deadline != "" {
+		dl, err := time.Parse(time.RFC3339, req.Deadline)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid deadline: want RFC3339, e.g. 2026-10-24T12:00:00Z"})
+			return
+		}
+		routeReq.Deadline = dl
+	}
+
+	decision, err := s.ledgerFor(r).RoutePayment(routeReq)
+	s.metrics.RoutingDecisions.Inc(decision.Rail, decision.Reason)
+	if err != nil {
+		if errors.Is(err, ledger.ErrNoFeasibleRail) {
+			// 422 with the decision: the feasibility list names the
+			// blocking constraint.
+			writeJSON(w, http.StatusUnprocessableEntity, decision)
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, decision)
+}
+
 // would overdraw an overdraft-protected payer or breach a daily outflow
 // limit, is rejected the same way.
 //
@@ -9376,6 +9451,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /transfers/batch", s.handleCreateBatchTransfer)
 	mux.HandleFunc("POST /transfers/dry-run", s.handleDryRunTransfer)
 	mux.HandleFunc("POST /transfers/fee-estimate", s.handleFeeEstimate)
+	mux.HandleFunc("POST /routing/decide", s.handleRoutePayment)
 	mux.HandleFunc("POST /transfers/reviews/expire", s.handleExpireReviews)
 	mux.HandleFunc("POST /transfers/reviews/approve", s.handleBatchApproveTransferReviews)
 	mux.HandleFunc("POST /transfers/{id}/approve", s.handleApproveTransferReview)

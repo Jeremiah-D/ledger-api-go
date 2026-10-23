@@ -659,6 +659,11 @@ type Ledger struct {
 	// cross-currency spread legs. Structural config — it survives
 	// snapshots, like fxAccount.
 	fxIncomeAccount AccountID
+	// railConfigs holds per-rail routing capability overrides (see
+	// SetRailConfig, routing.go, LG-187): a rail with no override uses
+	// the default table. Operational config — in-memory only, it does
+	// not survive snapshots, like payout instructions and gpi tracks.
+	railConfigs map[string]RailCapability
 	// fxSnapshotVersion counts FX rate-table mutations (LG-45): every
 	// SetFXRate / SetFXRateRat / RemoveFXRate bumps it and persists a
 	// full copy of the table in fxRateSnapshots at the new version, so a
@@ -1620,6 +1625,7 @@ func New(opts ...Option) *Ledger {
 		reportScheduleFiring: make(map[string]bool),
 		fxRates:              make(map[fxPair]ExchangeRate),
 		correspondentFees:    make(map[fxPair]int64),
+		railConfigs:          make(map[string]RailCapability),
 		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
 		forwards:             make(map[string]*FXForward),
 		rateOverrides:        make(map[fxPair]*RateOverride),

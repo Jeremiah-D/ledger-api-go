@@ -31,6 +31,7 @@ import (
 //	swift   SWIFT correspondent banking without gpi tracking: 48h.
 //	gpi     SWIFT gpi: 24h, the gpi rulebook's same-day value
 //	        expectation, tracked per UETR.
+//	ach     ACH batch: 48h (next-day batch settlement).
 //
 // A rail's SLA is a deadline, not a stopwatch that progress extends:
 // when a payout is submitted (SubmitPayout) or a rail-bound transfer
@@ -76,12 +77,15 @@ const (
 	RailSWIFT = "swift"
 	// RailGPI is the SWIFT gpi rail, tracked per UETR.
 	RailGPI = "gpi"
+	// RailACH is the ACH batch rail (US domestic): next-day settlement,
+	// monitored at a 48h horizon like SWIFT.
+	RailACH = "ach"
 )
 
 // slaRails is the closed rail vocabulary, in canonical order: it
 // bounds the ledger_sla_breaches_total{rail} label cardinality and
 // sizes the per-rail breach counter array.
-var slaRails = [5]string{RailFedNow, RailRTP, RailSEPA, RailSWIFT, RailGPI}
+var slaRails = [6]string{RailFedNow, RailRTP, RailSEPA, RailSWIFT, RailGPI, RailACH}
 
 // defaultSLADuration returns the rail's default settlement SLA, before
 // any operator override (see SetSLAConfig).
@@ -91,7 +95,7 @@ func defaultSLADuration(rail string) time.Duration {
 		return 20 * time.Second
 	case RailSEPA:
 		return 24 * time.Hour
-	case RailSWIFT:
+	case RailSWIFT, RailACH:
 		return 48 * time.Hour
 	case RailGPI:
 		return 24 * time.Hour
@@ -110,9 +114,9 @@ func slaRailIndex(rail string) (int, bool) {
 }
 
 // ErrInvalidRail is returned when a rail name is outside the SLA
-// vocabulary (fednow, rtp, sepa, swift, gpi): unknown rails are
+// vocabulary (fednow, rtp, sepa, swift, gpi, ach): unknown rails are
 // refused, not coerced — like the gpi status vocabulary in gpi.go.
-var ErrInvalidRail = errors.New("ledger: invalid payment rail: want fednow, rtp, sepa, swift or gpi")
+var ErrInvalidRail = errors.New("ledger: invalid payment rail: want fednow, rtp, sepa, swift, gpi or ach")
 
 // ErrInvalidSLADuration is returned by SetSLAConfig for a non-positive
 // duration: an SLA of zero or less would breach every watch at open,

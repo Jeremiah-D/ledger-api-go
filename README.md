@@ -1242,6 +1242,33 @@ periods, dual-control review) are not evaluated: this is a price quote,
 not a submission preview — use `POST /transfers/dry-run` for the full
 check sequence. Requests are counted in `ledger_fee_estimates_total`.
 
+### Smart payment routing (`POST /routing/decide`)
+
+Picks the settlement rail for a payment of an amount in a currency with
+an optional deadline, under a routing strategy: `cost` (cheapest
+feasible rail, the default), `speed` (fastest feasible rail), or
+`deadline` (deadline is a hard filter, cheapest of the rails that
+settle before it). The six rails of the closed vocabulary are
+considered — `fednow`, `rtp`, `sepa`, `swift`, `gpi`, `ach` — each with
+supported currencies, per-payment amount caps, expected settlement
+duration, and an operator cost model (flat + bps), all overridable at
+runtime with `SetRailConfig` (`RailConfig` reads the effective table;
+`ResetRailConfig` restores the default). The default cost figures are
+operator estimates, documented in the defaults table.
+
+Every decision is written to the structured audit log as a
+`routing_decision` event with the strategy, the request, the chosen
+rail and reason, and the full per-rail feasibility list
+(`currency-not-supported`, `amount-exceeds-cap`, `deadline-missed`).
+The journal, version, balances and idempotency state are untouched:
+routing decides, it never books. A routed transfer posts with
+`Transfer.Rail` set, which opens the LG-185 SLA watch for its
+settlement deadline. Requests are counted in
+`ledger_routing_requests_total`; decisions in
+`ledger_routing_decisions_total{rail,reason}` (a `422` still returns the
+decision with the feasibility list, so the caller can see the blocking
+constraint).
+
 ### `POST /accounts/{id}/freeze` and `POST /accounts/{id}/unfreeze`
 
 Risk-control stop for an account (fintech wind-down / fraud hold). A frozen
@@ -3885,6 +3912,7 @@ gpi 回答"钱在哪"，SLA 回答"钱迟到了吗"：与 LG-165 的 gpi 状态�
 | `sepa` | 24h | SEPA 当日 |
 | `swift` | 48h | 非 gpi 跨境汇款 |
 | `gpi` | 24h | SWIFT gpi 按 UETR 预期（同日 value） |
+| `ach` | 48h | ACH 批量（次日结算，LG-187 路由扩展 rail 词汇表） |
 
 - `POST /payouts` / `POST /transfers` 接受可选 `rail`（rail 词汇表外 fail-closed）；
   payout 提交（`POST /payouts/{id}/submit`）即按 rail 打开 SLA watch（`OpenedAt` +
@@ -6508,6 +6536,12 @@ curl -s localhost:8080/metrics
 - `ledger_fee_estimates_total` — transfer fee estimate requests received
   (`POST /transfers/fee-estimate`), including would-be rejections.
   Estimates are read-only: nothing is booked.
+- `ledger_routing_requests_total` — smart-routing requests received
+  (`POST /routing/decide`), including infeasible ones.
+- `ledger_routing_decisions_total{rail,reason}` — routing decisions by
+  rail and reason (`cheapest`, `fastest`, `deadline-cheapest`,
+  `only-feasible`, `no-feasible-rail`); every decision is counted once,
+  mirroring the `routing_decision` audit events.
 - `ledger_sweeps_total` — every `POST /sweeps` request received.
 - `ledger_sweep_idempotency_hits_total` — sweeps that replayed an existing
   idempotency key (returned the original receipt, booked nothing).

@@ -41,6 +41,7 @@ func TestNormalizeRail(t *testing.T) {
 		{"SEPA", "sepa"},
 		{"swift", "swift"},
 		{"GPI", "gpi"},
+		{"ACH", "ach"},
 	} {
 		got, err := normalizeRail(tc.in)
 		if err != nil {
@@ -51,7 +52,7 @@ func TestNormalizeRail(t *testing.T) {
 			t.Errorf("normalizeRail(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-	for _, bad := range []string{"ach", "zelle", "fedwire", "x"} {
+	for _, bad := range []string{"zelle", "fedwire", "x"} {
 		if _, err := normalizeRail(bad); !errors.Is(err, ErrInvalidRail) {
 			t.Errorf("normalizeRail(%q) err = %v, want ErrInvalidRail", bad, err)
 		}
@@ -67,6 +68,7 @@ func TestSetSLAConfig(t *testing.T) {
 		RailSEPA:   24 * time.Hour,
 		RailSWIFT:  48 * time.Hour,
 		RailGPI:    24 * time.Hour,
+		RailACH:    48 * time.Hour, // LG-187: ACH joins the vocabulary.
 	} {
 		got, err := l.SLADuration(rail)
 		if err != nil {
@@ -85,8 +87,8 @@ func TestSetSLAConfig(t *testing.T) {
 	}
 	// Unknown rail, empty rail, and non-positive durations are
 	// refused fail-closed.
-	if err := l.SetSLAConfig("ach", time.Hour); !errors.Is(err, ErrInvalidRail) {
-		t.Errorf("SetSLAConfig(ach) err = %v, want ErrInvalidRail", err)
+	if err := l.SetSLAConfig("zelle", time.Hour); !errors.Is(err, ErrInvalidRail) {
+		t.Errorf("SetSLAConfig(zelle) err = %v, want ErrInvalidRail", err)
 	}
 	if err := l.SetSLAConfig("", time.Hour); !errors.Is(err, ErrInvalidRail) {
 		t.Errorf("SetSLAConfig(empty) err = %v, want ErrInvalidRail", err)
@@ -105,9 +107,9 @@ func TestCreatePayout_RailValidation(t *testing.T) {
 	// is recorded.
 	if _, _, err := l.CreatePayout(PayoutInstruction{
 		ID: "po-rail-bad", PayeeAccount: "saver", AmountCents: 1000,
-		Destination: "FPS:1", Maker: "alice", Rail: "ach",
+		Destination: "FPS:1", Maker: "alice", Rail: "zelle",
 	}); !errors.Is(err, ErrInvalidRail) {
-		t.Fatalf("CreatePayout(ach) err = %v, want ErrInvalidRail", err)
+		t.Fatalf("CreatePayout(zelle) err = %v, want ErrInvalidRail", err)
 	}
 	if _, ok := l.GetPayout("po-rail-bad"); ok {
 		t.Fatal("rejected payout was recorded")
@@ -338,9 +340,24 @@ func TestTransfer_OpensSLAWatch(t *testing.T) {
 	// An unknown rail is rejected before anything books.
 	if _, err := l.PostTransfer(Transfer{
 		ID: "tx-sla-3", From: "payer", To: "payee",
-		AmountCents: 10_000, Currency: "USD", Rail: "ach",
+		AmountCents: 10_000, Currency: "USD", Rail: "zelle",
 	}); !errors.Is(err, ErrInvalidRail) {
-		t.Fatalf("PostTransfer(ach) err = %v, want ErrInvalidRail", err)
+		t.Fatalf("PostTransfer(zelle) err = %v, want ErrInvalidRail", err)
+	}
+	// LG-187: ach is now a vocabulary rail, so a routed ACH transfer
+	// opens an SLA watch with the 48h default.
+	if _, err := l.PostTransfer(Transfer{
+		ID: "tx-sla-4", From: "payer", To: "payee",
+		AmountCents: 10_000, Currency: "USD", Rail: "ach",
+	}); err != nil {
+		t.Fatalf("PostTransfer(ach): %v", err)
+	}
+	w4, ok4 := l.SLAWatch("tx-sla-4")
+	if !ok4 {
+		t.Fatal("no SLA watch opened for an ach transfer")
+	}
+	if w4.Rail != RailACH {
+		t.Errorf("watch rail = %q, want ach", w4.Rail)
 	}
 }
 

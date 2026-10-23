@@ -328,6 +328,17 @@ type Metrics struct {
 	// estimate is read-only by design, so there is no separate
 	// "committed" counter (LG-186).
 	FeeEstimateRequests atomic.Uint64
+	// RoutingRequests counts POST /routing/decide requests received
+	// (all attempts, including infeasible ones). The decisions
+	// themselves are counted by RoutingDecisions (LG-187).
+	RoutingRequests atomic.Uint64
+	// RoutingDecisions counts routing decisions by rail and reason,
+	// rendered as ledger_routing_decisions_total{rail="..",reason=".."}.
+	// Every decision — routed or rejected as infeasible — is counted,
+	// mirroring the routing_decision audit events; infeasible decisions
+	// use rail="" and reason="no-feasible-rail". Inc is safe for
+	// concurrent use.
+	RoutingDecisions RoutingDecisionCounter
 	// SnapshotBackupsTotal counts successful periodic snapshot backup
 	// ticks (full and incremental).
 	SnapshotBackupsTotal atomic.Uint64
@@ -1225,6 +1236,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_fee_estimates_total",
 		"Total transfer fee estimate requests received (POST /transfers/fee-estimate), including would-be rejections. Estimates are read-only: nothing is booked.",
 		m.FeeEstimateRequests.Load())
+	writeCounter(&sb, "ledger_routing_requests_total",
+		"Total smart-routing requests received (POST /routing/decide), including infeasible ones.",
+		m.RoutingRequests.Load())
+	writeLabeledCounter(&sb, "ledger_routing_decisions_total",
+		"Routing decisions by rail and reason (LG-187): every decision — routed or rejected as infeasible — is counted once, mirroring the routing_decision audit events.",
+		m.RoutingDecisions.series())
 	writeCounter(&sb, "ledger_snapshot_backups_total",
 		"Total successful periodic snapshot backup ticks (full and incremental).",
 		m.SnapshotBackupsTotal.Load())
@@ -1409,6 +1426,50 @@ func (c *QuorumVoteCounter) series() []labeledCounterSeries {
 		parts := strings.Split(k, "\x00")
 		out = append(out, labeledCounterSeries{
 			labels: fmt.Sprintf(`approver=%q,vote=%q,outcome=%q`, parts[0], parts[1], parts[2]),
+			value:  v,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].labels < out[j].labels })
+	return out
+}
+
+// RoutingDecisionCounter is the per-rail, per-reason breakdown of smart
+// routing decisions (LG-187), rendered as
+// ledger_routing_decisions_total{rail="..",reason=".."}: the HTTP layer
+// counts every decision once — routed or rejected as infeasible — so Inc
+// accumulates (never overwrites). Rail and reason come from the
+// ledger's RouteReason* constants and rail vocabulary, both safe label
+// text. The zero value is ready to use; Inc is safe for concurrent use.
+type RoutingDecisionCounter struct {
+	mu     sync.Mutex
+	counts map[routingDecisionKey]uint64
+}
+
+type routingDecisionKey struct {
+	rail   string
+	reason string
+}
+
+// Inc records one routing decision for the (rail, reason) pair.
+func (c *RoutingDecisionCounter) Inc(rail, reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = make(map[routingDecisionKey]uint64)
+	}
+	k := routingDecisionKey{rail: rail, reason: reason}
+	c.counts[k]++
+}
+
+// series renders the counter as labeled series, sorted by (rail, reason)
+// for a deterministic exposition.
+func (c *RoutingDecisionCounter) series() []labeledCounterSeries {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]labeledCounterSeries, 0, len(c.counts))
+	for k, v := range c.counts {
+		out = append(out, labeledCounterSeries{
+			labels: fmt.Sprintf(`rail=%q,reason=%q`, k.rail, k.reason),
 			value:  v,
 		})
 	}
