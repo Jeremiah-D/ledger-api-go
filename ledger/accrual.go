@@ -158,7 +158,32 @@ func (l *Ledger) AccrueInterest(expense, payable AccountID, principalCents, rate
 		// policy's dust tiers (see transfer.go).
 		return JournalEntry{}, false, ErrNonPositiveAmount
 	}
-	return l.accrue(AccrualKindInterest, expense, payable, amount, capCents, asof)
+	return l.accrue(AccrualKindInterest, expense, payable, amount, capCents, asof, time.Time{}, ValueDateConventionNone)
+}
+
+// AccrueInterestWithValueDate books one day's interest accrual like
+// AccrueInterest, but the accrual entry carries an explicit value date
+// (起息日, LG-181): the day-count and AccruedTotal windows anchor on
+// the value date, not the booking date, while the deterministic entry ID
+// still anchors on the booking day (asof) so per-day idempotency is
+// unchanged. The value date is validated against the ledger's
+// value-date window and adjusted per the business-day convention before
+// anything is journaled — fail-closed, like Post.
+func (l *Ledger) AccrueInterestWithValueDate(expense, payable AccountID, principalCents, rateBps int64, asof time.Time, valueDate time.Time, convention ValueDateConvention, capCents int64) (JournalEntry, bool, error) {
+	if rateBps < 1 || rateBps > 10000 {
+		return JournalEntry{}, false, ErrInvalidAccrualRate
+	}
+	if principalCents <= 0 {
+		return JournalEntry{}, false, ErrNonPositiveAmount
+	}
+	// Same overflow-safe daily math as AccrueInterest: flooring the
+	// annual figure then dividing by 365 equals flooring the daily
+	// figure, because the second divisor is an integer.
+	amount := policyFeeCents(principalCents, rateBps) / 365
+	if amount <= 0 {
+		return JournalEntry{}, false, ErrNonPositiveAmount
+	}
+	return l.accrue(AccrualKindInterest, expense, payable, amount, capCents, asof, valueDate, convention)
 }
 
 // AccrueFee books a fee accrual of exactly amountCents: debit the
@@ -176,25 +201,42 @@ func (l *Ledger) AccrueFee(expense, payable AccountID, amountCents int64, asof t
 	if amountCents <= 0 {
 		return JournalEntry{}, false, ErrNonPositiveAmount
 	}
-	return l.accrue(AccrualKindFee, expense, payable, amountCents, capCents, asof)
+	return l.accrue(AccrualKindFee, expense, payable, amountCents, capCents, asof, time.Time{}, ValueDateConventionNone)
+}
+
+// AccrueFeeWithValueDate books a fee accrual like AccrueFee, but the
+// accrual entry carries an explicit value date (起息日, LG-181): the
+// AccruedTotal windows anchor on the value date, not the booking date,
+// while the deterministic entry ID still anchors on the booking day
+// (asof) so per-day idempotency is unchanged. The value date is
+// validated against the ledger's value-date window and adjusted per the
+// business-day convention before anything is journaled — fail-closed,
+// like Post.
+func (l *Ledger) AccrueFeeWithValueDate(expense, payable AccountID, amountCents int64, asof time.Time, valueDate time.Time, convention ValueDateConvention, capCents int64) (JournalEntry, bool, error) {
+	if amountCents <= 0 {
+		return JournalEntry{}, false, ErrNonPositiveAmount
+	}
+	return l.accrue(AccrualKindFee, expense, payable, amountCents, capCents, asof, valueDate, convention)
 }
 
 // accrue is the shared accrual path. Callers hold no lock; it takes the
 // write lock for the cap evaluation and the post. The cap and the post
 // are atomic with respect to each other: two concurrent accruals for the
 // same triple cannot both clear the cap check and then both book past
-// it, because both run under the same write lock.
-func (l *Ledger) accrue(kind string, expense, payable AccountID, amountCents, capCents int64, asof time.Time) (JournalEntry, bool, error) {
+// it, because both run under the same write lock. A zero valueDate
+// (with ValueDateConventionNone) anchors the accrual on its booking
+// date, like the historical behavior.
+func (l *Ledger) accrue(kind string, expense, payable AccountID, amountCents, capCents int64, asof time.Time, valueDate time.Time, convention ValueDateConvention) (JournalEntry, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.accrueLocked(kind, expense, payable, amountCents, capCents, asof)
+	return l.accrueLocked(kind, expense, payable, amountCents, capCents, asof, valueDate, convention)
 }
 
 // accrueLocked is accrue's body. Callers must hold l.mu (the write
 // lock): it evaluates the cap and posts atomically. AccrueInterestTiered
 // (see interest_tiers.go) enters here holding the lock because it needs
 // the tier table read and the post under one critical section.
-func (l *Ledger) accrueLocked(kind string, expense, payable AccountID, amountCents, capCents int64, asof time.Time) (JournalEntry, bool, error) {
+func (l *Ledger) accrueLocked(kind string, expense, payable AccountID, amountCents, capCents int64, asof time.Time, valueDate time.Time, convention ValueDateConvention) (JournalEntry, bool, error) {
 	if !validAccrualKind(kind) {
 		return JournalEntry{}, false, ErrInvalidAccrualKind
 	}
@@ -209,13 +251,15 @@ func (l *Ledger) accrueLocked(kind string, expense, payable AccountID, amountCen
 	}
 	id := accrualEntryID(kind, expense, payable, asof)
 	e := JournalEntry{
-		ID:             id,
-		DebitAccount:   expense,
-		CreditAccount:  payable,
-		AmountCents:    amountCents,
-		IdempotencyKey: id,
-		Memo:           "accrual:" + kind,
-		CreatedAt:      asof,
+		ID:                  id,
+		DebitAccount:        expense,
+		CreditAccount:       payable,
+		AmountCents:         amountCents,
+		IdempotencyKey:      id,
+		Memo:                "accrual:" + kind,
+		ValueDate:           valueDate,
+		ValueDateConvention: convention,
+		CreatedAt:           asof,
 	}
 
 	// accrueLocked holds l.mu on entry (see accrue above).
@@ -281,7 +325,12 @@ func (l *Ledger) accruedTotalLocked(expense, payable AccountID, kind string, sin
 		if len(id) != len(prefix)+10 {
 			continue
 		}
-		if e.CreatedAt.Before(since) || !e.CreatedAt.Before(until) {
+		// LG-181: accrual rows anchor their period on the value date,
+		// not the booking date — interest accrues from the value date
+		// (资金起息). Rows without an explicit value date anchor on
+		// their booking date, so pre-value-date history totals exactly
+		// as before.
+		if vd := e.EffectiveValueDate(); vd.Before(since) || !vd.Before(until) {
 			continue
 		}
 		var ok bool
@@ -305,14 +354,16 @@ func (l *Ledger) accruedTotalLocked(expense, payable AccountID, kind string, sin
 	// interest kind can be capitalized, so this loop is a no-op for
 	// fees. A reversed capitalization restores the payable balance —
 	// the mirror entry cancels the capitalization, so a capitalization
-	// with a reversal row is skipped here.
+	// with a reversal row is skipped here. Like the accrual rows above,
+	// the window anchors on the value date (LG-181); capitalization
+	// rows carry none, so this is identical to the booking date.
 	if kind == AccrualKindInterest {
 		for id, e := range l.entries {
 			exp, pay, _, ok := parseCapitalizationID(id)
 			if !ok || exp != expense || pay != payable {
 				continue
 			}
-			if e.CreatedAt.Before(since) || !e.CreatedAt.Before(until) {
+			if vd := e.EffectiveValueDate(); vd.Before(since) || !vd.Before(until) {
 				continue
 			}
 			if _, reversed := l.entries[id+"/reversal"]; reversed {

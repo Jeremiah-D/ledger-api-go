@@ -88,6 +88,19 @@ func hashChainLink(prevHash [32]byte, e JournalEntry) [32]byte {
 	if e.PurposeCode != "" {
 		writeString(e.PurposeCode)
 	}
+	// The value date is covered like the purpose code (see LG-181):
+	// rewriting a journaled value date breaks the chain exactly like
+	// rewriting an amount. The section carries both dates — the booking
+	// date and the value date — so the 起息日 is auditable from the
+	// chain alone. Entries whose value date equals their booking date
+	// carry no value date (see resolveValueDateLocked) and skip the
+	// section entirely, so their encoding stays byte-identical to the
+	// pre-value-date chain.
+	if !e.ValueDate.IsZero() {
+		writeString("value-date")
+		writeInt(e.CreatedAt.UnixNano())
+		writeInt(e.ValueDate.UnixNano())
+	}
 	writeInt(int64(len(e.Attachments)))
 	for _, a := range e.Attachments {
 		writeString(a)

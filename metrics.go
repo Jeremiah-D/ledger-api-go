@@ -290,6 +290,13 @@ type Metrics struct {
 	// 20022 purpose code is outside the admitted subset (see
 	// ledger.ErrInvalidPurposeCode).
 	PurposeCodeRejections atomic.Uint64
+	// ValueDateRejections counts POST /entries and POST /entries/batch
+	// requests rejected with 422 because the entry's value date named an
+	// unknown business-day convention or strayed past the ledger's
+	// value-date window from its booking date (see
+	// ledger.ErrInvalidValueDateConvention and
+	// ledger.ErrValueDateOutOfWindow).
+	ValueDateRejections atomic.Uint64
 	// FXTransfersTotal counts POST /transfers requests that attempted a
 	// cross-currency transfer (all attempts, including rejected ones).
 	FXTransfersTotal atomic.Uint64
@@ -1123,6 +1130,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_purpose_code_rejections_total",
 		"Total POST /entries, POST /transfers, and POST /payouts requests rejected with 422 because the ISO 20022 purpose code is outside the admitted subset.",
 		m.PurposeCodeRejections.Load())
+	writeCounter(&sb, "ledger_value_date_rejections_total",
+		"Total POST /entries and POST /entries/batch requests rejected with 422 because the entry's value date named an unknown business-day convention or strayed past the ledger's value-date window from its booking date.",
+		m.ValueDateRejections.Load())
 	writeCounter(&sb, "ledger_fx_transfers_total",
 		"Total POST /transfers requests that attempted a cross-currency transfer, including rejected ones.",
 		m.FXTransfersTotal.Load())

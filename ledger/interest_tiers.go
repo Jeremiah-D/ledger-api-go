@@ -247,5 +247,5 @@ func (l *Ledger) AccrueInterestTiered(expense, payable AccountID, principalCents
 		// AccrueInterest's dust path.
 		return JournalEntry{}, false, ErrNonPositiveAmount
 	}
-	return l.accrueLocked(AccrualKindInterestTiered, expense, payable, amount, capCents, asof)
+	return l.accrueLocked(AccrualKindInterestTiered, expense, payable, amount, capCents, asof, time.Time{}, ValueDateConventionNone)
 }

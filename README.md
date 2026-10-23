@@ -4157,6 +4157,51 @@ curl -s -X POST localhost:8080/transfers \
 Go: `ledger.IsValidPurposeCode(code)`、`ledger.AdmittedPurposeCodes()`、
 `ledger.LookupPurposeCode(code)`。
 
+### Value dating / 起息日 (`POST /entries` 的 `value_date`)
+
+每笔分录有两个日期：**记账日**（booking date，`created_at`，分录
+何时落账）与**起息日**（value date，资金何时真正移动、利息从何日
+起算）。`POST /entries` 与 `POST /entries/batch` 接受可选的
+`value_date`（RFC 3339；缺省 = 记账日）与 `value_date_convention`
+（营业日惯例）：
+
+- 空 value date = 记账日：行为与从前完全一致（omitempty，不进链）。
+- 营业日惯例（复用 LG-95 假日日历，日历只提供日期、落账语义在
+  本项）：`following` 把落在周末/假日的起息日顺延到下一个营业日，
+  `preceding` 回溯到上一个营业日；空 = `none`，不做调整。惯例不配
+  value date 是调用方 bug，fail-closed（`422`）。
+- 起息窗口：起息日相对记账日的前后偏移不得超过账本的起息窗口，
+  默认前后各 30 天（`ledger.WithValueDateWindow` /
+  `ledger.SetValueDateWindow` 可调；0 表示该侧钉死在记账日）。
+  超窗 fail-closed：`422` + `ledger.ErrValueDateOutOfWindow`，
+  记账前拒绝——无分录、无链节、无版本号推进。
+- 审计链覆盖：起息日进链哈希，链节同时记录记账日与起息日双日期
+  （booking/value 双日期可稽）；起息日等于记账日的分录跳过该节，
+  与 value-date 引入前的链逐字节兼容。快照携带起息日与窗口配置；
+  `GET /entries` 回显；dry-run 腿回显将要落账的起息日。
+- 计息锚定：`AccruedTotal` 的窗口按起息日（`EffectiveValueDate`）
+  而非记账日过滤——利息从起息日开始算。`AccrueInterestWithValueDate`
+  / `AccrueFeeWithValueDate` 为计提分录携带显式起息日（窗口 +
+  惯例同样 fail-closed）；分录的幂等 ID 仍锚定记账日，同日重跑是
+  replay，不重复计提。
+- 指标：`GET /metrics` 的 `ledger_value_date_rejections_total`。
+
+```bash
+# 起息日落在周六 + following：落账为下周一。
+curl -s -X POST localhost:8080/entries \
+  -d '{"debit_account":"cash","credit_account":"equity","amount_cents":1000,"currency":"USD","value_date":"2026-10-24T12:00:00Z","value_date_convention":"following"}'
+# 201；entry.value_date = "2026-10-26T12:00:00Z"（周一）。
+
+# 起息日超窗 60 天：422，fail-closed。
+curl -s -X POST localhost:8080/entries \
+  -d '{"debit_account":"cash","credit_account":"equity","amount_cents":1000,"currency":"USD","value_date":"2026-12-22T12:00:00Z"}' -w '\n%{http_code}\n'
+# {"error":"ledger: value date outside the allowed window from the booking date: ..."} / 422
+```
+
+Go: `ledger.ValueDateConvention`（`ValueDateConventionNone` /
+`Following` / `Preceding`）、`ledger.JournalEntry.EffectiveValueDate()`、
+`ledger.SetValueDateWindow(ahead, back)`。
+
 ### `GET /exports/camt052` — ISO 20022 camt.052 日间账户报告导出
 
 camt.053（LG-158）是日终对账单，camt.052（LG-170）是它的日间

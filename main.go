@@ -79,6 +79,16 @@ type createEntryRequest struct {
 	// ExternalPurpose1Code, e.g. SALA, GDDS, SUPP. Empty means "no
 	// purpose stated".
 	PurposeCode string `json:"purpose_code"`
+	// ValueDate is the entry's 起息日 (value date, see
+	// ledger.JournalEntry.ValueDate, LG-181): the economic date the
+	// money moves. RFC 3339 timestamp; empty (or equal to the booking
+	// date) means "the same as the booking date".
+	ValueDate time.Time `json:"value_date"`
+	// ValueDateConvention is the business-day convention applied when
+	// ValueDate lands on a non-business day (see
+	// ledger.JournalEntry.ValueDateConvention, LG-181): "following" or
+	// "preceding". Empty means "none".
+	ValueDateConvention ledger.ValueDateConvention `json:"value_date_convention"`
 }
 
 func newID() string {
@@ -188,6 +198,11 @@ func (s *server) writePostError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
+	if errors.Is(err, ledger.ErrInvalidValueDateConvention) || errors.Is(err, ledger.ErrValueDateOutOfWindow) {
+		s.metrics.ValueDateRejections.Add(1)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
 	if errors.Is(err, ledger.ErrInvalidCurrency) {
 		s.metrics.CurrencyRejections.Add(1)
 	}
@@ -248,18 +263,20 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry := ledger.JournalEntry{
-		ID:             newID(),
-		DebitAccount:   req.DebitAccount,
-		CreditAccount:  req.CreditAccount,
-		AmountCents:    req.AmountCents,
-		Currency:       req.Currency,
-		IdempotencyKey: req.IdempotencyKey,
-		Memo:           req.Memo,
-		ExternalRef:    req.ExternalRef,
-		Attachments:    req.Attachments,
-		Metadata:       req.Metadata,
-		PurposeCode:    req.PurposeCode,
-		CreatedAt:      time.Now(),
+		ID:                  newID(),
+		DebitAccount:        req.DebitAccount,
+		CreditAccount:       req.CreditAccount,
+		AmountCents:         req.AmountCents,
+		Currency:            req.Currency,
+		IdempotencyKey:      req.IdempotencyKey,
+		Memo:                req.Memo,
+		ExternalRef:         req.ExternalRef,
+		Attachments:         req.Attachments,
+		Metadata:            req.Metadata,
+		PurposeCode:         req.PurposeCode,
+		ValueDate:           req.ValueDate,
+		ValueDateConvention: req.ValueDateConvention,
+		CreatedAt:           time.Now(),
 	}
 
 	posted, duplicate, err := s.ledgerFor(r).Post(entry)
@@ -315,18 +332,20 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry := ledger.JournalEntry{
-		ID:             newID(),
-		DebitAccount:   req.DebitAccount,
-		CreditAccount:  req.CreditAccount,
-		AmountCents:    req.AmountCents,
-		Currency:       req.Currency,
-		IdempotencyKey: req.IdempotencyKey,
-		Memo:           req.Memo,
-		ExternalRef:    req.ExternalRef,
-		Attachments:    req.Attachments,
-		Metadata:       req.Metadata,
-		PurposeCode:    req.PurposeCode,
-		CreatedAt:      time.Now(),
+		ID:                  newID(),
+		DebitAccount:        req.DebitAccount,
+		CreditAccount:       req.CreditAccount,
+		AmountCents:         req.AmountCents,
+		Currency:            req.Currency,
+		IdempotencyKey:      req.IdempotencyKey,
+		Memo:                req.Memo,
+		ExternalRef:         req.ExternalRef,
+		Attachments:         req.Attachments,
+		Metadata:            req.Metadata,
+		PurposeCode:         req.PurposeCode,
+		ValueDate:           req.ValueDate,
+		ValueDateConvention: req.ValueDateConvention,
+		CreatedAt:           time.Now(),
 	}
 
 	result, err := s.ledgerFor(r).DryRunPost(entry)
@@ -391,6 +410,11 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, ledger.ErrPeriodClosed) {
 			s.metrics.PeriodRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrInvalidValueDateConvention) || errors.Is(err, ledger.ErrValueDateOutOfWindow) {
+			s.metrics.ValueDateRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1135,6 +1159,16 @@ type batchEntryRequest struct {
 	// PurposeCode is the entry's ISO 20022 business purpose (see
 	// ledger.JournalEntry.PurposeCode, LG-180).
 	PurposeCode string `json:"purpose_code"`
+	// ValueDate is the entry's 起息日 (value date, see
+	// ledger.JournalEntry.ValueDate, LG-181): the economic date the
+	// money moves. RFC 3339 timestamp; empty means "the same as the
+	// booking date".
+	ValueDate time.Time `json:"value_date"`
+	// ValueDateConvention is the business-day convention applied when
+	// ValueDate lands on a non-business day (see
+	// ledger.JournalEntry.ValueDateConvention, LG-181): "following" or
+	// "preceding". Empty means "none".
+	ValueDateConvention ledger.ValueDateConvention `json:"value_date_convention"`
 }
 
 type createBatchRequest struct {
@@ -1198,18 +1232,20 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			entryID = newID()
 		}
 		entries = append(entries, ledger.JournalEntry{
-			ID:             entryID,
-			DebitAccount:   re.DebitAccount,
-			CreditAccount:  re.CreditAccount,
-			AmountCents:    re.AmountCents,
-			Currency:       re.Currency,
-			IdempotencyKey: re.IdempotencyKey,
-			Memo:           re.Memo,
-			ExternalRef:    re.ExternalRef,
-			Attachments:    re.Attachments,
-			Metadata:       re.Metadata,
-			PurposeCode:    re.PurposeCode,
-			CreatedAt:      time.Now(),
+			ID:                  entryID,
+			DebitAccount:        re.DebitAccount,
+			CreditAccount:       re.CreditAccount,
+			AmountCents:         re.AmountCents,
+			Currency:            re.Currency,
+			IdempotencyKey:      re.IdempotencyKey,
+			Memo:                re.Memo,
+			ExternalRef:         re.ExternalRef,
+			Attachments:         re.Attachments,
+			Metadata:            re.Metadata,
+			PurposeCode:         re.PurposeCode,
+			ValueDate:           re.ValueDate,
+			ValueDateConvention: re.ValueDateConvention,
+			CreatedAt:           time.Now(),
 		})
 	}
 	batch := ledger.Batch{

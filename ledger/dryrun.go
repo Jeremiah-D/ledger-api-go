@@ -1,5 +1,7 @@
 package ledger
 
+import "time"
+
 // What-if dry-run simulation (LG-36).
 //
 // A dry run answers "what would happen if I submitted this now?" without
@@ -46,6 +48,12 @@ type DryRunLeg struct {
 	// code path on a deep copy of the ledger, so the metadata a dry run
 	// reports is the metadata the real call would journal.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// ValueDate echoes the entry's resolved value date (see
+	// JournalEntry.ValueDate, valuedate.go): the dry run resolves the
+	// same business-day convention the real call would journal, so a
+	// client can swap the /dry-run suffix for the real endpoint and see
+	// the same date. Empty when the value date equals the booking date.
+	ValueDate time.Time `json:"value_date,omitempty"`
 	// DebitBalanceBefore/After (and the credit pair) are the account's net
 	// balance in the leg's currency around the simulated posting. Legs
 	// apply sequentially in commit order, so a leg's "before" already
@@ -107,19 +115,19 @@ type BudgetImpact struct {
 // against stale state.
 func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	c := &Ledger{
-		balances:             make(map[accountCurrency]int64, len(l.balances)),
-		entries:              make(map[string]JournalEntry, len(l.entries)),
-		byKey:                make(map[string]JournalEntry, len(l.byKey)),
-		byRef:                make(map[string]string, len(l.byRef)),
-		byAccount:            make(map[AccountID][]string, len(l.byAccount)),
-		debitTotals:          make(map[accountCurrency]int64, len(l.debitTotals)),
-		creditTotals:         make(map[accountCurrency]int64, len(l.creditTotals)),
-		frozen:               make(map[AccountID]bool, len(l.frozen)),
-		closed:               make(map[AccountID]AccountClosure, len(l.closed)),
-		chart:                make(map[AccountID]AccountType, len(l.chart)),
-		noOverdraft:          make(map[AccountID]bool, len(l.noOverdraft)),
-		dailyLimits:          make(map[dailyLimitKey]int64, len(l.dailyLimits)),
-		dailyOutflow:         make(map[dailyLimitKey]int64, len(l.dailyOutflow)),
+		balances:     make(map[accountCurrency]int64, len(l.balances)),
+		entries:      make(map[string]JournalEntry, len(l.entries)),
+		byKey:        make(map[string]JournalEntry, len(l.byKey)),
+		byRef:        make(map[string]string, len(l.byRef)),
+		byAccount:    make(map[AccountID][]string, len(l.byAccount)),
+		debitTotals:  make(map[accountCurrency]int64, len(l.debitTotals)),
+		creditTotals: make(map[accountCurrency]int64, len(l.creditTotals)),
+		frozen:       make(map[AccountID]bool, len(l.frozen)),
+		closed:       make(map[AccountID]AccountClosure, len(l.closed)),
+		chart:        make(map[AccountID]AccountType, len(l.chart)),
+		noOverdraft:  make(map[AccountID]bool, len(l.noOverdraft)),
+		dailyLimits:  make(map[dailyLimitKey]int64, len(l.dailyLimits)),
+		dailyOutflow: make(map[dailyLimitKey]int64, len(l.dailyOutflow)),
 		// Velocity limits and their rolling windows travel with the
 		// twin: the dry-run's velocity gate must see the same config
 		// and window activity the real Post applies, or a dry-run
@@ -129,47 +137,61 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		velocityLimits: make(map[velocityLimitKey]VelocityLimit, len(l.velocityLimits)),
 		velocityEvents: make(map[velocityLimitKey][]velocityEvent, len(l.velocityEvents)),
 		velocityNow:    l.velocityNow,
-		sweepReserves:        make(map[accountCurrency]int64, len(l.sweepReserves)),
+		sweepReserves:  make(map[accountCurrency]int64, len(l.sweepReserves)),
 		// The transfer beneficiary allowlists travel with the twin: the
 		// dry-run's allowlist gate must see the same lists the real
 		// PostTransfer applies (see the deep copy below).
-		transferAllowlist:    make(map[AccountID]map[AccountID]bool, len(l.transferAllowlist)),
-		budgets:              make(map[budgetKey]int64, len(l.budgets)),
-		monthlySpend:         make(map[monthlySpendKey]int64, len(l.monthlySpend)),
-		parents:              make(map[AccountID]AccountID, len(l.parents)),
-		transferKeys:         make(map[string][]string, len(l.transferKeys)),
-		holds:                make(map[string]Hold, len(l.holds)),
-		holdsByAccount:       make(map[AccountID][]string, len(l.holdsByAccount)),
-		holdKeys:             make(map[string]string, len(l.holdKeys)),
-		captureKeys:          make(map[string]CaptureReceipt, len(l.captureKeys)),
-		sweepKeys:            make(map[string]sweepRecord, len(l.sweepKeys)),
+		transferAllowlist: make(map[AccountID]map[AccountID]bool, len(l.transferAllowlist)),
+		budgets:           make(map[budgetKey]int64, len(l.budgets)),
+		monthlySpend:      make(map[monthlySpendKey]int64, len(l.monthlySpend)),
+		parents:           make(map[AccountID]AccountID, len(l.parents)),
+		transferKeys:      make(map[string][]string, len(l.transferKeys)),
+		holds:             make(map[string]Hold, len(l.holds)),
+		holdsByAccount:    make(map[AccountID][]string, len(l.holdsByAccount)),
+		holdKeys:          make(map[string]string, len(l.holdKeys)),
+		captureKeys:       make(map[string]CaptureReceipt, len(l.captureKeys)),
+		sweepKeys:         make(map[string]sweepRecord, len(l.sweepKeys)),
 		// The auto-sweep rule registry travels with the twin like the
 		// other structural registries: the simulated post sees the same
 		// rules the real ledger would fire (see autosweep.go). Rule
 		// state is shallow-copied — the twin never fires rules, so
 		// lastRunAt cannot drift.
-		autoSweepRules:     make(map[string]*autoSweepRuleState, len(l.autoSweepRules)),
-		batchKeys:            make(map[string]batchRecord, len(l.batchKeys)),
-		batchTransferKeys:    make(map[string]batchTransferRecord, len(l.batchTransferKeys)),
-		merges:               make(map[string]mergeRecord, len(l.merges)),
-		mergeKeys:            make(map[string]string, len(l.mergeKeys)),
-		painTransfers:        make(map[string]PainTransfer, len(l.painTransfers)),
-		accountIBANs:         make(map[AccountID]AccountIBAN, len(l.accountIBANs)),
-		externalMappings:     make(map[externalMappingKey]ExternalAccountMapping, len(l.externalMappings)),
+		autoSweepRules:    make(map[string]*autoSweepRuleState, len(l.autoSweepRules)),
+		batchKeys:         make(map[string]batchRecord, len(l.batchKeys)),
+		batchTransferKeys: make(map[string]batchTransferRecord, len(l.batchTransferKeys)),
+		merges:            make(map[string]mergeRecord, len(l.merges)),
+		mergeKeys:         make(map[string]string, len(l.mergeKeys)),
+		painTransfers:     make(map[string]PainTransfer, len(l.painTransfers)),
+		accountIBANs:      make(map[AccountID]AccountIBAN, len(l.accountIBANs)),
+		externalMappings:  make(map[externalMappingKey]ExternalAccountMapping, len(l.externalMappings)),
 		// The declared entry links travel with the twin like the other
 		// structural registries, with the link chain rebuilt alongside:
 		// the simulated post sees the same association record, and the
 		// twin's declarations are discarded with the copy.
-		entryLinks:           append([]EntryLink(nil), l.entryLinks...),
-		linkChain:            append([]entryLinkChainLink(nil), l.linkChain...),
+		entryLinks: append([]EntryLink(nil), l.entryLinks...),
+		linkChain:  append([]entryLinkChainLink(nil), l.linkChain...),
+		// The holiday calendar and the value-date window travel with
+		// the twin like the other structural config (see valuedate.go,
+		// LG-181): a dry run of a value-dated posting must resolve the
+		// same business-day convention against the same holidays and
+		// the same window the real Post applies, or it would wrongly
+		// report success. The calendar slices are deep-copied so the
+		// twin never shares backing arrays with the live ledger.
+		businessCalendar: BusinessDayCalendar{
+			Weekend:  append([]time.Weekday(nil), l.businessCalendar.Weekend...),
+			Holidays: append([]string(nil), l.businessCalendar.Holidays...),
+			Version:  l.businessCalendar.Version,
+		},
+		valueDateWindowAhead: l.valueDateWindowAhead,
+		valueDateWindowBack:  l.valueDateWindowBack,
 		virtualAccounts:      make(map[AccountID]AccountID, len(l.virtualAccounts)),
 		creditLines:          make(map[creditLineKey]CreditLine, len(l.creditLines)),
 		// Collateral pledges and coverage requirements travel with
 		// the twin: the dry-run's collateral gate must see the same
 		// coverage the real Post applies, or a dry-run would wrongly
 		// report success on an uncovered draw.
-		collateralPledges:  make(map[collateralKey]CollateralPledge, len(l.collateralPledges)),
-		collateralReqs:     make(map[collateralReqKey]CollateralRequirement, len(l.collateralReqs)),
+		collateralPledges:    make(map[collateralKey]CollateralPledge, len(l.collateralPledges)),
+		collateralReqs:       make(map[collateralReqKey]CollateralRequirement, len(l.collateralReqs)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
 		closedPeriods:        make(map[string]bool, len(l.closedPeriods)),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch, len(l.balanceWatches)),
@@ -410,6 +432,7 @@ func (l *Ledger) dryRunLegsLocked(entries []JournalEntry, apply bool) []DryRunLe
 			Currency:            e.Currency,
 			Memo:                e.Memo,
 			Metadata:            e.Metadata,
+			ValueDate:           e.ValueDate,
 			DebitBalanceBefore:  balance(e.DebitAccount, e.Currency),
 			CreditBalanceBefore: balance(e.CreditAccount, e.Currency),
 		}

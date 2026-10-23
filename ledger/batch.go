@@ -146,6 +146,13 @@ func (l *Ledger) postBatchLocked(b Batch) (BatchReceipt, error) {
 		if e.CreatedAt.IsZero() {
 			e.CreatedAt = now
 		}
+		// Value dating (LG-181): like Post, a batch entry's explicit
+		// value date is validated against the ledger's value-date window
+		// and adjusted per the business-day convention before anything
+		// is recorded — fail-closed, the whole batch is rejected.
+		if err := l.resolveValueDateLocked(e); err != nil {
+			return BatchReceipt{}, err
+		}
 	}
 
 	// 2. Sanctions/denylist screening (see denylist.go): every new entry's

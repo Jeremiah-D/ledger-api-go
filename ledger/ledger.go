@@ -69,6 +69,27 @@ type JournalEntry struct {
 	// (see Transfer.PurposeCode); fee legs, FX conversion legs, and
 	// other internal/system postings carry none.
 	PurposeCode string `json:"purpose_code,omitempty"`
+	// ValueDate is the entry's 起息日 (value date, LG-181): the economic
+	// date the money moves — the date interest starts accruing — which
+	// may differ from the booking date (CreatedAt). Empty (zero) means
+	// "the same as the booking date", the historical behavior: nothing
+	// extra is journaled. An explicit value date is validated against
+	// the ledger's value-date window (see SetValueDateWindow) and
+	// adjusted per ValueDateConvention before anything is journaled —
+	// fail-closed. It is part of the journaled record: the audit-chain
+	// hash covers it (entries without a value date skip the section
+	// entirely, so their encoding stays byte-identical to the
+	// pre-value-date chain), snapshots carry it, and GET /entries
+	// echoes it. Accrual rows anchor their AccruedTotal windows on it
+	// (see EffectiveValueDate).
+	ValueDate time.Time `json:"value_date,omitempty"`
+	// ValueDateConvention is the business-day convention applied to
+	// ValueDate when it lands on a non-business day: "following" moves
+	// it to the next business day, "preceding" to the previous one,
+	// under the ledger's holiday calendar (see businessday.go, LG-95).
+	// Empty means "none" — the value date stands, weekend or not. A
+	// convention other than "none" requires an explicit ValueDate.
+	ValueDateConvention ValueDateConvention `json:"value_date_convention,omitempty"`
 	// ExternalRef is the caller's external business reference for the
 	// entry (a payment provider's transaction ID, an external order
 	// number, a reconciliation reference). Unlike the memo it is a
@@ -461,6 +482,16 @@ type Ledger struct {
 	// dailyLimits — calendar changes do not bump the journal version and
 	// survive disaster-recovery snapshots.
 	businessCalendar BusinessDayCalendar
+	// valueDateWindowAhead and valueDateWindowBack bound how far a
+	// posting's value date may stray from its booking date, ahead and
+	// back (see valuedate.go, LG-181): a value date past either edge is
+	// rejected fail-closed with ErrValueDateOutOfWindow. An edge of zero
+	// pins that side to the booking date exactly. Structural config,
+	// like businessCalendar: SetValueDateWindow changes are audited and
+	// never bump the journal version, and both edges round-trip through
+	// disaster-recovery snapshots.
+	valueDateWindowAhead time.Duration
+	valueDateWindowBack  time.Duration
 	// accrualBusinessDaysOnly restricts interest and fee accruals to
 	// business days when true (see SetAccrualBusinessDaysOnly): a
 	// non-business-day asof is rejected with ErrNotBusinessDay. Off by
@@ -1457,9 +1488,9 @@ func New(opts ...Option) *Ledger {
 		aliases:               make(map[string]AccountID),
 		accountAliases:        make(map[AccountID]string),
 		noOverdraft:           make(map[AccountID]bool),
-		kyc:                 make(map[AccountID]KycProfile),
-		invoices:            make(map[string]Invoice),
-		invoicesByAccount:   make(map[AccountID][]string),
+		kyc:                   make(map[AccountID]KycProfile),
+		invoices:              make(map[string]Invoice),
+		invoicesByAccount:     make(map[AccountID][]string),
 		deniedExact:           make(map[AccountID]DenylistEntry),
 		deniedPrefixes:        make(map[string]DenylistEntry),
 		apiKeys:               make(map[string]*APIKey),
@@ -1476,37 +1507,43 @@ func New(opts ...Option) *Ledger {
 		largeTxReportCurrency: DefaultCurrency,
 		largeTxReports:        make(map[largeTxReportKey]LargeTxReport),
 		businessCalendar:      DefaultBusinessDayCalendar(),
-		budgets:               make(map[budgetKey]int64),
-		monthlySpend:          make(map[monthlySpendKey]int64),
-		budgetPaceAlertRatio:  DefaultBudgetPaceAlertRatio,
-		budgetPaceAlerted:     make(map[monthlySpendKey]bool),
-		balanceWatches:        make(map[balanceWatchKey]BalanceWatch),
-		balanceWatchBreached:  make(map[balanceWatchKey]watchBreachState),
-		liquidityThresholds:   make(map[liquidityThresholdKey]LiquidityAlertThreshold),
-		liquidityBreached:     make(map[liquidityThresholdKey]bool),
-		settlementChannels:    make(map[AccountID]string),
-		settlementCutoffs:     make(map[string]SettlementCutoff),
-		settlementDeferrals:   make(map[string]*SettlementDeferral),
-		parents:               make(map[AccountID]AccountID),
-		transferKeys:          make(map[string][]string),
-		reviews:               make(map[string]*TransferReview),
-		reviewThresholds:      make(map[AccountID]int64),
-		reviewDelegations:     make(map[delegationKey]*ReviewDelegation),
-		multisigApprovers:     make(map[string]ed25519.PublicKey),
-		multisigPolicies:      make(map[string]MultisigPolicy),
-		multisigOps:           make(map[string]*MultisigOperation),
-		holds:                 make(map[string]Hold),
-		holdsByAccount:        make(map[AccountID][]string),
-		holdKeys:              make(map[string]string),
+		// LG-181: the value-date window defaults to 30 days ahead and
+		// 30 days back (see defaultValueDateWindowAhead/Back in
+		// valuedate.go); SetValueDateWindow / WithValueDateWindow
+		// adjust it.
+		valueDateWindowAhead: defaultValueDateWindowAhead,
+		valueDateWindowBack:  defaultValueDateWindowBack,
+		budgets:              make(map[budgetKey]int64),
+		monthlySpend:         make(map[monthlySpendKey]int64),
+		budgetPaceAlertRatio: DefaultBudgetPaceAlertRatio,
+		budgetPaceAlerted:    make(map[monthlySpendKey]bool),
+		balanceWatches:       make(map[balanceWatchKey]BalanceWatch),
+		balanceWatchBreached: make(map[balanceWatchKey]watchBreachState),
+		liquidityThresholds:  make(map[liquidityThresholdKey]LiquidityAlertThreshold),
+		liquidityBreached:    make(map[liquidityThresholdKey]bool),
+		settlementChannels:   make(map[AccountID]string),
+		settlementCutoffs:    make(map[string]SettlementCutoff),
+		settlementDeferrals:  make(map[string]*SettlementDeferral),
+		parents:              make(map[AccountID]AccountID),
+		transferKeys:         make(map[string][]string),
+		reviews:              make(map[string]*TransferReview),
+		reviewThresholds:     make(map[AccountID]int64),
+		reviewDelegations:    make(map[delegationKey]*ReviewDelegation),
+		multisigApprovers:    make(map[string]ed25519.PublicKey),
+		multisigPolicies:     make(map[string]MultisigPolicy),
+		multisigOps:          make(map[string]*MultisigOperation),
+		holds:                make(map[string]Hold),
+		holdsByAccount:       make(map[AccountID][]string),
+		holdKeys:             make(map[string]string),
 		// LG-171: the RfP registry starts empty; records are issued by
 		// CreateRfP.
-		rfps: make(map[string]RfP),
-		captureKeys:           make(map[string]CaptureReceipt),
-		partialCaptureKeys:    make(map[string]PartialCaptureReceipt),
-		termDeposits:          make(map[string]TermDeposit),
-		termDepositKeys:       make(map[string]string),
-		payouts:               make(map[string]PayoutInstruction),
-		payoutKeys:            make(map[string]string),
+		rfps:               make(map[string]RfP),
+		captureKeys:        make(map[string]CaptureReceipt),
+		partialCaptureKeys: make(map[string]PartialCaptureReceipt),
+		termDeposits:       make(map[string]TermDeposit),
+		termDepositKeys:    make(map[string]string),
+		payouts:            make(map[string]PayoutInstruction),
+		payoutKeys:         make(map[string]string),
 		// LG-165: the gpi tracking registry starts empty; tracks open
 		// automatically as payouts are drafted.
 		gpiTracks:     make(map[string]*GPITrack),
@@ -1518,47 +1555,47 @@ func New(opts ...Option) *Ledger {
 		cancellationSeqs:    make(map[string]int),
 		// LG-175: the nostro/vostro registry starts empty; accounts
 		// are registered and expectations recorded by operator calls.
-		nostroAccounts:     make(map[AccountID]*NostroAccount),
-		nostroExpectations: make(map[AccountID]map[string]StatementLine),
-		achReturnCounts:       make(map[string]uint64),
-		fedNowRejections:       make(map[string]uint64),
-		camt054Imports:          make(map[string]*CAMT054ImportReport),
-		camt054Matches:          make(map[string]camt054MatchRecord),
-		ftpCurves:             make(map[string]*FtpCurve),
-		creditLines:           make(map[creditLineKey]CreditLine),
-		collateralPledges:     make(map[collateralKey]CollateralPledge),
-		collateralReqs:        make(map[collateralReqKey]CollateralRequirement),
-		eclStageConfig:        DefaultECLStageConfig(),
-		eclExposures:          make(map[eclExposureKey]eclExposureRow),
-		sweepKeys:             make(map[string]sweepRecord),
-		autoSweepRules:        make(map[string]*autoSweepRuleState),
-		sweepFXKeys:           make(map[string]sweepFXRecord),
-		batchKeys:             make(map[string]batchRecord),
-		batchTransferKeys:   make(map[string]batchTransferRecord),
-		allocRules:            make(map[string]AllocationRule),
-		allocKeys:             make(map[string]allocRecord),
-		nettingKeys:           make(map[string]nettingRecord),
-		installments:          make(map[string]InstallmentPlan),
-		installmentKeys:       make(map[string]installmentKeyRecord),
-		installmentLateFees:   make(map[string]InstallmentLateFeeRule),
-		clearingBatches:       make(map[string]ClearingBatch),
-		clearingKeys:          make(map[string]clearingKeyRecord),
-		merges:                make(map[string]mergeRecord),
-		mergeKeys:             make(map[string]string),
-		splits:                make(map[string]splitRecord),
-		splitKeys:             make(map[string]string),
-		schedules:             make(map[string]*TransferSchedule),
-		scheduleKeys:          make(map[string]string),
-		scheduleRuns:          make(map[string][]ScheduleRun),
-		scheduleFiring:        make(map[string]bool),
-		reportSchedules:       make(map[string]*ReportSchedule),
-		reportScheduleKeys:    make(map[string]string),
-		reportScheduleRuns:    make(map[string][]ReportRun),
-		reportScheduleFiring:  make(map[string]bool),
-		fxRates:               make(map[fxPair]ExchangeRate),
-		fxRateSnapshots:       make(map[uint64]FXRateTableSnapshot),
-		forwards:              make(map[string]*FXForward),
-		rateOverrides:         make(map[fxPair]*RateOverride),
+		nostroAccounts:       make(map[AccountID]*NostroAccount),
+		nostroExpectations:   make(map[AccountID]map[string]StatementLine),
+		achReturnCounts:      make(map[string]uint64),
+		fedNowRejections:     make(map[string]uint64),
+		camt054Imports:       make(map[string]*CAMT054ImportReport),
+		camt054Matches:       make(map[string]camt054MatchRecord),
+		ftpCurves:            make(map[string]*FtpCurve),
+		creditLines:          make(map[creditLineKey]CreditLine),
+		collateralPledges:    make(map[collateralKey]CollateralPledge),
+		collateralReqs:       make(map[collateralReqKey]CollateralRequirement),
+		eclStageConfig:       DefaultECLStageConfig(),
+		eclExposures:         make(map[eclExposureKey]eclExposureRow),
+		sweepKeys:            make(map[string]sweepRecord),
+		autoSweepRules:       make(map[string]*autoSweepRuleState),
+		sweepFXKeys:          make(map[string]sweepFXRecord),
+		batchKeys:            make(map[string]batchRecord),
+		batchTransferKeys:    make(map[string]batchTransferRecord),
+		allocRules:           make(map[string]AllocationRule),
+		allocKeys:            make(map[string]allocRecord),
+		nettingKeys:          make(map[string]nettingRecord),
+		installments:         make(map[string]InstallmentPlan),
+		installmentKeys:      make(map[string]installmentKeyRecord),
+		installmentLateFees:  make(map[string]InstallmentLateFeeRule),
+		clearingBatches:      make(map[string]ClearingBatch),
+		clearingKeys:         make(map[string]clearingKeyRecord),
+		merges:               make(map[string]mergeRecord),
+		mergeKeys:            make(map[string]string),
+		splits:               make(map[string]splitRecord),
+		splitKeys:            make(map[string]string),
+		schedules:            make(map[string]*TransferSchedule),
+		scheduleKeys:         make(map[string]string),
+		scheduleRuns:         make(map[string][]ScheduleRun),
+		scheduleFiring:       make(map[string]bool),
+		reportSchedules:      make(map[string]*ReportSchedule),
+		reportScheduleKeys:   make(map[string]string),
+		reportScheduleRuns:   make(map[string][]ReportRun),
+		reportScheduleFiring: make(map[string]bool),
+		fxRates:              make(map[fxPair]ExchangeRate),
+		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
+		forwards:             make(map[string]*FXForward),
+		rateOverrides:        make(map[fxPair]*RateOverride),
 		// LG-69 defaults: one-hour override lifetime, 10% deviation
 		// cap. Both are construction-time config (see
 		// WithRateOverrideTTL / WithRateOverrideMaxDeviationBps).
@@ -1675,6 +1712,16 @@ func validateJournalEntry(e *JournalEntry) error {
 	// in the admitted ISO 20022 subset (see checkPurposeCode), or the
 	// posting is rejected fail-closed before anything is recorded.
 	if err := checkPurposeCode(e.PurposeCode); err != nil {
+		return err
+	}
+	// The value date is field validation like the purpose code: the
+	// convention must be a known value, and a convention other than
+	// "none" requires an explicit value date (see checkValueDateFields
+	// in valuedate.go). The window and the business-day adjustment are
+	// resolved at Post time, when the booking date is final (see
+	// resolveValueDateLocked) — or per entry in PostBatch, which fills
+	// CreatedAt before resolving.
+	if err := checkValueDateFields(e); err != nil {
 		return err
 	}
 	return nil
@@ -1929,6 +1976,16 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 	// must be final when the limit is evaluated.
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now()
+	}
+
+	// Value dating (LG-181): the value date anchors interest accruals
+	// (see valuedate.go). It defaults to the booking date just filled
+	// above, is validated against the ledger's value-date window, and is
+	// adjusted per the business-day convention before anything is
+	// journaled — fail-closed: a window violation or an unknown
+	// convention rejects the posting and records nothing.
+	if err := l.resolveValueDateLocked(&e); err != nil {
+		return JournalEntry{}, false, err
 	}
 
 	// Daily outflow limits are the last of the account risk controls, after

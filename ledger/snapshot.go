@@ -188,19 +188,19 @@ type snapshotSplitLine struct {
 // Idempotency-key namespaces in a snapshot. One record per key, so every
 // namespace stays independently addressable on import.
 const (
-	snapshotNSEntry       = "entry"           // key -> JournalEntry (byKey)
-	snapshotNSTransfer    = "transfer"        // key -> []entry IDs (transferKeys)
-	snapshotNSHold        = "hold"            // key -> hold ID (holdKeys)
-	snapshotNSCapture     = "capture"         // key -> CaptureReceipt (captureKeys)
-	snapshotNSPartialCap  = "partial_capture" // key -> PartialCaptureReceipt (partialCaptureKeys)
-	snapshotNSSweep       = "sweep"           // key -> snapshotSweep (sweepKeys)
-	snapshotNSSweepFX     = "sweep_fx"        // key -> snapshotSweepFX (sweepFXKeys)
-	snapshotNSMergeKey    = "merge_key"       // key -> merge ID (mergeKeys)
-	snapshotNSSplitKey    = "split_key"       // key -> split ID (splitKeys)
-	snapshotNSBatch       = "batch"           // key -> snapshotBatch (batchKeys)
-	snapshotNSTransferBatch = "transfer_batch" // key -> snapshotTransferBatch (batchTransferKeys)
-	snapshotNSAlloc       = "allocation"      // key -> snapshotAllocation (allocKeys)
-	snapshotNSTermDeposit = "term_deposit"    // key -> deposit ID (termDepositKeys)
+	snapshotNSEntry         = "entry"           // key -> JournalEntry (byKey)
+	snapshotNSTransfer      = "transfer"        // key -> []entry IDs (transferKeys)
+	snapshotNSHold          = "hold"            // key -> hold ID (holdKeys)
+	snapshotNSCapture       = "capture"         // key -> CaptureReceipt (captureKeys)
+	snapshotNSPartialCap    = "partial_capture" // key -> PartialCaptureReceipt (partialCaptureKeys)
+	snapshotNSSweep         = "sweep"           // key -> snapshotSweep (sweepKeys)
+	snapshotNSSweepFX       = "sweep_fx"        // key -> snapshotSweepFX (sweepFXKeys)
+	snapshotNSMergeKey      = "merge_key"       // key -> merge ID (mergeKeys)
+	snapshotNSSplitKey      = "split_key"       // key -> split ID (splitKeys)
+	snapshotNSBatch         = "batch"           // key -> snapshotBatch (batchKeys)
+	snapshotNSTransferBatch = "transfer_batch"  // key -> snapshotTransferBatch (batchTransferKeys)
+	snapshotNSAlloc         = "allocation"      // key -> snapshotAllocation (allocKeys)
+	snapshotNSTermDeposit   = "term_deposit"    // key -> deposit ID (termDepositKeys)
 )
 
 // snapshotIdempotencyLine carries one idempotency-key registration. Only
@@ -220,9 +220,9 @@ type snapshotIdempotencyLine struct {
 	// SweepFX carries the cross-currency sweep registration row for the
 	// "sweep_fx" namespace (see sweep_fx.go).
 	SweepFX *snapshotSweepFX `json:"sweep_fx,omitempty"`
-	MergeID        string                 `json:"merge_id,omitempty"`
-	SplitID        string                 `json:"split_id,omitempty"`
-	Batch          *snapshotBatch         `json:"batch,omitempty"`
+	MergeID string           `json:"merge_id,omitempty"`
+	SplitID string           `json:"split_id,omitempty"`
+	Batch   *snapshotBatch   `json:"batch,omitempty"`
 	// TransferBatch carries the transfer-batch receipt row for the
 	// "transfer_batch" namespace (see batch_transfer.go).
 	TransferBatch *snapshotTransferBatch `json:"transfer_batch,omitempty"`
@@ -322,6 +322,13 @@ type snapshotConfigLine struct {
 	// (see SetAccrualBusinessDaysOnly); absent in snapshots written
 	// before business-day support existed (defaults to false).
 	AccrualBusinessDaysOnly bool `json:"accrual_business_days_only,omitempty"`
+	// ValueDateWindowAhead and ValueDateWindowBack carry the value-date
+	// window edges as duration strings (see SetValueDateWindow,
+	// valuedate.go, LG-181); absent in snapshots written before
+	// value-date support existed, which import as the default 30-day
+	// edges.
+	ValueDateWindowAhead string `json:"value_date_window_ahead,omitempty"`
+	ValueDateWindowBack  string `json:"value_date_window_back,omitempty"`
 	// Budgets carries the monthly spend budgets (see SetAccountBudget);
 	// absent in snapshots written before budgets existed. Like the daily
 	// limits, the accumulated per-month spend counters are deliberately
@@ -1246,6 +1253,8 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		LargeTxReportCurrency:    l.largeTxReportCurrency,
 		BusinessDayCalendar:      l.businessCalendarSnapshotLocked(),
 		AccrualBusinessDaysOnly:  l.accrualBusinessDaysOnly,
+		ValueDateWindowAhead:     l.valueDateWindowAhead.String(),
+		ValueDateWindowBack:      l.valueDateWindowBack.String(),
 		Budgets:                  l.budgetsLocked(),
 		Denylist:                 l.denylistLocked(),
 		FXRates:                  l.fxRatesLocked(),
@@ -1290,27 +1299,27 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		// LG-125: the mandate registry and its debit index round-trip,
 		// so a restored ledger keeps the exact standing pull
 		// authorizations the original ran on.
-		Mandates:              l.mandatesSnapshotLocked(),
-		MandateDebits:         l.mandateDebitsSnapshotLocked(),
-		ClosedAccounts:        l.closedCopyLocked(),
-		Suspended:             l.suspendedCopyLocked(),
-		OFXImportRegistry:     l.ofxImportsLocked(),
-		CAMT053ImportRegistry: l.camt053ImportsLocked(),
-		TdInterestExpense:     l.tdInterestExpense,
-		PayoutClearingAccount: l.payoutClearingAccount,
+		Mandates:                l.mandatesSnapshotLocked(),
+		MandateDebits:           l.mandateDebitsSnapshotLocked(),
+		ClosedAccounts:          l.closedCopyLocked(),
+		Suspended:               l.suspendedCopyLocked(),
+		OFXImportRegistry:       l.ofxImportsLocked(),
+		CAMT053ImportRegistry:   l.camt053ImportsLocked(),
+		TdInterestExpense:       l.tdInterestExpense,
+		PayoutClearingAccount:   l.payoutClearingAccount,
 		FedNowSettlementAccount: l.fedNowSettlementAccount,
-		CreditInterestIncome:  l.creditInterestIncome,
-		CreditLines:           l.creditLinesLocked(),
-		CollateralPledges:     l.collateralPledgesLocked(),
-		CollateralRequirements: l.collateralReqsLocked(),
-		ECLExpenseAccount:     l.eclExpenseAccount,
-		ECLAllowanceAccount:   l.eclAllowanceAccount,
-		ECLExposures:          l.eclExposureRecordsLocked(),
-		PainTransfers:         l.painTransfersLocked(),
-		AccountIBANs:          l.accountIBANsLocked(),
-		PainInstructions:      l.painInstructionsLocked(),
-		VirtualAccounts:       l.virtualAccountsLocked(),
-		VirtualAccountVersion: l.virtualAccountVersion,
+		CreditInterestIncome:    l.creditInterestIncome,
+		CreditLines:             l.creditLinesLocked(),
+		CollateralPledges:       l.collateralPledgesLocked(),
+		CollateralRequirements:  l.collateralReqsLocked(),
+		ECLExpenseAccount:       l.eclExpenseAccount,
+		ECLAllowanceAccount:     l.eclAllowanceAccount,
+		ECLExposures:            l.eclExposureRecordsLocked(),
+		PainTransfers:           l.painTransfersLocked(),
+		AccountIBANs:            l.accountIBANsLocked(),
+		PainInstructions:        l.painInstructionsLocked(),
+		VirtualAccounts:         l.virtualAccountsLocked(),
+		VirtualAccountVersion:   l.virtualAccountVersion,
 		// FTPCurves carries the per-currency FTP rate curves with
 		// their versions (see SetFtpCurve); FTPAccounts carries the
 		// internal counterparties (see WithFtpAccounts). Absent in
@@ -3104,6 +3113,26 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		l.businessCalendar = *cfg.BusinessDayCalendar
 		l.accrualBusinessDaysOnly = cfg.AccrualBusinessDaysOnly
+	}
+	// The value-date window restores verbatim like the calendar: a
+	// restore keeps the exact window the original ran on. Absent in
+	// snapshots written before value-date support existed, which keep
+	// the default 30-day edges.
+	if cfg.ValueDateWindowAhead != "" || cfg.ValueDateWindowBack != "" {
+		ahead, back := defaultValueDateWindowAhead, defaultValueDateWindowBack
+		if cfg.ValueDateWindowAhead != "" {
+			var err error
+			if ahead, err = time.ParseDuration(cfg.ValueDateWindowAhead); err != nil || ahead < 0 {
+				return bad("invalid value_date_window_ahead %q", cfg.ValueDateWindowAhead)
+			}
+		}
+		if cfg.ValueDateWindowBack != "" {
+			var err error
+			if back, err = time.ParseDuration(cfg.ValueDateWindowBack); err != nil || back < 0 {
+				return bad("invalid value_date_window_back %q", cfg.ValueDateWindowBack)
+			}
+		}
+		l.valueDateWindowAhead, l.valueDateWindowBack = ahead, back
 	}
 	// Monthly spend budgets restore like the daily outflow limits: the
 	// accumulated per-month spend counters are deliberately not
