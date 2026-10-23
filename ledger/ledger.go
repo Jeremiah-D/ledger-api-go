@@ -1411,6 +1411,13 @@ type Ledger struct {
 	// (LG-84): the configured TSA client/trust anchor and the loaded
 	// timestamp anchors. See tsa.go for the lock-order contract.
 	tsa tsaAnchorState
+	// sarReports holds SAR drafts and filings (see sar.go, LG-188),
+	// keyed by report ID ("SAR-NNNN"); sarSeq is the next report
+	// sequence. sarCfg is the detector tuning. Drafting books nothing
+	// and bumps no version — operational records, not books.
+	sarReports map[string]*SARReport
+	sarSeq     uint64
+	sarCfg     sarConfig
 }
 
 // Option configures a Ledger.
@@ -1558,6 +1565,8 @@ func New(opts ...Option) *Ledger {
 		reviewDelegations:    make(map[delegationKey]*ReviewDelegation),
 		multisigApprovers:    make(map[string]ed25519.PublicKey),
 		multisigPolicies:     make(map[string]MultisigPolicy),
+		sarReports:            make(map[string]*SARReport),
+		sarCfg:                defaultSARConfig(),
 		multisigOps:          make(map[string]*MultisigOperation),
 		holds:                make(map[string]Hold),
 		holdsByAccount:       make(map[AccountID][]string),

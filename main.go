@@ -8900,6 +8900,142 @@ func (s *server) handleLargeTxReports(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// sarDraftRequest is the body of POST /compliance/sar/draft. Since/Until
+// are RFC3339 timestamps bounding the drafting window (max 31 days).
+type sarDraftRequest struct {
+	Account string `json:"account"`
+	Since   string `json:"since"`
+	Until   string `json:"until"`
+}
+
+// decodeSARBody bounds the body and decodes it strictly, like every
+// other POST endpoint: unknown fields fail fast.
+func (s *server) decodeSARBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	switch err := dec.Decode(dst); {
+	case err == io.EOF:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "empty request body"})
+		return false
+	case err != nil:
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return false
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return false
+	default:
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+			return false
+		}
+	}
+	return true
+}
+
+// handleDraftSAR implements POST /compliance/sar/draft, the
+// operator-facing suspicious-activity report (SAR/STR) draft generator
+// (see ledger.DraftSAR, LG-188). It assembles a GoAML-compatible draft
+// from the ledger's behavioral risk signals — velocity usage,
+// denylist matches, large-tx threshold crossings — plus the
+// structuring and rapid-movement journal detectors. Drafting is
+// read-only: it books nothing and bumps no version.
+//
+//	curl -s -X POST localhost:8080/compliance/sar/draft \
+//	  -d '{"account":"acct-1","since":"2026-10-01T00:00:00Z","until":"2026-10-08T00:00:00Z"}'
+func (s *server) handleDraftSAR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+
+	var req sarDraftRequest
+	if !s.decodeSARBody(w, r, &req) {
+		return
+	}
+	since, err := time.Parse(time.RFC3339, req.Since)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since: " + err.Error()})
+		return
+	}
+	until, err := time.Parse(time.RFC3339, req.Until)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid until: " + err.Error()})
+		return
+	}
+	rep, err := s.ledgerFor(r).DraftSAR(ledger.AccountID(req.Account), since, until)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrNoSuspiciousActivity):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	s.metrics.SARDraftsTotal.Add(1)
+	writeJSON(w, http.StatusCreated, rep)
+}
+
+// handleFileSAR implements POST /compliance/sar/{id}/file: it moves a
+// draft to filed. Filed reports are immutable (409 on a second filing)
+// and the filing is sealed into the audit chain as a sar_filed event
+// carrying the report's content hash.
+func (s *server) handleFileSAR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	defer r.Body.Close()
+	id := r.PathValue("id")
+	rep, err := s.ledgerFor(r).FileSAR(id)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrSARNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrSARAlreadyFiled):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	s.metrics.SARFiledTotal.Add(1)
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// handleGetSAR implements GET /compliance/sar/{id}: fetch one report,
+// draft or filed.
+func (s *server) handleGetSAR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	rep, ok := s.ledgerFor(r).GetSAR(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrSARNotFound.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// handleListSARs implements GET /compliance/sar: list all reports,
+// oldest first.
+func (s *server) handleListSARs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	reports := s.ledgerFor(r).ListSARs()
+	if reports == nil {
+		reports = []*ledger.SARReport{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reports": reports})
+}
+
 // parseSettlementExpected parses one ?expected= query value of
 // GET /settlement: "<account>:<currency>:<cents>". The account may not be
 // empty; cents is a signed integer (negative expectations are legal for
@@ -9491,6 +9627,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
 	mux.HandleFunc("POST /compliance/large-tx-reports", s.handleLargeTxReports)
+	mux.HandleFunc("POST /compliance/sar/draft", s.handleDraftSAR)
+	mux.HandleFunc("POST /compliance/sar/{id}/file", s.handleFileSAR)
+	mux.HandleFunc("GET /compliance/sar/{id}", s.handleGetSAR)
+	mux.HandleFunc("GET /compliance/sar", s.handleListSARs)
 	mux.HandleFunc("GET /settlement", s.handleSettlement)
 	mux.HandleFunc("GET /cash-flow", s.handleCashFlow)
 	mux.HandleFunc("GET /tax-report", s.handleTaxReport)
@@ -10834,6 +10974,14 @@ func main() {
 	if raw := os.Getenv("LEDGER_LARGE_TX_REPORT_CURRENCY"); raw != "" {
 		opts = append(opts, ledger.WithLargeTxReportCurrency(raw))
 		log.Printf("ledger-api-go: large-transaction report currency = %s", raw)
+	}
+
+	// LEDGER_SAR_REPORTING_ENTITY sets the reporting entity stamped on
+	// SAR drafts (the goAML filing institution, see ledger/sar.go).
+	// Unset omits the field.
+	if raw := os.Getenv("LEDGER_SAR_REPORTING_ENTITY"); raw != "" {
+		opts = append(opts, ledger.WithSARReportingEntity(raw))
+		log.Printf("ledger-api-go: SAR reporting entity = %s", raw)
 	}
 
 	// LEDGER_BUSINESS_DAY_WEEKEND and LEDGER_BUSINESS_DAY_HOLIDAYS
