@@ -4243,6 +4243,32 @@ curl -s 'localhost:8080/exports/pain008?mandate=m-sub&creditor_scheme_id=DE98ZZZ
 
 Go: `ledger.ExportPain008`。
 
+### `pain.009` — ISO 20022 pain.009 直接扣款授权发起导出
+
+已登记的 mandate 可以用 ISO 20022 `pain.009.001.02`
+（`MndtInitnReq`）发起：债权人把该 mandate 发给债务人银行，
+使之成为银行认可的直接扣款授权——授权发起本身不移动资金、
+不下达任何一笔扣款。
+
+语义：
+- 与 pain.008（LG-166）正交：pain.009 是**授权发起**
+  （`MndtId` + `CdtrSchmeId` + `Dbtr`），pain.008 是**执行扣款**
+  （`DrctDbtTxInf`、`SeqTp`、扣款日）；与 mandate_preauth
+  （LG-192）正交：预授权是账本内部额度占用，从不上报文。
+- `CdtrSchmeId` 必填（SEPA 强制，账本不存 creditor
+  identifier，无默认值可编——缺失 fail-closed）；debtor/
+  creditor 均需已登记 IBAN，debtor BIC 已登记则随 `DbtrAgt`。
+- `FrDt` 为 mandate `ValidFrom` 日期（零值省略——自始有效），
+  `ToDt` 为 `ValidUntil` 日期（创建时强制非零，故恒有值）；
+  授权发起报文不带金额——每笔上限留在账本，不上报文。
+- `MsgId` 确定性：`pain009-<mandate ID>-<scheme ID>`。
+- fail-closed：未知/暂停/取消/过期的 mandate 拒绝导出；缺
+  creditor scheme、缺 debtor/creditor IBAN 拒绝整个导出。
+- 只读：读锁、无 version bump、无链追加、无幂等键消耗；照例记
+  一条 `pain009_exported` 审计事件。
+
+Go: `ledger.ExportPain009`。
+
 ### `GET /exports/pacs002` — ISO 20022 pacs.002 银行间状态报告导出
 
 gpi 跟踪的 FI-to-FI 视角：`pacs.002.001.03`（`FIToFIPaymentStatusReport`）
