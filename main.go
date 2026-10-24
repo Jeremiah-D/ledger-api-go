@@ -5928,6 +5928,56 @@ func (s *server) handlePacs009Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePacs003Export implements GET /exports/pacs003 (LG-201): an
+// ISO 20022 pacs.003.001.08 FIToFICstmrDrctDbt customer direct debit
+// for one posted transfer (see ledger.ExportPacs003). Query
+// parameters: transfer (required, the transfer ID), dbtr_agt
+// (required, the debtor agent reference), cdtr_agt (required, the
+// creditor agent reference), mndt_id (required, the mandate ID),
+// mndt_dt (optional, the mandate signature date, YYYY-MM-DD),
+// dbtr_nm / cdtr_nm (optional customer names), cdtr_schme_id
+// (optional creditor scheme identifier). The export is read-only: no
+// version bump, no audit event. Error mapping: a missing transfer,
+// agent, or mandate parameter, or a malformed mandate date, is a 400;
+// an unknown transfer ID is a 404; a cross-currency transfer is a
+// 422.
+func (s *server) handlePacs003Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs003Exports.Add(1)
+	id := r.URL.Query().Get("transfer")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "transfer is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPacs003(id, ledger.Pacs003Options{
+		DebtorAgent:          r.URL.Query().Get("dbtr_agt"),
+		CreditorAgent:        r.URL.Query().Get("cdtr_agt"),
+		MandateID:            r.URL.Query().Get("mndt_id"),
+		MandateSignatureDate: r.URL.Query().Get("mndt_dt"),
+		DebtorName:           r.URL.Query().Get("dbtr_nm"),
+		CreditorName:         r.URL.Query().Get("cdtr_nm"),
+		CreditorSchemeID:     r.URL.Query().Get("cdtr_schme_id"),
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrTransferNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrPacs003FXTransfer):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrPacs003MissingDebtorAgent),
+			errors.Is(err, ledger.ErrPacs003MissingCreditorAgent),
+			errors.Is(err, ledger.ErrPacs003MissingMandate),
+			errors.Is(err, ledger.ErrPacs003InvalidMandateDate):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handlePacs008Export implements GET /exports/pacs008 (LG-176): an
 // ISO 20022 pacs.008.001.08 FIToFICstmrCdtTrf customer credit transfer
 // for one payout (see ledger.ExportPacs008). Query parameters:
@@ -10283,6 +10333,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
 	mux.HandleFunc("GET /exports/pacs010", s.handlePacs010Export)
+	mux.HandleFunc("GET /exports/pacs003", s.handlePacs003Export)
 	mux.HandleFunc("GET /exports/pacs008", s.handlePacs008Export)
 	mux.HandleFunc("POST /repairs/{id}/fix", s.handleRepairFix)
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)

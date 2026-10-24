@@ -4661,6 +4661,39 @@ Go: `ledger.ExportPacs010(mandateID, ledger.Pacs010ExportOptions{SettlementMetho
 导出与对账均为只读（不 bump 版本、不写分录），但各 emits 一条审计事件
 （`pacs010_exported` / `pacs010_reconciled`）。
 
+### `GET /exports/pacs003` — ISO 20022 pacs.003 银行间客户直接扣款导出
+
+pacs.010（LG-190）是机构间的直接扣款，本节是它的客户对应物：已过账
+的 transfer 渲染为 ISO 20022 `pacs.003.001.08`
+（`FIToFICstmrDrctDbt`）——债权人银行发往债务人银行的客户直接扣款指
+令，凭 mandate 从债务人账户"拉"款。它与 pacs.008（LG-176，客户贷记
+"推"）方向相反，与 pacs.010（机构间"拉"）的区别在于被扣方是客户而
+非机构。
+
+报文：`GrpHdr`（`MsgId` 确定性 `<transfer>/drctdbt`，`NbOfTxs`，
+`InitgPty` = 债权人银行）+ 一个 `DrctDbtTxInf`：`PmtId`
+（`InstrId`/`EndToEndId`/`TxId` 均为 transfer ID，跨导出稳定）、
+`InstdAmt`（transfer 金额与币种）、`DrctDbtTx/MndtRltdInf`
+（`MndtId` 必填、`DtOfSgntr` 可选）、`CdtrSchmeId`（可选）、
+`CdtrAgt`/`Cdtr`/`CdtrAcct`（transfer 收款方）与
+`DbtrAgt`/`Dbtr`/`DbtrAcct`（transfer 付款方）。代理行标识复用
+pacs009 惯例：`FinInstnId/Othr/Id` = 调用方提供的代理行 reference，
+绝不编造 BIC；客户方以账户 ID 专有标识（`Id/PrvtId/Othr/Id`），
+`Nm` 仅在调用方提供时出现。
+
+Fail-closed：未知 transfer（404）、跨币种 transfer（422）、缺债务人
+代理行 / 缺债权人代理行 / 缺 mandate ID / mandate 签名日期格式错误
+（均为 400）——账本没有代理行注册表与 mandate 注册表可供推导，宁可
+拒绝也不编造指令。导出只读（不 bump 版本、不写分录），
+`ledger_pacs003_exports_total` 计数。
+
+```bash
+curl -s 'localhost:8080/exports/pacs003?transfer=tx-2026-1042&dbtr_agt=BANKDEBB&cdtr_agt=BANKCRED&mndt_id=MNDT-2026-001&mndt_dt=2026-01-15' -o drctdbt.xml
+# 200 pacs.003.001.08: <FIToFICstmrDrctDbt>/.../<MsgId>tx-2026-1042/drctdbt</MsgId>/.../<MndtId>MNDT-2026-001</MndtId>
+```
+
+Go: `ledger.ExportPacs003(transferID, ledger.Pacs003Options{DebtorAgent, CreditorAgent, MandateID, MandateSignatureDate, DebtorName, CreditorName, CreditorSchemeID})`。
+
 ### `GET /exports/pacs008` — ISO 20022 pacs.008 即时客户贷记出站报文导出
 
 入站 pacs.008（LG-163）是银行转发的客户贷记通知，本节是它的出站
