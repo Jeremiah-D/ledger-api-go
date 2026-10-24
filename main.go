@@ -5637,6 +5637,43 @@ func (s *server) handlePacs002Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePacs028Export implements GET /exports/pacs028 (LG-195): an
+// ISO 20022 pacs.028.001.03 FI-to-FI payment status request for one
+// gpi-tracked payment (see ledger.ExportPacs028). Query parameters:
+// uetr (required), requester (required, the requesting party's
+// identification). The request is the pacs.002 report's counterpart:
+// it asks the chain about a payment rather than stating its status,
+// and is read-only: no version bump, no audit event. Error mapping:
+// a missing uetr or requester is a 400; an unknown UETR is a 404.
+func (s *server) handlePacs028Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs028Exports.Add(1)
+	uetr := r.URL.Query().Get("uetr")
+	requester := r.URL.Query().Get("requester")
+	if uetr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "uetr is required"})
+		return
+	}
+	if requester == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "requester is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPacs028(uetr, requester)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrPacs028UnknownUETR):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrPacs028RequesterRequired):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handlePacs004Export implements GET /exports/pacs004 (LG-169): an
 // ISO 20022 pacs.004.001.02 PaymentReturn for one settled payout (see
 // ledger.ExportPacs004). Query parameters: uetr (required), reason
@@ -10239,6 +10276,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
 	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
+	mux.HandleFunc("GET /exports/pacs028", s.handlePacs028Export)
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("POST /exports/mt103", s.handleMT103Export)
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)

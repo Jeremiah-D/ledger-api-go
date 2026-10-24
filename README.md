@@ -4226,6 +4226,33 @@ curl -s 'localhost:8080/exports/pacs002?uetr=9f2c8e1a-…' -o status.xml
 
 Go: `ledger.ExportPacs002`。
 
+### `GET /exports/pacs028` — ISO 20022 pacs.028 银行间状态请求导出
+
+pacs.002 的反向：`pacs.028.001.03`（`FIToFIPaymentStatusRequest`）是
+向代理行链路**问**一笔付款状态的请求，而不是陈述状态。
+`ExportPacs028` 把一条 gpi 跟踪记录（LG-165）渲染成 pacs.028 报文：
+
+语义：
+- `GrpHdr`：`MsgId` 确定性 `<uetr>/sts-req`，`CreDtTm` 为被跟踪付款的
+  创建时间戳，`Reqstr/Id` 携带请求方标识原文。
+- `OrgnlGrpInfAndSts`：原指令建模为 `pacs.008.001.02`（pacs.002 同惯例），
+  `OrgnlUETR` 携带原始 UETR——请求只针对一笔付款，UETR 在组级命名该
+  付款；`Reqstr/Id` 重复请求方标识以便回盘路由。
+- 确定性 + 只读：全部字段来自跟踪记录快照与请求方参数，同输入导出
+  字节相同（重试不产生第二个可区分请求）；无 version bump、无记账、
+  无审计链追加。
+- 闭环拒绝：未知 UETR 不伪造请求（`404`，`ErrPacs028UnknownUETR`）；
+  空请求方拒绝（`400`），不默认补一个身份。
+- `400` 缺 `uetr` 或 `requester`；`404` 未知 UETR。计数器
+  `ledger_pacs028_exports_total`。
+
+```bash
+curl -s 'localhost:8080/exports/pacs028?uetr=9f2c8e1a-…&requester=ledger-ops' -o status-request.xml
+# 200 pacs.028.001.03: <FIToFIPmtStsReq>/.../<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>/.../<Id>ledger-ops</Id>
+```
+
+Go: `ledger.ExportPacs028`。
+
 ### camt.056 支付撤销 + camt.029 决议（`POST /cancellations`）
 
 已发出但未结算的 payout 可用 ISO 20022 `camt.056.001.02`
@@ -7005,6 +7032,9 @@ curl -s localhost:8080/metrics
   exports.
 - `ledger_pacs002_exports_total` — `GET /exports/pacs002` ISO 20022
   pacs.002 FI-to-FI payment status report exports served, including
+  rejected exports.
+- `ledger_pacs028_exports_total` — `GET /exports/pacs028` ISO 20022
+  pacs.028 FI-to-FI payment status request exports served, including
   rejected exports.
 - `ledger_camt056_exports_total` — `GET /exports/camt056` ISO 20022
   camt.056 FI-to-FI cancellation request exports served, including
