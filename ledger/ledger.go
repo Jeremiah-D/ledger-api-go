@@ -642,6 +642,19 @@ type Ledger struct {
 	// means tiered accrual is off and AccrueInterestTiered is rejected.
 	// Structural config — it survives snapshots.
 	interestTiers []InterestTier
+	// rebateTiers is the opt-in maker-rebate ladder (see rebate_tiers.go,
+	// LG-194): monthly maker volumes earn a rebate rate per band. A nil
+	// table means rebate quoting is off. rebateVolumes tracks counted
+	// maker volume per (month, account), rebateWash the wash fills
+	// excluded from it, and rebateSettled/rebateSettlements close a
+	// month with its stored accrual schedule. Process-local structural
+	// state, like the payee-verification policy: it never bumps the
+	// journal version and is not part of snapshots.
+	rebateTiers       []RebateTier
+	rebateVolumes     map[string]map[AccountID]int64
+	rebateWash        map[string]map[AccountID]rebateWashStat
+	rebateSettled     map[string]bool
+	rebateSettlements map[string][]RebateQuote
 	// maxTransferChunkCents is the opt-in single-transfer cap for
 	// PostTransferSplit (see WithMaxTransferChunkCents in
 	// transfer_split.go): a transfer whose amount exceeds it is split

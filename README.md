@@ -2423,6 +2423,33 @@ curl -s -X POST localhost:8080/transfers \
 # 403 {"error":"ledger: transfer beneficiary is not on the payer's transfer allowlist: ..."}
 ```
 
+### Maker rebate tiers (Go API: `SetRebateTiers` / `RecordMakerTrade` / `SettleMakerRebates`)
+
+A venue pays its liquidity providers (makers) back a slice of their
+monthly maker volume: `SetRebateTiers` installs a rate ladder (first band
+at zero, strictly ascending minima, rates 0–10000 bps — a 0 bps bottom
+band is the normal shape, small makers earn nothing until they clear the
+first threshold), the matching engine reports maker-side fills with
+`RecordMakerTrade(maker, counterparty, amountCents, at)`, and
+`SettleMakerRebates("YYYY-MM")` closes the month and returns the accrual
+schedule (one quote per account with any recorded activity, sorted by
+account). A month's rebate is `floor(volume * rateBps / 10000)` cents at
+the single band the month's total volume lands in — a rate on the month's
+volume, not band-by-band interest. Wash trades are excluded, not
+rejected: a fill whose maker and counterparty are the same account never
+adds to volume (an account cannot manufacture a higher tier by trading
+with itself), and the quote discloses the excluded volume and trade
+count. Settling is idempotent (a second call returns the stored schedule)
+and closes the month to further fills (`ErrRebateMonthSettled`). This is
+orthogonal to fee splits, which distribute a fee already charged; a
+rebate returns money at cycle end, and the operator books the settled
+payout through the ordinary transfer path (ledger transfers carry no
+maker/taker side, so fills are reported, not hooked into `PostTransfer`).
+Table changes and settlements are audited (`maker_rebate_tiers_set` /
+`maker_rebate_settled`); the table and volumes are process-local
+structural state, like the payee-verification policy, and do not bump
+the journal version or round-trip through snapshots.
+
 ### Confirmation of payee (`expected_payee_name`)
 
 Opt-in per-transfer payee-name check (UK-style confirmation of payee):
