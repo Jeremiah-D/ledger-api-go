@@ -370,6 +370,11 @@ type snapshotConfigLine struct {
 	// forward.go), sorted by ID; absent in snapshots written before
 	// forward support existed (restores as empty).
 	FXForwards []FXForward `json:"fx_forwards,omitempty"`
+	// FXLimitOrders carries the resting FX limit orders (LG-191, see
+	// fx_limit_order.go), sorted by (CreatedAt, ID); absent in
+	// snapshots written before limit-order support existed (restores
+	// as empty).
+	FXLimitOrders []LimitOrder `json:"fx_limit_orders,omitempty"`
 	// ClosedPeriods carries the locked accounting periods ("YYYY-MM",
 	// see ClosePeriod); absent in snapshots written before period locks
 	// existed. A restore that dropped the locks would reopen closed
@@ -1281,6 +1286,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		FXSnapshotVersion:        l.fxSnapshotVersion,
 		FXRateTableSnapshots:     l.fxRateTableSnapshotsLocked(),
 		FXForwards:               l.fxForwardsSnapshotLocked(),
+		FXLimitOrders:            l.fxLimitOrdersSnapshotLocked(),
 		ClosedPeriods:            l.closedPeriodsLocked(),
 		BalanceWatches:           l.balanceWatchesLocked(),
 		LiquidityAlertThresholds: l.liquidityThresholdsLocked(),
@@ -2451,6 +2457,48 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("fx forward %q has zero settle_at", f.ID)
 		}
 	}
+	// FX limit orders (LG-191): each must carry a unique non-empty ID, a
+	// known lifecycle state, a valid currency pair, a valid side, a
+	// positive limit price and amount, non-negative fills that do not
+	// exceed the amount, and non-empty accounts — a corrupt order row
+	// fails the import instead of restoring a lie.
+	seenLimitOrderIDs := make(map[string]bool, len(cfg.FXLimitOrders))
+	for i := range cfg.FXLimitOrders {
+		o := &cfg.FXLimitOrders[i]
+		if o.ID == "" {
+			return bad("fx limit order with empty ID")
+		}
+		if seenLimitOrderIDs[o.ID] {
+			return bad("duplicate fx limit order ID %q", o.ID)
+		}
+		seenLimitOrderIDs[o.ID] = true
+		switch o.State {
+		case LimitOrderPending, LimitOrderFilled, LimitOrderCancelled, LimitOrderExpired:
+		default:
+			return bad("fx limit order %q has unknown state %q", o.ID, o.State)
+		}
+		if o.FromCurrency == "" || o.ToCurrency == "" || o.FromCurrency == o.ToCurrency {
+			return bad("fx limit order %q has bad currency pair %q->%q", o.ID, o.FromCurrency, o.ToCurrency)
+		}
+		if o.Side != LimitOrderBuy && o.Side != LimitOrderSell {
+			return bad("fx limit order %q has bad side %q", o.ID, o.Side)
+		}
+		if o.LimitNum <= 0 || o.LimitDen <= 0 {
+			return bad("fx limit order %q has non-positive limit price %d/%d", o.ID, o.LimitNum, o.LimitDen)
+		}
+		if o.AmountCents <= 0 {
+			return bad("fx limit order %q has non-positive amount", o.ID)
+		}
+		if o.FilledCents < 0 || o.FilledCents > o.AmountCents {
+			return bad("fx limit order %q has filled %d outside [0, amount %d]", o.ID, o.FilledCents, o.AmountCents)
+		}
+		if o.FillCount < 0 {
+			return bad("fx limit order %q has negative fill count", o.ID)
+		}
+		if o.FromAccount == "" || o.ToAccount == "" || o.FromAccount == o.ToAccount {
+			return bad("fx limit order %q has bad accounts", o.ID)
+		}
+	}
 	// Closed periods are validated like every other config row: a
 	// malformed period ID in the snapshot fails the import instead of
 	// silently unlocking a month.
@@ -3415,6 +3463,18 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		f := cfg.FXForwards[i]
 		l.forwards[f.ID] = f.copy()
 	}
+	// FX limit orders (LG-191): restore the book in the stored
+	// (CreatedAt, ID) order, which keeps the sweep sequence identical
+	// to the pre-snapshot ledger. The import validated every row above,
+	// so this is a plain copy — a restore that dropped the book would
+	// silently void resting price instructions.
+	l.limitOrders = make(map[string]*LimitOrder, len(cfg.FXLimitOrders))
+	l.limitOrderSeq = make([]string, 0, len(cfg.FXLimitOrders))
+	for i := range cfg.FXLimitOrders {
+		o := cfg.FXLimitOrders[i]
+		l.limitOrders[o.ID] = &o
+		l.limitOrderSeq = append(l.limitOrderSeq, o.ID)
+	}
 	if len(cfg.FXRateTableSnapshots) == 0 && len(fx) > 0 {
 		rates := make([]ExchangeRate, 0, len(fx))
 		for _, r := range fx {
@@ -4141,6 +4201,11 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// FX forward contracts must round-trip too (LG-110): a restore
 	// that dropped the book would silently void booked agreements.
 	if !forwardsEqualLocked(a, b) {
+		return false
+	}
+	// FX limit orders must round-trip too (LG-191): a restore that
+	// dropped the book would silently void resting price instructions.
+	if !limitOrdersEqualLocked(a, b) {
 		return false
 	}
 	// The OFX import registry must round-trip (LG-66): it is the

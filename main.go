@@ -10066,6 +10066,7 @@ func (s *server) handler() http.Handler {
 		// reports exactly what it always did.
 		var auditWritten, auditDropped, outboxWritten, outboxDropped uint64
 		var breaches, ruleLegs, freezeReleases, healthViolations uint64
+		var limitOrderFills, limitOrderCancels uint64
 		var deferredSettlements uint64
 		// Per-rule posting-rule leg counts (LG-132), aggregated across
 		// tenants like the other ledger-sourced counters above.
@@ -10125,6 +10126,12 @@ func (s *server) handler() http.Handler {
 			}
 			vanAttributions += l.VANAttributionCount()
 			freezeReleases += l.FrozenAutoReleases()
+			// The FX limit-order counters likewise live in the ledger:
+			// fills post inside MatchLimitOrders and cancels inside
+			// CancelLimitOrder / the sweep's expiry pass, not in a
+			// handler (see ledger/fx_limit_order.go, LG-191).
+			limitOrderFills += l.LimitOrderFills()
+			limitOrderCancels += l.LimitOrderCancels()
 			// The settlement-deferral counter likewise lives in the
 			// ledger: deferrals are decided inside the PostTransfer
 			// commit paths, not in a handler (see
@@ -10236,6 +10243,12 @@ func (s *server) handler() http.Handler {
 		// releases happen inside the write path and the background
 		// sweeper, not in a handler.
 		s.metrics.FreezeAutoReleasesTotal.Store(freezeReleases)
+		// The FX limit-order fill/cancel counters likewise live in the
+		// ledger: fills post inside MatchLimitOrders and cancels inside
+		// CancelLimitOrder / the sweep's expiry pass, not in a handler
+		// (see ledger/fx_limit_order.go, LG-191).
+		s.metrics.LimitOrderFillsTotal.Store(limitOrderFills)
+		s.metrics.LimitOrderCancelsTotal.Store(limitOrderCancels)
 		// The settlement-deferral counter is mirrored like the other
 		// ledger-sourced counters above.
 		s.metrics.SettlementDeferredTotal.Store(deferredSettlements)

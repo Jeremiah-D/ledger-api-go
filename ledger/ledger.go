@@ -657,6 +657,22 @@ type Ledger struct {
 	// config — like frozen and feeTiers — and survive snapshots.
 	fxRates   map[fxPair]ExchangeRate
 	fxAccount AccountID
+	// limitOrders is the FX limit-order book (see fx_limit_order.go,
+	// LG-191): resting orders keyed by ID, with limitOrderSeq keeping
+	// insertion order so MatchLimitOrders sweeps deterministically. The
+	// book lives under l.mu with the rest of the state and survives
+	// snapshots (see FXLimitOrders in snapshot.go).
+	limitOrders   map[string]*LimitOrder
+	limitOrderSeq []string
+	// limitOrderFills and limitOrderCancels count FX limit-order fills
+	// (every fill, partial or final) and orders that left the book
+	// without filling (manual cancels plus sweep auto-expiries).
+	// Operational metrics, surfaced on GET /metrics as
+	// ledger_fx_limit_order_fills_total /
+	// ledger_fx_limit_order_cancels_total; not books, so they do not
+	// round-trip through snapshots.
+	limitOrderFills   atomic.Uint64
+	limitOrderCancels atomic.Uint64
 	// correspondentFees is the per-corridor flat fee charged by the
 	// correspondent banks on cross-currency transfers (see fee_estimate.go,
 	// LG-186): a corridor's fee is booked in the source currency, on top
@@ -1645,6 +1661,7 @@ func New(opts ...Option) *Ledger {
 		reportScheduleRuns:   make(map[string][]ReportRun),
 		reportScheduleFiring: make(map[string]bool),
 		fxRates:              make(map[fxPair]ExchangeRate),
+		limitOrders:          make(map[string]*LimitOrder),
 		correspondentFees:    make(map[fxPair]int64),
 		railConfigs:          make(map[string]RailCapability),
 		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),

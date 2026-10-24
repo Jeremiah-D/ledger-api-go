@@ -3399,6 +3399,56 @@ curl -s -X POST localhost:8080/transfers \
 # 201 {...,"fx":{"direction":"sell","bid_num":108,"bid_den":100,"ask_num":112,"ask_den":100,"spread_bps":363,"spread_cents":200,...}}
 ```
 
+#### FX limit orders (Go API: `PlaceLimitOrder`)
+
+A market order converts at the live rate; a **limit order** parks a
+price instruction in the ledger and waits: convert `amount_cents` of
+`from_currency` into `to_currency` for `from_account` →
+`to_account`, but only when the market reaches the caller's limit. The
+order book is swept explicitly with `MatchLimitOrders(now)` — no
+background goroutines — and a triggered fill settles through the same
+FX transfer path as a market order (same legs, same fee/overdraft/
+daily-limit gates, same audit chain), so the two are orthogonal by
+construction: limit orders add *timing*, not a second settlement
+engine.
+
+Side semantics follow the dealing convention: a **sell** order (the
+customer sells the source currency) triggers when the market **bid**
+reaches the limit price and settles at the bid; a **buy** order (the
+customer buys the target currency) triggers when the market **ask**
+falls to the limit and settles at the ask. The limit is an integer
+ratio in target-per-source currency (the rate-table convention) and
+every comparison is exact rational math — no float64 touches the
+price, and the touch test uses the side's dealing price, never the
+mid.
+
+Fills may be partial: a fill is bounded by the payer's available
+source-currency balance, so one order can accumulate several fills
+across sweeps while the remainder keeps resting ("fund and fill"); the
+order leaves the book as `filled` only when the full amount is
+converted. An order with `expiry` set is auto-cancelled by the sweep
+once the deadline passes (checked before the touch, so an expired
+order never fills); manual `CancelLimitOrder` succeeds only from the
+`pending` state. A fill that would route into dual-control review is
+skipped for that sweep instead of freezing funds — the order stays
+pending for the operator. The book survives disaster-recovery
+snapshots, and `ledger_fx_limit_order_fills_total` /
+`ledger_fx_limit_order_cancels_total` count fills and non-fill
+departures on `/metrics`. This is the payments-fintech leg of FX:
+corporate treasury desks park target-rate conversions (payroll,
+supplier settlement) and the ledger executes them when the market
+arrives.
+
+```go
+l.PlaceLimitOrder(ledger.LimitOrder{
+    ID: "lo-payroll-eur", FromAccount: "treasury", ToAccount: "payroll-eur",
+    FromCurrency: "USD", ToCurrency: "EUR",
+    Side: ledger.LimitOrderSell, LimitNum: 110, LimitDen: 100, // sell USD when bid >= 1.10 EUR
+    AmountCents: 5000000, Expiry: time.Now().Add(30 * 24 * time.Hour),
+})
+res := l.MatchLimitOrders(time.Now()) // res.Fills, res.Expires
+```
+
 #### Rate-table snapshot versioning
 
 Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,

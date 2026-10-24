@@ -218,6 +218,16 @@ type Metrics struct {
 	// by the write-path lazy check, the background freeze sweeper, or an
 	// explicit ledger.ExpireFrozenAccounts call.
 	FreezeAutoReleasesTotal atomic.Uint64
+	// LimitOrderFillsTotal counts FX limit-order fills (see
+	// ledger/fx_limit_order.go, LG-191): every fill, partial or final.
+	// Mirrored from the ledgers on every GET /metrics scrape, like the
+	// freeze auto-release counter.
+	LimitOrderFillsTotal atomic.Uint64
+	// LimitOrderCancelsTotal counts FX limit orders that left the book
+	// without filling (see ledger/fx_limit_order.go, LG-191): manual
+	// cancels plus sweep auto-expiries. Mirrored from the ledgers on
+	// every GET /metrics scrape, like the freeze auto-release counter.
+	LimitOrderCancelsTotal atomic.Uint64
 	// SettlementDeferredTotal counts transfers deferred to the next
 	// settlement window since start (see ledger.SettlementDeferral):
 	// transfers posted after their currency's cutoff. Mirrored from
@@ -1349,6 +1359,12 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_freeze_auto_releases_total",
 		"Total automatic account unfreezes: timed freezes whose deadline passed, released by the write-path lazy check, the background freeze sweeper, or an explicit ExpireFrozenAccounts call.",
 		m.FreezeAutoReleasesTotal.Load())
+	writeCounter(&sb, "ledger_fx_limit_order_fills_total",
+		"Total FX limit-order fills (partial and final) posted by MatchLimitOrders.",
+		m.LimitOrderFillsTotal.Load())
+	writeCounter(&sb, "ledger_fx_limit_order_cancels_total",
+		"Total FX limit orders that left the book without filling: manual cancels plus sweep auto-expiries.",
+		m.LimitOrderCancelsTotal.Load())
 	writeCounter(&sb, "ledger_settlement_deferred_total",
 		"Total transfers deferred to the next settlement window: transfers posted after their currency's settlement cutoff (see the per-currency cutoff config).",
 		m.SettlementDeferredTotal.Load())
