@@ -6217,6 +6217,39 @@ res, err := q.Resolve(l, "USD")
 // res.BatchID / res.EntryIDs ("gridlock:<payment ID>"): the atomic batch that settled them
 ```
 
+### Group cash pooling (`ledger/cash_pooling.go`)
+
+The treasury view (LG-203): at cut-off, every participant's positive
+balance concentrates into a header account in one atomic batch,
+leaving each participant at zero and the header holding the net
+amount. `NewCashPool(id, header, participants, currency)` validates
+the group (non-empty ID and header, at least one participant, distinct
+participants, header not a participant); `Run(l)` sweeps every
+positive balance to the header through `PostBatch`, so any failing leg
+— a frozen participant, a closed account, any other gate — rejects the
+entire run with zero bookings: either every participant lands at zero
+or nobody moves. A participant in debit fails the run closed rather
+than being skipped or funded: funding a deficit is a lending
+decision, not a concentration run, and this module never makes it
+silently. Participants already at zero are listed in the report, not
+swept (a zero leg would be rejected by the journal). The report
+carries the header position re-read from the books — balance before,
+total swept, balance after — plus per-leg entry IDs
+(`cashpool:<pool>:<run>:<participant>`), so a later run that sweeps
+the same participant again never collides with an earlier run's rows.
+Unlike the auto-sweep rules (LG-178, one source under one trigger)
+pooling sweeps many participants at once to zero, and unlike the
+hierarchy rollup (LG-19, a read-only sum) it moves money. The pool
+definition is in-memory operational state and does not round-trip
+through snapshots; the journal rows of a run do.
+
+```go
+pool, _ := ledger.NewCashPool("group-1", "treasury", []ledger.AccountID{"sub-a", "sub-b"}, "USD")
+rep, err := pool.Run(l)
+// rep.TotalCents: net amount concentrated; rep.Legs: per-participant sweeps
+// rep.HeaderBalanceBefore / rep.HeaderBalanceAfter: the header position, re-read from the books
+```
+
 ### Net settlement batches (`ledger/clearing.go`)
 
 The workflow container around netting (LG-135): where multilateral
