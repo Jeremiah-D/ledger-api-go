@@ -491,6 +491,11 @@ type Ledger struct {
 	// config, like noOverdraft: it never bumps the journal version
 	// and is not part of the snapshot.
 	payeeVerificationPolicy PayeeVerificationPolicy
+	// travelRulePolicy is the FATF travel-rule policy
+	// (see travel_rule.go, LG-196). Process-local structural
+	// config, like payeeVerificationPolicy: it never bumps the
+	// journal version and is not part of the snapshot.
+	travelRulePolicy TravelRulePolicy
 	// businessCalendar is the ledger's holiday calendar (see
 	// businessday.go): weekend days plus the custom holiday table, with
 	// a version counter bumped on every change. Structural config, like
@@ -1611,6 +1616,7 @@ func New(opts ...Option) *Ledger {
 		sweepReserves:           make(map[accountCurrency]int64),
 		transferAllowlist:       make(map[AccountID]map[AccountID]bool),
 		payeeVerificationPolicy: DefaultPayeeVerificationPolicy(),
+		travelRulePolicy:        DefaultTravelRulePolicy(),
 		largeTxThresholds:       make(map[string]int64),
 		largeTxReportCurrency:   DefaultCurrency,
 		largeTxReports:          make(map[largeTxReportKey]LargeTxReport),

@@ -219,6 +219,10 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		// with it like the other structural config.
 		holderNames:             make(map[AccountID]*holderNameRecord, len(l.holderNames)),
 		payeeVerificationPolicy: l.payeeVerificationPolicy,
+		// The travel-rule policy travels with the twin like the
+		// payee-verification policy: the dry run's travel-rule gate
+		// must apply the same threshold the real PostTransfer does.
+		travelRulePolicy: l.travelRulePolicy,
 	}
 	for k, v := range l.balances {
 		c.balances[k] = v

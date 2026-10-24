@@ -1085,6 +1085,14 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	if err != nil {
 		return TransferReceipt{}, err
 	}
+	// FATF travel rule (see travel_rule.go): after the
+	// confirmation-of-payee gate and before the overdraft gate, like
+	// the non-FX path (transfer.go). The disclosure rides the receipt
+	// below.
+	travelRule, err := l.travelRuleLocked(t)
+	if err != nil {
+		return TransferReceipt{}, err
+	}
 	if l.noOverdraft[t.From] &&
 		l.balances[accountCurrency{account: t.From, currency: t.Currency}] < totalOutflow {
 		return TransferReceipt{}, ErrAccountOverdraft
@@ -1446,5 +1454,6 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		SettlementStatus: settlementStatus,
 		SettlementWindow: settlementWindow,
 		PayeeMatch:       payeeMatch,
+		TravelRule:       travelRule,
 	}, nil
 }

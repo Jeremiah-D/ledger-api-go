@@ -2487,6 +2487,35 @@ curl -s -X POST localhost:8080/transfers \
 # 422 {"error":"ledger: payee name does not match the expected name: payee \"supplier\""}
 ```
 
+### FATF travel rule (Go API: `Transfer.CrossBorder`, LG-196)
+
+Opt-in per-transfer travel-rule check (FATF Recommendation 16) for
+cross-border payments: when `Transfer.CrossBorder` is true,
+`PostTransfer` verifies the originator/beneficiary information set
+before booking — originator name + account + address or identifying
+document (either one satisfies the third leg, supplied as
+`TravelRuleOriginatorID`), beneficiary name + account. Originator and
+beneficiary names are the payer/payee accounts' registered holder
+names; an unregistered holder name counts as a missing field. The
+completeness requirement is enforced fail-closed only strictly above
+the configured threshold (`SetTravelRulePolicy`, default 100000 minor
+units — USD 1000 for USD transfers; operators serving non-USD corridors
+set the local equivalent): an above-threshold transfer with an
+incomplete set is rejected with `ErrTravelRuleIncomplete` and books
+nothing, while an at-or-below-threshold transfer books regardless and
+the information already present travels with it. The outcome is
+disclosed on the receipt as `travel_rule` (`complete`,
+`above_threshold`). The gate runs between the confirmation-of-payee
+and overdraft checks on both the same-currency and cross-currency
+paths, and `POST /transfers/dry-run` runs it too. Audit events
+(`travel_rule_checked`, `travel_rule_rejected`) and error strings
+carry field names and the completeness/threshold conclusions only —
+never a name, address, or identifier value. `CheckTravelRule` offers
+the same assessment read-only (e.g. a payer UI pre-screen), and
+`AssessTravelRule` is the pure function underneath. The check is
+orthogonal to KYC (whether the holder's identity was verified) and to
+the payment purpose code (what the payment is for).
+
 ### Large-transfer auto-split (Go API: `PostTransferSplit`)
 
 When a transfer exceeds a per-transfer cap — a downstream rail's

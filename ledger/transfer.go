@@ -207,6 +207,19 @@ type Transfer struct {
 	// the audit records the confirmation. It is ignored when the check
 	// is skipped (no ExpectedPayeeName) or the tier is not no_match.
 	PayeeNameConfirmed bool `json:"payee_name_confirmed,omitempty"`
+	// CrossBorder marks the transfer as a cross-border payment
+	// subject to the FATF travel rule (see travel_rule.go, LG-196):
+	// when true, PostTransfer checks the originator/beneficiary
+	// information set before booking and fails closed above the
+	// threshold when it is incomplete. False (the default) skips the
+	// check entirely, so domestic transfers are unaffected.
+	CrossBorder bool `json:"cross_border,omitempty"`
+	// TravelRuleOriginatorID is the originator's address or
+	// identifying document reference for a cross-border transfer
+	// (see travel_rule.go, LG-196): it satisfies the originator's
+	// third information leg. Only its presence is audited, never its
+	// value. Ignored unless CrossBorder is true.
+	TravelRuleOriginatorID string `json:"travel_rule_originator_id,omitempty"`
 }
 
 // TransferReceipt reports what PostTransfer committed.
@@ -264,6 +277,13 @@ type TransferReceipt struct {
 	// (no ExpectedPayeeName) or on idempotent replays, which return the
 	// originally posted entries without re-running the check.
 	PayeeMatch string `json:"payee_match,omitempty"`
+	// TravelRule discloses the travel-rule outcome for a cross-border
+	// transfer (see travel_rule.go, LG-196): whether the information
+	// set was complete and whether the transfer was above the
+	// enforcement threshold. Nil for non-cross-border transfers and
+	// on idempotent replays, which return the originally posted
+	// entries without re-running the check.
+	TravelRule *TravelRuleDisclosure `json:"travel_rule,omitempty"`
 	// currency has no cutoff configured — zero behavior change — or
 	// when the transfer was routed into dual-control review (its
 	// settlement is the operator's concern at approval).
@@ -633,6 +653,15 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 	if len([]rune(t.ExpectedPayeeName)) > 128 {
 		return t, "", ErrInvalidExpectedPayeeName
 	}
+	// The travel-rule originator address-or-identifier is field
+	// validation, like the expected payee name: an overlong value is
+	// rejected before anything is recorded, on both paths. It is
+	// only consulted for cross-border transfers, but the length cap
+	// applies regardless so a stray value cannot smuggle an unbounded
+	// string into the transfer record.
+	if len([]rune(t.TravelRuleOriginatorID)) > MaxTravelRuleOriginatorIDRunes {
+		return t, "", ErrInvalidTravelRuleOriginatorID
+	}
 	// Attachments are field validation, like the memo: more than
 	// maxAttachments entries, a non-https URI, or a URI longer than
 	// maxAttachmentRunes characters is rejected before anything is
@@ -903,6 +932,18 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	// operator's own revenue account. The match tier is disclosed on
 	// the receipt below.
 	payeeMatch, err := l.payeeVerificationLocked(t)
+	if err != nil {
+		return TransferReceipt{}, err
+	}
+
+	// FATF travel rule (see travel_rule.go): after the
+	// confirmation-of-payee gate — both are payee-directed — and
+	// before the overdraft gate, so the check order stays validation
+	// → idempotency replay → ID conflict → frozen → allowlist →
+	// payee-verification → travel-rule → overdraft → commit. Only
+	// cross-border transfers are gated; the disclosure rides the
+	// receipt below.
+	travelRule, err := l.travelRuleLocked(t)
 	if err != nil {
 		return TransferReceipt{}, err
 	}
@@ -1183,6 +1224,7 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		SettlementStatus: settlementStatus,
 		SettlementWindow: settlementWindow,
 		PayeeMatch:       payeeMatch,
+		TravelRule:       travelRule,
 	}, nil
 }
 
