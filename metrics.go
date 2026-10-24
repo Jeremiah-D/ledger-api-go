@@ -321,6 +321,14 @@ type Metrics struct {
 	// do not count here — a replay returns the original receipt
 	// instead of failing.
 	AllowlistRejections atomic.Uint64
+	// PayeeMismatchRejections counts POST /transfers and POST
+	// /transfers/dry-run requests rejected with 422 because the
+	// confirmation-of-payee check found no match and the policy
+	// rejects (see ledger.SetPayeeVerificationPolicy). The gate runs
+	// after the idempotency replay check, like the frozen gate, so
+	// replayed keys do not count here — a replay returns the original
+	// receipt instead of failing.
+	PayeeMismatchRejections atomic.Uint64
 	// CurrencyRejections counts POST /entries, POST /entries/batch, and
 	// POST /transfers requests rejected for currency reasons: a malformed
 	// currency code (400), a cross-currency transfer (422), or an expired
@@ -1226,6 +1234,9 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_allowlist_rejections_total",
 		"Total POST /transfers requests rejected with 403 because the payer has a transfer beneficiary allowlist installed and the payee is not on it (see ledger.SetTransferAllowlist).",
 		m.AllowlistRejections.Load())
+	writeCounter(&sb, "ledger_payee_mismatch_rejections_total",
+		"Total POST /transfers and POST /transfers/dry-run requests rejected with 422 because the confirmation-of-payee check found no match and the policy rejects (see ledger.SetPayeeVerificationPolicy).",
+		m.PayeeMismatchRejections.Load())
 	writeCounter(&sb, "ledger_currency_rejections_total",
 		"Total POST /entries, POST /entries/batch, and POST /transfers requests rejected for currency reasons: malformed currency code, cross-currency transfer, or expired FX rate.",
 		m.CurrencyRejections.Load())

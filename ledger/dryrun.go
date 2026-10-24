@@ -212,6 +212,13 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		// registry is copied so a simulated match would see the same
 		// recorded lines as the live ledger.
 		statementMatches: make(map[string]*statementMatchRecord, len(l.statementMatches)),
+		// The holder-name registry travels with the twin like the other
+		// structural registries: the dry-run's payee-verification gate
+		// must see the same names the real PostTransfer applies (see
+		// the deep copy below). The payee-verification policy travels
+		// with it like the other structural config.
+		holderNames:             make(map[AccountID]*holderNameRecord, len(l.holderNames)),
+		payeeVerificationPolicy: l.payeeVerificationPolicy,
 	}
 	for k, v := range l.balances {
 		c.balances[k] = v
@@ -264,6 +271,11 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	for k, v := range l.statementMatches {
 		cp := *v
 		c.statementMatches[k] = &cp
+	}
+	// Holder-name records are deep-copied so the twin can never alias
+	// the live ledger's PII bytes.
+	for k, v := range l.holderNames {
+		c.holderNames[k] = &holderNameRecord{name: append([]byte(nil), v.name...), updatedAt: v.updatedAt}
 	}
 	for k, v := range l.dailyLimits {
 		c.dailyLimits[k] = v

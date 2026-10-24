@@ -194,6 +194,19 @@ type Transfer struct {
 	// so it stays out of the JSON API and snapshots; it lives only for
 	// the duration of the settlement call.
 	forwardLocked *forwardLockedRate
+	// ExpectedPayeeName is the opt-in confirmation-of-payee name (see
+	// payee_verification.go, LG-193): the name the requester expects
+	// the payee account's holder to carry. When non-empty, PostTransfer
+	// compares it against the payee's registered holder name (after
+	// idempotency replay and VAN attribution) and audits the match
+	// tier (exact/close/no_match/unverifiable). At most 128 characters.
+	ExpectedPayeeName string `json:"expected_payee_name,omitempty"`
+	// PayeeNameConfirmed is the requester's secondary confirmation for
+	// a no-match: "I checked out-of-band and this is the right payee".
+	// It overrides a rejecting no-match policy; the transfer books and
+	// the audit records the confirmation. It is ignored when the check
+	// is skipped (no ExpectedPayeeName) or the tier is not no_match.
+	PayeeNameConfirmed bool `json:"payee_name_confirmed,omitempty"`
 }
 
 // TransferReceipt reports what PostTransfer committed.
@@ -245,6 +258,12 @@ type TransferReceipt struct {
 	// booked in its currency's current settlement window, "scheduled"
 	// when it posted after the cutoff and waits for the next window
 	// (see SettlementWindow for the window). Empty when the transfer's
+	// PayeeMatch discloses the confirmation-of-payee tier for the
+	// transfer (see payee_verification.go, LG-193): "exact", "close",
+	// "no_match", or "unverifiable". Empty when the check was skipped
+	// (no ExpectedPayeeName) or on idempotent replays, which return the
+	// originally posted entries without re-running the check.
+	PayeeMatch string `json:"payee_match,omitempty"`
 	// currency has no cutoff configured — zero behavior change — or
 	// when the transfer was routed into dual-control review (its
 	// settlement is the operator's concern at approval).
@@ -608,13 +627,19 @@ func validateTransferFields(t Transfer) (Transfer, string, error) {
 	if err := checkExternalRefLength(t.ExternalRef); err != nil {
 		return t, "", err
 	}
+	// The expected payee name is field validation, like the memo: an
+	// overlong name is rejected before anything is recorded. Empty
+	// means "no confirmation-of-payee check" (opt-in).
+	if len([]rune(t.ExpectedPayeeName)) > 128 {
+		return t, "", ErrInvalidExpectedPayeeName
+	}
 	// Attachments are field validation, like the memo: more than
 	// maxAttachments entries, a non-https URI, or a URI longer than
 	// maxAttachmentRunes characters is rejected before anything is
 	// recorded, on both paths.
 	if err := checkAttachments(t.Attachments); err != nil {
 		return t, "", err
-	}	// Metadata is field validation, like the attachments: more than
+	} // Metadata is field validation, like the attachments: more than
 	// maxMetadataPairs pairs, a key outside the tag-segment charset,
 	// or a value longer than maxMetadataValueRunes UTF-8 characters is
 	// rejected before anything is recorded, on both paths.
@@ -867,6 +892,19 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	// replay above returns the original receipt instead of failing.
 	if l.allowlistRejectedLocked(t.From, t.To) {
 		return TransferReceipt{}, l.allowlistRejectionLocked(t.From, t.To)
+	}
+
+	// Confirmation of payee (see payee_verification.go): after the
+	// allowlist gate — both are payee-directed — and before the
+	// overdraft gate, so the check order stays validation →
+	// idempotency replay → ID conflict → frozen → allowlist →
+	// payee-verification → overdraft → commit. Only the principal
+	// leg's payee is checked: the fee leg's recipient is the
+	// operator's own revenue account. The match tier is disclosed on
+	// the receipt below.
+	payeeMatch, err := l.payeeVerificationLocked(t)
+	if err != nil {
+		return TransferReceipt{}, err
 	}
 
 	// Overdraft protection guards the payer's total outflow (amount + fee),
@@ -1144,6 +1182,7 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 		RuleLegs:         ruleLegInfos,
 		SettlementStatus: settlementStatus,
 		SettlementWindow: settlementWindow,
+		PayeeMatch:       payeeMatch,
 	}, nil
 }
 

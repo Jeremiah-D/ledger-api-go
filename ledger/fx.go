@@ -1078,6 +1078,13 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 	if l.allowlistRejectedLocked(t.From, t.To) {
 		return TransferReceipt{}, l.allowlistRejectionLocked(t.From, t.To)
 	}
+	// Confirmation of payee (see payee_verification.go): after the
+	// allowlist gate and before the overdraft gate, like the non-FX
+	// path (transfer.go). t.To is already VAN-resolved above.
+	payeeMatch, err := l.payeeVerificationLocked(t)
+	if err != nil {
+		return TransferReceipt{}, err
+	}
 	if l.noOverdraft[t.From] &&
 		l.balances[accountCurrency{account: t.From, currency: t.Currency}] < totalOutflow {
 		return TransferReceipt{}, ErrAccountOverdraft
@@ -1438,5 +1445,6 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		RuleLegs:         ruleLegInfos,
 		SettlementStatus: settlementStatus,
 		SettlementWindow: settlementWindow,
+		PayeeMatch:       payeeMatch,
 	}, nil
 }

@@ -2423,6 +2423,43 @@ curl -s -X POST localhost:8080/transfers \
 # 403 {"error":"ledger: transfer beneficiary is not on the payer's transfer allowlist: ..."}
 ```
 
+### Confirmation of payee (`expected_payee_name`)
+
+Opt-in per-transfer payee-name check (UK-style confirmation of payee):
+when `POST /transfers` carries `expected_payee_name`, the ledger compares
+it against the payee account's registered holder name (set with
+`SetAccountHolderName`, see the PII section) after the idempotency replay
+check and VAN attribution, and audits the match tier — `exact`
+(case-insensitive), `close` (within the configured fuzzy threshold,
+default 0.8 normalized similarity — typos and transliteration wobble),
+`no_match`, or `unverifiable` (no holder name registered). The tier is
+disclosed on the receipt as `payee_match`. A `no_match` is rejected with
+`422 {"error":"ledger: payee name does not match the expected name"}`
+and records nothing — unless the requester sets `payee_name_confirmed`
+(the out-of-band secondary confirmation: "I checked and this is the right
+payee"), which books the transfer and audits the override. The policy is
+tunable via `SetPayeeVerificationPolicy`: `OnNoMatch` `reject` (default)
+or `audit` (book it, audit the mismatch), `OnUnverifiable` `audit`
+(default) or `reject`, and the close-match threshold in (0, 1]. The gate
+runs between the allowlist and overdraft checks (field validation →
+idempotency replay → ID conflict → frozen → allowlist →
+payee-verification → overdraft → commit), on the same-currency and
+cross-currency paths; the split-transfer path skips it like it skips the
+allowlist gate. Names never enter the audit trail or error strings — the
+audit carries the accounts and the tier only. Rejections are counted in
+`ledger_payee_mismatch_rejections_total`. `VerifyPayeeName` offers the
+same check read-only (e.g. a payer UI pre-screen), and
+`POST /transfers/dry-run` runs the full gate.
+
+```bash
+curl -s -X POST localhost:8080/transfers \
+  -d '{"transfer_id":"payout-1","from_account":"acme","to_account":"supplier","amount_cents":5000,"expected_payee_name":"Acme Supplies Ltd"}'
+# 201 {"payee_match":"exact", ...}
+curl -s -X POST localhost:8080/transfers \
+  -d '{"transfer_id":"payout-2","from_account":"acme","to_account":"supplier","amount_cents":5000,"expected_payee_name":"Evil Corp"}'
+# 422 {"error":"ledger: payee name does not match the expected name: payee \"supplier\""}
+```
+
 ### Large-transfer auto-split (Go API: `PostTransferSplit`)
 
 When a transfer exceeds a per-transfer cap — a downstream rail's

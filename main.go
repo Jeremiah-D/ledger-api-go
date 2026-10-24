@@ -471,6 +471,14 @@ type createTransferRequest struct {
 	// Rail is the settlement rail (see ledger.RailFedNow and friends,
 	// LG-185): empty means "no rail stated" and opens no SLA watch.
 	Rail string `json:"rail"`
+	// ExpectedPayeeName is the opt-in confirmation-of-payee name (see
+	// ledger.Transfer.ExpectedPayeeName, LG-193): the name the caller
+	// expects the payee account's holder to carry. Empty skips the
+	// check; at most 128 characters.
+	ExpectedPayeeName string `json:"expected_payee_name"`
+	// PayeeNameConfirmed is the caller's secondary confirmation for a
+	// no-match (see ledger.Transfer.PayeeNameConfirmed, LG-193).
+	PayeeNameConfirmed bool `json:"payee_name_confirmed"`
 }
 
 // handleCreateTransfer implements POST /transfers, the payment-domain view
@@ -540,28 +548,30 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		id = newID()
 	}
 	transfer := ledger.Transfer{
-		ID:              id,
-		From:            req.FromAccount,
-		To:              req.ToAccount,
-		AmountCents:     req.AmountCents,
-		Currency:        req.Currency,
-		ToCurrency:      req.ToCurrency,
-		FXAccount:       req.FXAccount,
-		FeeCents:        req.FeeCents,
-		FeeAccount:      req.FeeAccount,
-		FeeSplits:       req.FeeSplits,
-		SkipFee:         req.SkipFee,
-		IdempotencyKey:  req.IdempotencyKey,
-		Memo:            req.Memo,
-		ExternalRef:     req.ExternalRef,
-		Attachments:     req.Attachments,
-		Metadata:        req.Metadata,
-		MaxSlippageBps:  req.MaxSlippageBps,
-		FXSide:          req.FXSide,
-		FXIncomeAccount: req.FXIncomeAccount,
-		PurposeCode:     req.PurposeCode,
-		Rail:            req.Rail,
-		CreatedAt:       time.Now(),
+		ID:                 id,
+		From:               req.FromAccount,
+		To:                 req.ToAccount,
+		AmountCents:        req.AmountCents,
+		Currency:           req.Currency,
+		ToCurrency:         req.ToCurrency,
+		FXAccount:          req.FXAccount,
+		FeeCents:           req.FeeCents,
+		FeeAccount:         req.FeeAccount,
+		FeeSplits:          req.FeeSplits,
+		SkipFee:            req.SkipFee,
+		IdempotencyKey:     req.IdempotencyKey,
+		Memo:               req.Memo,
+		ExternalRef:        req.ExternalRef,
+		Attachments:        req.Attachments,
+		Metadata:           req.Metadata,
+		MaxSlippageBps:     req.MaxSlippageBps,
+		FXSide:             req.FXSide,
+		FXIncomeAccount:    req.FXIncomeAccount,
+		PurposeCode:        req.PurposeCode,
+		Rail:               req.Rail,
+		ExpectedPayeeName:  req.ExpectedPayeeName,
+		PayeeNameConfirmed: req.PayeeNameConfirmed,
+		CreatedAt:          time.Now(),
 	}
 	if req.ToCurrency != "" {
 		s.metrics.FXTransfersTotal.Add(1)
@@ -587,6 +597,11 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrBeneficiaryNotAllowed) {
 			s.metrics.AllowlistRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPayeeNameMismatch) {
+			s.metrics.PayeeMismatchRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
@@ -1022,28 +1037,30 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		id = newID()
 	}
 	transfer := ledger.Transfer{
-		ID:              id,
-		From:            req.FromAccount,
-		To:              req.ToAccount,
-		AmountCents:     req.AmountCents,
-		Currency:        req.Currency,
-		ToCurrency:      req.ToCurrency,
-		FXAccount:       req.FXAccount,
-		FeeCents:        req.FeeCents,
-		FeeAccount:      req.FeeAccount,
-		FeeSplits:       req.FeeSplits,
-		SkipFee:         req.SkipFee,
-		IdempotencyKey:  req.IdempotencyKey,
-		Memo:            req.Memo,
-		ExternalRef:     req.ExternalRef,
-		Attachments:     req.Attachments,
-		Metadata:        req.Metadata,
-		MaxSlippageBps:  req.MaxSlippageBps,
-		FXSide:          req.FXSide,
-		FXIncomeAccount: req.FXIncomeAccount,
-		PurposeCode:     req.PurposeCode,
-		Rail:            req.Rail,
-		CreatedAt:       time.Now(),
+		ID:                 id,
+		From:               req.FromAccount,
+		To:                 req.ToAccount,
+		AmountCents:        req.AmountCents,
+		Currency:           req.Currency,
+		ToCurrency:         req.ToCurrency,
+		FXAccount:          req.FXAccount,
+		FeeCents:           req.FeeCents,
+		FeeAccount:         req.FeeAccount,
+		FeeSplits:          req.FeeSplits,
+		SkipFee:            req.SkipFee,
+		IdempotencyKey:     req.IdempotencyKey,
+		Memo:               req.Memo,
+		ExternalRef:        req.ExternalRef,
+		Attachments:        req.Attachments,
+		Metadata:           req.Metadata,
+		MaxSlippageBps:     req.MaxSlippageBps,
+		FXSide:             req.FXSide,
+		FXIncomeAccount:    req.FXIncomeAccount,
+		PurposeCode:        req.PurposeCode,
+		Rail:               req.Rail,
+		ExpectedPayeeName:  req.ExpectedPayeeName,
+		PayeeNameConfirmed: req.PayeeNameConfirmed,
+		CreatedAt:          time.Now(),
 	}
 
 	result, err := s.ledgerFor(r).DryRunTransfer(transfer)
@@ -1067,6 +1084,11 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ledger.ErrBeneficiaryNotAllowed) {
 			s.metrics.AllowlistRejections.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ledger.ErrPayeeNameMismatch) {
+			s.metrics.PayeeMismatchRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ledger.ErrAccountOverdraft) {
@@ -5473,7 +5495,6 @@ func (s *server) handlePain008Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
-
 // handlePacs010Export implements GET /exports/pacs010 (LG-190): an
 // ISO 20022 pacs.010.001.02 FinancialInstitutionDirectDebit for the
 // booked mandate collections (see ledger.ExportPacs010) — the
@@ -5588,7 +5609,6 @@ func (s *server) handlePacs010Reconcile(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, rep)
 }
 
-
 // handlePacs002Export implements GET /exports/pacs002 (LG-167): an
 // ISO 20022 pacs.002.001.03 FI-to-FI payment status report for one
 // gpi-tracked payment (see ledger.ExportPacs002). Query parameter:
@@ -5653,7 +5673,6 @@ func (s *server) handlePacs004Export(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write(doc)
 }
-
 
 // mt103ExportRequest is the JSON body of POST /exports/mt103: the
 // per-export options of ledger.MT103ExportOptions, with the value date
@@ -7997,7 +8016,6 @@ func writeInvoiceError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-
 // uboOwnerRequest is one ownership link in the POST /accounts/{id}/ubo
 // body: name is the natural person's name (kind "person") or the
 // owning entity's account ID (kind "entity"); share_bp is the owner's
@@ -8136,7 +8154,6 @@ func (s *server) handleSetUboThreshold(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]int64{"threshold_bp": s.ledgerFor(r).UboControlThreshold()})
 }
-
 
 // issueInvoiceRequest is the body of POST /invoices: the receivable to
 // open. Only id, account, amount_cents, and due_date are required;
