@@ -616,7 +616,10 @@ func (l *Ledger) ExpireMandatesAt(now time.Time) int {
 //     ErrMandateExpired after), the amount must not exceed the
 //     per-debit cap (ErrMandateAmountExceeded), the currency must match
 //     (ErrMandateCurrencyMismatch), and the frequency window must be
-//     free (ErrMandateFrequencyExceeded);
+//     free (ErrMandateFrequencyExceeded) — active pre-authorizations
+//     (see mandate_preauth.go, LG-192) occupy the window exactly like
+//     posted debits, so a reservation and a debit can never race for
+//     the same window;
 //  5. the full Post validation sequence runs inside postLocked —
 //     sanctions screening, chart direction, frozen, suspended,
 //     overdraft, daily limit, budget, period, journal rules — so a
@@ -656,6 +659,16 @@ func (l *Ledger) DebitWithMandate(mandateID string, d MandateDebit) (MandateDebi
 // failure or a success means for the pending-retry registry. Callers
 // must hold the write lock.
 func (l *Ledger) debitMandateCoreLocked(mandateID string, d MandateDebit) (MandateDebitReceipt, error) {
+	return l.debitMandateCoreLockedExcluding(mandateID, d, "")
+}
+
+// debitMandateCoreLockedExcluding is debitMandateCoreLocked with one
+// pre-authorization excluded from the frequency gate: a capture
+// (see CapturePreAuth in mandate_preauth.go) excludes the reservation
+// it is converting, so the settlement is not blocked by its own hold on
+// the window. excludeID == "" excludes nothing — the direct-debit and
+// retry paths. Callers must hold the write lock.
+func (l *Ledger) debitMandateCoreLockedExcluding(mandateID string, d MandateDebit, excludeID string) (MandateDebitReceipt, error) {
 	m, ok := l.mandates[mandateID]
 	if !ok {
 		return MandateDebitReceipt{}, ErrMandateNotFound
@@ -729,7 +742,14 @@ func (l *Ledger) debitMandateCoreLocked(mandateID string, d MandateDebit) (Manda
 	if entry.Currency != m.Currency {
 		return MandateDebitReceipt{}, fmt.Errorf("%w: %q != %q", ErrMandateCurrencyMismatch, entry.Currency, m.Currency)
 	}
-	if l.mandateWindowDebitCountLocked(mandateID, ts, m.Frequency) > 0 {
+	// The frequency gate counts active pre-authorization reservations
+	// alongside posted debits (see
+	// mandateWindowAuthorizationCountLocked): a reservation and a debit
+	// can never race for the same window. The capturing
+	// pre-authorization's own reservation is excluded when excludeID
+	// names it — the settlement converts the reservation, it does not
+	// compete with it.
+	if l.mandateWindowAuthorizationCountLocked(mandateID, ts, m.Frequency, excludeID) > 0 {
 		return MandateDebitReceipt{}, fmt.Errorf("%w: %s", ErrMandateFrequencyExceeded, m.Frequency)
 	}
 	// The mandate_of link pre-check: the debit entry ID must not equal

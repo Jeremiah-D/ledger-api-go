@@ -210,11 +210,14 @@ func (s *server) writePostError(w http.ResponseWriter, err error) {
 }
 
 // writeMandateError maps a mandate-domain error to its HTTP status: 404
-// for an unknown mandate, 422 for semantic authorization rejections
-// (the request is well-formed, the mandate just does not cover it),
-// and reports whether err was a mandate-domain error at all.
+// for an unknown mandate or pre-authorization, 422 for semantic
+// authorization rejections (the request is well-formed, the mandate
+// just does not cover it), and reports whether err was a mandate-domain
+// error at all. Pre-authorization (LG-192) errors follow the same
+// classes: the pre-authorization is mandate-domain state.
 func writeMandateError(w http.ResponseWriter, err error) bool {
-	if errors.Is(err, ledger.ErrMandateNotFound) {
+	if errors.Is(err, ledger.ErrMandateNotFound) ||
+		errors.Is(err, ledger.ErrPreAuthNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return true
 	}
@@ -223,7 +226,9 @@ func writeMandateError(w http.ResponseWriter, err error) bool {
 		errors.Is(err, ledger.ErrMandateExpired),
 		errors.Is(err, ledger.ErrMandateAmountExceeded),
 		errors.Is(err, ledger.ErrMandateCurrencyMismatch),
-		errors.Is(err, ledger.ErrMandateFrequencyExceeded):
+		errors.Is(err, ledger.ErrMandateFrequencyExceeded),
+		errors.Is(err, ledger.ErrPreAuthNotActive),
+		errors.Is(err, ledger.ErrPreAuthExpired):
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return true
 	}
@@ -2571,6 +2576,196 @@ func (s *server) handleExpireMandates(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"expired": s.ledgerFor(r).ExpireMandates(),
+	})
+}
+
+// preauthRequest is the body of POST /mandates/{id}/preauth: one
+// pre-authorization — AmountCents of the mandate's pull limit frozen
+// for a future direct debit, without posting anything. ExpiresAt is
+// RFC3339 and required: authorizations are always time-bound. Currency
+// empty means the mandate's currency. The id is the pre-authorization's
+// reference.
+type preauthRequest struct {
+	ID             string    `json:"id"`
+	AmountCents    int64     `json:"amount_cents"`
+	Currency       string    `json:"currency"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	IdempotencyKey string    `json:"idempotency_key"`
+}
+
+// preauthCaptureRequest is the body of
+// POST /mandates/{id}/preauth/{preauth_id}/capture: settles the whole
+// pre-authorization as a real direct-debit posting under the capture ID
+// (see ledger.CapturePreAuth, LG-192). Captures are single-shot and
+// full-amount — the reservation is converted, not partially settled.
+type preauthCaptureRequest struct {
+	ID             string            `json:"id"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	ExternalRef    string            `json:"external_ref"`
+	Attachments    []string          `json:"attachments"`
+	Metadata       map[string]string `json:"metadata"`
+}
+
+// handleAuthorizePreAuth implements POST /mandates/{id}/preauth:
+// freezes AmountCents of the mandate's pull limit without posting
+// (see ledger.AuthorizePreAuth, LG-192). 201 with the pre-authorization
+// (200 with duplicate: true on an idempotent replay); 404 on an unknown
+// mandate; 422 when the mandate does not cover the authorization
+// (suspended/cancelled/expired, over the per-debit cap, wrong currency,
+// frequency window already occupied by a debit or another active
+// pre-authorization); 400 on field errors.
+func (s *server) handleAuthorizePreAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req preauthRequest
+	if !s.decodeRequestBody(w, r, &req) {
+		return
+	}
+	p, duplicate, err := s.ledgerFor(r).AuthorizePreAuth(ledger.PreAuth{
+		ID:             req.ID,
+		MandateID:      r.PathValue("id"),
+		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
+		ExpiresAt:      req.ExpiresAt,
+		IdempotencyKey: req.IdempotencyKey,
+	})
+	if err != nil {
+		if writeMandateError(w, err) {
+			return
+		}
+		s.writePostError(w, err)
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, map[string]any{"preauth": p, "duplicate": true})
+		return
+	}
+	writeJSON(w, http.StatusCreated, p)
+}
+
+// handleCapturePreAuth implements
+// POST /mandates/{id}/preauth/{preauth_id}/capture: converts the
+// pre-authorization into a real direct-debit posting through the full
+// Post validation sequence (see ledger.CapturePreAuth, LG-192). 201
+// with the receipt (200 with duplicate: true on an idempotent replay);
+// 404 on an unknown mandate or pre-authorization (or a
+// pre-authorization under a different mandate); 422 when the
+// pre-authorization is captured/released/expired or the mandate no
+// longer authorizes the pull; the booking itself runs the full Post
+// gate sequence, so frozen/overdraft/period rejections map exactly like
+// POST /entries.
+func (s *server) handleCapturePreAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req preauthCaptureRequest
+	if !s.decodeRequestBody(w, r, &req) {
+		return
+	}
+	receipt, err := s.ledgerFor(r).CapturePreAuth(r.PathValue("id"), ledger.PreAuthCapture{
+		ID:             req.ID,
+		PreAuthID:      r.PathValue("preauth_id"),
+		IdempotencyKey: req.IdempotencyKey,
+		ExternalRef:    req.ExternalRef,
+		Attachments:    req.Attachments,
+		Metadata:       req.Metadata,
+	})
+	if err != nil {
+		if writeMandateError(w, err) {
+			return
+		}
+		s.writePostError(w, err)
+		return
+	}
+	if receipt.Duplicate {
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	writeJSON(w, http.StatusCreated, receipt)
+}
+
+// handleReleasePreAuth implements
+// POST /mandates/{id}/preauth/{preauth_id}/release: drops the
+// pre-authorization without settling anything (see
+// ledger.ReleasePreAuth). 200 with the pre-authorization; 404 on an
+// unknown mandate or pre-authorization. Releasing an already-terminal
+// pre-authorization is a no-op that returns it as-is.
+func (s *server) handleReleasePreAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	// The route names the mandate: the ledger rejects a pre-authorization
+	// under a different mandate before anything mutates (see
+	// ledger.ReleasePreAuth).
+	p, err := s.ledgerFor(r).ReleasePreAuth(r.PathValue("id"), r.PathValue("preauth_id"))
+	if err != nil {
+		if writeMandateError(w, err) {
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// handleGetPreAuth implements
+// GET /mandates/{id}/preauth/{preauth_id}: the pre-authorization with
+// its effective status (lazy expiry applied). 404 on an unknown mandate
+// or pre-authorization.
+func (s *server) handleGetPreAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if _, ok := s.ledgerFor(r).GetMandate(r.PathValue("id")); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrMandateNotFound.Error()})
+		return
+	}
+	p, ok := s.ledgerFor(r).GetPreAuth(r.PathValue("preauth_id"))
+	if !ok || p.MandateID != r.PathValue("id") {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ledger.ErrPreAuthNotFound.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// handleListMandatePreAuths implements GET /mandates/{id}/preauth: every
+// pre-authorization under the mandate with its effective status, sorted
+// by ID. 404 on an unknown mandate.
+func (s *server) handleListMandatePreAuths(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	preauths, err := s.ledgerFor(r).ListMandatePreAuths(r.PathValue("id"))
+	if err != nil {
+		if writeMandateError(w, err) {
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mandate_id": r.PathValue("id"),
+		"preauths":   preauths,
+	})
+}
+
+// handleExpirePreAuths implements POST /mandates/preauth/expire: marks
+// every pre-authorization past its ExpiresAt as expired (see
+// ledger.ExpirePreAuths). Expiry is lazy by predicate everywhere else;
+// the sweep exists for observability. Always 200 with the marked count.
+func (s *server) handleExpirePreAuths(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"expired": s.ledgerFor(r).ExpirePreAuths(),
 	})
 }
 
@@ -9881,6 +10076,17 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /mandates/{id}/pacs010/reconcile", s.handlePacs010Reconcile)
 	mux.HandleFunc("POST /mandates/{id}/suspend", s.handleSuspendMandate)
 	mux.HandleFunc("POST /mandates/{id}/cancel", s.handleCancelMandate)
+	// LG-192: mandate pre-authorizations — the auth/capture flow for
+	// direct debits. /mandates/preauth/expire is the pre-authorization
+	// expiry sweep (registered before the {preauth_id} routes so the
+	// literal does not shadow them — Go 1.22 mux prefers exact patterns
+	// over wildcards anyway).
+	mux.HandleFunc("POST /mandates/{id}/preauth", s.handleAuthorizePreAuth)
+	mux.HandleFunc("GET /mandates/{id}/preauth", s.handleListMandatePreAuths)
+	mux.HandleFunc("POST /mandates/preauth/expire", s.handleExpirePreAuths)
+	mux.HandleFunc("POST /mandates/{id}/preauth/{preauth_id}/capture", s.handleCapturePreAuth)
+	mux.HandleFunc("POST /mandates/{id}/preauth/{preauth_id}/release", s.handleReleasePreAuth)
+	mux.HandleFunc("GET /mandates/{id}/preauth/{preauth_id}", s.handleGetPreAuth)
 	mux.HandleFunc("POST /revaluations", s.handleCreateRevaluation)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)
 	mux.HandleFunc("POST /reconcile/export", s.handleReconcileExport)
@@ -10086,6 +10292,10 @@ func (s *server) handler() http.Handler {
 		var extMappingChanges uint64
 		var entryLinkChanges uint64
 		var mandateDebits uint64
+		// LG-192: mandate pre-authorization lifecycle counters —
+		// authorized, captured, released — aggregated across tenants
+		// like the mandate debit counter above.
+		var preauthAuthorized, preauthCaptured, preauthReleased uint64
 		var gpiTracked, gpiSettled, gpiRejected uint64
 		var retentionDeletions uint64
 		// Per-reason-code ACH return counts (LG-161), aggregated
@@ -10172,6 +10382,15 @@ func (s *server) handler() http.Handler {
 			// debits post inside DebitWithMandate, not in a handler
 			// (see ledger/mandate.go, LG-125).
 			mandateDebits += l.MandateDebitCount()
+			// The pre-authorization lifecycle counters likewise live
+			// in the ledger: authorizations open inside
+			// AuthorizePreAuth, captures inside CapturePreAuth, and
+			// releases inside ReleasePreAuth, not in a handler (see
+			// ledger/mandate_preauth.go, LG-192).
+			auth, cap, rel := l.PreAuthCounts()
+			preauthAuthorized += auth
+			preauthCaptured += cap
+			preauthReleased += rel
 			// The gpi lifecycle counters likewise live in the ledger:
 			// tracks open inside CreatePayout and advance inside
 			// AdvanceGPI / the pain.002 apply path, not in a handler
@@ -10304,6 +10523,12 @@ func (s *server) handler() http.Handler {
 		s.metrics.ExternalMappingChangesTotal.Store(extMappingChanges)
 		s.metrics.EntryLinkChangesTotal.Store(entryLinkChanges)
 		s.metrics.MandateDebitsTotal.Store(mandateDebits)
+		// The pre-authorization counters mirror the ledger the same
+		// way: the ledger is the source of truth, so the scrape
+		// overwrites (never accumulates) the exposed series.
+		s.metrics.PreAuthAuthorizedTotal.Store(preauthAuthorized)
+		s.metrics.PreAuthCapturedTotal.Store(preauthCaptured)
+		s.metrics.PreAuthReleasedTotal.Store(preauthReleased)
 		// The gpi counters mirror the ledger the same way.
 		s.metrics.GPITrackedTotal.Store(gpiTracked)
 		s.metrics.GPISettledTotal.Store(gpiSettled)

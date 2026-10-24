@@ -865,6 +865,24 @@ type Metrics struct {
 	// GET /metrics). It is synced from the ledger on every GET /metrics
 	// scrape, like EntryLinkChangesTotal.
 	MandateDebitsTotal atomic.Uint64
+	// PreAuthAuthorizedTotal counts mandate pre-authorizations opened
+	// (see ledger.AuthorizePreAuth, LG-192): new authorizations only —
+	// idempotent replays of a pre-authorization key are not counted,
+	// across all tenants (see GET /metrics). It is synced from the
+	// ledger on every GET /metrics scrape, like MandateDebitsTotal.
+	PreAuthAuthorizedTotal atomic.Uint64
+	// PreAuthCapturedTotal counts pre-authorizations settled into real
+	// direct-debit postings (see ledger.CapturePreAuth, LG-192):
+	// idempotent replays of a capture key are not counted, across all
+	// tenants. It is synced from the ledger on every GET /metrics
+	// scrape, like PreAuthAuthorizedTotal.
+	PreAuthCapturedTotal atomic.Uint64
+	// PreAuthReleasedTotal counts pre-authorizations released without
+	// settling (see ledger.ReleasePreAuth, LG-192): idempotent
+	// releases of an already-terminal pre-authorization are not
+	// counted, across all tenants. It is synced from the ledger on
+	// every GET /metrics scrape, like PreAuthAuthorizedTotal.
+	PreAuthReleasedTotal atomic.Uint64
 	// GPITrackedTotal counts gpi-tracked cross-border payments (see
 	// ledger.GPICounts, LG-165): one per payout drafted, across all
 	// tenants (see GET /metrics). It is synced from the ledger on
@@ -1407,6 +1425,15 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(&sb, "ledger_mandate_debits_total",
 		"Total direct-debit mandate debits posted (see ledger.DebitWithMandate): pulls authorized by a mandate and booked through the full Post validation sequence. Idempotent replays of a debit key are not counted.",
 		m.MandateDebitsTotal.Load())
+	writeCounter(&sb, "ledger_preauth_authorized_total",
+		"Total mandate pre-authorizations opened (see ledger.AuthorizePreAuth): limit frozen for a future direct debit, nothing posted. Idempotent replays of a pre-authorization key are not counted.",
+		m.PreAuthAuthorizedTotal.Load())
+	writeCounter(&sb, "ledger_preauth_captured_total",
+		"Total mandate pre-authorizations captured into real direct-debit postings (see ledger.CapturePreAuth). Idempotent replays of a capture key are not counted.",
+		m.PreAuthCapturedTotal.Load())
+	writeCounter(&sb, "ledger_preauth_released_total",
+		"Total mandate pre-authorizations released without settling (see ledger.ReleasePreAuth). Idempotent releases of an already-terminal pre-authorization are not counted.",
+		m.PreAuthReleasedTotal.Load())
 	writeCounter(&sb, "ledger_gpi_tracked_total",
 		"Total SWIFT gpi cross-border payments tracked (see ledger.GPICounts): one per payout drafted. In-memory only, synced from the ledger on every scrape.",
 		m.GPITrackedTotal.Load())

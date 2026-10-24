@@ -125,6 +125,16 @@ const (
 	// autopay missed a cycle. Downstream consumers can wire it into
 	// dunning escalation (see EscalateDunning) to chase the payer.
 	OutboxMandateRetryExhausted = "mandate_retry_exhausted"
+	// Pre-authorization lifecycle (see mandate_preauth.go, LG-192): the
+	// mandate-limit reservation for a future direct-debit pull —
+	// authorized (frozen limit, nothing booked), captured (settled as a
+	// real debit — the debit's journal row emits the usual
+	// entry_posted event too), released (reservation dropped), and
+	// expired (lapsed un-settled).
+	OutboxPreAuthAuthorized = "preauth_authorized"
+	OutboxPreAuthCaptured   = "preauth_captured"
+	OutboxPreAuthReleased   = "preauth_released"
+	OutboxPreAuthExpired    = "preauth_expired"
 	// Term-deposit lifecycle (see termdeposit.go): opening locks the
 	// principal off-journal, maturing releases it at tenor end, and an
 	// early withdrawal releases it with a penalty. The interest accrual

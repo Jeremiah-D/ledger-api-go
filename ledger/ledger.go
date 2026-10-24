@@ -1410,7 +1410,34 @@ type Ledger struct {
 	// the debits were never booked, so there is nothing to reconcile.
 	mandateRetries     map[string]*MandateRetry
 	mandateRetryFiring map[string]bool
-	chain              []chainLink // audit chain, one link per successful Post, in order
+	// preauths is the pre-authorization registry (see
+	// mandate_preauth.go, LG-192): the mandate-limit reservations for
+	// future direct-debit pulls, by pre-authorization ID. Append-only
+	// like mandates: rows move to captured/released/expired, never
+	// deleted. In-memory operational state like holds — they do not
+	// round-trip through snapshots.
+	preauths map[string]PreAuth
+	// preauthsByMandate is the mandate -> pre-authorization index:
+	// mandate ID to pre-authorization IDs in authorization order.
+	preauthsByMandate map[string][]string
+	// preauthKeys is the pre-authorization idempotency namespace:
+	// key -> pre-authorization ID, independent of Post's byKey and the
+	// hold/capture namespaces. preauthCaptureKeys is the
+	// pre-authorization-capture namespace: key -> capture receipt. Both
+	// honor the ledger's idempotency TTL (see
+	// prunePreAuthKeysLocked in mandate_preauth.go).
+	preauthKeys        map[string]string
+	preauthCaptureKeys map[string]PreAuthCaptureReceipt
+	// preauthAuthorizedChanges, preauthCapturedChanges, and
+	// preauthReleasedChanges count new pre-authorization operations
+	// (see AuthorizePreAuth, CapturePreAuth, ReleasePreAuth):
+	// idempotent replays are not counted. Operational metrics,
+	// surfaced on GET /metrics; not books, so they do not round-trip
+	// through snapshots.
+	preauthAuthorizedChanges atomic.Uint64
+	preauthCapturedChanges   atomic.Uint64
+	preauthReleasedChanges   atomic.Uint64
+	chain                    []chainLink // audit chain, one link per successful Post, in order
 	// chainArchives remembers the chain-segment archives this process
 	// exported (LG-136): PruneChainPrefix requires the dropped prefix
 	// to be covered by these archives and re-verifies them before
@@ -1700,7 +1727,14 @@ func New(opts ...Option) *Ledger {
 		mandateRetryPolicies: make(map[string]MandateRetryPolicy),
 		mandateRetries:       make(map[string]*MandateRetry),
 		mandateRetryFiring:   make(map[string]bool),
-		pruneInterval:        defaultKeyPruneInterval,
+		// LG-192: the mandate pre-authorization registry starts empty;
+		// pre-authorizations are created through AuthorizePreAuth and
+		// never survive a restart (like holds).
+		preauths:           make(map[string]PreAuth),
+		preauthsByMandate:  make(map[string][]string),
+		preauthKeys:        make(map[string]string),
+		preauthCaptureKeys: make(map[string]PreAuthCaptureReceipt),
+		pruneInterval:      defaultKeyPruneInterval,
 	}
 	for _, opt := range opts {
 		opt(l)
@@ -2308,6 +2342,10 @@ func (l *Ledger) pruneIdempotencyKeysLocked(now time.Time) int {
 	// same schedule, in their own namespace (see prunePayoutKeysLocked
 	// in payout.go).
 	removed += l.pruneHoldKeysLocked(now)
+	// Pre-authorization and pre-authorization-capture keys expire on
+	// the same schedule, in their own namespaces (see
+	// prunePreAuthKeysLocked in mandate_preauth.go).
+	removed += l.prunePreAuthKeysLocked(now)
 	removed += l.pruneSweepKeysLocked(now)
 	removed += l.pruneSweepFXKeysLocked(now)
 	removed += l.pruneMergeKeysLocked(now)

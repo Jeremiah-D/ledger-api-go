@@ -377,6 +377,13 @@ type ReconciliationReport struct {
 	// compliance tooling reads this to reconcile which standing pull
 	// authorizations are live and how far each has been drawn.
 	Mandates []MandateReport `json:"mandates"`
+	// PreAuths lists every mandate pre-authorization (see
+	// mandate_preauth.go, LG-192), sorted by ID: the reserved amount,
+	// currency, expiry, and effective status (lazy expiry applied).
+	// Treasury and compliance tooling reads this to reconcile which
+	// pull authorizations are live but not yet settled — authorized
+	// limit that has not become a debit.
+	PreAuths []PreAuthReport `json:"preauths"`
 	// ClosedPeriods lists the currently locked accounting periods
 	// ("YYYY-MM", UTC months; see ClosePeriod), sorted: no journal entry
 	// may be booked with a timestamp in one of these months, so the
@@ -892,6 +899,11 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		// usage, so the reconciliation record shows which mandates
 		// are live and how far each has been drawn.
 		Mandates:                l.mandateReportsLocked(now),
+		// LG-192: the pre-authorizations table — live but
+		// un-settled pull authorizations, so the reconciliation
+		// record shows reserved limit that has not become a
+		// debit.
+		PreAuths:                l.preauthReportsLocked(now),
 		ClosedPeriods:           l.closedPeriodsLocked(),
 		ActiveTransferSchedules: l.activeScheduleCountLocked(),
 		PendingReviews:          l.pendingTransferReviewsLocked(now),

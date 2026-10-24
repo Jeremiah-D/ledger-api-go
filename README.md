@@ -1135,6 +1135,56 @@ can wire it into dunning escalation. Retry policies and pending
 retries are in-memory operational state (like sweeper flags): they do
 not round-trip through snapshots.
 
+**Pre-authorizations on mandates (`POST /mandates/{id}/preauth`,
+代扣预授权 — auth/capture for direct debits):** the fintech
+pre-authorization flow on top of a mandate: the merchant reserves a
+slice of the mandate's pull limit *before* the money moves (check the
+customer can pay, settle later). This is deliberately not a hold:
+holds reserve an account's *available balance* against arbitrary
+postings, while a pre-authorization is an authorization-domain
+reservation against the mandate's *frequency window and per-debit cap*
+— it never touches balances, available funds, or the journal, and the
+two designs stay orthogonal.
+
+`POST /mandates/{id}/preauth` freezes `amount_cents` inside the
+mandate's limits (the mandate must be active and cover now, the amount
+must fit the per-debit cap, the currency must match, the account pair
+must not be frozen/suspended/closed). The reservation occupies the
+mandate's frequency window exactly like a posted debit: an active
+pre-authorization blocks both a parallel `POST /mandates/{id}/debits`
+and a parallel pre-authorization in the same window (all fail
+`422` `ledger: mandate frequency window already used`).
+`POST /mandates/{id}/preauth/{preauth_id}/capture` converts the
+reservation into a real debit — the settlement posts through the exact
+same path as a direct debit (the mandate gates are re-run at the
+capture timestamp, the mandate must still authorize the pull, and the
+full `Post` validation sequence — frozen, overdraft, daily limit,
+budget, period, journal rules — guards the booking), so a capture can
+never dodge a control the direct debit would hit. The debit memo
+carries both stamps, `preauth_of:<preauth ID> mandate_of:<mandate
+ID>`, and the usual `mandate_of` entry link is declared, so a capture
+is indistinguishable from a direct debit in every index. Captures are
+single-shot and full-amount (no partial capture: a merchant wanting
+two settlements issues two pre-authorizations); a mandate cancelled
+or expired after the authorization refuses the capture (`422`), like
+a card scheme refuses settlement after the auth window.
+`POST /mandates/{id}/preauth/{preauth_id}/release` drops the
+reservation without settling (idempotent on terminal states);
+`GET /mandates/{id}/preauth/{preauth_id}` reads one,
+`GET /mandates/{id}/preauth` lists the mandate's, and expiry is lazy
+by predicate (`ExpiresAt` is required — authorizations are always
+time-bound) plus `POST /mandates/preauth/expire` for observability.
+Idempotency keys live in their own namespace (authorize vs. capture),
+isolated from entry/transfer/hold keys and pruned with the same TTL.
+Every lifecycle move enters the structured audit chain and emits a
+`preauth_authorized` / `preauth_captured` / `preauth_released` /
+`preauth_expired` outbox envelope; `GET /metrics` exposes
+`ledger_preauth_authorized_total`,
+`ledger_preauth_captured_total`, and
+`ledger_preauth_released_total`; the `Reconcile` report discloses the
+`preauths` table. Pre-authorizations are in-memory operational state
+(like holds): they do not round-trip through snapshots.
+
 ### Request for Payment (`POST /rfp`, RfP 即时支付收款请求)
 
 The pull-side dual of a transfer: instead of the payer pushing money,
