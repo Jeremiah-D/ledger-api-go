@@ -4410,6 +4410,32 @@ curl -s 'localhost:8080/exports/pacs004?uetr=9f2c8e1a-…&reason=DUPL' -o return
 
 Go: `ledger.ExportPacs004`。
 
+### `pacs.007` — ISO 20022 pacs.007 已结算付款撤销导出
+
+已结算的 payout 可以用 ISO 20022 `pacs.007.001.02`
+（`FIToFIPmtRvsl`）撤销：贷记方发起、把已结算的付款本身
+撤销（不是像 pacs.004 那样退一笔新钱回来，也不是 camt.056
+那样结算前召回在途指令）。
+
+语义：
+- 与 pacs.004（LG-169）正交：pacs.004 是**退汇**（受益人把钱
+  退回），pacs.007 是**撤销**（已结算指令本身被 undo）；
+  与 camt.056（LG-168）正交：camt.056 是**撤销请求**
+  （结算前），pacs.007 是**撤销执行报文**（结算后）。
+- `OrgnlGrpInf` 把原指令建模为 `pacs.008.001.02`（pacs.002
+  惯例）；`TxInf` 含 `RvslId`、`OrgnlUETR`、`RvsdIntrBkSttlmAmt`、
+  `RtrRsnInf/Rsn/Prtry` 与 `OrgnlTxRef`（原指令引用只含金额、
+  币种、end-to-end ID，不含当事人名）。
+- `MsgId` 确定性：`<uetr>/rvsl`——导出不开记录，同支付同
+  原因重复导出 MsgId 不变。
+- 原因码闭集：`DUPL`（重复支付）/`AM09`（金额错误）/
+  `FRAD`（欺诈支付）/`CUST`（贷记方请求）；未知 UETR、未结算
+  payout、空原因码、闭集外原因码一律 fail-closed。
+- 只读：读锁快照、无 version bump、无记账、无审计链追加——与
+  `ExportPacs004` 同契约；刻意**不**驱动 payout 指令。
+
+Go: `ledger.ExportPacs007`。
+
 ### `POST /exports/mt103` — SWIFT FIN MT103 跨境汇款导出
 
 已审批（approved）或已提交（submitted）的 payout 可以用 SWIFT FIN
