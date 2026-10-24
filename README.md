@@ -6179,6 +6179,44 @@ report, err := l.PostNetting("cutoff-2026-10-11", []ledger.AccountID{"merch-a", 
 // report.Before / report.After: per-(account, currency) net positions around the settlement
 ```
 
+### RTGS liquidity-saving queue (`ledger/gridlock.go`)
+
+The RTGS view (LG-202): a payment arrives, the payer's account is
+short, and the payment cannot settle — yet. It is not dropped and not
+partially settled; it waits in full in a queue, and the queue
+periodically looks for a set of waiting payments that can settle
+together. `NewGridlockQueue()` creates the queue; `Enqueue(payment)`
+admits one instruction (ID, payer, payee, positive amount, currency —
+empty means USD), validating shape only: admission is the operator's
+routing decision, and a payment ID is single-use for the queue's life,
+so a settled payment can never re-enter and double-book.
+`Resolve(l, currency)` settles the maximal feasible set in that
+currency as one atomic batch through `PostBatch`, and leaves the rest
+queued. Feasibility uses the RTGS zero floor, independent of the
+ledger's opt-in overdraft protection: a payer may pay only out of a
+non-negative simulated balance, and the greedy fixpoint — repeatedly
+apply any payment whose payer can currently pay, in queue order, until
+no progress — finds a maximal feasible set (any feasible ordering can
+start with any currently payable payment, so the fixpoint loses
+nothing). A zero-balance cycle stays queued for a funding decision:
+netting obligations down is the netting session's job (LG-56), not
+this queue's, which settles instructions at full value. Payments
+touching frozen or closed accounts are skipped for that run so one
+blocked account cannot stall the queue; any other gate failure fails
+the whole run closed with the queue untouched. Currency isolation is
+absolute: a resolution only ever looks at, simulates, and settles
+payments in its own currency. The queue is in-memory operational state
+(like the auto-sweep rules) and does not round-trip through snapshots;
+settled batches survive as journal rows carrying their batch ID.
+
+```go
+q := ledger.NewGridlockQueue()
+q.Enqueue(ledger.QueuedPayment{ID: "rtgs-1", From: "bank-a", To: "bank-b", AmountCents: 10000, Currency: "USD"})
+res, err := q.Resolve(l, "USD")
+// res.Settled: payments settled in settlement order; res.Remaining: still queued, in queue order
+// res.BatchID / res.EntryIDs ("gridlock:<payment ID>"): the atomic batch that settled them
+```
+
 ### Net settlement batches (`ledger/clearing.go`)
 
 The workflow container around netting (LG-135): where multilateral
