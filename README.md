@@ -2543,6 +2543,33 @@ not a paper-check presentment), and the register is process-local
 operational state — the check-issuance system of record remains
 authoritative and re-registers issued checks at startup.
 
+### Payment-versus-payment bilateral settlement (Go API: `NewPvPSettlement`, LG-200)
+
+Two-counterparty FX settlement without Herstatt risk: a PvP pair
+swaps value in two different currencies, and neither leg may settle
+without the other. `NewPvPSettlement` validates the pair up front
+(two distinct leg IDs, two distinct payer accounts, two distinct
+currencies, positive amounts — a same-currency pair is a plain
+transfer, not PvP), then the settlement moves `created → held →
+committed` or `→ rolled_back`. `Hold` freezes both legs before
+either is posted; `Commit` takes one journal entry ID per leg and is
+all-or-nothing — a missing, empty, or duplicated entry ID rejects
+the whole commit and leaves the settlement held, so a partial commit
+is never reported. `FailAndRollback` (or plain `Rollback`) releases
+both holds together when either leg fails, and a terminal settlement
+can never commit or roll back again. A committed settlement yields
+one audit link per leg, each naming the other leg's journal entry,
+so the pair of links is bidirectional and an auditor can walk from
+either entry to its PvP counterpart. Audit links carry settlement,
+leg, and entry IDs plus currency and amount only — never account
+holder names or account IDs. This module books no journal entries
+itself: the caller posts both legs through the normal posting path
+after `Hold` and hands the resulting entry IDs to `Commit`, the
+same boundary the positive-pay module keeps. It is orthogonal to
+netting (a minimal transfer set for many obligations, not a
+two-currency pair) and to the merchant end-of-day settlement view
+(a report after the fact, not settlement execution).
+
 ### Large-transfer auto-split (Go API: `PostTransferSplit`)
 
 When a transfer exceeds a per-transfer cap — a downstream rail's
