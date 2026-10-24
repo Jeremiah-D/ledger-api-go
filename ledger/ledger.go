@@ -496,6 +496,15 @@ type Ledger struct {
 	// config, like payeeVerificationPolicy: it never bumps the
 	// journal version and is not part of the snapshot.
 	travelRulePolicy TravelRulePolicy
+	// issuedChecks is the positive-pay issued-check register
+	// (see positive_pay.go, LG-197), keyed by account + check
+	// number; positivePayExceptions is the exception queue, and
+	// cleared presentments are tracked on the issued record.
+	// Process-local operational state, like travelRulePolicy: it
+	// never bumps the journal version and is not part of the
+	// snapshot.
+	issuedChecks          map[positivePayKey]*positivePayIssuedRecord
+	positivePayExceptions map[positivePayKey]*PositivePayException
 	// businessCalendar is the ledger's holiday calendar (see
 	// businessday.go): weekend days plus the custom holiday table, with
 	// a version counter bumped on every change. Structural config, like
@@ -1617,6 +1626,8 @@ func New(opts ...Option) *Ledger {
 		transferAllowlist:       make(map[AccountID]map[AccountID]bool),
 		payeeVerificationPolicy: DefaultPayeeVerificationPolicy(),
 		travelRulePolicy:        DefaultTravelRulePolicy(),
+		issuedChecks:            make(map[positivePayKey]*positivePayIssuedRecord),
+		positivePayExceptions:   make(map[positivePayKey]*PositivePayException),
 		largeTxThresholds:       make(map[string]int64),
 		largeTxReportCurrency:   DefaultCurrency,
 		largeTxReports:          make(map[largeTxReportKey]LargeTxReport),

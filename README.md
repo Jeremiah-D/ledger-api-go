@@ -2516,6 +2516,33 @@ the same assessment read-only (e.g. a payer UI pre-screen), and
 orthogonal to KYC (whether the holder's identity was verified) and to
 the payment purpose code (what the payment is for).
 
+### Positive pay check fraud prevention (Go API: `RegisterIssuedCheck`, LG-197)
+
+Paper-check channel fraud control: the operator registers every check
+it issues (`RegisterIssuedCheck`: account, check number, amount,
+currency, payee, issue date — a duplicate account + number is refused
+fail-closed), and each check presented for payment
+(`PresentCheck`) is compared against its registered entry. A full
+match (amount, currency, and payee after case/whitespace
+normalization — exact, not fuzzy) clears for posting and marks the
+entry cleared, so a re-presentment is idempotently cleared. An amount,
+payee, or currency mismatch — or a check with no registered entry —
+enters the exception queue as pending and must not be posted until a
+human adjudicates it (`DecidePositivePayException`: `pay` approves it
+for posting, so a later present returns cleared; `return` bounces it,
+so a later present returns returned). Deciding a missing or
+already-decided exception, or an unknown decision, is an error.
+Every step is audited (`positive_pay_issued`, `positive_pay_cleared`,
+`positive_pay_exception`, `positive_pay_decision`) with check number,
+reason, and decision only — never the payee name. `GetPositivePayException`
+and `ListPositivePayExceptions` (sorted by account, then number) read
+the queue. This module books no journal entries itself: the caller
+posts only cleared checks through the normal posting path. It is
+orthogonal to mandate pre-authorization (an electronic-mandate hold,
+not a paper-check presentment), and the register is process-local
+operational state — the check-issuance system of record remains
+authoritative and re-registers issued checks at startup.
+
 ### Large-transfer auto-split (Go API: `PostTransferSplit`)
 
 When a transfer exceeds a per-transfer cap — a downstream rail's
