@@ -4214,6 +4214,33 @@ pain.010.001.02（`MndtAmdmntReq`），向债务人银行申请修改授权—�
   `404` 未知授权；`422` 授权未激活。计数器
   `ledger_pain010_exports_total`。
 
+### CSV 批量付款文件导入（LG-208）
+
+企业批量付款的文件通道：`ImportPaymentCSV` 解析一笔付款文件的 CSV
+（列：`payer,payee,amount,currency,purpose,execution_date`，可选
+`payer_iban,payee_iban,payer_bic,payee_bic`），逐行校验后把通过的行
+组成待复核 batch，操作员以 `ApproveCSVBatch` 批准后经 LG-160
+`PostBatchTransfer` 原子过账。
+
+- 逐行隔离：坏行进 repair queue（LG-177，操作员可见、Maker 为空、
+  永不自行重提），其余行照常入批——一个坏行不堵整批文件。
+- 校验复用 pain.001：IBAN 走 ISO 13616 mod-97（`validIBAN`）、BIC 走
+  ISO 9362（`validBIC`），不另写第二套规则；金额为十进制字符串转
+  整型 cents（无浮点，最多两位小数，超位即坏行）；币种须为 3 位
+  大写字母；执行日须为真实 `YYYY-MM-DD` 日期；用途（purpose）即
+  过账时的 transfer memo（≤255 字符）。
+- 导入本身不落账：不 bump 版本、不写 journal；批准时才按行执行日
+  作为 transfer 日期、用途作为 memo、批次号作为外部引用过账；批准
+  时全部 LG-160 校验（denylist、冻结、透支、限额）仍然生效，批准
+  失败整批不落账、批次保持待复核，可修因后重批。
+- 文件幂等：同一文件字节的 SHA-256 重导入返回原报告（`Duplicate`），
+  不重复入批、不重复进 repair queue；批次批准同样幂等（批次号即
+  `PostBatchTransfer` 幂等键），重批返回原收据。
+- 与 LG-160 正交（LG-160 是程序化批量 API，本项是文件通道）；与 OFX
+  导入正交（OFX 是银行对账单格式，本项是企业付款文件）。大额行若
+  命中付款方复核阈值，仍按 LG-42 挂 pending-review，再走 LG-149 批
+  量复核——CSV 批次批准不豁免逐笔复核。
+
 ### SWIFT gpi UETR 跨境追踪（`GET /gpi/track/{uetr}`）
 
 每笔 payout 指令都是跨境支付发起：`POST /payouts` 起草时自动分配
