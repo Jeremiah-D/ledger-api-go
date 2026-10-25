@@ -4535,6 +4535,41 @@ curl -s -X POST localhost:8080/exports/mt103 \
 
 Go: `ledger.ExportMT103` / `ledger.MT103ExportOptions`。
 
+### SWIFT FIN MT202 银行间汇款（库级解析 + 导出）
+
+银行间资金划转用 SWIFT FIN `MT202`（general financial institution
+transfer）渲染：一方金融机构指令另一方动用自有资金账户划款。
+报文含 block 1（发送方 LT 地址）、block 2（应用头 `I202`、接收方
+LT 地址）、block 3（`{108:MUR}`）与 block 4 核心字段集 `:20:` /
+`:21:` / `:32A:` / `:52A:` / `:58A:`。
+
+语义：
+- 与 MT103（LG-183）正交：MT103 是客户汇款（ordering 方为客户
+  `:50K:`，动客户的钱），MT202 无客户字段——`:52A:` 汇款行与
+  `:58A:` 收款行均为银行，动银行自有资金；与 MT940 正交：MT940
+  是账户对账单（事后报告），MT202 是事前指令，报告与指令绝不混淆。
+- 覆盖范围（fail-closed）：只实现 `:52a:` / `:58a:` 的 A（BIC）
+  变体，D（名称地址）变体与可选 `:72:` 附言字段一律拒绝——不静默
+  丢字段、不从名称猜 BIC。字段顺序固定为
+  `:20:` → `:21:` → `:32A:` → `:52A:` → `:58A:`，缺字段、重字段、
+  乱序、未知字段一律拒绝。
+- 字段纪律（MT103/nacha.go 惯例）：`:20:` / `:21:` 均为 1–16 `x`
+  字符（花括号另行拒绝）；`:32A:` 为 YYMMDD + 3 位大写币种 +
+  `<整数>,<2 位小数>`（15d，整数部分 ≤12 位，金额必须为正）；
+  `:52A:` / `:58A:` 必须为有效 ISO 9362 BIC；block 1/2 的 LT 地址
+  按 MT103 规则归一化（BIC8 → BIC8+`XXX`）。
+- block 3 只做形状校验（`{3:{108:<1–16 x>}}`），内容不进业务记录
+  （`:20:` 才是业务键）；导出时 MUR 写 `:20:`（MT103 惯例）。
+  block 5 省略（CHK 由 SWIFT 网络计算，不伪造）；block 1 的
+  session/sequence 填零（发送方接口分配）。
+- 纯值对象、无 HTTP 端点：MT202 没有 payout（客户指令）可渲染、
+  也没有 gpi track 可查询，调用方直接给齐两行一值——故为库级
+  `ParseMT202` / `ExportMT202`（MT940 同款定位），无锁、无
+  version bump、无记账、无审计链追加；重复导出字节一致；解析
+  接受 CRLF。
+
+Go: `ledger.MT202` / `ledger.ParseMT202` / `ledger.ExportMT202`。
+
 ### `GET /exports/accounting/xero` · `GET /exports/accounting/quickbooks` — 会计软件对接导出
 
 日记账可以导出给外部会计软件，做账/报税/审计对账：
