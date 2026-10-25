@@ -689,6 +689,11 @@ type Ledger struct {
 	// config — like frozen and feeTiers — and survive snapshots.
 	fxRates   map[fxPair]ExchangeRate
 	fxAccount AccountID
+	// fxBreakers is the per-pair rate-move circuit-breaker registry
+	// (see fx_breaker.go, LG-214), keyed by directional pair.
+	// Operational state like rate overrides — it does not round-trip
+	// through snapshots.
+	fxBreakers map[fxPair]FXRateBreaker
 	// limitOrders is the FX limit-order book (see fx_limit_order.go,
 	// LG-191): resting orders keyed by ID, with limitOrderSeq keeping
 	// insertion order so MatchLimitOrders sweeps deterministically. The
@@ -1730,6 +1735,7 @@ func New(opts ...Option) *Ledger {
 		reportScheduleRuns:   make(map[string][]ReportRun),
 		reportScheduleFiring: make(map[string]bool),
 		fxRates:              make(map[fxPair]ExchangeRate),
+		fxBreakers:           make(map[fxPair]FXRateBreaker),
 		limitOrders:          make(map[string]*LimitOrder),
 		correspondentFees:    make(map[fxPair]int64),
 		railConfigs:          make(map[string]RailCapability),

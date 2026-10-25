@@ -193,6 +193,7 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		collateralPledges:    make(map[collateralKey]CollateralPledge, len(l.collateralPledges)),
 		collateralReqs:       make(map[collateralReqKey]CollateralRequirement, len(l.collateralReqs)),
 		fxRates:              make(map[fxPair]ExchangeRate, len(l.fxRates)),
+		fxBreakers:           make(map[fxPair]FXRateBreaker, len(l.fxBreakers)),
 		correspondentFees:    make(map[fxPair]int64, len(l.correspondentFees)),
 		closedPeriods:        make(map[string]bool, len(l.closedPeriods)),
 		balanceWatches:       make(map[balanceWatchKey]BalanceWatch, len(l.balanceWatches)),
@@ -375,6 +376,9 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 	c.feeRevenueAccount = l.feeRevenueAccount
 	for k, v := range l.fxRates {
 		c.fxRates[k] = v
+	}
+	for k, v := range l.fxBreakers {
+		c.fxBreakers[k] = v
 	}
 	c.fxAccount = l.fxAccount
 	for k, v := range l.correspondentFees {

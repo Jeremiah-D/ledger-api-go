@@ -881,6 +881,20 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		if err != nil {
 			return TransferReceipt{}, err
 		}
+		// LG-214: the rate-move circuit breaker, on the live path
+		// only. A forward-locked settlement is exempt by
+		// construction — it prices at its locked rate, never at the
+		// live price — so the breaker check runs here, against
+		// the live mid, before the admitted-price substitution
+		// below: a market that moved past the breaker halts even
+		// admitted-price settlements until an operator resets.
+		// The check runs after the idempotency replay check above,
+		// so a replay returns the original receipt instead of
+		// tripping, and before any mutation, so a tripped
+		// settlement records nothing but the trip audit event.
+		if err := l.checkFXRateBreakerLocked(pair, commitEff.MidNum, commitEff.MidDen, now); err != nil {
+			return TransferReceipt{}, err
+		}
 	}
 	rate := commitEff.Rate // the market-table entry, for provenance disclosure
 	effNum, effDen := commitEff.Num, commitEff.Den

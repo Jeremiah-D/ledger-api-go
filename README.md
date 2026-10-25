@@ -3829,6 +3829,34 @@ rate and approver, and `ledger_fx_rate_overridden_total` counts them.
 Overrides are operational state like transfer reviews — they do not
 round-trip through snapshots; after a restore, operators re-propose.
 
+**FX rate-move circuit breaker (LG-214).** Per directional pair,
+opt-in: `SetFXRateBreaker(from, to, maxDeviationBps)` installs a
+maximum deviation and anchors the pair to the market mid in effect
+at that moment (its table rate and effective version). No breaker
+configured means no behavior change. Before a spot FX settlement
+books anything, the live market mid is compared with the anchor
+(exact big-rational math, floored basis points); a move of more than
+the threshold trips the breaker — the settlement is rejected
+(`422`, `ErrFXRateBreakerTripped`), one `fx_rate_breaker_tripped`
+audit event records the pair, anchor, live rate, deviation, and
+threshold, and the breaker stays tripped (latching) until an
+operator resets it, so later spot settlements for the pair are
+rejected even if the rate falls back. `ResetFXRateBreaker` re-anchors
+to the current market mid and clears the trip; re-setting a breaker
+does the same. `FXRateBreaker` / `FXRateBreakers` report the state.
+The breaker measures the live mid, not the dealing price (a wide
+spread is not a market jump) and not an admitted price — when the
+market has moved past the breaker, even admitted-price settlements
+halt until reviewed. Forward settlements are exempt: a forward
+settles at its contractually locked price, never at the live price
+(LG-110), so a live-market breaker cannot re-price a hedge; an
+operator who wants to stop a forward cancels it. This is orthogonal
+to the LG-68 expiry watch (warns, never blocks), the LG-76
+consistency scan (advises, never blocks), and the LG-69 override
+deviation cap (bounds operator-proposed prices, not market moves).
+Breakers are operational state like overrides — they do not
+round-trip through snapshots; after a restore, operators re-set them.
+
 #### FX revaluation (`POST /revaluations`)
 
 Period-end remeasurement: every non-base-currency balance is revalued at
