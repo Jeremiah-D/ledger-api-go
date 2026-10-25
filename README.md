@@ -4748,6 +4748,37 @@ block 3（`{108:MUR}`）与 block 4 字段集 `:20:` / `:21:` / `:79:`。
 Go: `ledger.MT199` / `ledger.ParseMT199` / `ledger.ExportMT199` /
 `ledger.WrapMT199Narrative`。
 
+### 贷款分期摊还表（预测性只读计算）
+
+贷款的分期表用 `GenerateLoanAmortizationSchedule` 生成：本金（整型
+cents）、年利率（基点，1200 = 12.00%）、期数、还款频率（月/季/
+半年/年）→ 每期 interest / principal split 与剩余本金。表是预测，
+不是记账：生成过程不碰账本状态、不记分录、不 bump version，实际
+还款仍走 Post / transfer 入账——给借款人看分期表，绝不能因此凭空
+产生一笔账。
+
+语义：
+- 与固定资产折旧摊销（LG-141）正交：折旧摊的是资产账面价值，本项
+  摊的是贷款本金——同名不同账，代码不共享；与定期转账执行计划
+  （schedule.go）正交：那是"到时执行哪些转账"，本项是"每期金额
+  如何拆分"。
+- 整数精确：全程不用 float64，单期利息为精确有理数
+  `remaining * annualBps / (10000 * periodsPerYear)` 四舍五入到
+  分（半值远离零）；等额本息的每期还款额由年金公式的精确有理值
+  四舍五入得到，零利率时退化为 `round(本金/期数)`。
+- 尾期 true-up：末期本金恒等于剩余本金，不用计算切片——本金列
+  求和恒等于贷款本金、末期剩余恒为零；等额本金的每期本金切片
+  向下取整，整除余数同样由末期 true-up 吸收（100 分分 3 期还
+  33、33、34）。不做 true-up 的长周期表会在末期残留几分钱的
+  欠/多还，本项从构造上杜绝。
+- 门控 fail-closed：本金、期数、利率、频率、模式任一非法即拒绝；
+  等额本息某期还款额若覆盖不了一期利息（表永远摊不完），拒绝
+  而非输出本金为负的行。
+
+Go: `ledger.GenerateLoanAmortizationSchedule` /
+`ledger.LoanAmortizationTerms` / `ledger.LoanAmortizationSchedule` /
+`ledger.LoanAmortizationPayment`。
+
 ### `GET /exports/accounting/xero` · `GET /exports/accounting/quickbooks` — 会计软件对接导出
 
 日记账可以导出给外部会计软件，做账/报税/审计对账：
