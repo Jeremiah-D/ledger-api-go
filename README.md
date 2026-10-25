@@ -4716,6 +4716,38 @@ Go: `ledger.MT202` / `ledger.ParseMT202` / `ledger.ExportMT202`。
 Go: `ledger.MT900910` / `ledger.ParseMT900910` / `ledger.ExportMT900910` /
 `ledger.Ledger.ExportMT900910ForPayout`。
 
+### SWIFT FIN MT199 自由格式报文（库级解析 + 导出）
+
+无金额语义的自由格式通知用 SWIFT FIN `MT199`（free format message）
+渲染：查询、说明、通知均走正文，不下达指令、不确认结算。报文含
+block 1（发送方 LT 地址）、block 2（应用头 `I199`、接收方 LT 地址）、
+block 3（`{108:MUR}`）与 block 4 字段集 `:20:` / `:21:` / `:79:`。
+
+语义：
+- 与结构化报文正交：MT103（LG-183）与 MT202（LG-204）是指令（含
+  `:32A:` 金额）、MT900/MT910（LG-209）是已结算确认——MT199 两者
+  都不是：结构体根本没有金额、币种、起息日字段，MT199 永远不可能
+  被误读为一笔付款，付款也不可能经由自由格式通知偷渡。
+- 上下文锚点（诚实说明）：`:21:` 为可选字段，填入所涉 transfer /
+  payout 的 ID（至多 16 字符）作锚点；gpi UETR（LG-165）为 36 字符
+  UUID、装不进 `:21:` 的 16x 上限，故绝不截断/哈希 UETR 硬塞——需
+  引用完整 UETR 时写进 `:79:` 正文（调用方按行切分，或用
+  `WrapMT199Narrative` 按词边界裹行），UETR↔transfer 的链接本身
+  仍在 gpi track（`LinkGPITransfer`）里。
+- 字段纪律（MT103/MT202/MT900 惯例）：`:20:` / `:21:` 均为 1–16 `x`
+  字符；`:79:` 必填，1–50 行、每行 1–35 `x` 字符，且为 block 4 末字段
+  ——其后续行均为续行（含以冒号开头的行也不会被误读为新字段）；
+  `:79:` 之前的任何金额类字段（如 `:32A:`）一律拒绝——那是另一种
+  报文类型，不是正文。`WrapMT199Narrative` 按词边界裹行：超 35 字符
+  的单个词（UETR、账号、参考号）拒绝拆分，调用方须有意切分；
+  空文本与超 50 行亦拒绝。纯值对象：无锁、无 version bump、无记账、
+  无审计链追加；block 3 只做形状校验、导出时 MUR 写 `:20:`；block 5
+  省略（CHK 由 SWIFT 网络计算，不伪造）；解析接受 CRLF；重复导出
+  字节一致。
+
+Go: `ledger.MT199` / `ledger.ParseMT199` / `ledger.ExportMT199` /
+`ledger.WrapMT199Narrative`。
+
 ### `GET /exports/accounting/xero` · `GET /exports/accounting/quickbooks` — 会计软件对接导出
 
 日记账可以导出给外部会计软件，做账/报税/审计对账：
