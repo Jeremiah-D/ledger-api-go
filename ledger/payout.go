@@ -20,6 +20,7 @@ import (
 //
 //	draft -> approved -> submitted -> settled | failed
 //	draft | approved -> cancelled
+//	approved -> expired (LG-213: past ExpiresAt, see payout_expiry.go)
 //
 // Clearing economics: submit books debit payout-clearing / credit
 // payee (the "待清算户"), earmarking the payer's funds as a suspense
@@ -72,6 +73,13 @@ const (
 	PayoutSettled   = "settled"
 	PayoutFailed    = "failed"
 	PayoutCancelled = "cancelled"
+	// PayoutExpired is set by ExpirePayouts (LG-213) when an approved
+	// instruction passes its opt-in ExpiresAt without being submitted,
+	// and lazily by SubmitPayout when it is asked to submit such an
+	// instruction: a lapsed approval, distinct from a human
+	// cancellation, and terminal — an expired instruction can neither
+	// submit nor be cancelled.
+	PayoutExpired = "expired"
 	// PayoutReturned is set by ApplyPacs004Return (LG-206) when the
 	// bank reports a settled payout's funds back via pacs.004: the
 	// money came back, so the instruction is terminal — it can
@@ -157,6 +165,16 @@ type PayoutInstruction struct {
 	ApprovedAt     time.Time `json:"approved_at,omitempty"`
 	SubmittedAt    time.Time `json:"submitted_at,omitempty"`
 	SettledAt      time.Time `json:"settled_at,omitempty"`
+	// ExpiresAt is the opt-in instruction expiry (LG-213): the last
+	// instant the approved instruction may still be submitted. Zero
+	// means "never expires" — the behavior of every pre-LG-213
+	// instruction. At or after ExpiresAt an approved instruction is
+	// expired by ExpirePayouts, or lazily by SubmitPayout; a submitted
+	// instruction is in flight and never expires.
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	// ExpiredAt is set when the instruction moves to expired, and is
+	// empty otherwise.
+	ExpiredAt time.Time `json:"expired_at,omitempty"`
 	// ClearingEntryID is the submit leg's journal row (debit payee /
 	// credit payout-clearing). SettlementEntryID is the clearing
 	// reversal (debit clearing / credit payee) booked on settle or
@@ -433,7 +451,11 @@ func (l *Ledger) ApprovePayout(id, approver string) (PayoutInstruction, error) {
 // submitting without one configured is rejected. The entry ID is the
 // deterministic "payout/<id>/clearing", so a retried submit replays the
 // original row instead of double-booking. Submitting an
-// already-submitted instruction is a no-op success.
+// already-submitted instruction is a no-op success. Submitting an
+// approved instruction past its opt-in ExpiresAt lazily expires it
+// instead (LG-213, see payout_expiry.go): the instruction moves to
+// expired with a payout_expired audit event, and the submit fails
+// with ErrPayoutExpired booking nothing.
 func (l *Ledger) SubmitPayout(id string) (PayoutInstruction, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -447,6 +469,13 @@ func (l *Ledger) SubmitPayout(id string) (PayoutInstruction, error) {
 	}
 	if p.Status != PayoutApproved {
 		return PayoutInstruction{}, ErrPayoutInvalidTransition
+	}
+	// LG-213: a submit racing ahead of the next ExpirePayouts sweep
+	// must not move money on a lapsed approval — the instruction
+	// expires here instead, with the same audit and outbox events
+	// the sweep would emit, and the submit fails.
+	if l.expirePayoutLocked(&p, time.Now(), "SubmitPayout") {
+		return p, ErrPayoutExpired
 	}
 	if l.payoutClearingAccount == "" {
 		return PayoutInstruction{}, ErrPayoutClearingAccountNotConfigured
@@ -724,6 +753,8 @@ type PayoutReport struct {
 	Approver        string    `json:"approver,omitempty"`
 	Status          string    `json:"status"`
 	CreatedAt       time.Time `json:"created_at"`
+	ExpiresAt       time.Time `json:"expires_at,omitempty"`
+	ExpiredAt       time.Time `json:"expired_at,omitempty"`
 	ClearingEntryID string    `json:"clearing_entry_id,omitempty"`
 	StatementLineID string    `json:"statement_line_id,omitempty"`
 	FailReason      string    `json:"fail_reason,omitempty"`
@@ -745,6 +776,8 @@ func (l *Ledger) payoutReportsLocked() []PayoutReport {
 			Approver:        p.Approver,
 			Status:          p.Status,
 			CreatedAt:       p.CreatedAt,
+			ExpiresAt:       p.ExpiresAt,
+			ExpiredAt:       p.ExpiredAt,
 			ClearingEntryID: p.ClearingEntryID,
 			StatementLineID: p.StatementLineID,
 			FailReason:      p.FailReason,

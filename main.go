@@ -4132,6 +4132,7 @@ type createPayoutRequest struct {
 	Destination    string           `json:"destination"`
 	Maker          string           `json:"maker"`
 	IdempotencyKey string           `json:"idempotency_key"`
+	ExpiresAt      time.Time        `json:"expires_at,omitempty"`
 	PurposeCode    string           `json:"purpose_code"`
 	// Rail is the settlement rail (see ledger.RailFedNow and friends,
 	// LG-185): empty means "no rail stated".
@@ -4164,6 +4165,7 @@ func (s *server) handleCreatePayout(w http.ResponseWriter, r *http.Request) {
 		Destination:    req.Destination,
 		Maker:          req.Maker,
 		IdempotencyKey: req.IdempotencyKey,
+		ExpiresAt:      req.ExpiresAt,
 		PurposeCode:    req.PurposeCode,
 		Rail:           req.Rail,
 	})
@@ -4259,6 +4261,9 @@ func (s *server) handleSubmitPayout(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ledger.ErrPayoutNotFound):
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		case errors.Is(err, ledger.ErrPayoutInvalidTransition):
+			s.metrics.PayoutRejections.Add(1)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutExpired):
 			s.metrics.PayoutRejections.Add(1)
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		case errors.Is(err, ledger.ErrPayoutClearingAccountNotConfigured):
@@ -4378,6 +4383,27 @@ func (s *server) handleCancelPayout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+// handleExpirePayouts implements POST /payouts/expire (LG-213): the
+// operator-facing sweep that moves every approved payout instruction
+// past its opt-in ExpiresAt into the expired terminal status and
+// reports how many were marked, mirroring POST /holds/expire. It
+// returns 200 {"expired": N} with the expired instructions' IDs in
+// "payout_ids" (sorted, for auditability). Expiry books nothing and
+// bumps no version; submitted instructions are in flight and never
+// expire here.
+func (s *server) handleExpirePayouts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	expired := s.ledgerFor(r).ExpirePayouts()
+	ids := make([]string, 0, len(expired))
+	for _, p := range expired {
+		ids = append(ids, p.ID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"expired": len(expired), "payout_ids": ids})
 }
 
 // achReturnsRequest is the POST /ach/returns body: the bank's NACHA
@@ -10327,6 +10353,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /payouts/{id}/settle", s.handleSettlePayout)
 	mux.HandleFunc("POST /payouts/{id}/fail", s.handleFailPayout)
 	mux.HandleFunc("POST /payouts/{id}/cancel", s.handleCancelPayout)
+	mux.HandleFunc("POST /payouts/expire", s.handleExpirePayouts)
 	// LG-161: ACH return (dishonored entry) file booking.
 	mux.HandleFunc("POST /ach/returns", s.handleACHReturns)
 	mux.HandleFunc("POST /fednow/pacs008", s.handleFedNowPacs008)

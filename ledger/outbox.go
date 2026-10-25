@@ -108,7 +108,7 @@ const (
 	// the payee's second-phase defense against a filed claim — one
 	// evidence package submitted inside the window, then the
 	// operator/arbiter adjudicates and the dispute resolves.
-	OutboxRepresentmentSubmitted  = "representment_submitted"
+	OutboxRepresentmentSubmitted   = "representment_submitted"
 	OutboxRepresentmentAdjudicated = "representment_adjudicated"
 	// Direct-debit mandate lifecycle (see mandate.go, LG-125): the
 	// mandate is structural config, but its lifecycle moves are domain
@@ -154,6 +154,7 @@ const (
 	OutboxPayoutSettled   = "payout_settled"
 	OutboxPayoutFailed    = "payout_failed"
 	OutboxPayoutCancelled = "payout_cancelled"
+	OutboxPayoutExpired   = "payout_expired"
 	// pain.001 instruction lifecycle (see pain001_status.go, LG-102):
 	// every instruction-level or per-transfer status move emits one
 	// event, so downstream consumers can subscribe to bank-side

@@ -3164,6 +3164,27 @@ status with the reason, so the books never show money as left when it
 did not. Every transition audits (`payout_open/approved/submitted/
 settled/failed/cancelled`), emits an outbox event, and is idempotent;
 the reconcile report discloses every instruction (`payouts` section).
+
+### Payout instruction expiry (LG-213)
+
+An approved payout may carry an opt-in `expires_at` (`POST /payouts`
+accepts it; zero means never expires, the pre-LG-213 behavior): the
+last instant the instruction may still be submitted. `POST
+/payouts/expire` sweeps every approved instruction past its expiry
+into the `expired` terminal status and reports how many were marked;
+submitting an already-expired instruction lazily expires it instead
+and fails (`409`), so a submit racing ahead of the sweep can never
+move money on a lapsed approval. Expiry is distinct from a human
+cancellation (`cancelled`): it says the approval lapsed, not that
+anyone chose to stop it. Drafts are not swept, and submitted
+instructions are in flight — once the clearing leg is journaled, the
+instruction's fate is settle or fail, never a silent expiry. Expiry
+books no journal row, bumps no version, and moves no money; each
+expired instruction audits as `payout_expired` and emits a
+`payout_expired` outbox event. This is orthogonal to the settlement
+cutoff (LG-101, which defers a booked transfer's settlement window)
+and to the payout idempotency TTL (which governs replayed opens,
+not the instruction's submittable lifetime).
 Instructions are in-memory only (like clearing batches) — the journaled
 legs survive snapshots, and the fail-closed clearing account
 round-trips.
