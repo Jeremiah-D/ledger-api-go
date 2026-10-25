@@ -3289,6 +3289,43 @@ cards are a prepaid-cash liability. Card state is in-memory only,
 like loyalty programs: cards, the config, and movements do not
 round-trip through snapshots.
 
+### Employee expense reimbursement (Go API: `SubmitExpense` / `ApproveExpense` / `RejectExpense` / `ReimburseExpense`, LG-217)
+
+An employee expense claim moves through `pending -> approved ->
+closed` (or `pending -> rejected`): submitting records the claim
+and moves no money; deciding it requires an approver who differs
+from the employee — an employee cannot approve or reject their own
+claim — and a decided claim can never be re-decided; reimbursing
+books one atomic journal entry, debit the configured expense
+account and credit the configured employee-payable account, and
+closes the claim, so the same expense can never be paid twice.
+Claim numbers are unique, and the reimbursement entry ID is
+`expense/<number>`.
+
+```go
+l.SetExpenseConfig(ledger.ExpenseConfig{
+    ExpenseAccount: "travel-expense", EmployeePayableAccount: "payable-employees",
+})
+l.SubmitExpense("EXP-001", "alice", 42000, "USD", "travel") // pending
+l.ApproveExpense("EXP-001", "bob")                          // approved (bob != alice)
+l.ReimburseExpense("EXP-001") // journal: debit travel-expense / credit payable-employees, closed
+```
+
+Reimbursement is fail-closed without configured accounts, and
+posts through the system path, so a frozen expense or payable
+account refuses the payment and leaves the claim approved — payable
+after the freeze lifts — instead of paying into a frozen account.
+Every movement flows into the audit log (`expense_submitted` /
+`expense_approved` / `expense_rejected` / `expense_reimbursed`);
+the movement log is queryable per claim via `ExpenseMovements`,
+and an employee's claims via `ExpensesByEmployee`. This is
+orthogonal to the generic journal review (dual control over
+journal entries themselves) and to scheduled transfers (a repeating
+plan, not a single claim): this is the expense business flow.
+Claim state is in-memory only, like gift cards: claims, the config,
+and movements do not round-trip through snapshots, while the
+journaled reimbursement rows do.
+
 ### ACH returns (dishonored entries / 退票拒付)
 
 The other side of an ACH origination: the bank answers the NACHA

@@ -925,6 +925,20 @@ type Ledger struct {
 	giftCardConfig    GiftCardConfig
 	giftCardConfigSet bool
 	giftCardMovements []GiftCardMovement
+	// expenses maps expense report numbers to their records (see
+	// expense.go, LG-217): amount, currency, category, submitter,
+	// and lifecycle status. expenseConfig names the two booking
+	// accounts reimbursements debit and credit; expenseConfigSet
+	// reports whether any were configured (without it a
+	// reimbursement is fail-closed). expenseMovements is the
+	// append-only claim movement log. All four are in-memory
+	// only, like gift cards: they do not round-trip through
+	// snapshots, and the expense audit events are the durable
+	// record when the audit log is enabled.
+	expenses         map[string]Expense
+	expenseConfig    ExpenseConfig
+	expenseConfigSet bool
+	expenseMovements []ExpenseMovement
 	// payoutCancellations maps SWIFT gpi UETRs to their cancellation
 	// records (see camt056.go, LG-168): at most one open cancellation
 	// per UETR. cancellationSeqs counts cancellation attempts per
@@ -1724,6 +1738,10 @@ func New(opts ...Option) *Ledger {
 		// issued and swept by operator calls.
 		giftCards:         make(map[string]GiftCard),
 		giftCardMovements: []GiftCardMovement{},
+		// LG-217: the expense claim registry starts empty; claims
+		// are filed, decided, and reimbursed by operator calls.
+		expenses:         make(map[string]Expense),
+		expenseMovements: []ExpenseMovement{},
 		// LG-168: the payout cancellation registry starts empty;
 		// records open as operators request cancellations.
 		payoutCancellations: make(map[string]*PayoutCancellation),
