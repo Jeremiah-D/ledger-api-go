@@ -4684,6 +4684,38 @@ LT 地址）、block 3（`{108:MUR}`）与 block 4 核心字段集 `:20:` /
 
 Go: `ledger.MT202` / `ledger.ParseMT202` / `ledger.ExportMT202`。
 
+### SWIFT FIN MT900/MT910 借记/贷记确认（库级解析 + 已结算导出）
+
+已结算付款的事后确认用 SWIFT FIN `MT900`（confirmation of debit，借记确认）/
+`MT910`（confirmation of credit，贷记确认）渲染：银行通知账户持有人，
+某笔款项已从其账户借记/贷记。报文含 block 1（发送方 LT 地址）、block 2
+（应用头 `I900`/`I910`、接收方 LT 地址）、block 3（`{108:MUR}`）与 block 4
+字段集 `:20:` / `:21:` / `:25:` / `:32A:` / `:52A:` / `:72:`。
+
+语义：
+- 时态是全部：MT900/MT910 报告已发生的 movement，不是下达指令——与
+  MT103（LG-183，客户指令）、MT202（LG-204，银行间指令）正交：那两者
+  下达尚未发生的划款，本项确认已经结算的划款。确认绝不移动资金、不
+  记账、不 bump version、不追加审计事件。
+- 门控 fail-closed：账本导出 `ExportMT900910ForPayout` 只接受状态为
+  `settled` 的 payout——draft/approved/submitted（pending）、failed、
+  cancelled、returned 一律拒绝。向尚未结算的付款发确认，等于告诉账户
+  持有人钱已动而实际未动；已退汇（returned）的付款也不发原借记确认，
+  其资金已回流。`:20:` 为 payout ID、`:21:` 默认 `NONREF`、`:25:` 默认
+  结算腿借记的 payee 账户、`:32A:` 日期默认结算时间戳；方向（900 借记
+  默认 / 910 贷记）由调用方明示，账本不从 payout 猜方向。
+- 字段纪律（MT103/MT202 惯例）：`:20:` / `:21:` 均为 1–16 `x` 字符；
+  `:25:` 为 1–35 `x` 字符；`:32A:` 为 YYMMDD + 3 位大写币种 +
+  `<整数>,<2 位小数>`（15d，金额必须为正）；`:52a:` 只实现 A（BIC）
+  变体，D 变体拒绝；`:72:` 可选，至多 6 行、每行至多 35 `x` 字符，
+  且为 block 4 末字段——其后续行均为续行（含以冒号开头的行也不
+  会被误读为新字段）。字段顺序固定，缺字段、乱序、未知字段一律拒绝；
+  block 3 只做形状校验、导出时 MUR 写 `:20:`；block 5 省略（CHK 由
+  SWIFT 网络计算，不伪造）；解析接受 CRLF；重复导出字节一致。
+
+Go: `ledger.MT900910` / `ledger.ParseMT900910` / `ledger.ExportMT900910` /
+`ledger.Ledger.ExportMT900910ForPayout`。
+
 ### `GET /exports/accounting/xero` · `GET /exports/accounting/quickbooks` — 会计软件对接导出
 
 日记账可以导出给外部会计软件，做账/报税/审计对账：
