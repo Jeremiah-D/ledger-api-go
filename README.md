@@ -4164,6 +4164,56 @@ curl -s 'localhost:8080/exports/pain002?msgid=<msgid>' -H 'Accept: application/x
 # 200 <?xml ...?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">...
 ```
 
+### pacs.004 退汇入站处理（LG-206）
+
+`ParsePacs004` + `ApplyPacs004Return` 是 LG-169 出站 pacs.004 导出的入站
+镜像：银行发回的 pacs.004（`PmtRtr`，接受 `.001.02` 与 `.001.10` 两个
+版本）报告一笔已结算 payout 的资金退回，ledger 据此过账并推进状态。
+
+- 匹配键：`OrgnlEndToEndId` 即 payout ID（LG-169 导出时即以 payout ID
+  填充该字段），故本仓自己发出的退汇可往返解析入账；原因码复用出站
+  的 admitted 词汇（`DUPL`/`AM09`/`AC03`/`CUST`），未知原因码解析即拒。
+- 全额退汇 only：退汇金额与币种必须与结算 payout 完全一致。部分退汇
+  （金额或币种不一致）是另一种商业事件（部分退款、扣费、争议切片），
+  ledger 不猜——连同未匹配原付款一起 fail-closed 进 repair queue
+  （LG-177），返回 repair record ID，绝不静默丢弃银行报文。
+- 入账：冲正分录为结算腿的镜像（debit clearing / credit payee，
+  确定性 ID `payout/<id>/return`），payout 状态 settled → `returned`
+ （新状态；camt.056 默认分支 fail-closed 拒绝已退汇指令）。记一条
+  `pacs004_return_applied` 审计事件。
+- 幂等：同一 MsgId 重复入账为 no-op 成功（返回原冲正分录 ID，不重记
+  账）；另一 MsgId 对已退汇 payout 的二次退汇以
+  `ErrPacs004AlreadyReturned` 拒绝——钱已回来，无可再冲。
+- repair queue 中的退汇记录是可见性停车，不是可重提指令：其 Maker
+  恒为空，CreatePayout 门永远过不了——重提一个被停车的退汇绝不能凭空
+  造出一笔付款；操作员在账外与银行解决，记录随 repair TTL 过期。
+
+### pain.010 授权修改导出（LG-207）
+
+`GET /exports/pain010?mandate=<id>&creditor_scheme_id=<scheme>&effective_date=<YYYY-MM-DD>&new_creditor_iban=&new_debtor_iban=&new_max_amount_cents=&new_frequency=`
+是 LG-199 pain.009 发起的后续：为一笔已注册 mandate 生成 ISO 20022
+pain.010.001.02（`MndtAmdmntReq`），向债务人银行申请修改授权——债权人
+或债务人账户变更、单笔扣款上限调整、扣款周期变更。
+
+- 结构：`OrgnlMndt`（原授权号 + 债权人 scheme ID）+ `AmdmntInf`
+  （实际修改项 + 生效日期 `FrDt`）。只渲染真正修改的字段：未改字段
+  不出现在报文中，绝不把旧值重述一遍；零修改项的空修改请求直接
+  拒绝，不发空文。
+- 只读导出：不 bump 版本、不落账、不改 mandate 行；仅记一条
+  `pain010_exported` 审计事件（msg_id/mandate_id/creditor_scheme_id/
+  effective_date/amended_fields）。导出的是修改请求，不是修改本身——
+  银行在生效日执行修改，ledger 下一次按新条款 pain.008 扣款是独立
+  的操作员决策，导出本身不自动改变任何扣款行为。
+- Fail-closed：缺 scheme、零修改项、缺生效日、负上限、无效 IBAN、
+  频率不在 mandate 词汇内、未知授权、授权未有效激活（暂停/取消/
+  过期）一律拒绝；其中“修改未生效”对应授权本身未有效激活——对已死
+  授权的修改无从谈起。过去生效日不拒绝：回溯修改是银行的决定，
+  ledger 不替银行立政策。
+- `GrpHdr MsgId` 确定性：`pain010-<mandate>-<生效日>`，同一修改轮次
+  重导出得同一 ID，不同生效日换 ID。`400` 缺参数/非法修改项；
+  `404` 未知授权；`422` 授权未激活。计数器
+  `ledger_pain010_exports_total`。
+
 ### SWIFT gpi UETR 跨境追踪（`GET /gpi/track/{uetr}`）
 
 每笔 payout 指令都是跨境支付发起：`POST /payouts` 起草时自动分配

@@ -5352,6 +5352,69 @@ func (s *server) handlePain002Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePain010Export implements GET /exports/pain010 (LG-207): an
+// ISO 20022 pain.010.001.02 mandate amendment request for one
+// registered mandate (see ledger.ExportPain010). Query parameters:
+// mandate (required), creditor_scheme_id (required, the SEPA
+// creditor identifier), effective_date (required, YYYY-MM-DD, the
+// date the amendment takes effect), new_creditor_iban,
+// new_debtor_iban, new_max_amount_cents, new_frequency (optional,
+// at least one amended field required). The export is read-only: it
+// changes no mandate row. Error mapping: missing parameters, a bad
+// date/amount, an empty amendment, an invalid IBAN/frequency/cap are
+// 400; an unknown mandate is a 404; a suspended/cancelled/expired
+// mandate is a 422.
+func (s *server) handlePain010Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain010Exports.Add(1)
+	q := r.URL.Query()
+	mandateID := q.Get("mandate")
+	schemeID := q.Get("creditor_scheme_id")
+	effectiveRaw := q.Get("effective_date")
+	if mandateID == "" || schemeID == "" || effectiveRaw == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mandate, creditor_scheme_id and effective_date are required"})
+		return
+	}
+	effective, err := time.Parse("2006-01-02", effectiveRaw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "effective_date must be YYYY-MM-DD"})
+		return
+	}
+	amd := ledger.MandateAmendment{
+		CreditorIBAN:  q.Get("new_creditor_iban"),
+		DebtorIBAN:    q.Get("new_debtor_iban"),
+		Frequency:     q.Get("new_frequency"),
+		EffectiveDate: effective,
+	}
+	if raw := q.Get("new_max_amount_cents"); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "new_max_amount_cents must be an integer"})
+			return
+		}
+		amd.MaxAmountCents = n
+	}
+	doc, err := s.ledgerFor(r).ExportPain010(mandateID, schemeID, amd)
+	if err != nil {
+		status := http.StatusUnprocessableEntity
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrMissingPain010CreditorScheme),
+			errors.Is(err, ledger.ErrPain010NoAmendment),
+			errors.Is(err, ledger.ErrPain010EffectiveDateRequired),
+			errors.Is(err, ledger.ErrInvalidIBAN),
+			errors.Is(err, ledger.ErrInvalidMandateFrequency),
+			errors.Is(err, ledger.ErrMandateNonPositiveMaxAmount):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleGPITrack implements GET /gpi/track/{uetr} (LG-165): the gpi
 // tracking record of one cross-border payment — its UETR, linked
 // payout/transfer, current status, and full transition history. An
@@ -10353,6 +10416,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
+	mux.HandleFunc("GET /exports/pain010", s.handlePain010Export)
 	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
 	mux.HandleFunc("GET /exports/pacs028", s.handlePacs028Export)
