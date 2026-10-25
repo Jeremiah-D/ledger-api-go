@@ -3208,6 +3208,47 @@ payout; `409` ID conflict or invalid state transition; `422`
 statement mismatch or overdraft/daily-limit/period rejection;
 `500` payout clearing account not configured.
 
+### Loyalty points liability (Go API: `RegisterLoyaltyProgram` / `IssuePoints` / `RedeemPoints` / `ExpirePoints`, LG-215)
+
+Points are a liability of the program, not of any cash account, so
+they live in their own sub-ledger, strictly apart from cash balances:
+issuing, redeeming, or expiring points moves no cash and books no
+journal row, and `VerifyAccountingEquation` is unaffected. A program
+fixes the cash value of a point (`CentsPerPoint`), the inactivity
+window after which unused points expire (`InactivityDays`), and the
+accounts credited on redemption (revenue/discount) and on expiry
+(breakage). Every movement records both legs atomically — the
+points-liability debit and the cash-value credit — and flows into
+the audit log (`loyalty_points_issued` / `loyalty_points_redeemed` /
+`loyalty_points_expired`); the movement log is queryable per
+(account, program) via `LoyaltyMovements`.
+
+```go
+l.RegisterLoyaltyProgram(ledger.LoyaltyProgram{
+    Name: "gold", CentsPerPoint: 10, InactivityDays: 30,
+    RevenueAccount: "revenue-loyalty", BreakageAccount: "breakage-loyalty",
+})
+l.IssuePoints("acct-1", 250, "gold")   // balance: 250 points
+m, _ := l.RedeemPoints("acct-1", 100, "gold")
+// m.CashCents == 1000, credited (by valuation) to revenue-loyalty
+l.PointsBalance("acct-1", "gold")      // 150
+```
+
+Rate changes never rewrite issued value: each issue mints a lot at
+the program's then-current rate, and redemptions consume lots
+oldest-first, valuing each lot at its own issue-time rate — so
+re-registering a program at a new rate reprices future issues only.
+Expiry is inactivity-based: `ExpirePoints(now)` writes off the whole
+unused balance of an (account, program) pair whose last points
+activity is strictly older than the program's window, valuing the
+write-off at the lots' issue-time rates as breakage revenue. This is
+orthogonal to dividend and rebate tiers (cash distributions, not
+points) and to escheatment (LG-109, which remits dormant cash to the
+state — points expiry writes off a merchant liability to the
+merchant, never to the escheat path). Points state is in-memory only,
+like payout instructions: programs, lots, and movements do not
+round-trip through snapshots.
+
 ### ACH returns (dishonored entries / 退票拒付)
 
 The other side of an ACH origination: the bank answers the NACHA

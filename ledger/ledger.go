@@ -898,6 +898,20 @@ type Ledger struct {
 	gpiTracks     map[string]*GPITrack
 	gpiByPayout   map[string]string
 	gpiByTransfer map[string]string
+	// loyaltyPrograms maps program names to their configs (see
+	// loyalty.go, LG-215): the conversion rate and window for future
+	// issues. loyaltyLots maps (account, program) pairs to their
+	// unconsumed lots in minting order; loyaltyActivity stamps each
+	// pair's last issue/redeem time for the inactivity expiry;
+	// loyaltyMovements is the append-only points movement log. All
+	// four are in-memory only, like payout instructions and gpi
+	// tracks: they do not round-trip through snapshots, and the
+	// loyalty audit events are the durable record when the audit
+	// log is enabled.
+	loyaltyPrograms  map[string]LoyaltyProgram
+	loyaltyLots      map[loyaltyKey][]loyaltyLot
+	loyaltyActivity  map[loyaltyKey]time.Time
+	loyaltyMovements []LoyaltyMovement
 	// payoutCancellations maps SWIFT gpi UETRs to their cancellation
 	// records (see camt056.go, LG-168): at most one open cancellation
 	// per UETR. cancellationSeqs counts cancellation attempts per
@@ -1687,6 +1701,12 @@ func New(opts ...Option) *Ledger {
 		gpiTracks:     make(map[string]*GPITrack),
 		gpiByPayout:   make(map[string]string),
 		gpiByTransfer: make(map[string]string),
+		// LG-215: the loyalty points registry starts empty; programs
+		// are registered and lots minted by operator calls.
+		loyaltyPrograms:  make(map[string]LoyaltyProgram),
+		loyaltyLots:      make(map[loyaltyKey][]loyaltyLot),
+		loyaltyActivity:  make(map[loyaltyKey]time.Time),
+		loyaltyMovements: []LoyaltyMovement{},
 		// LG-168: the payout cancellation registry starts empty;
 		// records open as operators request cancellations.
 		payoutCancellations: make(map[string]*PayoutCancellation),
