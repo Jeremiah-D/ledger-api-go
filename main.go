@@ -5324,6 +5324,34 @@ func (s *server) handlePain002Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
+// handlePain002Export implements GET /exports/pain002 (LG-205): an
+// ISO 20022 pain.002.001.10 customer payment status report for one
+// pain.001 instruction (see ledger.ExportPain002). Query parameter:
+// msgid (required, the pain.001 instruction MsgId). The export is
+// read-only: no version bump, no audit event beyond the export's own
+// trail entry. Error mapping: a missing msgid is a 400; an unknown
+// instruction is a 404.
+func (s *server) handlePain002Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain002Exports.Add(1)
+	msgID := r.URL.Query().Get("msgid")
+	if msgID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "msgid is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPain002(msgID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrUnknownPainInstruction) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleGPITrack implements GET /gpi/track/{uetr} (LG-165): the gpi
 // tracking record of one cross-border payment — its UETR, linked
 // payout/transfer, current status, and full transition history. An
@@ -10324,6 +10352,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
+	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
 	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
 	mux.HandleFunc("GET /exports/pacs028", s.handlePacs028Export)

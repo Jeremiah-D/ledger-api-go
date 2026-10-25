@@ -4127,6 +4127,43 @@ curl -s -X POST localhost:8080/exports/pain002/apply \
 # 200 {"state":"exported","txs":[{"tx_id":"st1","state":"accepted"},{"tx_id":"st2","state":"rejected"}]}
 ```
 
+### pain.002 客户付款状态报告导出（LG-205）
+
+`GET /exports/pain002?msgid=<pain.001 MsgId>` 是 LG-162 入站回盘的出站镜像：
+为企业客户生成 ISO 20022 pain.002.001.10（`CstmrPmtStsRpt`），报告其发起的
+付款在银行侧的处理状态。`OrgnlMsgId` 即原 pain.001 指令 MsgId，
+`OrgnlMsgNmId` 为 `pain.001.001.03`；每笔 `TxInfAndSts` 的
+`OrgnlEndToEndId` 即 transfer ID。
+
+状态映射（入站映射的精确逆操作）：
+
+| ledger 状态 | TxSts | 含义 |
+|---|---|---|
+| `exported` | `PDNG` | Pending（银行未定论） |
+| `accepted` | `ACCP` | AcceptedCustomerProfile（已受理、待结算） |
+| `settled` | `ACSC` | AcceptedSettlementCompleted（已结算） |
+| `rejected` | `RJCT` | Rejected（拒绝，银行 reason 原文进 `StsRsnInf/AddtlInf`） |
+
+语义：
+
+- `GrpSts` 由逐笔状态推导：全一致时取该状态，混合时为 `PART`——混合报告
+  绝不宣称逐笔不支持的组 verdict。
+- `GrpHdr MsgId` 确定性：由原 MsgId + 逐笔状态派生（`pain002-<orig>-<hash>`），
+  同状态重导出得同一 MsgId，状态变化则 MsgId 变化（与 pain.001 MsgId 同款
+  内容绑定原则）。
+- 只读导出：不 bump 版本、不落账、不消费幂等键；仅记一条
+  `pain002_exported` 审计事件（msg_id/orgnl_msg_id/tx_count/grp_sts）。
+- 刻意不对称：`ACSC` 只来自操作员结算确认（`SettlePain001Instruction`），
+  银行受理（`ACCP`）绝不直接宣称为已结算——ledger 从不替银行宣称钱已到账。
+- `400` 缺 msgid；`404` 未知指令（`ErrUnknownPainInstruction`，fail-closed：
+  没导出过的指令的状态报告是编造，不是报告）。计数器
+  `ledger_pain002_exports_total`。
+
+```bash
+curl -s 'localhost:8080/exports/pain002?msgid=<msgid>' -H 'Accept: application/xml'
+# 200 <?xml ...?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">...
+```
+
 ### SWIFT gpi UETR 跨境追踪（`GET /gpi/track/{uetr}`）
 
 每笔 payout 指令都是跨境支付发起：`POST /payouts` 起草时自动分配
