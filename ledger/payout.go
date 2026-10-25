@@ -72,6 +72,12 @@ const (
 	PayoutSettled   = "settled"
 	PayoutFailed    = "failed"
 	PayoutCancelled = "cancelled"
+	// PayoutReturned is set by ApplyPacs004Return (LG-206) when the
+	// bank reports a settled payout's funds back via pacs.004: the
+	// money came back, so the instruction is terminal — it can
+	// neither settle again nor be cancelled (camt.056's default
+	// branch refuses it fail-closed).
+	PayoutReturned = "returned"
 )
 
 // Validation and state errors returned by the payout APIs.
@@ -157,6 +163,11 @@ type PayoutInstruction struct {
 	// fail.
 	ClearingEntryID   string `json:"clearing_entry_id,omitempty"`
 	SettlementEntryID string `json:"settlement_entry_id,omitempty"`
+	// ReturnEntryID is the pacs.004 return reversal row (debit
+	// clearing / credit payee, "payout/<id>/return") booked by
+	// ApplyPacs004Return (LG-206) when a settled payout's funds
+	// come back. Empty until the payout is returned.
+	ReturnEntryID string `json:"return_entry_id,omitempty"`
 	// StatementLineID is the bank statement line that evidenced the
 	// settlement (see SettlePayout).
 	StatementLineID string `json:"statement_line_id,omitempty"`
