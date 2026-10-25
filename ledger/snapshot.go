@@ -640,6 +640,13 @@ type snapshotConfigLine struct {
 	// like the fee-revenue account.
 	ECLExpenseAccount   AccountID `json:"ecl_expense_account,omitempty"`
 	ECLAllowanceAccount AccountID `json:"ecl_allowance_account,omitempty"`
+	// BadDebtExpenseAccount carries the ledger-wide fail-closed
+	// write-off booking account (see SetBadDebtExpenseAccount);
+	// absent in snapshots written before write-off existed. A
+	// restore that dropped it would turn fail-closed write-offs
+	// into fail-open ones, so it round-trips like the ECL expense
+	// account.
+	BadDebtExpenseAccount AccountID `json:"bad_debt_expense_account,omitempty"`
 	// ECLExposures carries the ECL exposure registry (see
 	// RegisterECLExposure), sorted by (account, currency); absent in
 	// snapshots written before ECL existed. A restore that dropped it
@@ -1338,6 +1345,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		CollateralRequirements:  l.collateralReqsLocked(),
 		ECLExpenseAccount:       l.eclExpenseAccount,
 		ECLAllowanceAccount:     l.eclAllowanceAccount,
+		BadDebtExpenseAccount:   l.badDebtExpenseAccount,
 		ECLExposures:            l.eclExposureRecordsLocked(),
 		PainTransfers:           l.painTransfersLocked(),
 		AccountIBANs:            l.accountIBANsLocked(),
@@ -3399,6 +3407,7 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	}
 	l.eclExpenseAccount = cfg.ECLExpenseAccount
 	l.eclAllowanceAccount = cfg.ECLAllowanceAccount
+	l.badDebtExpenseAccount = cfg.BadDebtExpenseAccount
 	l.eclExposures = make(map[eclExposureKey]eclExposureRow, len(cfg.ECLExposures))
 	for _, rec := range cfg.ECLExposures {
 		l.eclExposures[eclExposureKey{account: rec.Account, currency: rec.Currency}] = eclExposureRow{
@@ -4144,6 +4153,9 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 		return false
 	}
 	if a.eclExpenseAccount != b.eclExpenseAccount || a.eclAllowanceAccount != b.eclAllowanceAccount {
+		return false
+	}
+	if a.badDebtExpenseAccount != b.badDebtExpenseAccount {
 		return false
 	}
 	if len(a.eclExposures) != len(b.eclExposures) {

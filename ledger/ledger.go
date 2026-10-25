@@ -1005,10 +1005,16 @@ type Ledger struct {
 	// eclStageMigrations counts stage migrations recorded (the durable
 	// record is the ecl_stage_migration audit events). Both are
 	// in-memory only — they do not round-trip through snapshots.
-	eclStageConfig         ECLStageConfig
-	eclExposures           map[eclExposureKey]eclExposureRow
-	eclExpenseAccount      AccountID
-	eclAllowanceAccount    AccountID
+	eclStageConfig      ECLStageConfig
+	eclExposures        map[eclExposureKey]eclExposureRow
+	eclExpenseAccount   AccountID
+	eclAllowanceAccount AccountID
+	// badDebtExpenseAccount is the ledger-wide bad-debt expense
+	// account that write-offs debit (see writeoff.go): empty means
+	// unconfigured and WriteOff refuses. Structural config, like
+	// the ECL expense account — it never bumps the journal version
+	// and it survives disaster-recovery snapshots.
+	badDebtExpenseAccount  AccountID
 	eclProvisionsCommitted atomic.Uint64
 	eclStageMigrations     atomic.Uint64
 	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so

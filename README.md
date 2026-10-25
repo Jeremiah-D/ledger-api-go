@@ -1527,6 +1527,50 @@ with a `reversed` flag). A mistaken sweep is undone with
 is never deleted, the audit chain stays append-only, and the dormant
 mark stays (the money is back but the account is still quiet).
 
+#### Bad-debt write-off (Go API: `WriteOff`)
+
+The accounting end of the receivables lifecycle: an uncollectible
+receivable leaves the books instead of lingering as an asset the
+balance sheet pretends is real. `WriteOff(receivableAccount,
+amountCents, currency, reason)` books one atomic journal entry —
+debit the configured bad-debt expense account, credit the
+receivable account — for exactly the written-off amount, with the
+reason journaled as the entry's memo. No cash moves: this is not a
+payment, and it is not a reversal — the original sale entry stays
+journaled, and the write-off entry is the auditable record that the
+receivable was abandoned.
+
+```go
+// Expense a receivable nobody will ever pay.
+l.SetBadDebtExpenseAccount("bad-debt-expense")
+posted, dup, err := l.WriteOff("receivable-acme", 40000, "USD",
+    "invoice INV-9 uncollectible after 180 days")
+// posted: debit bad-debt-expense 40000, credit receivable-acme 40000.
+// receivable-acme's USD balance drops by exactly 40000.
+```
+
+The expense account is ledger-wide configured (like the ECL
+expense account): with none configured, `WriteOff` is fail-closed
+rather than expensing into an unconfigured account. Entry IDs are
+deterministic —
+`writeoff/<account>/<currency>/<amount>/<reason-hash>` — so a
+retried write-off replays the original entry instead of expensing
+twice, including when the receivable's balance has since fallen
+below the amount. A write-off can never exceed the receivable's
+current balance in that currency: expensing more than is owed would
+drive the receivable negative and invent a liability the books never
+had. A partial write-off is the normal case — write off what is
+uncollectible, leave the collectible remainder — and a second
+write-off for the remainder is a new entry with its own reason. The
+reason is mandatory: a write-off without a stated reason is
+unauditable. Each write-off is a full journal row (own audit-chain
+link, version bump) audited as `writeoff` with the post-write-off
+receivable balance in the details, and the configured expense
+account survives disaster-recovery snapshots. Orthogonal to
+escheatment above: escheatment sweeps dormant accounts' balances to
+the state and freezes the account; write-off expenses an
+uncollectible receivable and leaves the account open.
+
 ### Period close (`POST /periods/{id}/close` / `POST /periods/{id}/reopen`)
 
 Accounting-period lock for month-end close (fintech compliance). A period
