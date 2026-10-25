@@ -3326,6 +3326,50 @@ Claim state is in-memory only, like gift cards: claims, the config,
 and movements do not round-trip through snapshots, while the
 journaled reimbursement rows do.
 
+### Deferred revenue recognition (Go API: `ReceiveDeferredRevenue` / `RecognizeRevenue` / `TerminateDeferredRevenue`, LG-218)
+
+A customer who pays upfront for a service delivered over time does
+not create income on receipt: receipt books one atomic journal
+entry, debit the configured cash account and credit the configured
+deferred-revenue liability account, and opens a contract spanning a
+caller-chosen number of periods. Revenue is recognized one period at
+a time — each `RecognizeRevenue` call books debit liability / credit
+revenue for exactly one period's share — so the caller drives timing
+(one call per delivered period or completed milestone) and the ledger
+never invents a calendar: `asOf` stamps the entry, it never decides
+how many periods to recognize. Each non-final period recognizes
+floor(total / periods); the final period true-ups to the remaining
+balance, so the recognized total over the contract's life is exactly
+the contract amount. Early termination settles the remainder by the
+caller's explicit choice: refund (debit liability / credit cash, the
+default) or recognize at once (debit liability / credit revenue).
+
+```go
+l.SetDeferredRevenueConfig(ledger.DeferredRevenueConfig{
+    CashAccount: "cash-operating", LiabilityAccount: "deferred-revenue",
+    RevenueAccount: "revenue-subscriptions",
+})
+c, _ := l.ReceiveDeferredRevenue("acme", 10001, "USD", 3) // active, recognized 0
+l.RecognizeRevenue(c.ID, time.Now()) // 3333 (floor), then 3333, then 3335 true-up -> completed
+l.TerminateDeferredRevenue(c.ID, "") // "" defaults to refund of the remainder
+```
+
+Booking is fail-closed without configured, distinct accounts, and
+posts through the system path, so a frozen account refuses the
+booking and leaves the contract untouched for retry. Every movement
+flows into the audit log (`deferred_revenue_received` /
+`deferred_revenue_recognized` / `deferred_revenue_terminated_*`);
+the movement log is queryable per contract via
+`DeferredRevenueMovements`, and a customer's contracts via
+`DeferredRevenuesByCustomer`. This is orthogonal to the settlement
+cutoff (a transfer's settlement timing, not income timing), to
+scheduled transfers (a repeating plan, not one receipt's income),
+and to accruals (income before cash, the opposite direction):
+receipt here is cash before income. Contract state is in-memory
+only, like expense claims: contracts, the config, and movements do
+not round-trip through snapshots, while the journaled receipt,
+recognition, and termination rows do.
+
 ### ACH returns (dishonored entries / 退票拒付)
 
 The other side of an ACH origination: the bank answers the NACHA

@@ -939,6 +939,24 @@ type Ledger struct {
 	expenseConfig    ExpenseConfig
 	expenseConfigSet bool
 	expenseMovements []ExpenseMovement
+	// deferredRevenue maps ledger-assigned contract IDs to their
+	// records (see deferred_revenue.go, LG-218): customer, total,
+	// period count, recognized progress, and lifecycle status.
+	// deferredRevenueConfig names the three booking accounts
+	// receipt, recognition, and termination debit and credit;
+	// deferredRevenueConfigSet reports whether any were configured
+	// (without it a booking is fail-closed). deferredRevenueSeq
+	// assigns contract IDs in receipt order.
+	// deferredRevenueMovements is the append-only contract
+	// movement log. All five are in-memory only, like expense
+	// claims: they do not round-trip through snapshots, and the
+	// deferred-revenue audit events are the durable record when
+	// the audit log is enabled.
+	deferredRevenue          map[string]DeferredRevenueContract
+	deferredRevenueConfig    DeferredRevenueConfig
+	deferredRevenueConfigSet bool
+	deferredRevenueSeq       int
+	deferredRevenueMovements []DeferredRevenueMovement
 	// payoutCancellations maps SWIFT gpi UETRs to their cancellation
 	// records (see camt056.go, LG-168): at most one open cancellation
 	// per UETR. cancellationSeqs counts cancellation attempts per
@@ -1742,6 +1760,11 @@ func New(opts ...Option) *Ledger {
 		// are filed, decided, and reimbursed by operator calls.
 		expenses:         make(map[string]Expense),
 		expenseMovements: []ExpenseMovement{},
+		// LG-218: the deferred revenue registry starts empty;
+		// contracts open on receipt and settle by recognition or
+		// termination.
+		deferredRevenue:          make(map[string]DeferredRevenueContract),
+		deferredRevenueMovements: []DeferredRevenueMovement{},
 		// LG-168: the payout cancellation registry starts empty;
 		// records open as operators request cancellations.
 		payoutCancellations: make(map[string]*PayoutCancellation),
