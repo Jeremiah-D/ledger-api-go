@@ -3249,6 +3249,46 @@ merchant, never to the escheat path). Points state is in-memory only,
 like payout instructions: programs, lots, and movements do not
 round-trip through snapshots.
 
+### Gift card float (Go API: `RegisterGiftCardConfig` / `IssueGiftCard` / `RedeemGiftCard` / `BreakageGiftCards`, LG-216)
+
+A sold gift card is cash in and a promise out: the float is a
+liability of the merchant, not revenue, so it lives in its own
+sub-ledger, strictly apart from cash balances — issuing, redeeming,
+or sweeping a card moves no cash and books no journal row, and
+`VerifyAccountingEquation` is unaffected. A card records its face
+value separately from its remaining balance, so the original value
+stays queryable after partial redemptions; card numbers are unique,
+and a redemption that empties a card exhausts it. Every movement
+flows into the audit log (`gift_card_issued` / `gift_card_redeemed` /
+`gift_card_breakage`); the movement log is queryable per card via
+`GiftCardMovements`.
+
+```go
+l.RegisterGiftCardConfig(ledger.GiftCardConfig{
+    DormancyDays: 365, BreakageBps: 5000,
+    BreakageAccount: "breakage-giftcard", LiabilityAccount: "liability-giftcard",
+})
+l.IssueGiftCard("GC-1", 10000, "USD") // face 10000, balance 10000
+l.RedeemGiftCard("GC-1", 4000)         // balance 6000, still active
+l.GiftCardBalance("GC-1")              // 6000
+```
+
+Breakage is proportional, not all-or-nothing: `BreakageGiftCards(now)`
+sweeps active cards whose last activity is strictly older than the
+dormancy window and confirms `BreakageBps` of each card's remaining
+balance as breakage revenue (floor division — 10001 cents at 5000 bps
+confirms 5000, leaving 5001). A swept card is closed to further
+redemption: swept to zero it is exhausted, otherwise it is expired
+with the residual staying on the card as a liability — never remitted
+to the escheat path (LG-109 remits dormant cash to the state;
+breakage keeps the residual as the merchant's own liability). A card
+is swept at most once, and a sweep with no config registered is an
+empty report. This is orthogonal to loyalty points (LG-215, a points
+liability) and to escheatment (LG-109, a cash remittance): gift
+cards are a prepaid-cash liability. Card state is in-memory only,
+like loyalty programs: cards, the config, and movements do not
+round-trip through snapshots.
+
 ### ACH returns (dishonored entries / 退票拒付)
 
 The other side of an ACH origination: the bank answers the NACHA

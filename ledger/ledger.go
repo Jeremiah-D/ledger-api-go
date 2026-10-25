@@ -912,6 +912,19 @@ type Ledger struct {
 	loyaltyLots      map[loyaltyKey][]loyaltyLot
 	loyaltyActivity  map[loyaltyKey]time.Time
 	loyaltyMovements []LoyaltyMovement
+	// giftCards maps card numbers to their records (see giftcard.go,
+	// LG-216): face value, remaining balance, breakage confirmed,
+	// and lifecycle status. giftCardConfig is the ledger-wide
+	// dormancy/breakage config; giftCardConfigSet reports whether
+	// one was registered (without it there is nothing to sweep).
+	// giftCardMovements is the append-only card movement log. All
+	// four are in-memory only, like loyalty programs: they do not
+	// round-trip through snapshots, and the gift card audit events
+	// are the durable record when the audit log is enabled.
+	giftCards         map[string]GiftCard
+	giftCardConfig    GiftCardConfig
+	giftCardConfigSet bool
+	giftCardMovements []GiftCardMovement
 	// payoutCancellations maps SWIFT gpi UETRs to their cancellation
 	// records (see camt056.go, LG-168): at most one open cancellation
 	// per UETR. cancellationSeqs counts cancellation attempts per
@@ -1707,6 +1720,10 @@ func New(opts ...Option) *Ledger {
 		loyaltyLots:      make(map[loyaltyKey][]loyaltyLot),
 		loyaltyActivity:  make(map[loyaltyKey]time.Time),
 		loyaltyMovements: []LoyaltyMovement{},
+		// LG-216: the gift card registry starts empty; cards are
+		// issued and swept by operator calls.
+		giftCards:         make(map[string]GiftCard),
+		giftCardMovements: []GiftCardMovement{},
 		// LG-168: the payout cancellation registry starts empty;
 		// records open as operators request cancellations.
 		payoutCancellations: make(map[string]*PayoutCancellation),
