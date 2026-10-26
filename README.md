@@ -1571,6 +1571,54 @@ escheatment above: escheatment sweeps dormant accounts' balances to
 the state and freezes the account; write-off expenses an
 uncollectible receivable and leaves the account open.
 
+#### Bad-debt write-off recovery (Go API: `RecoverWriteOff` / `RecoverWriteOffFor`, LG-219)
+
+The other end of the receivables lifecycle: a receivable written
+off as uncollectible sometimes pays after all, and that cash is
+real income — but it is not a payment of the receivable, which
+was already expensed and removed. `RecoverWriteOff(account,
+amountCents, currency)` books one atomic journal entry — debit
+the configured cash account, credit the configured bad-debt
+recovery income account — and touches neither the original sale
+nor the write-off row: the written-off receivable's balance never
+moves, so recovery can never resurrect an asset the books already
+abandoned.
+
+```go
+// Cash arrives for a receivable already written off.
+l.SetWriteOffRecoveryConfig(ledger.WriteOffRecoveryConfig{
+    CashAccount: "cash-operating",
+    RecoveryIncomeAccount: "bad-debt-recovery-income",
+})
+posted, dup, err := l.RecoverWriteOff("receivable-acme", 25000, "USD")
+// posted: debit cash-operating 25000, credit bad-debt-recovery-income 25000.
+// receivable-acme's USD balance is unchanged; only cash and recovery income move.
+```
+
+The cap is cumulative and read off the journal: a single recovery
+may never exceed total written off for that (account, currency)
+minus total already recovered, so partial recoveries drain a pool
+that can never be over-drawn, and a recovery against an account
+with nothing written off fails closed. Entry IDs are deterministic
+— `writeoff-recovery/<account>/<currency>/<writeoff-id>/<seq>`
+— and are also the idempotency keys, so repeating an ID replays
+the original entry instead of booking cash twice, including after
+the pool is exhausted. `RecoverWriteOff` derives both components
+from the journal (the latest write-off's reason hash, the next
+sequence number); `RecoverWriteOffFor` takes them from the caller
+to anchor a recovery to one specific write-off. Booking is
+fail-closed without configured, distinct accounts, and accounts
+equal to the receivable account are refused — crediting income
+into the receivable itself would restore its balance by the back
+door. Each recovery posts through the system path, so a frozen or
+denylisted booking account refuses it through the full Post gate
+and books nothing, and every recovery is a full journal row (own
+audit-chain link, version bump) audited as `writeoff_recovery`
+with the recovered total and the remaining written-off balance.
+Orthogonal to write-off above: that expenses an uncollectible
+receivable out of the books, this books cash back in after the
+fact.
+
 ### Period close (`POST /periods/{id}/close` / `POST /periods/{id}/reopen`)
 
 Accounting-period lock for month-end close (fintech compliance). A period

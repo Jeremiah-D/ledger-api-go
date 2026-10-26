@@ -1079,6 +1079,17 @@ type Ledger struct {
 	// the ECL expense account — it never bumps the journal version
 	// and it survives disaster-recovery snapshots.
 	badDebtExpenseAccount  AccountID
+	// writeOffRecoveryConfig is the ledger-wide bad-debt recovery
+	// booking accounts (see writeoff_recovery.go, LG-219): the
+	// cash account debited and the recovery-income account
+	// credited when written-off cash comes back.
+	// writeOffRecoveryConfigSet reports whether any were
+	// configured (without it a recovery is fail-closed). Both
+	// are in-memory only, like the deferred-revenue config: they
+	// do not round-trip through snapshots, while the journaled
+	// recovery rows do.
+	writeOffRecoveryConfig    WriteOffRecoveryConfig
+	writeOffRecoveryConfigSet bool
 	eclProvisionsCommitted atomic.Uint64
 	eclStageMigrations     atomic.Uint64
 	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so
