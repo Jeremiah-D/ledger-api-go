@@ -587,6 +587,13 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   `ExpireReviews` sweep, like the global chain timeout, but scoped to
   this one transfer; the timeouts ride the review record, the
   `Reconcile` pending-review list, and disaster-recovery snapshots.
+  `SetStagedReviewDeadline` adds an orthogonal opt-in overall deadline
+  for the whole staged review: a pending staged review past the deadline
+  is auto-rejected fail-closed on whatever stage it sits on
+  (`transfer_review_staged_deadline_expired` in the audit chain), never
+  silently approved or advanced — the deadline must not be earlier than
+  the install instant, and it rides the review record and
+  disaster-recovery snapshots like the timeouts.
 - **Approver vote delegation (vote by proxy):** `DelegateVote` grants a
   delegatee the right to cast votes in the granter's place — on the
   flat review path, the quorum path, or the chain path (`scope:

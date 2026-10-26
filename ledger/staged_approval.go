@@ -119,10 +119,21 @@ type ApprovalStage struct {
 // on when timeouts land, and the advance instant for every later
 // stage — so each stage's clock runs from its own start, never from
 // the review's creation or from a previous stage's start.
+//
+// LG-226: Deadline carries the opt-in overall deadline installed by
+// SetStagedReviewDeadline (zero when unset — no overall bound). It
+// is orthogonal to the per-stage timeouts: the deadline rejects the
+// review on any stage once it lapses, while a stage timeout rejects
+// only on its own rung.
 type StagedApprovalProgress struct {
 	Stages    []ApprovalStage `json:"stages"`
 	Stage     int             `json:"stage"`
 	Approvers []string        `json:"approvers"`
+	// Deadline is the overall staged-review deadline installed by
+	// SetStagedReviewDeadline; zero when unset. It is only
+	// meaningful while stages are installed — it never applies to a
+	// flat, quorum, or chain decision.
+	Deadline time.Time `json:"deadline,omitempty"`
 	// Timeouts is the per-stage lifetime installed by
 	// SetStageTimeouts, in stage order; nil when unset. It is only
 	// meaningful while stages are installed — it never applies to a
@@ -172,6 +183,7 @@ func copyStagedApproval(p *StagedApprovalProgress) *StagedApprovalProgress {
 		Approvers:      append([]string(nil), p.Approvers...),
 		Timeouts:       append([]time.Duration(nil), p.Timeouts...),
 		StageStartedAt: p.StageStartedAt,
+		Deadline:       p.Deadline,
 	}
 	return out
 }
@@ -183,7 +195,8 @@ func stagedApprovalEqual(a, b *StagedApprovalProgress) bool {
 		return a == nil && b == nil
 	}
 	if a.Stage != b.Stage || len(a.Stages) != len(b.Stages) || len(a.Approvers) != len(b.Approvers) ||
-		len(a.Timeouts) != len(b.Timeouts) || a.StageStartedAt.UnixNano() != b.StageStartedAt.UnixNano() {
+		len(a.Timeouts) != len(b.Timeouts) || a.StageStartedAt.UnixNano() != b.StageStartedAt.UnixNano() ||
+		a.Deadline.UnixNano() != b.Deadline.UnixNano() {
 		return false
 	}
 	for i := range a.Stages {
@@ -320,6 +333,31 @@ func (l *Ledger) castStagedApproveVoteLocked(ctx context.Context, r *TransferRev
 	}
 	if p.Stage < 0 || p.Stage >= len(p.Stages) {
 		return TransferReceipt{}, fmt.Errorf("stage %d: %w", p.Stage, ErrInvalidApprovalStages)
+	}
+	// LG-226: an overall deadline that lapsed while nobody was
+	// watching rejects the review first, on any stage — the operator
+	// can never approve past the deadline, and the review can never
+	// advance or settle once its clock has run out. The deadline
+	// dominates the per-stage timeout: whichever bound lapsed, the
+	// review ends rejected, and the deadline event names the bound
+	// that fired.
+	if l.stagedDeadlineExpired(r, now) {
+		l.timeoutStagedStageLocked(r, now)
+		l.emitAuditCtx(ctx, AuditEvent{
+			Op:            "transfer_review_staged_deadline_expired",
+			Actor:         "ApproveTransferReview",
+			TraceID:       r.TransferID,
+			VersionBefore: l.version,
+			VersionAfter:  l.version,
+			Accounts:      []AccountID{r.Transfer.From, r.Transfer.To},
+			Details: map[string]any{
+				"stage":       p.Stage,
+				"stage_count": len(p.Stages),
+				"deadline":    p.Deadline.Format(time.RFC3339Nano),
+				"reason":      "staged approval deadline expired",
+			},
+		})
+		return TransferReceipt{}, ErrReviewExpired
 	}
 	// LG-223: a stage that lapsed while nobody was watching rejects
 	// the review first — the operator can never approve past a silent

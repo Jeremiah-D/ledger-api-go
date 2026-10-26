@@ -219,19 +219,28 @@ func (l *Ledger) emitStagedStageTimeoutAuditLocked(marked int, ids []string) {
 	})
 }
 
-// ExpireStagedReviewsAt is the explicit staged-timeout sweep with a
+// ExpireStagedReviewsAt is the explicit staged sweep with a
 // caller-supplied timestamp, so tests and operators can pin timeout
 // deterministically: it marks every pending staged review whose
-// current stage has lapsed as rejected and returns how many were
-// marked. It is the staged counterpart of the chain-timeout half of
-// ExpireReviewsAt; ExpireReviewsAt itself runs this sweep too, so
-// operators normally need only the one entry point.
+// current stage has lapsed as rejected, and — since LG-226 — every
+// pending staged review whose overall deadline has lapsed, and
+// returns how many were marked in total. A review rejected by the
+// stage sweep is no longer pending for the deadline sweep, so the
+// two bounds never double-handle a review; each bound emits its own
+// batched audit event. It is the staged counterpart of the
+// chain-timeout half of ExpireReviewsAt; ExpireReviewsAt itself runs
+// both staged sweeps too, so operators normally need only the one
+// entry point.
 func (l *Ledger) ExpireStagedReviewsAt(now time.Time) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	marked, ids := l.expireStagedStagesLocked(now)
 	if marked > 0 {
 		l.emitStagedStageTimeoutAuditLocked(marked, ids)
+	}
+	if expired, expiredIDs := l.expireStagedDeadlinesLocked(now); expired > 0 {
+		l.emitStagedDeadlineExpiredAuditLocked(expired, expiredIDs)
+		marked += expired
 	}
 	return marked
 }
