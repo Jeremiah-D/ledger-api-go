@@ -162,6 +162,12 @@ type TransferReview struct {
 	// start, and the per-stage named votes. Nil when the review was
 	// decided (or is being decided) outside a chain.
 	ChainProgress *ReviewChainProgress `json:"chain_progress,omitempty"`
+	// StagedApproval is the review's position in its per-transfer
+	// staged approval (see staged_approval.go): the ordered role
+	// chain, the current stage, and the approver of each decided
+	// stage. Nil when the review was decided (or is being decided)
+	// outside staged approval.
+	StagedApproval *StagedApprovalProgress `json:"staged_approval,omitempty"`
 }
 
 // WithReviewThreshold sets the ledger-wide large-transfer review
@@ -548,6 +554,7 @@ func (l *Ledger) GetTransferReview(transferID string) (TransferReview, bool) {
 	}
 	out := *r
 	out.ChainProgress = copyChainProgress(r.ChainProgress)
+	out.StagedApproval = copyStagedApproval(r.StagedApproval)
 	return out, true
 }
 
@@ -657,6 +664,14 @@ func (l *Ledger) ApproveTransferReviewCtx(ctx context.Context, transferID, revie
 		reviewer = defaultReviewOperator
 	}
 
+	// LG-221: while per-transfer stages are installed, the approval
+	// is a stage vote on the review's current stage (see
+	// staged_approval.go) — an unfinished chain can never settle, so
+	// the flat approve entry point cannot bypass the stages. Stages
+	// take precedence over the global schemes for this review.
+	if r.StagedApproval != nil {
+		return l.castStagedApproveVoteLocked(ctx, r, reviewer, now)
+	}
 	// LG-126: while an approval chain is active, the approval is a
 	// named vote on the review's current stage (see review_chain.go).
 	// The chain supersedes the flat quorum policy while configured: a
@@ -904,6 +919,12 @@ func (l *Ledger) RejectTransferReviewCtx(ctx context.Context, transferID, review
 	}
 	if reviewer == "" {
 		reviewer = defaultReviewOperator
+	}
+	// LG-221: while per-transfer stages are installed, the rejection
+	// is a stage vote — decisive at every stage (see
+	// staged_approval.go).
+	if r.StagedApproval != nil {
+		return l.castStagedRejectVoteLocked(ctx, r, reviewer, reason)
 	}
 	// LG-126: while an approval chain is active, the rejection is a
 	// named vote on the review's current stage — decisive at every

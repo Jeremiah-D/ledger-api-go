@@ -896,6 +896,10 @@ func reviewsEqual(a, b *TransferReview) bool {
 		// a restore that dropped the stage or the per-stage votes
 		// would silently lose the tiered-approval trail.
 		!chainProgressEqual(a.ChainProgress, b.ChainProgress) ||
+		// LG-221: the staged-approval progress is part of the review
+		// record — a restore that dropped the stage or the decided
+		// approvers would silently lose the role-chain trail.
+		!stagedApprovalEqual(a.StagedApproval, b.StagedApproval) ||
 		a.CreatedAt.UnixNano() != b.CreatedAt.UnixNano() ||
 		a.ExpiresAt.UnixNano() != b.ExpiresAt.UnixNano() ||
 		a.ReviewedAt.UnixNano() != b.ReviewedAt.UnixNano() ||

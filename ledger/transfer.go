@@ -310,6 +310,15 @@ type TransferReceipt struct {
 	// single-operator and flat-quorum decisions, and for idempotent
 	// replays of an already-settled review.
 	ChainTally *ReviewChainTally `json:"chain_tally,omitempty"`
+	// StagedTally discloses the live staged-approval count when the
+	// review decision went through per-transfer stages (see
+	// staged_approval.go): the current stage, the stage's role, the
+	// approvers so far, and what this vote did. It is set on
+	// approve-vote receipts while the review is pending (including
+	// stage advances). Nil for single-operator, quorum, and chain
+	// decisions, and for idempotent replays of an already-settled
+	// review.
+	StagedTally *StagedApprovalTally `json:"staged_tally,omitempty"`
 }
 
 // FeeTier is one band of the tiered transfer fee schedule: transfers of

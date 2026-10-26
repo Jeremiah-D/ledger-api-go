@@ -558,6 +558,25 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   longer auto-rejects the review (lazy by predicate, swept by the same
   expiry worker), so funds can never strand on a silent approver.
   While a chain is configured it supersedes the flat N-of-M policy.
+- **Per-transfer staged approval (tiered roles, one transfer at a time):**
+  `SetApprovalStages` attaches an opt-in ordered role chain to one pending
+  review — unlike the global chain, which decides every review alike, stages
+  decide a single high-value transfer on its own terms. Each stage is signed
+  by exactly one approver, in order: a stage approval advances the review
+  (`transfer_review_staged_stage_advanced` in the audit chain), and only the
+  last stage's approval settles through the normal approval path, so a review
+  with unfinished stages can never settle — the flat `approve`/`reject`
+  endpoints become stage votes while stages are installed. A reject at any
+  stage closes the review at once. The approver of a stage must differ from
+  the previous stage's approver, so tiered approval cannot collapse into one
+  operator signing every rung. Every stage vote lands in the structured audit
+  chain with its stage number and role, and the decided approvers ride the
+  review record, the `Reconcile` report, and disaster-recovery snapshots.
+  Stages install only on a fresh pending review — one already carrying chain
+  progress or quorum votes belongs to that scheme — and role membership
+  itself is enforced by the calling operator system (the ledger holds no
+  identity-to-role registry); what the ledger guarantees is order, one
+  signature per stage, no adjacent self-approval, and no early settlement.
 - **Approver vote delegation (vote by proxy):** `DelegateVote` grants a
   delegatee the right to cast votes in the granter's place — on the
   flat review path, the quorum path, or the chain path (`scope:
