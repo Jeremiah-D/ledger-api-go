@@ -3032,6 +3032,24 @@ the un-settled remainder, and `Reconcile` reports per-hold
 status). Every `POST /holds/{id}/capture/partial` is counted by
 `ledger_partial_captures_total`.
 
+#### Extending a hold's expiry
+
+A pre-authorization that needs more time should not have to expire
+and be re-placed — re-placement is a new reservation with a gap in
+which the funds sit unreserved. `ExtendHoldExpiry` moves an active
+hold's deadline in place: the new expiry must be strictly later than
+the current one (extensions only lengthen, never shorten — an equal,
+earlier, or past expiry is rejected and the original deadline is
+untouched), and captured, released, or expired holds are refused
+(the sweep state and the lazy-expiry reading agree: a lapsed hold is
+never resurrected by an extension). Amount, currency, and the
+partial-capture position are untouched — a partially captured hold
+stays active with its remainder still reserving funds — and the move
+lands one `hold_expiry_extended` audit event with the old and new
+expiry. Like the hold itself, an extension is off-journal and bumps
+neither the version nor the audit chain; the extended hold simply
+survives `ExpireHolds` sweeps up to its new expiry.
+
 ### Payment repair queue (支付修复队列，预发出修复)
 
 与争议（dispute.go，LG-129）正交：争议是事后——钱已经动了，payer
