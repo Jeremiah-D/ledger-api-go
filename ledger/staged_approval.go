@@ -110,10 +110,27 @@ type ApprovalStage struct {
 // approver of each decided stage, in stage order. It rides the review
 // record through snapshots and the reconcile report. Invariant:
 // len(Approvers) == Stage while the review is pending and staged.
+//
+// LG-223: Timeouts carries the opt-in per-stage lifetimes installed
+// by SetStageTimeouts (nil when no timeouts are installed — a stage
+// with no timeout never times out, and a zero timeout means the same
+// for that stage). StageStartedAt is when the current stage became
+// current: the timeout-install instant for the stage the review sits
+// on when timeouts land, and the advance instant for every later
+// stage — so each stage's clock runs from its own start, never from
+// the review's creation or from a previous stage's start.
 type StagedApprovalProgress struct {
 	Stages    []ApprovalStage `json:"stages"`
 	Stage     int             `json:"stage"`
 	Approvers []string        `json:"approvers"`
+	// Timeouts is the per-stage lifetime installed by
+	// SetStageTimeouts, in stage order; nil when unset. It is only
+	// meaningful while stages are installed — it never applies to a
+	// flat, quorum, or chain decision.
+	Timeouts []time.Duration `json:"timeouts,omitempty"`
+	// StageStartedAt is when the current stage started, for the
+	// LG-223 timeout clock. Zero when no timeouts are installed.
+	StageStartedAt time.Time `json:"stage_started_at,omitempty"`
 }
 
 // StagedApprovalTally is the live staged-approval count disclosed on
@@ -150,9 +167,11 @@ func copyStagedApproval(p *StagedApprovalProgress) *StagedApprovalProgress {
 		return nil
 	}
 	out := &StagedApprovalProgress{
-		Stage:     p.Stage,
-		Stages:    append([]ApprovalStage(nil), p.Stages...),
-		Approvers: append([]string(nil), p.Approvers...),
+		Stage:          p.Stage,
+		Stages:         append([]ApprovalStage(nil), p.Stages...),
+		Approvers:      append([]string(nil), p.Approvers...),
+		Timeouts:       append([]time.Duration(nil), p.Timeouts...),
+		StageStartedAt: p.StageStartedAt,
 	}
 	return out
 }
@@ -163,7 +182,8 @@ func stagedApprovalEqual(a, b *StagedApprovalProgress) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	if a.Stage != b.Stage || len(a.Stages) != len(b.Stages) || len(a.Approvers) != len(b.Approvers) {
+	if a.Stage != b.Stage || len(a.Stages) != len(b.Stages) || len(a.Approvers) != len(b.Approvers) ||
+		len(a.Timeouts) != len(b.Timeouts) || a.StageStartedAt.UnixNano() != b.StageStartedAt.UnixNano() {
 		return false
 	}
 	for i := range a.Stages {
@@ -173,6 +193,11 @@ func stagedApprovalEqual(a, b *StagedApprovalProgress) bool {
 	}
 	for i := range a.Approvers {
 		if a.Approvers[i] != b.Approvers[i] {
+			return false
+		}
+	}
+	for i := range a.Timeouts {
+		if a.Timeouts[i] != b.Timeouts[i] {
 			return false
 		}
 	}
@@ -296,6 +321,30 @@ func (l *Ledger) castStagedApproveVoteLocked(ctx context.Context, r *TransferRev
 	if p.Stage < 0 || p.Stage >= len(p.Stages) {
 		return TransferReceipt{}, fmt.Errorf("stage %d: %w", p.Stage, ErrInvalidApprovalStages)
 	}
+	// LG-223: a stage that lapsed while nobody was watching rejects
+	// the review first — the operator can never approve past a silent
+	// approver, and the review can never advance to the next stage
+	// on a timed-out rung.
+	if l.stagedStageTimedOut(r, now) {
+		stage := p.Stages[p.Stage]
+		l.timeoutStagedStageLocked(r, now)
+		l.emitAuditCtx(ctx, AuditEvent{
+			Op:            "transfer_review_staged_stage_timeout",
+			Actor:         "ApproveTransferReview",
+			TraceID:       r.TransferID,
+			VersionBefore: l.version,
+			VersionAfter:  l.version,
+			Accounts:      []AccountID{r.Transfer.From, r.Transfer.To},
+			Details: map[string]any{
+				"stage":       p.Stage,
+				"stage_count": len(p.Stages),
+				"role":        stage.Role,
+				"timeout":     p.Timeouts[p.Stage].String(),
+				"reason":      "staged stage timeout",
+			},
+		})
+		return TransferReceipt{}, ErrReviewExpired
+	}
 	if len(p.Approvers) > 0 && p.Approvers[len(p.Approvers)-1] == approver {
 		return TransferReceipt{}, ErrStagedApproverRepeated
 	}
@@ -310,6 +359,10 @@ func (l *Ledger) castStagedApproveVoteLocked(ctx context.Context, r *TransferRev
 	}
 	from := p.Stage
 	p.Stage++
+	// LG-223: the next stage's clock starts at the advance instant,
+	// not at the review's creation — each stage is timed from its
+	// own start.
+	p.StageStartedAt = now
 	l.reviews[r.TransferID] = r
 	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "transfer_review_staged_stage_advanced",

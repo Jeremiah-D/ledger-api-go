@@ -577,6 +577,16 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   itself is enforced by the calling operator system (the ledger holds no
   identity-to-role registry); what the ledger guarantees is order, one
   signature per stage, no adjacent self-approval, and no early settlement.
+  `SetStageTimeouts` adds an opt-in lifetime per stage, in stage order
+  (one-shot, zero means that stage never times out): each stage's clock
+  runs from its own start — the install instant for the current stage,
+  the advance instant for later stages — and a stage that waits longer
+  auto-rejects the review fail-closed (`transfer_review_staged_stage_timeout`
+  in the audit chain, with the stage, role, and timeout), never advancing
+  to the next stage. Timeout evaluation is lazy by predicate plus the
+  `ExpireReviews` sweep, like the global chain timeout, but scoped to
+  this one transfer; the timeouts ride the review record, the
+  `Reconcile` pending-review list, and disaster-recovery snapshots.
 - **Approver vote delegation (vote by proxy):** `DelegateVote` grants a
   delegatee the right to cast votes in the granter's place — on the
   flat review path, the quorum path, or the chain path (`scope:

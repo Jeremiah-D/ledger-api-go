@@ -337,13 +337,13 @@ func reviewExpiredLocked(r *TransferReview, now time.Time) bool {
 }
 
 // reviewActiveLocked reports whether the review currently freezes funds:
-// pending, not lapsed, and — under an approval chain — its current
-// stage not timed out. A timed-out stage is lazy like review-level
-// expiry: the funds are already released for available-balance purposes
-// even before ExpireReviews sweeps the review. Callers must hold l.mu
-// (either lock suffices).
+// pending, not lapsed, and — under an approval chain or a staged
+// approval — its current stage not timed out. A timed-out stage is
+// lazy like review-level expiry: the funds are already released for
+// available-balance purposes even before ExpireReviews sweeps the
+// review. Callers must hold l.mu (either lock suffices).
 func (l *Ledger) reviewActiveLocked(r *TransferReview, now time.Time) bool {
-	return r.Status == ReviewStatusPending && !reviewExpiredLocked(r, now) && !l.chainStageTimedOut(r, now)
+	return r.Status == ReviewStatusPending && !reviewExpiredLocked(r, now) && !l.chainStageTimedOut(r, now) && !l.stagedStageTimedOut(r, now)
 }
 
 // reviewHeldLocked sums the frozen funds of active reviews on
@@ -1114,6 +1114,16 @@ func (l *Ledger) ExpireReviewsAtCtx(ctx context.Context, now time.Time) int {
 	// count keeps its LG-42 meaning: review-level expiries only.
 	if timedOut, ids := l.expireChainStagesLocked(now); timedOut > 0 {
 		l.emitChainStageTimeoutAuditLocked(timedOut, ids)
+	}
+	// LG-223: staged stage timeouts auto-reject their reviews — the
+	// same batched-audit shape as the chain sweep, kept as its own
+	// event so the two timeout schemes stay distinguishable. A
+	// review already expired or chain-timed-out above is no longer
+	// pending, so the sweeps never double-handle a review. The
+	// returned count keeps its LG-42 meaning: review-level expiries
+	// only.
+	if timedOut, ids := l.expireStagedStagesLocked(now); timedOut > 0 {
+		l.emitStagedStageTimeoutAuditLocked(timedOut, ids)
 	}
 	return marked
 }
