@@ -1363,6 +1363,31 @@ check. A key posted before the freeze still replays to its original entry
 after the freeze (the replay books nothing new); only fresh bookings
 through the frozen account are refused.
 
+**Partial freeze (amount-level, not account-level):**
+`FreezeAmount` / `FreezeAmountIn` freeze a specified amount of an
+account's available funds while the rest keeps posting — unlike `Freeze`,
+which stops the whole account, and unlike a dispute hold, which reserves
+through the hold machinery with an expiry and a capture path (a partial
+freeze has neither: it lasts until explicitly released and never settles
+into a posting). The amount must fit inside available funds at freeze
+time (over-available freezes fail closed with `422`); the frozen amount
+deducts from `Available` exactly once, as its own term — it is never also
+recorded as a hold, so the same reservation is never deducted twice
+(a hold and a partial freeze on one account deduct as their sum).
+`UnfreezeAmount` releases part of the frozen amount; releasing more than
+is frozen is rejected (`422`) and releases nothing. A full `Unfreeze`
+also clears any partial freeze on the account. For overdraft-protected
+accounts, the frozen amount raises the posting floor: a posting that
+would take the balance below the frozen amount is rejected
+(`ErrPartialFreezeBlockedPosting`); unprotected accounts keep the sign
+convention, with the freeze advisory for `Post` like a hold. Partial
+freezes round-trip through disaster-recovery snapshots, appear on the
+reconcile report (`partial_frozen`, sorted by account and currency),
+and are audited (`partial_freeze` / `partial_freeze_released`). HTTP:
+`POST /accounts/{id}/partial-freeze` and `POST
+/accounts/{id}/partial-unfreeze` with `{"amount_cents", "currency"?}`;
+`GET /accounts/{id}/balance` reports `partial_frozen_cents`.
+
 ```bash
 curl -s -X POST localhost:8080/accounts/cash/freeze
 # {"account":"cash","frozen":true}

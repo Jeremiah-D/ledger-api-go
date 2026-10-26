@@ -560,6 +560,12 @@ type snapshotConfigLine struct {
 	// timed freeze into a manual one, so deadlines round-trip like the
 	// frozen-account list itself.
 	FrozenAutoUnfreeze []FrozenAutoUnfreeze `json:"frozen_auto_unfreeze,omitempty"`
+	// PartialFrozen carries the account-level partially frozen
+	// amounts (see partial_freeze.go), sorted by (account,
+	// currency); absent in snapshots written before partial freezes
+	// existed. A restore that dropped them would silently unfreeze
+	// funds, so they round-trip like the frozen-account list.
+	PartialFrozen []PartialFrozenBalance `json:"partial_frozen,omitempty"`
 	// ClosedAccounts carries the terminal account-lifecycle records
 	// (see CloseAccount in close.go), sorted by account; absent in
 	// snapshots written before account closure existed. A restore that
@@ -1414,6 +1420,9 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 	cfg.ReviewDelegations = l.reviewDelegationsSnapshotLocked()
 	cfg.ReviewDelegationsGranted = l.reviewDelegationsGranted
 	cfg.FrozenAutoUnfreeze = l.frozenAutoUnfreezeLocked()
+	// LG-224: partially frozen amounts round-trip like the
+	// frozen-account list.
+	cfg.PartialFrozen = l.partialFrozenSnapshotLocked()
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("ledger: snapshot export: %w", err)
 	}
@@ -2929,6 +2938,27 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		}
 		l.frozen[fu.Account] = true
 		l.frozenUntil[fu.Account] = fu.AutoUnfreezeAt
+	}
+	// LG-224: partially frozen amounts restore like the frozen
+	// list: an empty account, a bad currency, or a negative amount
+	// fails the import instead of installing a reservation that
+	// could never have been created. A zero row is skipped — it
+	// freezes nothing.
+	for _, pf := range cfg.PartialFrozen {
+		if pf.Account == "" {
+			return bad("partial freeze with empty account")
+		}
+		cur, err := normalizeCurrency(pf.Currency)
+		if err != nil {
+			return bad("bad partial freeze currency %q: %v", pf.Currency, err)
+		}
+		if pf.AmountCents < 0 {
+			return bad("negative partial freeze for account %q (%s)", pf.Account, pf.Currency)
+		}
+		if pf.AmountCents == 0 {
+			continue
+		}
+		l.partialFrozen[accountCurrency{account: pf.Account, currency: cur}] = pf.AmountCents
 	}
 	for _, a := range cfg.OverdraftProtected {
 		l.noOverdraft[a] = true

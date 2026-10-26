@@ -357,10 +357,15 @@ func (l *Ledger) heldLocked(a AccountID, currency string, now time.Time) int64 {
 // funds frozen by pending transfer reviews (see review.go — a pending
 // review deducts its frozen outflow exactly like a hold) minus active
 // term-deposit principals (see termdeposit.go — a term deposit locks
-// its principal off-journal, like a hold). Expired holds and lapsed
-// reviews count as inactive even before their sweeps; matured and
-// early-withdrawn term deposits release their locks. An empty currency
-// means the default currency. Unknown accounts report zero.
+// its principal off-journal, like a hold) minus the partially frozen
+// amount (see partial_freeze.go — an account-level amount freeze).
+// Each reservation source deducts exactly once: a hold and a partial
+// freeze are distinct reservations, so their sum deducts, but a
+// partial freeze is never also recorded as a hold and therefore
+// never deducted twice for itself. Expired holds and lapsed reviews
+// count as inactive even before their sweeps; matured and
+// early-withdrawn term deposits release their locks. An empty
+// currency means the default currency. Unknown accounts report zero.
 func (l *Ledger) AvailableIn(a AccountID, currency string) int64 {
 	if currency == "" {
 		currency = DefaultCurrency
@@ -370,13 +375,13 @@ func (l *Ledger) AvailableIn(a AccountID, currency string) int64 {
 	now := time.Now()
 	return l.balances[accountCurrency{account: a, currency: currency}] -
 		l.heldLocked(a, currency, now) - l.reviewHeldLocked(a, currency, now) -
-		l.termLockedLocked(a, currency, now)
+		l.termLockedLocked(a, currency, now) - l.partialFrozenLocked(a, currency)
 }
 
 // Available returns the account's available funds (in cents) in the
 // default currency: net balance minus active authorization holds minus
 // funds frozen by pending transfer reviews minus active term-deposit
-// principals. See AvailableIn.
+// principals minus the partially frozen amount. See AvailableIn.
 func (l *Ledger) Available(a AccountID) int64 {
 	return l.AvailableIn(a, DefaultCurrency)
 }

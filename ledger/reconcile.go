@@ -171,6 +171,13 @@ type ReconciliationReport struct {
 	TrialBalances        []TrialBalance            `json:"trial_balances"`
 	Discrepancies        []TrialBalanceDiscrepancy `json:"discrepancies"`
 	FrozenAccounts       []AccountID               `json:"frozen_accounts"`
+	// PartialFrozen lists every account-level partially frozen
+	// amount (see partial_freeze.go), sorted by (account,
+	// currency): the cents frozen per account while the rest of the
+	// account keeps moving. Unlike FrozenAccounts — the whole-account
+	// stop — these accounts are not stopped, only the listed cents
+	// are reserved from their available balances.
+	PartialFrozen []PartialFrozenBalance `json:"partial_frozen"`
 	// ClosedAccounts lists the accounts in their terminal lifecycle
 	// state (see CloseAccount), sorted: no journal entry may book
 	// through any of them anymore, so the report's figures for those
@@ -852,6 +859,7 @@ func (l *Ledger) reconcileLocked(now time.Time) ReconciliationReport {
 		TrialBalances:              make([]TrialBalance, 0, len(l.balances)),
 		Discrepancies:              make([]TrialBalanceDiscrepancy, 0),
 		FrozenAccounts:             l.frozenAccountsLocked(),
+		PartialFrozen:              l.partialFrozenSnapshotLocked(),
 		ClosedAccounts:             l.closedAccountsLocked(),
 		SuspendedAccounts:          l.suspendedAccountsLocked(),
 		ClearingBatches:            l.clearingBatchSummariesLocked(),

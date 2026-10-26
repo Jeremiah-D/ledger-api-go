@@ -4880,10 +4880,11 @@ func (s *server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	account, alias := s.resolveAccountRef(r, id)
 	l := s.ledgerFor(r)
 	resp := map[string]any{
-		"account":         string(account),
-		"balance_cents":   l.Balance(account),
-		"available_cents": l.Available(account),
-		"frozen":          l.IsFrozen(account),
+		"account":              string(account),
+		"balance_cents":        l.Balance(account),
+		"available_cents":      l.Available(account),
+		"frozen":               l.IsFrozen(account),
+		"partial_frozen_cents": l.PartialFrozenAmount(account),
 	}
 	if alias != "" {
 		resp["alias"] = alias
@@ -8114,6 +8115,109 @@ func (s *server) handleUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": id, "frozen": false})
 }
 
+// partialFreezeRequest is the body of POST
+// /accounts/{id}/partial-freeze and /accounts/{id}/partial-unfreeze:
+// the amount to freeze or release. Currency is optional and defaults
+// to USD; when given it must be a 3-letter uppercase ISO 4217 code.
+type partialFreezeRequest struct {
+	AmountCents int64  `json:"amount_cents"`
+	Currency    string `json:"currency,omitempty"`
+}
+
+// handlePartialFreezeAccount implements POST
+// /accounts/{id}/partial-freeze: freezes amount_cents of the account's
+// available funds (see ledger.FreezeAmountIn) while the rest of the
+// account keeps posting. Malformed requests return 400; a freeze on a
+// frozen, closed, or suspended account returns 403; an amount the
+// available funds cannot cover returns 422. Freezing moves no money
+// and does not bump the ledger version.
+func (s *server) handlePartialFreezeAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	var req partialFreezeRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	if err := l.FreezeAmountInCtx(actx, ledger.AccountID(id), req.Currency, req.AmountCents); err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrAccountClosed) || errors.Is(err, ledger.ErrAccountFrozen) || errors.Is(err, ledger.ErrAccountSuspended):
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPartialFreezeExceedsAvailable):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	currency := req.Currency
+	if currency == "" {
+		currency = ledger.DefaultCurrency
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":         id,
+		"currency":        currency,
+		"frozen_cents":    l.PartialFrozenAmountIn(ledger.AccountID(id), currency),
+		"available_cents": l.AvailableIn(ledger.AccountID(id), currency),
+	})
+}
+
+// handlePartialUnfreezeAccount implements POST
+// /accounts/{id}/partial-unfreeze: releases amount_cents of the
+// account's partially frozen funds (see ledger.UnfreezeAmountIn).
+// Releasing more than is frozen returns 422 and releases nothing;
+// malformed requests return 400. Releasing is never blocked by a
+// whole-account freeze, close, or suspension stop.
+func (s *server) handlePartialUnfreezeAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account id required"})
+		return
+	}
+	var req partialFreezeRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	if err := l.UnfreezeAmountInCtx(actx, ledger.AccountID(id), req.Currency, req.AmountCents); err != nil {
+		if errors.Is(err, ledger.ErrPartialFreezeExceedsFrozen) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	currency := req.Currency
+	if currency == "" {
+		currency = ledger.DefaultCurrency
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account":         id,
+		"currency":        currency,
+		"frozen_cents":    l.PartialFrozenAmountIn(ledger.AccountID(id), currency),
+		"available_cents": l.AvailableIn(ledger.AccountID(id), currency),
+	})
+}
+
 // kycSetRequest is the body of POST /accounts/{id}/kyc: the KYC/尽调
 // profile to install. Only status is required; risk_tier, verified_at,
 // and expires_at are optional. The expired state cannot be set directly
@@ -10372,6 +10476,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /holds/{id}/release", s.handleReleaseHold)
 	mux.HandleFunc("POST /accounts/{id}/freeze", s.handleFreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/unfreeze", s.handleUnfreezeAccount)
+	mux.HandleFunc("POST /accounts/{id}/partial-freeze", s.handlePartialFreezeAccount)
+	mux.HandleFunc("POST /accounts/{id}/partial-unfreeze", s.handlePartialUnfreezeAccount)
 	mux.HandleFunc("POST /accounts/{id}/kyc", s.handleSetKyc)
 	mux.HandleFunc("GET /accounts/{id}/kyc", s.handleGetKyc)
 	mux.HandleFunc("POST /kyc/expire", s.handleExpireKyc)

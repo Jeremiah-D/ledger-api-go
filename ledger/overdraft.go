@@ -74,6 +74,21 @@ func (l *Ledger) overdraftRejectedLocked(e JournalEntry) error {
 	if cl, ok := l.creditLines[creditLineKey{account: e.CreditAccount, currency: e.Currency}]; ok {
 		floor = -cl.LimitCents
 	}
+	// LG-224: a partially frozen amount raises the protected
+	// account's posting floor — a posting that would take the
+	// balance below the frozen amount spends frozen funds, and is
+	// rejected with its own error (not the overdraft error: the
+	// account may still be far above zero). The frozen floor wins
+	// over a credit-line floor whenever it is higher, because frozen
+	// funds must stay put regardless of the line. The comparison
+	// uses addCents so an overflowing frozen-plus-amount total
+	// fails closed instead of wrapping around.
+	if pf := l.partialFrozenLocked(e.CreditAccount, e.Currency); pf > 0 && pf > floor {
+		total, ok := addCents(e.AmountCents, pf)
+		if !ok || l.balances[accountCurrency{account: e.CreditAccount, currency: e.Currency}] < total {
+			return ErrPartialFreezeBlockedPosting
+		}
+	}
 	if l.balances[accountCurrency{account: e.CreditAccount, currency: e.Currency}] < e.AmountCents+floor {
 		if floor < 0 {
 			return ErrCreditLimitExceeded

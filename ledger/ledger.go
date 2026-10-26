@@ -336,6 +336,12 @@ type Ledger struct {
 	// here; a manual Freeze stores the zero time by deleting any
 	// deadline, so a manual freeze never auto-releases.
 	frozenUntil map[AccountID]time.Time
+	// partialFrozen carries the account-level partially frozen cents
+	// per (account, currency) (see partial_freeze.go): a frozen
+	// amount, not a whole-account stop. It deducts from Available
+	// and raises the protected-account posting floor, and it
+	// round-trips through snapshots like the frozen-account list.
+	partialFrozen map[accountCurrency]int64
 	// freezeEvents is the in-memory history of account freeze-state
 	// transitions (see AccountFreezeEvent in statement.go), appended by
 	// the freeze paths under the write lock and read by GenerateStatement
@@ -1688,6 +1694,7 @@ func New(opts ...Option) *Ledger {
 		creditTotals:            make(map[accountCurrency]int64),
 		frozen:                  make(map[AccountID]bool),
 		frozenUntil:             make(map[AccountID]time.Time),
+		partialFrozen:           make(map[accountCurrency]int64),
 		closed:                  make(map[AccountID]AccountClosure),
 		suspended:               make(map[AccountID]AccountSuspension),
 		dormant:                 make(map[AccountID]DormancyRecord),

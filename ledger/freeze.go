@@ -133,7 +133,11 @@ func (l *Ledger) freezeCtxLocked(ctx context.Context, a AccountID, until time.Ti
 
 // Unfreeze lifts a freeze previously applied with Freeze. Unfreezing an
 // account that was never frozen is a no-op. Like Freeze, it does not bump
-// the ledger version.
+// the ledger version. LG-224: unfreezing also clears any partial freeze
+// on the account (all currencies) — an account coming out of a full
+// freeze must not stay partially frozen behind it; each cleared amount
+// is recorded as its own partial_freeze_released audit event with the
+// reason "account_unfrozen".
 func (l *Ledger) Unfreeze(a AccountID) {
 	l.UnfreezeCtx(context.Background(), a)
 }
@@ -146,6 +150,9 @@ func (l *Ledger) UnfreezeCtx(ctx context.Context, a AccountID) {
 	// A manual unfreeze also drops any scheduled deadline: the account is
 	// no longer frozen, so the deadline is meaningless.
 	delete(l.frozenUntil, a)
+	// LG-224: a full unfreeze clears the account's partial freezes
+	// too, so no frozen amount survives the unfreeze.
+	cleared := l.clearPartialFrozenLocked(a)
 	l.emitAuditCtx(ctx, AuditEvent{
 		Op:            "unfreeze",
 		Actor:         "Unfreeze",
@@ -154,6 +161,22 @@ func (l *Ledger) UnfreezeCtx(ctx context.Context, a AccountID) {
 		VersionAfter:  l.version,
 		Accounts:      []AccountID{a},
 	})
+	for _, c := range cleared {
+		l.emitAuditCtx(ctx, AuditEvent{
+			Op:            "partial_freeze_released",
+			Actor:         "Unfreeze",
+			TraceID:       string(a),
+			VersionBefore: l.version,
+			VersionAfter:  l.version,
+			Accounts:      []AccountID{a},
+			Details: map[string]any{
+				"amount_cents":    c.AmountCents,
+				"currency":        c.Currency,
+				"remaining_cents": int64(0),
+				"reason":          "account_unfrozen",
+			},
+		})
+	}
 	l.emitOutboxLocked(OutboxEvent{
 		Type:    OutboxAccountUnfrozen,
 		Account: a,
