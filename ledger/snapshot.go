@@ -2959,6 +2959,14 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			continue
 		}
 		l.partialFrozen[accountCurrency{account: pf.Account, currency: cur}] = pf.AmountCents
+		// LG-225: a row's expiry restores verbatim with its
+		// amount, so a restored ledger keeps the deadline — a
+		// zero row above was already skipped, so its expiry
+		// never restores here. A zero expiry instant is
+		// treated as absent, never installed.
+		if pf.ExpiresAt != nil && !pf.ExpiresAt.IsZero() {
+			l.partialFreezeExpiry[accountCurrency{account: pf.Account, currency: cur}] = *pf.ExpiresAt
+		}
 	}
 	for _, a := range cfg.OverdraftProtected {
 		l.noOverdraft[a] = true

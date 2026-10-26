@@ -1383,7 +1383,23 @@ would take the balance below the frozen amount is rejected
 convention, with the freeze advisory for `Post` like a hold. Partial
 freezes round-trip through disaster-recovery snapshots, appear on the
 reconcile report (`partial_frozen`, sorted by account and currency),
-and are audited (`partial_freeze` / `partial_freeze_released`). HTTP:
+and are audited (`partial_freeze` / `partial_freeze_released`).
+A partial freeze can also carry an opt-in automatic-release deadline
+(LG-225, `SetPartialFreezeExpiry(account, currency, expiresAt)`):
+the deadline may only be set on a freeze that already exists, and a
+past deadline is rejected with the freeze untouched. While a deadline
+is set, `FreezeAmount` for that same (account, currency) is rejected
+(`ErrPartialFreezeExpirySet`) — a pending release must never sweep up
+funds frozen after the deadline was set — until the deadline releases
+or is manually cleared (`ClearPartialFreezeExpiry`, which leaves the
+frozen amount itself untouched). `ExpirePartialFreezes(now)` releases
+every due freeze, restoring Available and auditing
+`partial_freeze_expired` (distinct from a manual
+`partial_freeze_released`); it bumps no version and posts nothing. A
+partial release keeps the deadline for the remaining amount; a full
+release (or a whole-account `Unfreeze`) clears it. The deadline
+round-trips through snapshots on the `partial_frozen` row
+(`expires_at`) and is disclosed on the reconcile report. HTTP:
 `POST /accounts/{id}/partial-freeze` and `POST
 /accounts/{id}/partial-unfreeze` with `{"amount_cents", "currency"?}`;
 `GET /accounts/{id}/balance` reports `partial_frozen_cents`.

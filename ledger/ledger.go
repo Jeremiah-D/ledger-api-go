@@ -342,6 +342,13 @@ type Ledger struct {
 	// and raises the protected-account posting floor, and it
 	// round-trips through snapshots like the frozen-account list.
 	partialFrozen map[accountCurrency]int64
+	// partialFreezeExpiry carries the opt-in automatic-release
+	// deadline per (account, currency) partial freeze (see
+	// partial_freeze_expiry.go): only keys with a live partial
+	// freeze appear here, and ExpirePartialFreezes releases a key
+	// once its deadline passes. It round-trips through snapshots
+	// on the PartialFrozenBalance row, like the frozen amount.
+	partialFreezeExpiry map[accountCurrency]time.Time
 	// freezeEvents is the in-memory history of account freeze-state
 	// transitions (see AccountFreezeEvent in statement.go), appended by
 	// the freeze paths under the write lock and read by GenerateStatement
@@ -1695,6 +1702,7 @@ func New(opts ...Option) *Ledger {
 		frozen:                  make(map[AccountID]bool),
 		frozenUntil:             make(map[AccountID]time.Time),
 		partialFrozen:           make(map[accountCurrency]int64),
+		partialFreezeExpiry:    make(map[accountCurrency]time.Time),
 		closed:                  make(map[AccountID]AccountClosure),
 		suspended:               make(map[AccountID]AccountSuspension),
 		dormant:                 make(map[AccountID]DormancyRecord),

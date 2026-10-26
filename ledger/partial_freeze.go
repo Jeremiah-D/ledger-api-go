@@ -111,6 +111,12 @@ type PartialFrozenBalance struct {
 	Account     AccountID `json:"account"`
 	Currency    string    `json:"currency"`
 	AmountCents int64     `json:"amount_cents"`
+	// ExpiresAt is the opt-in automatic-release deadline for this
+	// partial freeze (LG-225, see partial_freeze_expiry.go). Nil
+	// means the freeze lasts until explicitly released; a set
+	// value round-trips through snapshots and is disclosed on the
+	// reconcile report alongside the frozen amount.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 // partialFrozenLocked reports the partially frozen cents on (account,
@@ -128,7 +134,12 @@ func (l *Ledger) partialFrozenSnapshotLocked() []PartialFrozenBalance {
 		if v == 0 {
 			continue
 		}
-		out = append(out, PartialFrozenBalance{Account: k.account, Currency: k.currency, AmountCents: v})
+		row := PartialFrozenBalance{Account: k.account, Currency: k.currency, AmountCents: v}
+		if exp, ok := l.partialFreezeExpiry[k]; ok {
+			at := exp
+			row.ExpiresAt = &at
+		}
+		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Account != out[j].Account {
@@ -149,6 +160,11 @@ func (l *Ledger) clearPartialFrozenLocked(a AccountID) []PartialFrozenBalance {
 		if k.account == a && v != 0 {
 			cleared = append(cleared, PartialFrozenBalance{Account: k.account, Currency: k.currency, AmountCents: v})
 			delete(l.partialFrozen, k)
+			// LG-225: a whole-account unfreeze must not leave a
+			// dangling expiry behind for a freeze that no longer
+			// exists — an expiry without a freeze could never be
+			// set through the public API, so it is dropped here.
+			delete(l.partialFreezeExpiry, k)
 		}
 	}
 	sort.Slice(cleared, func(i, j int) bool { return cleared[i].Currency < cleared[j].Currency })
@@ -229,13 +245,28 @@ func (l *Ledger) freezeAmountInCtx(ctx context.Context, a AccountID, currency st
 		return ErrAccountSuspended
 	}
 
+	// LG-225: while a partial-freeze expiry is set for this
+	// (account, currency), no new amount may freeze here. The
+	// expiry releases the whole frozen amount at its deadline, so
+	// admitting new funds under the same expiry would make their
+	// release ambiguous — fail-safe, the new freeze is rejected
+	// until the expiry releases (ExpirePartialFreezes) or is
+	// manually cleared (ClearPartialFreezeExpiry). The gate is
+	// fail-closed on a stale deadline too: an expiry whose instant
+	// has passed but whose sweep has not run still blocks, so no
+	// new funds can slip in ahead of the release. The gate is
+	// per (account, currency): other currencies keep freezing.
+	key := accountCurrency{account: a, currency: cur}
+	if _, ok := l.partialFreezeExpiry[key]; ok {
+		return ErrPartialFreezeExpirySet
+	}
+
 	// Fail-closed coverage: the new amount must fit inside the
 	// available funds that are not already reserved — including by
 	// an existing partial freeze, which Available already deducts.
 	// The comparison is overflow-safe via coversCents against the
 	// pre-partial available figure: a required total that does not
 	// fit in int64 can never be covered.
-	key := accountCurrency{account: a, currency: cur}
 	avail := l.availableBeforePartialLocked(a, cur, now) - l.partialFrozenLocked(a, cur)
 	if amountCents > avail {
 		return ErrPartialFreezeExceedsAvailable
@@ -323,6 +354,12 @@ func (l *Ledger) unfreezeAmountLocked(ctx context.Context, a AccountID, currency
 	remaining := current - amountCents
 	if remaining == 0 {
 		delete(l.partialFrozen, key)
+		// LG-225: a full release clears the expiry with the
+		// freeze — a partial release keeps it (the remaining
+		// amount still expires at the same instant), but a
+		// zero frozen amount must never carry a dangling expiry
+		// that a later FreezeAmount would trip over.
+		delete(l.partialFreezeExpiry, key)
 	} else {
 		l.partialFrozen[key] = remaining
 	}
