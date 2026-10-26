@@ -594,6 +594,13 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   silently approved or advanced — the deadline must not be earlier than
   the install instant, and it rides the review record and
   disaster-recovery snapshots like the timeouts.
+  `ReplaceFutureStageRoles` revises only the not-yet-started stages of
+  an installed chain (the caller supplies exactly the future stages, in
+  order): the current and decided stages, their recorded approvers, the
+  stage count, the per-stage timeouts, and the overall deadline are all
+  untouched, and the revision lands one
+  `staged_future_roles_replaced` audit event — a renamed team can be
+  fixed on a future rung without killing the review and starting over.
 - **Approver vote delegation (vote by proxy):** `DelegateVote` grants a
   delegatee the right to cast votes in the granter's place — on the
   flat review path, the quorum path, or the chain path (`scope:
