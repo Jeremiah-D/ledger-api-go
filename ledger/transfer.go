@@ -896,6 +896,15 @@ func (l *Ledger) postTransferLocked(t Transfer, quote FXRateQuote) (TransferRece
 	if l.suspendedLocked(t.From) || l.suspendedLocked(t.To) {
 		return TransferReceipt{}, ErrAccountSuspended
 	}
+	// Client-money segregation (see client_money.go): a transfer
+	// between a client-money account and an own-money account is
+	// rejected, after the state gates above (a frozen or suspended
+	// account still reports its own error) and after the
+	// idempotency replay check. Only the principal legs are gated:
+	// fee legs are system-routed to operator revenue accounts.
+	if l.clientMoneyMismatchLocked(t.To, t.From) {
+		return TransferReceipt{}, ErrClientMoneySegregationViolation
+	}
 	// Every fee recipient walks the same frozen check the single fee
 	// account always walked: a frozen recipient rejects the transfer
 	// before anything books.

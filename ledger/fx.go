@@ -1075,6 +1075,18 @@ func (l *Ledger) postTransferFXLocked(t Transfer, toCurrency string, now time.Ti
 		(incomeAccount != "" && l.suspendedLocked(incomeAccount)) {
 		return TransferReceipt{}, ErrAccountSuspended
 	}
+	// Client-money segregation (see client_money.go): the FX path
+	// commits directly rather than through postTransferLocked, so
+	// it carries its own check — a cross-currency transfer between
+	// a client-money account and an own-money account is rejected
+	// here, after the VAN attribution above (so the parent's class
+	// governs), after the idempotency replay check, and after the
+	// state gates above, like the non-FX path. Only the principal
+	// legs are gated; the FX counterparty account is the
+	// operator's own settlement account, not a party.
+	if l.clientMoneyMismatchLocked(t.To, t.From) {
+		return TransferReceipt{}, ErrClientMoneySegregationViolation
+	}
 	// Every fee recipient walks the same frozen check the single fee
 	// account always walked, like the non-FX path (transfer.go).
 	for _, fa := range feeLegAccounts(feeAccount, feeSplits) {

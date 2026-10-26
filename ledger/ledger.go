@@ -394,6 +394,16 @@ type Ledger struct {
 	// round-trip through disaster-recovery snapshots.
 	cashAccounts          map[AccountID]bool
 	cashAccountCurrencies map[accountCurrency]bool
+	// clientMoneyAccounts marks accounts holding client money
+	// (see client_money.go): a marked account may only exchange
+	// with other marked accounts. Structural config, like chart:
+	// marking or unmarking does not bump the journal version,
+	// changes are audited (client_money_marked /
+	// client_money_unmarked), and — unlike cash-class marks — the
+	// marks are in-memory only and do not round-trip through
+	// disaster-recovery snapshots (the operator re-marks on
+	// restore).
+	clientMoneyAccounts map[AccountID]bool
 	// aliases maps a human-readable alias to the account it names, and
 	// accountAliases is the reverse index (see alias.go). The mapping
 	// is bijective: one alias names exactly one account, one account
@@ -1683,6 +1693,7 @@ func New(opts ...Option) *Ledger {
 		dormant:                 make(map[AccountID]DormancyRecord),
 		chart:                   make(map[AccountID]AccountType),
 		cashAccounts:            make(map[AccountID]bool),
+		clientMoneyAccounts:     make(map[AccountID]bool),
 		cashAccountCurrencies:   make(map[accountCurrency]bool),
 		tags:                    make(map[AccountID]map[string]string),
 		aliases:                 make(map[string]AccountID),
@@ -2176,6 +2187,16 @@ func (l *Ledger) postLockedGated(e JournalEntry, fireRules bool, enforceDormant 
 	// fail on an account suspended after the original posting.
 	if l.suspendedLocked(e.DebitAccount) || l.suspendedLocked(e.CreditAccount) {
 		return JournalEntry{}, false, ErrAccountSuspended
+	}
+	// Client-money segregation (see client_money.go): a movement
+	// between a client-money account and an own-money account is
+	// rejected. It runs after the state gates above — a frozen,
+	// suspended, or closed account still reports its own error —
+	// and after the idempotency replay check, so a replay books
+	// nothing new and must not fail on an account marked after
+	// the original posting. Rejected posts record nothing.
+	if l.clientMoneyMismatchLocked(e.DebitAccount, e.CreditAccount) {
+		return JournalEntry{}, false, ErrClientMoneySegregationViolation
 	}
 
 	// Overdraft protection is a risk control, not bookkeeping validation:

@@ -1619,6 +1619,44 @@ Orthogonal to write-off above: that expenses an uncollectible
 receivable out of the books, this books cash back in after the
 fact.
 
+#### Client-money segregation (Go API: `MarkClientMoneyAccount` / `UnmarkClientMoneyAccount` / `SegregationReport`, LG-220)
+
+Client-money protection (payment fintech): some accounts hold
+money that belongs to customers, not to the operator, and that
+money must never mix with the operator's own funds.
+`MarkClientMoneyAccount(account)` opts an account into the
+client-money class; every other account is own money by default.
+A movement between the two classes — in either direction, via
+`Post` or `PostTransfer` (including split, batch, forward, and
+cross-currency transfers) — is rejected fail-closed with
+`ErrClientMoneySegregationViolation` and zero side effects: no
+journal row, no balance change, no version bump. Same-class
+movements keep working. `UnmarkClientMoneyAccount` is the
+symmetric opt-out: it moves no money, it only reclassifies the
+account for future movements. Both operations are audited
+(`client_money_marked` / `client_money_unmarked`) and do not bump
+the journal version. The gate is orthogonal to freeze, suspend,
+and close: those are account state gates that stop all movement,
+this is a fund-ownership gate, and the state gates keep their
+precedence (a frozen account still reports `ErrAccountFrozen`).
+`SegregationReport()` lists every marked account's balance per
+currency with per-currency totals, and asserts a zero segregation
+gap: required segregated funds (the marked accounts' balances)
+against the same total recomputed independently from the journal
+rows, so the report reconciles the segregated pool with the books.
+
+```go
+l.MarkClientMoneyAccount("client-acme") // opt in; own accounts stay unmarked
+// client-acme -> operating: rejected, ErrClientMoneySegregationViolation, nothing booked.
+// client-acme -> client-beta: allowed, both marked.
+report := l.SegregationReport() // per-account balances, per-currency totals, GapZero == true
+l.UnmarkClientMoneyAccount("client-acme") // symmetric opt-out, audited, moves no money
+```
+
+Marks are in-memory only and do not round-trip through
+disaster-recovery snapshots (the operator re-marks on restore);
+the journaled rows and audit events are the durable record.
+
 ### Period close (`POST /periods/{id}/close` / `POST /periods/{id}/reopen`)
 
 Accounting-period lock for month-end close (fintech compliance). A period
