@@ -1253,6 +1253,12 @@ amount, currency, and status are untouched; audited as
 `preauth_expiry_extended`); the lazy predicate and the expire sweep
 read the live deadline, so an extended authorization survives sweeps
 up to its new deadline.
+An active, unexpired authorization's reserved amount can be revised
+in place with `AmendPreAuthAmount` (Go API: the new amount must be
+positive and fit the mandate's `MaxAmountCents` cap; unknown,
+captured, released, and expired authorizations are rejected; the
+currency, expiry, and status are untouched, and a later capture
+settles the amended amount; audited as `preauth_amount_amended`).
 Idempotency keys live in their own namespace (authorize vs. capture),
 isolated from entry/transfer/hold keys and pruned with the same TTL.
 Every lifecycle move enters the structured audit chain and emits a
