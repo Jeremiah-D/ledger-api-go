@@ -4109,6 +4109,12 @@ the future; no-expiry, filled, cancelled, and expired orders are
 rejected; the limit price, amount, fills, and state are untouched;
 audited as `fx_limit_order_expiry_extended`); the sweep reads the live
 deadline, so an extended order survives sweeps up to its new deadline.
+A pending order's trigger price can be revised in place with
+`AmendLimitOrderPrice` (the new limit must be a positive ratio;
+filled, cancelled, and expired orders are rejected; the currency
+pair, side, amount, fills, state, and expiry are untouched; audited
+as `fx_limit_order_price_amended`); the sweep reads the live limit,
+so an amended order triggers at its new price on the next sweep.
 A fill that would route into dual-control review is
 skipped for that sweep instead of freezing funds — the order stays
 pending for the operator. The book survives disaster-recovery
