@@ -1465,7 +1465,16 @@ pending, and the extension is audited as
 `partial_freeze_expiry_extended`; the sweep reads the live deadline,
 so an extended freeze releases only at its new deadline. The deadline
 round-trips through snapshots on the `partial_frozen` row
-(`expires_at`) and is disclosed on the reconcile report. HTTP:
+(`expires_at`) and is disclosed on the reconcile report. The frozen
+amount itself can be revised in place to a new absolute value
+(`AmendPartialFreezeAmount(account, currency, newAmountCents)`):
+only a pair that already carries a freeze may be amended, zero
+clears the record, a negative amount is rejected, an increase
+must fit the available-before-partial funds while a decrease is
+always safe, and a pair carrying a deadline refuses amendment
+(`ErrPartialFreezeExpirySet`); the posting gate and `Available`
+read the live amount, and the revision is audited as
+`partial_freeze_amount_amended`. HTTP:
 `POST /accounts/{id}/partial-freeze` and `POST
 /accounts/{id}/partial-unfreeze` with `{"amount_cents", "currency"?}`;
 `GET /accounts/{id}/balance` reports `partial_frozen_cents`.
