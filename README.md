@@ -1438,6 +1438,15 @@ release is recorded as a `frozen_auto_released` structured audit event
 and counted by `ledger_freeze_auto_releases_total` on `GET /metrics`.
 A manual `Freeze` clears any scheduled deadline, so a manual freeze never
 auto-releases; timed-freeze deadlines round-trip through snapshots.
+A timed freeze's deadline can be lengthened before it lapses
+(LG-229, `ExtendFreezeUntil(account, newUntil)`): only a freeze that
+already carries a deadline may be extended — manual freezes are rejected —
+and the new deadline must be strictly later than the current one and in
+the future, so an extension only lengthens, never shortens, a stop.
+The frozen state itself is unchanged, the version is not bumped, and the
+extension is audited as `freeze_until_extended`; the lazy release and
+the sweeper read the live deadline, so an extended freeze survives
+sweeps up to its new deadline and releases after it.
 
 ```bash
 curl -s -X POST localhost:8080/accounts/cash/freeze \
