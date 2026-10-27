@@ -1056,6 +1056,21 @@ enter dual-control review, and are counted by
 becomes `reversal_of:<original ref>/partial/<n>` (distinct per index,
 so partials never collide in the reference index).
 
+A transfer-level correction rides on the same mechanism (LG-231,
+`ReverseSettledTransfer(transferID, amountCents, reason,
+idempotencyKey)`): it books a partial reversal of a *settled*
+same-currency transfer's principal, returning the slice to the payer.
+Only a posted transfer qualifies — an unknown ID, a raw journal post,
+or a cross-currency transfer (two FX legs, no single-currency
+principal) is rejected, as is a pending-review principal (the money
+never moved — cancel through the review instead). The slice can never
+exceed the principal minus everything already reversed against it,
+including upheld dispute refunds and prior independent reversals; the
+operator's reason is recorded on the `settled_transfer_reversed` audit
+event (with the remaining reversible amount), not on the journal entry,
+which keeps the deterministic reversal memo. The fee leg, when the
+transfer carried one, is reversed individually like any other leg.
+
 ### Entry links (`GET /entries/{id}/links`)
 
 Explicit directed associations between journal entries — the
