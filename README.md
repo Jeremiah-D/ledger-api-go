@@ -4115,6 +4115,14 @@ filled, cancelled, and expired orders are rejected; the currency
 pair, side, amount, fills, state, and expiry are untouched; audited
 as `fx_limit_order_price_amended`); the sweep reads the live limit,
 so an amended order triggers at its new price on the next sweep.
+A pending order's total size can be revised in place with
+`AmendLimitOrderAmount` (the new amount must be positive and at
+least the amount already filled; filled, cancelled, and expired
+orders are rejected; the currency pair, side, limit price, fills,
+state, and expiry are untouched; audited as
+`fx_limit_order_amount_amended`); the sweep reads the live
+remainder, so an amended order fills up to its new size on the
+next sweep.
 A fill that would route into dual-control review is
 skipped for that sweep instead of freezing funds — the order stays
 pending for the operator. The book survives disaster-recovery
