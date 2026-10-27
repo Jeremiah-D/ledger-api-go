@@ -1245,6 +1245,14 @@ reservation without settling (idempotent on terminal states);
 `GET /mandates/{id}/preauth` lists the mandate's, and expiry is lazy
 by predicate (`ExpiresAt` is required — authorizations are always
 time-bound) plus `POST /mandates/preauth/expire` for observability.
+An active, unexpired authorization's deadline can be lengthened in
+place with `ExtendPreAuthExpiry` (Go API: the new deadline must be
+strictly later than the current one and in the future; unknown,
+captured, released, and expired authorizations are rejected; the
+amount, currency, and status are untouched; audited as
+`preauth_expiry_extended`); the lazy predicate and the expire sweep
+read the live deadline, so an extended authorization survives sweeps
+up to its new deadline.
 Idempotency keys live in their own namespace (authorize vs. capture),
 isolated from entry/transfer/hold keys and pruned with the same TTL.
 Every lifecycle move enters the structured audit chain and emits a
