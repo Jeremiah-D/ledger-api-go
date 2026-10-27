@@ -4096,7 +4096,14 @@ order leaves the book as `filled` only when the full amount is
 converted. An order with `expiry` set is auto-cancelled by the sweep
 once the deadline passes (checked before the touch, so an expired
 order never fills); manual `CancelLimitOrder` succeeds only from the
-`pending` state. A fill that would route into dual-control review is
+`pending` state. A pending order that already carries an expiry can
+have that deadline lengthened in place with `ExtendLimitOrderExpiry`
+(the new deadline must be strictly later than the current one and in
+the future; no-expiry, filled, cancelled, and expired orders are
+rejected; the limit price, amount, fills, and state are untouched;
+audited as `fx_limit_order_expiry_extended`); the sweep reads the live
+deadline, so an extended order survives sweeps up to its new deadline.
+A fill that would route into dual-control review is
 skipped for that sweep instead of freezing funds — the order stays
 pending for the operator. The book survives disaster-recovery
 snapshots, and `ledger_fx_limit_order_fills_total` /
