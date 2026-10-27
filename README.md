@@ -1411,7 +1411,17 @@ every due freeze, restoring Available and auditing
 `partial_freeze_expired` (distinct from a manual
 `partial_freeze_released`); it bumps no version and posts nothing. A
 partial release keeps the deadline for the remaining amount; a full
-release (or a whole-account `Unfreeze`) clears it. The deadline
+release (or a whole-account `Unfreeze`) clears it. A deadline can be
+lengthened before it lapses (LG-230, `ExtendPartialFreezeExpiry(account,
+currency, newExpiresAt)`): only a pair that already carries a deadline
+may be extended — a freeze with no deadline is rejected, so an extension
+never invents one — and the new deadline must be strictly later than
+the current one and in the future, so an extension only lengthens,
+never shortens, a reservation. The frozen amount is unchanged, the
+`FreezeAmount` gate stays in place while the (extended) deadline is
+pending, and the extension is audited as
+`partial_freeze_expiry_extended`; the sweep reads the live deadline,
+so an extended freeze releases only at its new deadline. The deadline
 round-trips through snapshots on the `partial_frozen` row
 (`expires_at`) and is disclosed on the reconcile report. HTTP:
 `POST /accounts/{id}/partial-freeze` and `POST
