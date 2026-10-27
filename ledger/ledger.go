@@ -823,6 +823,13 @@ type Ledger struct {
 	reviewThresholds map[AccountID]int64
 	reviewThreshold  int64
 	reviewExpiry     time.Duration
+	// pendingReviewEscalationCfg is the opt-in stalled-review
+	// escalation policy (see pending_review_escalation.go): the zero
+	// value disables it. pendingReviewEscalations counts fired
+	// escalations since process start — operational state, not books,
+	// so it does not round-trip through snapshots.
+	pendingReviewEscalationCfg PendingReviewEscalationConfig
+	pendingReviewEscalations   atomic.Uint64
 	// reviewQuorum is the opt-in N-of-M multi-approver quorum policy
 	// for dual-control reviews (see review_quorum.go): nil disables it,
 	// leaving the LG-42 single-operator decision path. Like the review

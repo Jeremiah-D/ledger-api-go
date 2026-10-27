@@ -491,6 +491,19 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   `"24h"`): `POST /transfers/reviews/expire` — or the background worker
   (`LEDGER_REVIEW_SWEEP_INTERVAL`) — auto-rejects lapsed reviews so
   frozen funds can never strand in dual-control limbo.
+- **Stalled-review escalation (LG-232):** an opt-in policy
+  (`SetPendingReviewEscalationConfig`, enabled plus a threshold age)
+  pages reviews that sit pending past the threshold: the sweep emits
+  one `pending_review_escalated` audit event per stalled review and
+  bumps the escalation counter, and nothing else — no approval, no
+  rejection, no movement of the frozen amount or the hold, no version
+  bump. Escalation is edge-triggered (a review pages once; the
+  `escalated_at` stamp on the review record remembers it) and clears on
+  decision: approve, reject, and expiry all reset the stamp, so a
+  decided review carries no stale escalation state. The stamp rides the
+  review record through disaster-recovery snapshots, so a restored
+  ledger never re-pages an already-escalated review; the counter is
+  operational state and does not round-trip.
 - `Reconcile` lists every pending review (`pending_reviews`: frozen legs,
   reserved outflow, expiry — plus each review's named approve/reject votes
   under a quorum policy) and every per-account threshold

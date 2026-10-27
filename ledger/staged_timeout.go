@@ -169,6 +169,8 @@ func (l *Ledger) timeoutStagedStageLocked(r *TransferReview, now time.Time) {
 	r.Status = ReviewStatusRejected
 	r.ReviewedBy = "system"
 	r.ReviewedAt = now
+	// LG-232: a timed-out stage decides the review — clear the stamp.
+	r.EscalatedAt = time.Time{}
 	l.reviews[r.TransferID] = r
 }
 

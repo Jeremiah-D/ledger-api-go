@@ -146,6 +146,14 @@ type TransferReview struct {
 	// comma-joined approver identities whose votes settled the review.
 	ReviewedBy string    `json:"reviewed_by,omitempty"`
 	ReviewedAt time.Time `json:"reviewed_at,omitempty"`
+	// EscalatedAt is the instant the pending-review escalation sweep
+	// (see pending_review_escalation.go, LG-232) last paged this
+	// review for stalling past its threshold. Zero means never
+	// escalated; the sweep sets it once (edge-triggered) and every
+	// resolution — approve, reject, expiry — clears it again, so a
+	// decided review carries no stale escalation state. It rides the
+	// review record through snapshots.
+	EscalatedAt time.Time `json:"escalated_at,omitempty"`
 	// ApproveVotes and RejectVotes record the named quorum votes cast
 	// on the review (see review_quorum.go): approver identities in vote
 	// order. Empty unless a quorum policy was active when the votes
@@ -796,6 +804,9 @@ func (l *Ledger) settleReviewLocked(ctx context.Context, r *TransferReview, revi
 	r.Status = ReviewStatusApproved
 	r.ReviewedBy = reviewer
 	r.ReviewedAt = now
+	// LG-232: a decided review carries no stale escalation stamp —
+	// the audit trail keeps the escalation history, the record does not.
+	r.EscalatedAt = time.Time{}
 
 	entryIDs := make([]string, 0, len(r.Entries))
 	for _, e := range r.Entries {
@@ -970,6 +981,8 @@ func (l *Ledger) rejectReviewLocked(ctx context.Context, r *TransferReview, revi
 	r.Status = ReviewStatusRejected
 	r.ReviewedBy = reviewer
 	r.ReviewedAt = now
+	// LG-232: a decided review carries no stale escalation stamp.
+	r.EscalatedAt = time.Time{}
 	l.reviews[r.TransferID] = r
 	// Only an actual state transition is audited: idempotent replays
 	// settle nothing and stay silent.
@@ -1025,6 +1038,8 @@ func (l *Ledger) expireReviewLocked(r *TransferReview, now time.Time) {
 	r.Status = ReviewStatusExpired
 	r.ReviewedBy = "system"
 	r.ReviewedAt = now
+	// LG-232: expiry is a decision too — clear the escalation stamp.
+	r.EscalatedAt = time.Time{}
 	l.reviews[r.TransferID] = r
 }
 
