@@ -322,6 +322,19 @@ malformed value fails the startup fast (`log.Fatal`) instead of
 silently mispricing transfers. Total fee cents booked are exposed as
 `ledger_transfer_fee_cents_total`.
 
+The default schedule can also be revised at runtime without rebuilding
+the ledger: `SetTransferFeeSchedule` installs a new tier table (or
+`SetTransferFeePolicy` a flat rate) in place. Only transfers posted
+after the call are charged under the new schedule; already-posted fee
+legs are never rewritten, and an explicit fee or `skip_fee` still wins
+over the new default. Validation is strict, unlike the construction
+options: an empty tier list, an empty revenue account, a negative
+minimum or rate, a rate above 10000 bps, a first tier not starting at
+0, or non-increasing minimums is rejected and the previous schedule is
+left exactly as it was (a fee-free policy is a 0 bps tier, not an empty
+table). The revision lands one `transfer_fee_schedule_amended` audit
+event and rides the `fee_tiers` config line through snapshots.
+
 #### Fee splits
 
 Instead of one `fee_account`, a transfer can divide its fee across
