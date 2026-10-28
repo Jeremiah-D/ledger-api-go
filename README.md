@@ -614,6 +614,16 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   untouched, and the revision lands one
   `staged_future_roles_replaced` audit event — a renamed team can be
   fixed on a future rung without killing the review and starting over.
+  `AmendFutureStageTimeouts` is the timeout counterpart: it revises only
+  the not-yet-started stages' lifetimes of a review that already carries
+  installed stage timeouts (the caller supplies exactly the future
+  lifetimes, in order, each zero or positive, zero meaning that stage
+  never times out): the current and decided stages' timeouts, the
+  current stage's start instant, the stage count, the decided approvers,
+  and the overall deadline are all untouched, and the revision lands one
+  `staged_future_timeouts_amended` audit event — a future rung can be
+  given more (or less) time without restarting the review or moving the
+  clock of the stage already running.
 - **Approver vote delegation (vote by proxy):** `DelegateVote` grants a
   delegatee the right to cast votes in the granter's place — on the
   flat review path, the quorum path, or the chain path (`scope:
