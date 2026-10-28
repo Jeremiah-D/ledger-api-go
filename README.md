@@ -1203,6 +1203,19 @@ even if they exceed the new cap, and the new cap gates the very next
 debit, because `DebitWithMandate` reads the live cap; the revision is
 audited as `mandate_max_amount_amended` and rides the mandate record
 through snapshots.
+`AmendMandateFrequency` revises a live mandate's pull frequency in
+place — active mandates only (suspended, cancelled, or expired
+mandates fail closed, lazy expiry included), and only to `per-day`,
+`per-week`, or `per-month`, the same three values creation allows —
+without touching payer, payee, cap, currency, or the validity
+window. There is no window state to migrate: windows are derived
+from each debit's booking timestamp, so the new frequency gates the
+very next debit, and the recomputation cuts both ways — tightening
+to a longer window can block a pull an earlier debit in that window
+now covers, while loosening to a shorter window can unblock a pull
+an earlier debit in the old window used to block. Past debits stay
+journaled. The revision is audited as `mandate_frequency_amended`
+and rides the mandate record through snapshots.
 `GET /mandates/{id}` reads a mandate with its effective status;
 `GET /mandates/{id}/debits` is the per-mandate reconciliation query —
 the debits in debit order, paged by `limit`/`cursor`. Repeating a debit
