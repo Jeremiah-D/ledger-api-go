@@ -3469,6 +3469,23 @@ ladder is a no-op that emits no audit event; a real revision is
 audited as `term_deposit_tiers_amended` (previous and new ladders,
 principal, currency) and rides the deposit row through snapshots.
 
+**Rollover-policy amendment (LG-250):** `AmendTermDepositRollover`
+replaces an active deposit's whole renewal policy in place (mode,
+term, cap as one contract — never a per-field patch). Only deposits
+that already carry a policy may be amended: a deposit without one
+fails closed (`ErrTermDepositRolloverNotConfigured`), since a policy
+cannot be installed after opening, and the new policy must itself be
+a real policy — nil or mode `none` is rejected, as there is no
+clear-policy path (closing rollover means letting the term mature
+and opening a new one without it). The new cap must not fall below
+the rolls already used, or the original policy stands. Only the
+policy changes; the sweep reads the live policy at maturity, so the
+new term, mode, or cap governs the very next renewal, while a child
+row generated before the amendment keeps its own policy snapshot.
+Amending to the current policy is a no-op that emits no audit event;
+a real revision is audited as `term_deposit_rollover_amended` and
+rides the deposit row through snapshots.
+
 ```bash
 curl -s -X POST localhost:8080/term-deposits \
   -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'

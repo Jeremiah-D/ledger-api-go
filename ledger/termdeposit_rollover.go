@@ -73,6 +73,13 @@ var (
 	// below 1: a policy that can never roll is a configuration bug, not
 	// a clampable value.
 	ErrInvalidRolloverMaxRollovers = errors.New("ledger: rollover max rollovers must be at least 1")
+	// ErrTermDepositRolloverNotConfigured is returned by
+	// AmendTermDepositRollover when the deposit carries no rollover
+	// policy (nil, or mode "none"): a rollover policy cannot be
+	// installed after opening, and there is no clear-policy path —
+	// closing rollover means letting the term mature and opening a
+	// new one (LG-250).
+	ErrTermDepositRolloverNotConfigured = errors.New("ledger: term deposit has no rollover policy to amend")
 )
 
 // RolloverPolicy is the opt-in renewal policy on a TermDeposit. TermDays
