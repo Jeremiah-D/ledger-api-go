@@ -3130,6 +3130,24 @@ expiry. Like the hold itself, an extension is off-journal and bumps
 neither the version nor the audit chain; the extended hold simply
 survives `ExpireHolds` sweeps up to its new expiry.
 
+#### Amending a hold's amount
+
+A pre-authorization whose amount turns out wrong should not have to
+be released and re-placed — re-placement is a new reservation with a
+gap in which the funds sit unreserved. `AmendHoldAmount` resizes an
+active, unexpired hold's amount in place: the new amount must be
+positive and at least the hold's already-captured cents (settled
+cents are immutable), an increase must fit the account's available
+funds with the hold's current reservation replaced rather than added
+(so the increase is never double-counted against itself), and a
+decrease is always safe. Only the amount moves — account, currency,
+expiry, idempotency key, and captured position are untouched — and
+`CapturePartial` afterwards settles against the new remainder
+automatically. The move lands one `hold_amount_amended` audit event
+with the old and new amounts; like the hold itself, an amendment is
+off-journal and bumps neither the version nor the audit chain, and
+the amended amount rides the hold record through snapshots.
+
 ### Payment repair queue (支付修复队列，预发出修复)
 
 与争议（dispute.go，LG-129）正交：争议是事后——钱已经动了，payer
