@@ -3886,7 +3886,15 @@ Grants are create-only: a second grant for the same account+currency
 returns `409` (`ErrCreditLineExists`); adjust with `POST
 /credit-lines/reduce`, which lowers the limit (rejecting any limit below
 current utilization with `422`, `ErrCreditLineBelowUtilization`) and
-revokes the line entirely at `0` (`GET` then returns `404`). `GET
+revokes the line entirely at `0` (`GET` then returns `404`).
+`AmendCreditLineRate` reprices a granted line's annual rate in place
+(1–10000 bps, the same gate as granting; unknown lines fail closed)
+without touching the limit, the utilization, or `GrantedAt`: interest
+already journaled stays journaled, and the next `accrue-interest` call
+prices the current utilization at the new rate, because accrual reads
+the live rate — re-running an old day replays the original row at the
+old rate. The revision is audited as `credit_line_rate_amended` and
+rides the line record through snapshots. `GET
 /credit-lines?account=&currency=` reports `limit_cents`, `used_cents`
 (the negative-balance portion in that currency), and
 `available_cents`. `POST /credit-lines/accrue-interest` books one day
