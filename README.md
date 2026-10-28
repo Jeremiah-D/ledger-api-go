@@ -1216,6 +1216,18 @@ now covers, while loosening to a shorter window can unblock a pull
 an earlier debit in the old window used to block. Past debits stay
 journaled. The revision is audited as `mandate_frequency_amended`
 and rides the mandate record through snapshots.
+`AmendMandateValidUntil` extends a live mandate's validity end in
+place — extension only, never a shortening: an equal, earlier, or
+zero end is refused with `ErrMandateInvalidWindow`, and suspended,
+cancelled, or expired mandates fail closed (lazy expiry included, so
+an expired mandate is never resurrected by an extension) — without
+touching payer, payee, cap, currency, frequency, `ValidFrom`, or
+status. Past debits stay journaled, and the new end gates the very
+next debit, because `DebitWithMandate` reads the live `ValidUntil`;
+a debit rejected under the old window books nothing, so it can simply
+be retried under the extended window. The revision is audited as
+`mandate_valid_until_amended` and rides the mandate record through
+snapshots.
 `GET /mandates/{id}` reads a mandate with its effective status;
 `GET /mandates/{id}/debits` is the per-mandate reconciliation query —
 the debits in debit order, paged by `limit`/`cursor`. Repeating a debit
