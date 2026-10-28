@@ -3894,7 +3894,19 @@ already journaled stays journaled, and the next `accrue-interest` call
 prices the current utilization at the new rate, because accrual reads
 the live rate — re-running an old day replays the original row at the
 old rate. The revision is audited as `credit_line_rate_amended` and
-rides the line record through snapshots. `GET
+rides the line record through snapshots.
+`AmendCreditLineLimit` revises a granted line's limit in place, in
+either direction — the raise no earlier path offered, since granting
+is create-only and reducing only lowers (to revocation at zero).
+The new limit must be positive (zero still means revoke via reduce)
+and must not sit below the current utilization, with the original
+limit untouched on any refusal; only the limit changes, never the
+rate or `GrantedAt`. The overdraft floor reads the live line, so the
+new limit gates the very next posting — a raise immediately widens
+the floor, a lowering immediately tightens it — while postings
+already journaled stay put. The revision is audited as
+`credit_line_limit_amended` and rides the line record through
+snapshots. `GET
 /credit-lines?account=&currency=` reports `limit_cents`, `used_cents`
 (the negative-balance portion in that currency), and
 `available_cents`. `POST /credit-lines/accrue-interest` books one day
