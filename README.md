@@ -1194,6 +1194,15 @@ entry→entry links.
 Lifecycle: `active → suspended | cancelled | expired`
 (`POST /mandates/{id}/suspend`, `POST /mandates/{id}/cancel`; expiry is
 lazy by predicate plus `POST /mandates/expire` for observability).
+`AmendMandateMaxAmount` revises a live mandate's per-debit cap in place
+— active mandates only (suspended, cancelled, or expired mandates fail
+closed, lazy expiry included), and a non-positive cap is rejected with
+the same gate creation applies — without touching payer, payee,
+currency, frequency, or the validity window. Past debits stay journaled
+even if they exceed the new cap, and the new cap gates the very next
+debit, because `DebitWithMandate` reads the live cap; the revision is
+audited as `mandate_max_amount_amended` and rides the mandate record
+through snapshots.
 `GET /mandates/{id}` reads a mandate with its effective status;
 `GET /mandates/{id}/debits` is the per-mandate reconciliation query —
 the debits in debit order, paged by `limit`/`cursor`. Repeating a debit
