@@ -3425,6 +3425,22 @@ flattening. The reconcile report (`term_deposits` section) and the open
 audit event disclose the ladder; the deterministic interest entry IDs
 (`term-interest/<id>/<date>`) are unchanged.
 
+**Rate amendment (LG-247):** `AmendTermDepositRate` reprices an active
+flat-rate deposit in place (1–10000 bps, the same gate as opening;
+matured or early-withdrawn deposits fail closed) without touching the
+principal, currency, tenor, maturity date, or rollover policy. Interest
+already journaled stays journaled, and the next accrual prices the
+principal at the new rate, because accrual reads the live deposit row —
+re-running an old day replays the original row at the old rate. Tiered
+deposits fail closed (`ErrTermDepositRateTiersConflict`): repricing a
+ladder is not a flat-rate amendment, and an amendment never flattens a
+ladder or installs one. Amending to the current rate is a no-op that
+emits no audit event; a real revision is audited as
+`term_deposit_rate_amended` and rides the deposit row through
+snapshots. Rollover inheritance is generation-time: a child row
+generated before an amendment keeps the rate it was born with, while a
+child generated after inherits the amended rate.
+
 ```bash
 curl -s -X POST localhost:8080/term-deposits \
   -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'
