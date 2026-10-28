@@ -3453,6 +3453,22 @@ snapshots. Rollover inheritance is generation-time: a child row
 generated before an amendment keeps the rate it was born with, while a
 child generated after inherits the amended rate.
 
+**Tiered-ladder amendment (LG-249):** `AmendTermDepositTiers`
+replaces an active tiered deposit's whole rate ladder in place — never
+a per-band patch, since bands carry positional semantics — validated by
+the shared tier validator (first band at 0, minima strictly ascending,
+rates 1–10000 bps; an empty ladder is rejected, there is no
+clear-ladder path for a live deposit). Flat deposits fail closed
+(`ErrTermDepositRateTiersConflict`), the mirror image of LG-247: no
+amendment ever switches a deposit between flat and tiered pricing.
+Only the ladder changes; the next accrual prices the principal at the
+new ladder, booked days are never repriced, and a child row generated
+before the amendment keeps the ladder it was born with while a child
+generated after inherits the amended one. Amending to the current
+ladder is a no-op that emits no audit event; a real revision is
+audited as `term_deposit_tiers_amended` (previous and new ladders,
+principal, currency) and rides the deposit row through snapshots.
+
 ```bash
 curl -s -X POST localhost:8080/term-deposits \
   -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'
