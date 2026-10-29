@@ -748,6 +748,30 @@ a real revision is audited as `transfer_schedule_interval_amended`
 (previous and new intervals, currency, run sequence) and rides the
 schedule row through snapshots.
 
+**End-time amendment (LG-255):**
+`AmendTransferScheduleEndsAt` revises a live plan's cutoff in
+place, orthogonal to the amount amendment (LG-253) and the interval
+amendment (LG-254): each touches only its own field. Only active or
+paused plans may be amended (cancelled or completed plans fail
+closed with `ErrScheduleBadTransition`); a zero end time is legal
+and removes the cutoff, turning the plan open-ended, while a non-zero
+end time must be after the plan's live `NextRunAt`, reusing the
+creation gate (`ErrScheduleBadEndsAt`) — live, not creation-time:
+`NextRunAt` advances on every firing, so the gate is judged against
+the `NextRunAt` at amendment time, and a rejected revision leaves
+the original end time untouched. Only the end time changes — legs,
+amount, currency, fee, interval, next run time, run sequence, and
+run history are untouched, and `NextRunAt` is not recomputed.
+Completion is still judged on the advanced `NextRunAt` with no
+firing-path change (the sweep reads the live end time at fire time),
+so a plan whose post-firing advance lands past the amended end time
+completes, and a plan whose cutoff was cleared never completes on
+end time again. Amending to the current end time is a no-op that
+emits no audit event; a real revision is audited as
+`transfer_schedule_ends_at_amended` (previous and new end times as
+RFC3339 strings, currency, run sequence) and rides the schedule row
+through snapshots, with a cleared end time round-tripping as zero.
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
