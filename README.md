@@ -772,6 +772,31 @@ emits no audit event; a real revision is audited as
 RFC3339 strings, currency, run sequence) and rides the schedule row
 through snapshots, with a cleared end time round-tripping as zero.
 
+**Fee amendment (LG-256):**
+`AmendTransferScheduleFee` revises a live plan's per-run fee in
+place, orthogonal to the amount amendment (LG-253), the interval
+amendment (LG-254), and the end-time amendment (LG-255): each
+touches only its own field. Only active or paused plans may be
+amended (cancelled or completed plans fail closed with
+`ErrScheduleBadTransition`); the new fee reuses the creation gate
+(`ErrScheduleBadFee`): it must be non-negative, and a positive fee
+requires an existing fee account — the fee account itself is never
+changed by this amendment, so a positive fee on a plan with no fee
+account is rejected and the original fee is left untouched, while
+amending to zero is always legal and keeps the fee account for a
+later positive revision. Only the fee changes — legs, amount,
+currency, fee account, `SkipFee` flag, interval, next run time, end
+time, run sequence, and run history are untouched, and
+already-fired runs are never rewritten: the sweep snapshot is taken
+at fire time, so the new fee governs the next successful firing,
+and a failed run's retry reads the amended fee (the failed run
+posted nothing, so the retry books exactly once under the same
+`"<schedule_id>/run/<seq>"` key). Amending to the current fee is a
+no-op that emits no audit event; a real revision is audited as
+`transfer_schedule_fee_amended` (previous and new fees, fee
+account, currency, run sequence) and rides the schedule row through
+snapshots, with a fee cleared to zero round-tripping as zero.
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
