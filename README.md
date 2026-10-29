@@ -3486,6 +3486,27 @@ Amending to the current policy is a no-op that emits no audit event;
 a real revision is audited as `term_deposit_rollover_amended` and
 rides the deposit row through snapshots.
 
+**Business-day-maturity amendment (LG-251):**
+`AmendTermDepositBusinessDayMaturity` toggles an active deposit's
+business-day settlement flag in place, recomputing `MaturesAt`
+exactly as at opening: `OpenedAt + TermDays` days, moved to the next
+business day when the flag is on and the raw date is not a business
+day, restored to the raw date when the flag is off. Only the flag and
+the maturity date change; the principal, currency, rate, tier ladder,
+term, and rollover policy are untouched, and booked daily rows are
+never repriced — re-running an old day replays the original row,
+while future accruals stop at the amended maturity. A recomputed
+maturity already in the past books no payout at amendment time; the
+deposit simply becomes maturable at the next sweep. Amending to the
+current flag is a no-op that emits no audit event, but a flag change
+whose recomputed date happens to equal the stored date is still a
+real amendment — the flag itself is contractual state, since a later
+term amendment applies the stored flag when it recomputes the
+maturity — and is audited as
+`term_deposit_business_day_maturity_amended` (previous and new flags,
+previous and new maturity dates, term, principal, currency), riding
+the deposit row through snapshots.
+
 ```bash
 curl -s -X POST localhost:8080/term-deposits \
   -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'
