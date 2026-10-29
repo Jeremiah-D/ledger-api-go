@@ -726,6 +726,28 @@ audited as `transfer_schedule_amount_amended` (previous and new
 amounts, currency, run sequence) and rides the schedule row through
 snapshots.
 
+**Interval amendment (LG-254):**
+`AmendTransferScheduleInterval` revises a live plan's cadence in
+place, orthogonal to the amount amendment (LG-253): each touches only
+its own field. Only active or paused plans may be amended (cancelled
+or completed plans fail closed with `ErrScheduleBadTransition`); the
+new interval must be positive, reusing the creation gate
+(`ErrScheduleBadInterval`), and a rejected revision leaves the
+original interval untouched. Only the interval changes — legs, amount,
+currency, fee, next run time, end time, run sequence, and run history
+are untouched. `NextRunAt` is not recomputed, so the next release
+moment does not move: the new interval takes effect on the advancement
+after that next release (the sweep snapshot is taken at fire time, so
+no firing-path change is needed), and a business-day cadence plan's
+day conversion reads the new interval at fire time (T+N business days
+where N is the new interval in whole days). `EndsAt` completion is
+still judged on the advanced `NextRunAt`, so a plan whose post-firing
+advance (under the new interval) lands past `EndsAt` completes.
+Amending to the current interval is a no-op that emits no audit event;
+a real revision is audited as `transfer_schedule_interval_amended`
+(previous and new intervals, currency, run sequence) and rides the
+schedule row through snapshots.
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
