@@ -3507,6 +3507,26 @@ maturity — and is audited as
 previous and new maturity dates, term, principal, currency), riding
 the deposit row through snapshots.
 
+**Term-days amendment (LG-252):** `AmendTermDepositTermDays`
+revises an active deposit's tenor in place (1–36500 days, the same
+gate as opening; matured or early-withdrawn deposits fail closed).
+`MaturesAt` is recomputed exactly as at opening — `OpenedAt +`
+new term days, moved to the next business day when the stored
+business-day flag is on — reusing the LG-251 helper, so a later
+flag amendment and a term amendment compose rather than drift.
+Only the term and the maturity date change; the principal,
+currency, rate, tier ladder, flag, rollover policy, and rolls used
+are untouched, booked daily rows are never repriced, and future
+accruals stop at the amended maturity. A recomputed maturity
+already in the past books no payout at amendment time; the deposit
+simply becomes maturable at the next sweep. Amending to the current
+term is a no-op that emits no audit event; a real revision is
+audited as `term_deposit_term_days_amended` (previous and new
+terms, previous and new maturity dates, stored flag, principal,
+currency) and rides the deposit row through snapshots. Rollover
+children keep their own term snapshots — amending a child's term
+never rewrites its parent's row.
+
 ```bash
 curl -s -X POST localhost:8080/term-deposits \
   -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'
