@@ -826,6 +826,38 @@ new fee accounts, fee amount, currency, run sequence) and rides
 the schedule row through snapshots, with an account cleared to
 empty round-tripping as empty.
 
+**Skip-fee amendment (LG-258):**
+`AmendTransferScheduleSkipFee` revises a live plan's skip-fee
+switch in place, orthogonal to the fee amendment (LG-256) and the
+fee-account amendment (LG-257): those change what fee books and
+where it books, this changes whether any fee books at all — each
+touches only its own field. Only active or paused plans may be
+amended (cancelled or completed plans fail closed with
+`ErrScheduleBadTransition`); a boolean is always legal, so there
+is no new validation gate — switching on is legal on a plan with
+a positive fee, a zero fee, or no fee account, and switching off
+restores exactly the fee behaviour the plan had before, since the
+fee amount and fee account are never changed by this amendment.
+Only the switch changes — legs, amount, currency, fee amount, fee
+account, interval, next run time, end time, run sequence, and run
+history are untouched, and already-fired runs are never
+rewritten: the sweep snapshot is taken at fire time, so the new
+switch governs the next successful firing — while it is on, a
+firing books no policy fee leg (`SkipFee` suppresses the ledger's
+default fee policy only; an explicit `FeeCents` still applies
+exactly as for a one-off transfer, so the switch on an
+explicit-fee plan does not silently drop that fee) and the fee
+account is untouched by the switch itself — and a failed run's
+retry reads the amended switch (the failed run posted nothing, so
+the retry books exactly once, with or without a policy fee leg as
+the amended switch dictates, under the same
+`"<schedule_id>/run/<seq>"` key). Amending to the current switch
+value is a no-op that emits no audit event; a real revision is
+audited as `transfer_schedule_skip_fee_amended` (previous and new
+switch values, fee amount, fee account, currency, run sequence)
+and rides the schedule row through snapshots, with a switch
+flipped back off round-tripping as false.
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
