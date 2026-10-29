@@ -797,6 +797,35 @@ no-op that emits no audit event; a real revision is audited as
 account, currency, run sequence) and rides the schedule row through
 snapshots, with a fee cleared to zero round-tripping as zero.
 
+**Fee-account amendment (LG-257):**
+`AmendTransferScheduleFeeAccount` revises a live plan's fee
+account in place, orthogonal to the fee amendment (LG-256): that
+changes the fee amount, this changes where the fee books — each
+touches only its own field. Only active or paused plans may be
+amended (cancelled or completed plans fail closed with
+`ErrScheduleBadTransition`); the new account reuses the creation
+gate (`ErrScheduleBadFee`): when the plan's current fee is
+positive, the new account must be non-empty — clearing it would
+strand a positive fee with nowhere to book — so a clearing attempt
+is rejected and the original account is left untouched, while
+when the fee is zero an empty value is legal and clears the
+account back to ledger-fee policy, and a later amendment can
+restore an account before any positive fee is set again. Only the
+fee account changes — legs, amount, currency, fee amount,
+`SkipFee` flag, interval, next run time, end time, run sequence,
+and run history are untouched, and already-fired runs are never
+rewritten: the sweep snapshot is taken at fire time, so the new
+account governs the next successful firing, and a failed run's
+retry reads the amended account (the failed run posted nothing, so
+the retry books exactly once, to the new account, under the same
+`"<schedule_id>/run/<seq>"` key). Amending to the current account
+is a no-op that emits no audit event, checked before the fee gate
+so restating the current account never errors; a real revision is
+audited as `transfer_schedule_fee_account_amended` (previous and
+new fee accounts, fee amount, currency, run sequence) and rides
+the schedule row through snapshots, with an account cleared to
+empty round-tripping as empty.
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
