@@ -708,6 +708,24 @@ duration — payroll and settlement runs never land on a holiday. Missed
 nominals are still skipped (counted as `skipped_runs`), and the flag
 survives snapshots.
 
+**Per-run amount amendment (LG-253):**
+`AmendTransferScheduleAmount` revises a live plan's per-run amount in
+place. Only active or paused plans may be amended (cancelled or
+completed plans fail closed with `ErrScheduleBadTransition`); the new
+amount must be positive, reusing the creation gate
+(`ErrScheduleNonPositiveAmount`), and a rejected revision leaves the
+original amount untouched. Only the amount changes — legs, currency,
+fee, interval, next run time, end time, run sequence, and run history
+are untouched, and already-fired runs are never rewritten: the sweep
+snapshot is taken at fire time, so the new amount governs the next
+successful firing, and a failed run's retry reads the amended amount
+(the failed run posted nothing, so the retry books exactly once under
+the same `"<schedule_id>/run/<seq>"` key). Amending to the current
+amount is a no-op that emits no audit event; a real revision is
+audited as `transfer_schedule_amount_amended` (previous and new
+amounts, currency, run sequence) and rides the schedule row through
+snapshots.
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
