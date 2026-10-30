@@ -4291,6 +4291,29 @@ is a no-op that emits no audit event; a real revision is audited as
 `installment_first_due_at_amended` (previous and new first due dates,
 posted-period count). (Payments fintech: installment governance.)
 
+**Currency amendment (LG-266):** `AmendInstallmentPlanCurrency`
+revises a live plan's settlement currency in place, alongside the rule
+(LG-264) and first-due-date (LG-265) amendments: only active or
+overdue plans may be amended (completed or settled_early plans fail
+closed with `ErrInstallmentBadTransition`); the new currency reuses
+the creation gate, so an empty code normalizes to the default currency
+(USD) and anything that is not a three-letter uppercase ISO 4217 code
+fails with `ErrInvalidCurrency`. Only Currency changes — payer, payee,
+principal, period count, rule, first due date, legs, status, and
+posted periods are untouched, and period amounts never move (they
+depend only on principal and period count). The sweeper reads the live
+currency at sweep time, so the new currency governs unposted periods
+from the next sweep — an unposted period already due under the new
+currency books normally — while already-posted periods are journaled
+rows whose currency and amounts are never rewritten. The ledger books
+per (account, currency), so a plan that changes currency mid-flight
+simply accrues its remaining periods in the new currency; the old
+currency's posted rows stay exactly where they were. Amending to the
+current currency (after normalization) is a no-op that emits no audit
+event; a real revision is audited as `installment_currency_amended`
+(previous and new currencies, posted-period count). (Payments fintech:
+installment governance.)
+
 ### Installment late fees (LG-150)
 
 Overdue money is free money for the payer — unless the plan opts in:
