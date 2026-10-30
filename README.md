@@ -2684,7 +2684,17 @@ Useful life is revisable in place with `AmendFixedAssetUsefulLife`
 shortened below the months already booked converges exactly to
 salvage); booked months are never recomputed, a fully depreciated
 asset rejects the revision with `ErrFixedAssetFullyDepreciated`, and
-the change is audited as `fixed_asset_useful_life_amended`.
+the change is audited as `fixed_asset_useful_life_amended`. Salvage
+value is revisable in place with `AmendFixedAssetSalvageValue`
+(LG-269): the new salvage governs from the next `Depreciate`
+(straight-line `(cost-new salvage)/life`, double-declining still
+capped at the new remaining base, so the lifetime total converges
+exactly to the new salvage); a revision that leaves no future
+depreciation under the new salvage is rejected with
+`ErrFixedAssetFullyDepreciated`, while lowering the salvage can
+reopen a fully depreciated asset (the gate is evaluated against the
+post-amendment base), and the change is audited as
+`fixed_asset_salvage_amended`.
 
 ### Business-day calendar (LG-95)
 
