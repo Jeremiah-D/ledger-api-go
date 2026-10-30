@@ -3919,6 +3919,24 @@ expired instruction audits as `payout_expired` and emits a
 cutoff (LG-101, which defers a booked transfer's settlement window)
 and to the payout idempotency TTL (which governs replayed opens,
 not the instruction's submittable lifetime).
+
+Extending an expiry (LG-267): an approved instruction that already
+carries an `expires_at` may have its deadline lengthened in place
+(`ExtendPayoutExpiry`) — the new deadline must be strictly later
+than the current one and in the future, or the call fails and the
+original deadline is untouched. Only approved instructions qualify:
+draft, submitted, settled, failed, cancelled, returned, and expired
+instructions are rejected, and a never-expires instruction (zero
+`expires_at`) cannot gain a deadline by extension. An approved
+instruction past its deadline but not yet swept (or lazily expired
+by a submit attempt) is still extendable — the extension lengthens
+a live instruction, it does not resurrect a departed one. The
+extension changes only `expires_at`: amount, currency, payee,
+destination, maker, approver, status, and journaled rows are
+untouched, the version is not bumped, and no outbox event fires;
+it audits as `payout_expiry_extended` with the previous and new
+deadlines. This is orthogonal to the expiry mechanism itself
+(LG-213) and to the FX limit-order expiry extension (LG-234).
 Instructions are in-memory only (like clearing batches) — the journaled
 legs survive snapshots, and the fail-closed clearing account
 round-trips.
