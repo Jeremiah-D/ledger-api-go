@@ -104,6 +104,14 @@ var (
 	// ErrFixedAssetNotFound is returned when depreciating or querying an
 	// asset ID that was never registered.
 	ErrFixedAssetNotFound = errors.New("ledger: fixed asset not found")
+	// ErrFixedAssetFullyDepreciated is returned when amending a fixed
+	// asset whose remaining depreciable base (cost - salvage -
+	// accumulated) is zero or negative: the asset has no future
+	// depreciation left for the amendment to govern, so there is
+	// nothing to revise. Introduced by AmendFixedAssetUsefulLife
+	// (LG-268); the salvage and method amendments (LG-269, LG-270)
+	// reuse it for the same gate.
+	ErrFixedAssetFullyDepreciated = errors.New("ledger: fixed asset is fully depreciated and has no future depreciation to revise")
 	// ErrInvalidDepreciationAccount is returned when a depreciation leg
 	// account is empty or contains '/'.
 	ErrInvalidDepreciationAccount = errors.New("ledger: depreciation leg accounts must be non-empty and must not contain '/'")

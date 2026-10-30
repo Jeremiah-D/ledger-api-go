@@ -2677,6 +2677,14 @@ The memo `depreciation:<method>` makes rows discoverable via
 month can be corrected and re-run. The asset register is in-memory
 structural config — re-register assets after a disaster-recovery
 restore (the booked entries themselves round-trip as ordinary rows).
+Useful life is revisable in place with `AmendFixedAssetUsefulLife`
+(LG-268): the new life governs from the next `Depreciate`
+(straight-line `base/new-life`, double-declining
+`bookValue*2/new-life`, still capped at the remaining base, so a life
+shortened below the months already booked converges exactly to
+salvage); booked months are never recomputed, a fully depreciated
+asset rejects the revision with `ErrFixedAssetFullyDepreciated`, and
+the change is audited as `fixed_asset_useful_life_amended`.
 
 ### Business-day calendar (LG-95)
 
