@@ -2694,7 +2694,18 @@ depreciation under the new salvage is rejected with
 `ErrFixedAssetFullyDepreciated`, while lowering the salvage can
 reopen a fully depreciated asset (the gate is evaluated against the
 post-amendment base), and the change is audited as
-`fixed_asset_salvage_amended`.
+`fixed_asset_salvage_amended`. Depreciation method is revisable in
+place with `AmendFixedAssetDepreciationMethod` (LG-270): the new
+method governs from the next `Depreciate` (straight-line
+`base/life`, double-declining `bookValue*2/life`, still capped at
+the remaining base with the dust true-up, so the schedule converges
+exactly to salvage in either direction); months already booked keep
+their old-method amounts and are never restated, a fully
+depreciated asset rejects the revision with
+`ErrFixedAssetFullyDepreciated`, an invalid method is rejected with
+`ErrInvalidDepreciationMethod` leaving the original method
+untouched, and the change is audited as
+`fixed_asset_method_amended`.
 
 ### Business-day calendar (LG-95)
 
