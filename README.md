@@ -960,6 +960,34 @@ and rides the schedule row through snapshots, with a pair
 cleared back to empty round-tripping as empty. (Payments
 fintech: recurring-transfer governance.)
 
+**Next-run-time amendment (LG-262):**
+`AmendTransferScheduleNextRunAt` revises a live plan's next
+release moment in place, orthogonal to the amount (LG-253),
+interval (LG-254), end-time (LG-255), fee (LG-256), fee-account
+(LG-257), skip-fee (LG-258), memo (LG-259), business-day cadence
+(LG-260), and FX-pair (LG-261) amendments — each touches only its
+own field, and moving the next release never moves a leg, an
+amount, a fee, a pair, or a date bound. Only active or paused
+plans may be amended (cancelled or completed plans fail closed
+with `ErrScheduleBadTransition`); the new time reuses the creation
+gates, judged against the live counterpart — the symmetric mirror
+of the end-time amendment: a zero value fails with
+`ErrScheduleBadNextRunAt`, and a new time later than the plan's
+live end time (when one is set) fails with `ErrScheduleBadEndsAt`,
+since a next run past the cutoff could never fire. Only NextRunAt
+changes — no recomputation, no immediate firing, no immediate
+completion: completion is still judged on the NextRunAt advanced
+after a firing, against the live end time. The sweep reads the
+live NextRunAt, so a moved-up time fires on the next sweep with
+missed nominal runs counted as skipped (never backfilled), a
+moved-out time simply delays the next firing, and a paused plan's
+revision waits for resume. Amending to the current next run time
+is a no-op that emits no audit event; a real revision is audited
+as `transfer_schedule_next_run_at_amended` (previous and new next
+run times, currency, run sequence) and rides the schedule row
+through snapshots. (Payments fintech: recurring-transfer
+governance.)
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
