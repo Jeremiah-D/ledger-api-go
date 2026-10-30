@@ -4252,6 +4252,25 @@ own key namespace honoring `LEDGER_IDEMPOTENCY_TTL`. Plans are
 in-memory only and do not round-trip through disaster-recovery
 snapshots — the journaled period rows do, so the money is safe.
 
+**Rule amendment (LG-264):** `AmendInstallmentPlanRule` revises a
+live plan's billing rule in place — the first installment-plan
+revision, following the transfer-schedule amendments (LG-253–LG-263):
+only active or overdue plans may be amended (completed or
+settled_early plans fail closed with `ErrInstallmentBadTransition`);
+the new rule reuses the creation gate, so anything other than
+`monthly` / `weekly` / `daily` fails with `ErrInvalidInstallmentRule`.
+Only Rule changes — principal, period count, first due date,
+currency, legs, status, and posted periods are untouched, and period
+amounts never move (they depend only on principal and period count:
+floor division with the final period absorbing the remainder). The
+sweeper reads the live rule at sweep time, so the new rule governs
+unposted periods from the next sweep — an unposted period already due
+under the new rule books normally — while already-posted periods are
+journaled rows that are never rewritten. Amending to the current rule
+is a no-op that emits no audit event; a real revision is audited as
+`installment_rule_amended` (previous and new rules, posted-period
+count). (Payments fintech: installment governance.)
+
 ### Installment late fees (LG-150)
 
 Overdue money is free money for the payer — unless the plan opts in:

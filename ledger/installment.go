@@ -84,6 +84,7 @@ var (
 	ErrEmptyInstallmentDueDate   = errors.New("ledger: installment first due date must not be zero")
 	ErrInstallmentNotFound       = errors.New("ledger: installment plan not found")
 	ErrInstallmentTerminal       = errors.New("ledger: installment plan is terminal")
+	ErrInstallmentBadTransition  = errors.New("ledger: installment plan status transition not allowed")
 	ErrInvalidInstallmentLateFeeRule = errors.New("ledger: installment late-fee rule invalid")
 )
 
