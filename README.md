@@ -4271,6 +4271,26 @@ is a no-op that emits no audit event; a real revision is audited as
 `installment_rule_amended` (previous and new rules, posted-period
 count). (Payments fintech: installment governance.)
 
+**First-due-date amendment (LG-265):** `AmendInstallmentPlanFirstDueAt`
+revises a live plan's first due date in place, alongside the rule
+amendment (LG-264): only active or overdue plans may be amended
+(completed or settled_early plans fail closed with
+`ErrInstallmentBadTransition`); the new date reuses the creation
+gate, so a zero time fails with `ErrInvalidInstallmentFirstDueAt`.
+Only FirstDueAt changes — principal, period count, rule, currency,
+legs, status, and posted periods are untouched, and period amounts
+never move (they depend only on principal and period count). The
+sweeper reads the live first due date at sweep time, so the new date
+governs unposted periods from the next sweep — an unposted period
+already due under the new date books normally — while already-posted
+periods are journaled rows that are never rewritten. Moving the
+anchor later can leave an unposted period's due date earlier than an
+already-posted one; the due date only decides sweep release order and
+never reorders posted history. Amending to the current first due date
+is a no-op that emits no audit event; a real revision is audited as
+`installment_first_due_at_amended` (previous and new first due dates,
+posted-period count). (Payments fintech: installment governance.)
+
 ### Installment late fees (LG-150)
 
 Overdue money is free money for the payer — unless the plan opts in:
