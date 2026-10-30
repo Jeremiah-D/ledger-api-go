@@ -920,6 +920,46 @@ the schedule row through snapshots, with a rhythm flipped back
 off round-tripping as false. (Payments fintech:
 recurring-transfer governance.)
 
+**FX-pair amendment (LG-261):**
+`AmendTransferScheduleFxPair` revises a live plan's FX settlement
+pair in place, orthogonal to the amount (LG-253), interval
+(LG-254), end-time (LG-255), fee (LG-256), fee-account (LG-257),
+skip-fee (LG-258), memo (LG-259), and business-day cadence
+(LG-260) amendments — each touches only its own fields, and
+moving the settlement pair never moves a leg, an amount, a fee,
+or a date. Only active or paused plans may be amended
+(cancelled or completed plans fail closed with
+`ErrScheduleBadTransition`); the pair is revised atomically:
+(empty target, empty account) clears back to same-currency
+settlement, (non-empty target, any account) sets the pair, with
+an empty account falling back to the ledger-level FX account at
+fire time exactly as `PostTransfer` treats an empty
+`Transfer.FXAccount`, and (empty target, non-empty account) is
+an orphan settlement account that fails closed with
+`ErrScheduleBadFXPair` and leaves the original pair untouched.
+The new target currency reuses the creation gate, so a malformed
+code fails with `ErrInvalidCurrency` and a target equal to the
+schedule's own currency fails with `ErrCrossCurrencyTransfer`,
+and an explicit settlement account equal to From or To fails
+with `ErrInvalidFXAccount` under `PostTransfer`'s own rule —
+every rejection leaves the original pair untouched. Only
+ToCurrency and FXAccount change — legs, amount, currency, fee
+amount, fee account, skip-fee switch, memo, interval, next run
+time, end time, run sequence, and run history are untouched, and
+already-fired runs are never rewritten: the sweep snapshot is
+taken at fire time, so the new pair governs the next successful
+firing and a failed run's retry reads the amended pair (the
+failed run posted nothing, so the retry books exactly once, at
+the amended pair, under the same `"<schedule_id>/run/<seq>"`
+key). Amending to the current pair (compared after normalizing
+the new target currency) is a no-op that emits no audit event;
+a real revision is audited as
+`transfer_schedule_fx_pair_amended` (previous and new target
+currencies and settlement accounts, currency, run sequence)
+and rides the schedule row through snapshots, with a pair
+cleared back to empty round-tripping as empty. (Payments
+fintech: recurring-transfer governance.)
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the

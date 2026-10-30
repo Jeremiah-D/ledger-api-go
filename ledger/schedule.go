@@ -77,6 +77,10 @@ var (
 	// ErrScheduleBadTransition is returned when a pause/resume/cancel is
 	// not allowed from the schedule's current status.
 	ErrScheduleBadTransition = errors.New("ledger: schedule status transition not allowed")
+	// ErrScheduleBadFXPair is returned when a schedule FX-pair revision
+	// names a settlement account without a target currency: the account
+	// would have no currency to settle into.
+	ErrScheduleBadFXPair = errors.New("ledger: schedule FX pair needs a target currency for a settlement account")
 )
 
 // ScheduleStatus is the lifecycle state of a TransferSchedule.
