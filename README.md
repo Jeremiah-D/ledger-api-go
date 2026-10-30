@@ -885,6 +885,41 @@ run sequence) and rides the schedule row through snapshots, with a
 memo cleared back to `""` round-tripping as empty. (Payments
 fintech: recurring-transfer governance.)
 
+**Business-day cadence amendment (LG-260):**
+`AmendTransferScheduleBusinessDayCadence` revises a live plan's
+advance rhythm in place, orthogonal to the interval amendment
+(LG-254): that changes how far apart runs are, this changes
+whether the gap counts calendar days or business days — each
+touches only its own field, and flipping the rhythm never moves
+a date by itself. Only active or paused plans may be amended
+(cancelled or completed plans fail closed with
+`ErrScheduleBadTransition`); a boolean is always legal, so there
+is no new validation gate — switching on is legal on any plan,
+and switching off restores exactly the fixed-duration advance
+the plan had before, since the interval itself is never changed
+by this amendment. Only the rhythm changes — legs, amount,
+currency, fee amount, fee account, skip-fee switch, memo,
+interval, next run time, end time, run sequence, and run history
+are untouched, and already-fired runs are never rewritten: there
+is no recomputation at amend time, so `NextRunAt` keeps its
+nominal value and the new rhythm only decides how the next
+firing advances it (a Friday run's next run lands on Monday
+instead of Saturday once switched on, and back to a fixed
+duration once switched off) — the sweep snapshot is taken at
+fire time, so the new rhythm governs the next successful firing,
+and a failed run's retry reads the amended rhythm (the failed
+run posted nothing and advanced nothing, so the retry books
+exactly once and advances under the amended rhythm, under the
+same `"<schedule_id>/run/<seq>"` key). A paused plan's revision
+waits with the plan and governs the first run after resume.
+Amending to the current rhythm value is a no-op that emits no
+audit event; a real revision is audited as
+`transfer_schedule_business_day_cadence_amended` (previous and
+new rhythm values, interval, currency, run sequence) and rides
+the schedule row through snapshots, with a rhythm flipped back
+off round-tripping as false. (Payments fintech:
+recurring-transfer governance.)
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
