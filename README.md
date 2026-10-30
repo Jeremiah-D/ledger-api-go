@@ -858,6 +858,33 @@ switch values, fee amount, fee account, currency, run sequence)
 and rides the schedule row through snapshots, with a switch
 flipped back off round-tripping as false.
 
+**Memo amendment (LG-259):**
+`AmendTransferScheduleMemo` revises a live plan's memo in place,
+orthogonal to the amount (LG-253), interval (LG-254), end-time
+(LG-255), fee (LG-256), fee-account (LG-257), and skip-fee (LG-258)
+amendments — each touches only its own field, and rewording the
+memo never moves a leg, an amount, a fee, or a date. Only active or
+paused plans may be amended (cancelled or completed plans fail
+closed with `ErrScheduleBadTransition`); the new memo reuses the
+creation length gate, so a memo over 255 UTF-8 characters fails
+with `ErrMemoTooLong` and the live memo is untouched. An empty
+string is legal and clears the memo, and the no-op judgement is by
+equality, not by emptiness — amending to the memo the plan already
+carries (including `""` on a memo-less plan) is a no-op that emits
+no audit event. Only Memo changes — legs, amount, currency, fee
+amount, fee account, skip-fee switch, interval, next run time, end
+time, run sequence, and run history are untouched, and already-fired
+runs are never rewritten: the sweep snapshot is taken at fire time,
+so the new memo governs the next successful firing (the fired
+transfer's principal entry carries it) and a failed run's retry
+reads the amended memo (the failed run posted nothing, so the retry
+books exactly once, with the amended memo, under the same
+`"<schedule_id>/run/<seq>"` key). A real revision is audited as
+`transfer_schedule_memo_amended` (previous and new memos, currency,
+run sequence) and rides the schedule row through snapshots, with a
+memo cleared back to `""` round-tripping as empty. (Payments
+fintech: recurring-transfer governance.)
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
