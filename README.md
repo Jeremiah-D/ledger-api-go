@@ -988,6 +988,37 @@ run times, currency, run sequence) and rides the schedule row
 through snapshots. (Payments fintech: recurring-transfer
 governance.)
 
+**Currency amendment (LG-263):**
+`AmendTransferScheduleCurrency` revises a live plan's base
+currency in place, orthogonal to the amount (LG-253), interval
+(LG-254), end-time (LG-255), fee (LG-256), fee-account (LG-257),
+skip-fee (LG-258), memo (LG-259), business-day cadence (LG-260),
+FX-pair (LG-261), and next-run-time (LG-262) amendments — each
+touches only its own field, and moving the booking currency never
+moves a leg, an amount, a fee, a pair, or a date. Only active or
+paused plans may be amended (cancelled or completed plans fail
+closed with `ErrScheduleBadTransition`); the new currency reuses
+the creation gate, so an empty code normalizes to the default
+currency exactly as at creation and a malformed code fails with
+`ErrInvalidCurrency`, and a new currency equal to the plan's live
+FX settlement target (when one is set) fails with
+`ErrCrossCurrencyTransfer` — the symmetric mirror of the FX-pair
+amendment's gate, judged against the live counterpart, so a plan
+with no pair amends freely. Only Currency changes — the per-run
+fee amount rides along as a bare number of cents, charged in the
+new currency from the next run, like the principal. The sweep
+snapshot is taken at fire time, so the new currency governs the
+next successful firing and a failed run's retry reads the amended
+currency (the failed run posted nothing, so the retry books
+exactly once, in the amended currency, under the same
+`"<schedule_id>/run/<seq>"` key). Amending to the current
+currency (compared after normalizing the new code) is a no-op
+that emits no audit event; a real revision is audited as
+`transfer_schedule_currency_amended` (previous and new
+currencies, live settlement target, run sequence) and rides the
+schedule row through snapshots. (Payments fintech:
+recurring-transfer governance.)
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
