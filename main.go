@@ -4475,6 +4475,51 @@ func (s *server) handleAmendPayoutDestination(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, amended)
 }
 
+// amendPayoutCurrencyRequest is the body of POST /payouts/{id}/currency:
+// the new currency. An absent currency decodes to "", which
+// AmendPayoutCurrency rejects with ErrInvalidCurrency (400) — an
+// amendment names the currency explicitly, so there is no default.
+type amendPayoutCurrencyRequest struct {
+	Currency string `json:"currency"`
+}
+
+// handleAmendPayoutCurrency implements POST /payouts/{id}/currency
+// (LG-277): revises a draft payout instruction's currency. Returns the
+// amended instruction. Unknown payout: 404; non-draft instruction:
+// 422; currency that is not three ASCII uppercase letters: 400.
+func (s *server) handleAmendPayoutCurrency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "payout id required"})
+		return
+	}
+	var req amendPayoutCurrencyRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	amended, err := s.ledgerFor(r).AmendPayoutCurrencyCtx(actx, id, req.Currency)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amended)
+}
+
 // amendCollateralHaircutRequest is the body of POST
 // /collateral/{account}/{asset}/haircut: the new haircut in basis
 // points (0..10000).
@@ -10725,6 +10770,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /payouts/{id}/cancel", s.handleCancelPayout)
 	mux.HandleFunc("POST /payouts/{id}/amount", s.handleAmendPayoutAmount)
 	mux.HandleFunc("POST /payouts/{id}/destination", s.handleAmendPayoutDestination)
+	mux.HandleFunc("POST /payouts/{id}/currency", s.handleAmendPayoutCurrency)
 	mux.HandleFunc("POST /payouts/expire", s.handleExpirePayouts)
 	// LG-161: ACH return (dishonored entry) file booking.
 	mux.HandleFunc("POST /ach/returns", s.handleACHReturns)
