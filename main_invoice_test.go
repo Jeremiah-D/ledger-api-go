@@ -116,6 +116,64 @@ func TestInvoiceVoidHTTP(t *testing.T) {
 	}
 }
 
+func TestInvoiceAmendDueDateHTTP(t *testing.T) {
+	srv := httptest.NewServer(newRouter(ledger.New()))
+	defer srv.Close()
+
+	// inv-open is issued with an explicit issue date so a due date
+	// before it is a deterministic 400. inv-p2 lives on its own
+	// account so the FIFO apply retires it alone, leaving it paid.
+	postJSON(t, srv.URL+"/invoices",
+		`{"id":"inv-open","account":"acme","amount_cents":1000,"issued_at":"2026-10-01T00:00:00Z","due_date":"2026-10-31T00:00:00Z"}`)
+	postJSON(t, srv.URL+"/invoices",
+		`{"id":"inv-void","account":"acme","amount_cents":1000,"issued_at":"2026-10-01T00:00:00Z","due_date":"2026-10-31T00:00:00Z"}`)
+	postJSON(t, srv.URL+"/invoices",
+		`{"id":"inv-p2","account":"other","amount_cents":1000,"issued_at":"2026-10-01T00:00:00Z","due_date":"2026-10-31T00:00:00Z"}`)
+	postJSON(t, srv.URL+"/invoices/apply",
+		`{"account":"other","currency":"USD","amount_cents":1000}`)
+	postJSON(t, srv.URL+"/invoices/inv-void/void", "")
+
+	// Happy path: the due date moves, everything else stays.
+	code, body := postJSON(t, srv.URL+"/invoices/inv-open/due-date",
+		`{"due_date":"2026-12-15T00:00:00Z"}`)
+	if code != 200 {
+		t.Fatalf("amend due date: status=%d body=%v, want 200", code, body)
+	}
+	if body["due_date"] != "2026-12-15T00:00:00Z" || body["status"] != "issued" {
+		t.Fatalf("amend body = %v, want due 2026-12-15 / issued", body)
+	}
+
+	// Unknown invoice: 404.
+	code, _ = postJSON(t, srv.URL+"/invoices/nope/due-date",
+		`{"due_date":"2026-12-15T00:00:00Z"}`)
+	if code != 404 {
+		t.Fatalf("amend unknown: status=%d, want 404", code)
+	}
+	// Paid invoice: 422 (same rejection as voiding a paid invoice).
+	code, _ = postJSON(t, srv.URL+"/invoices/inv-p2/due-date",
+		`{"due_date":"2026-12-15T00:00:00Z"}`)
+	if code != 422 {
+		t.Fatalf("amend paid: status=%d, want 422", code)
+	}
+	// Voided invoice: 422.
+	code, _ = postJSON(t, srv.URL+"/invoices/inv-void/due-date",
+		`{"due_date":"2026-12-15T00:00:00Z"}`)
+	if code != 422 {
+		t.Fatalf("amend voided: status=%d, want 422", code)
+	}
+	// Missing due date: 400.
+	code, _ = postJSON(t, srv.URL+"/invoices/inv-open/due-date", `{}`)
+	if code != 400 {
+		t.Fatalf("amend missing due date: status=%d, want 400", code)
+	}
+	// Due date before the issue date: 400.
+	code, _ = postJSON(t, srv.URL+"/invoices/inv-open/due-date",
+		`{"due_date":"2026-09-01T00:00:00Z"}`)
+	if code != 400 {
+		t.Fatalf("amend due before issued: status=%d, want 400", code)
+	}
+}
+
 func TestInvoiceSweepOverdueHTTP(t *testing.T) {
 	srv := httptest.NewServer(newRouter(ledger.New()))
 	defer srv.Close()

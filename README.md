@@ -7503,7 +7503,7 @@ appear in entries, the audit chain, or the version counter — but they
 drive the collections workflow that dunning escalates on.
 
 - **Lifecycle** (Go API: `IssueInvoice` / `ApplyPayment` / `VoidInvoice` /
-  `SweepOverdueInvoices`, or the `POST /invoices*` endpoints): an invoice
+  `SweepOverdueInvoices` / `AmendInvoiceDueDate`, or the `POST /invoices*` endpoints): an invoice
   opens as `issued`; `ApplyPayment` retires open invoices **FIFO** — the
   oldest invoice is paid first, a partially covered invoice becomes
   `partial`, a fully covered one becomes `paid`, and any amount beyond
@@ -7512,6 +7512,16 @@ drive the collections workflow that dunning escalates on.
   past their due date to `overdue` (the operator's "到期复核"); `VoidInvoice`
   cancels an invoice that never received a payment — a paid invoice
   cannot be voided (`422`), the record must stay for the audit trail.
+  `AmendInvoiceDueDate` (`POST /invoices/{id}/due-date`, LG-271) moves an
+  open invoice's due date — a paid invoice is rejected (`422`, same
+  rejection as voiding one), a voided invoice is rejected (`422`, not
+  open); the new date must not precede the issue date, and the sweep,
+  the receivables aging, and the dunning escalation all read the new
+  date from their next evaluation, so extending an overdue invoice's
+  due date ages it as current again (its `overdue` label stays until
+  a payment retires it). Amending to the current due date is a no-op;
+  the change is audited as `invoice_due_date_amended` and does not
+  bump the ledger version.
 - **Dunning 衔接**: open invoices past due feed the collections
   escalation directly — an overdue invoice is a FIFO lot aged from its
   due date, so a `(account, currency)` with a dunning policy escalates

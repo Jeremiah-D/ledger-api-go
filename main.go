@@ -8307,7 +8307,8 @@ func (s *server) handleExpireKyc(w http.ResponseWriter, r *http.Request) {
 
 // writeInvoiceError maps an invoice-domain error to its HTTP status:
 // 404 for an unknown invoice, 409 for a duplicate invoice ID, 422 for
-// a semantic rejection (voiding an invoice that already has payments),
+// a semantic rejection (voiding an invoice that already has payments,
+// or amending a closed one),
 // and reports whether err was an invoice-domain error at all. Field
 // validation (400) is left to the caller via writePostError's default.
 func writeInvoiceError(w http.ResponseWriter, err error) bool {
@@ -8317,6 +8318,8 @@ func writeInvoiceError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, ledger.ErrDuplicateInvoiceID):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 	case errors.Is(err, ledger.ErrInvoiceHasPayments):
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+	case errors.Is(err, ledger.ErrInvoiceNotOpen):
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 	default:
 		return false
@@ -8606,6 +8609,48 @@ func (s *server) handleVoidInvoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "voided"})
+}
+
+// amendInvoiceDueDateRequest is the body of POST /invoices/{id}/due-date:
+// the new due date. A missing due_date decodes to the zero time, which
+// AmendInvoiceDueDate rejects with ErrInvalidInvoice (400).
+type amendInvoiceDueDateRequest struct {
+	DueDate *time.Time `json:"due_date"`
+}
+
+// handleAmendInvoiceDueDate implements POST /invoices/{id}/due-date
+// (LG-271): revises an open invoice's due date. Returns the amended
+// invoice.
+func (s *server) handleAmendInvoiceDueDate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invoice id required"})
+		return
+	}
+	var req amendInvoiceDueDateRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	var due time.Time
+	if req.DueDate != nil {
+		due = req.DueDate.UTC()
+	}
+	amended, err := s.ledgerFor(r).AmendInvoiceDueDateCtx(actx, id, due)
+	if err != nil {
+		if !writeInvoiceError(w, err) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amended)
 }
 
 // handleSweepOverdueInvoices implements POST /invoices/sweep-overdue:
@@ -10490,6 +10535,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /invoices/{id}", s.handleGetInvoice)
 	mux.HandleFunc("POST /invoices/apply", s.handleApplyInvoicePayment)
 	mux.HandleFunc("POST /invoices/{id}/void", s.handleVoidInvoice)
+	mux.HandleFunc("POST /invoices/{id}/due-date", s.handleAmendInvoiceDueDate)
 	mux.HandleFunc("POST /invoices/sweep-overdue", s.handleSweepOverdueInvoices)
 	mux.HandleFunc("POST /accounts/{id}/suspend", s.handleSuspendAccount)
 	mux.HandleFunc("POST /accounts/{id}/resume", s.handleResumeAccount)
