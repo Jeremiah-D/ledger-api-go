@@ -4475,6 +4475,60 @@ func (s *server) handleAmendPayoutDestination(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, amended)
 }
 
+// amendCollateralHaircutRequest is the body of POST
+// /collateral/{account}/{asset}/haircut: the new haircut in basis
+// points (0..10000).
+type amendCollateralHaircutRequest struct {
+	HaircutBps int64 `json:"haircut_bps"`
+}
+
+// amendCollateralHaircutResponse is the POST
+// /collateral/{account}/{asset}/haircut response: the amended pledge
+// plus any margin calls the new haircut triggered.
+type amendCollateralHaircutResponse struct {
+	ledger.CollateralPledge
+	MarginCalls []ledger.MarginCall `json:"margin_calls,omitempty"`
+}
+
+// handleAmendCollateralHaircut implements POST
+// /collateral/{account}/{asset}/haircut (LG-275): revises a pledged
+// position's haircut in place. Returns the amended pledge and any
+// margin calls the new haircut triggered. Unknown pledge: 404;
+// haircut outside 0..10000: 422.
+func (s *server) handleAmendCollateralHaircut(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	account := r.PathValue("account")
+	asset := r.PathValue("asset")
+	if account == "" || asset == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account and asset required"})
+		return
+	}
+	var req amendCollateralHaircutRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	amended, calls, err := s.ledgerFor(r).AmendCollateralHaircutCtx(actx, ledger.AccountID(account), asset, req.HaircutBps)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrCollateralNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrInvalidCollateralHaircut):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amendCollateralHaircutResponse{CollateralPledge: amended, MarginCalls: calls})
+}
+
 // handleExpirePayouts implements POST /payouts/expire (LG-213): the
 // operator-facing sweep that moves every approved payout instruction
 // past its opt-in ExpiresAt into the expired terminal status and
@@ -10639,6 +10693,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /camt054/import", s.handleCAMT054Import)
 	mux.HandleFunc("POST /credit-lines", s.handleGrantCreditLine)
 	mux.HandleFunc("POST /credit-lines/reduce", s.handleReduceCreditLine)
+	// LG-275: collateral haircut revision — the in-place risk-discount
+	// path; pledging / revaluing / releasing stay ledger-only.
+	mux.HandleFunc("POST /collateral/{account}/{asset}/haircut", s.handleAmendCollateralHaircut)
 	mux.HandleFunc("GET /credit-lines", s.handleGetCreditLine)
 	mux.HandleFunc("POST /credit-lines/accrue-interest", s.handleAccrueCreditInterest)
 	mux.HandleFunc("POST /ecl/exposures", s.handleRegisterECLExposure)

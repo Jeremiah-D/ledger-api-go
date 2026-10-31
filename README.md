@@ -4507,6 +4507,9 @@ unitValueCents, haircutBps)` 质押（同 `(account, asset)` 累积，追加时�
 新单价/折扣率 mark-to-market，保留原 `PledgedAt`）；
 `ledger.ReleaseCollateral` 部分/全部释放（超额释放 fail-closed）；
 `ledger.RevalueCollateral` 市值重估；
+`ledger.AmendCollateralHaircut(account, assetID, newHaircutBps)` 原位修订
+折扣率（只改 `HaircutBps`，数量/单价/`PledgedAt` 不动；与当前值相同为
+no-op，不写审计；上调折扣可能立即触发 margin call，返回调用方）；
 `ledger.SetCollateralRequirement(account, currency, minCoverageBps)`
 设置最低覆盖率（basis points，`12500` = 125%；`0` 清除）。
 
@@ -4527,7 +4530,10 @@ requiredBps}`（告警惯例：返回结构体，不另设通道），同时记
 `collateral_margin_call` 审计事件。`ledger.CheckMarginCall` 随时查询
 当前是否触发。抵押物单价以被评估的 requirement 币种计价（多币种账户
 逐币种重估；模块**不**做静默 FX 折算）。质押与覆盖率要求随灾难恢复
-快照往返（config 行），不进对账报告。
+快照往返（config 行），不进对账报告。HTTP：`POST
+/collateral/{account}/{asset}/haircut` 修订折扣率（body
+`{"haircut_bps": N}`；未知质押 `404`，折扣越界 `422`；返回修订后质押
+与触发的 margin call）。
 
 ```go
 l.PledgeCollateral("trader", "bond-2028", 10, 10000, 2500) // 有效 75000c
