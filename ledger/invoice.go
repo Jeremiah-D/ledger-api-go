@@ -90,15 +90,16 @@ var (
 	// already has payments applied (PaidCents > 0) or is fully paid.
 	// 422-class: the request is well-formed, the money just moved — a
 	// paid invoice cannot be erased, only the audit trail keeps it.
-	// AmendInvoiceDueDate (LG-271) reuses it for a paid invoice: the
-	// record must stay as-is.
+	// AmendInvoiceDueDate (LG-271) and AmendInvoiceMemo (LG-272)
+	// reuse it for a paid invoice: the record must stay as-is.
 	ErrInvoiceHasPayments = errors.New("ledger: invoice has payments and cannot be voided")
 	// ErrInvoiceNotOpen is returned by AmendInvoiceDueDate (LG-271)
-	// for a voided invoice: the receivable is closed, so its due date
-	// cannot move. 422-class: the request is well-formed, the invoice
-	// is just closed. (VoidInvoice has no rejection for a voided
-	// invoice — voiding one is an idempotent no-op — so the amendment
-	// carries its own closed-invoice error.)
+	// and AmendInvoiceMemo (LG-272) for a voided invoice: the
+	// receivable is closed, so its due date and memo cannot move.
+	// 422-class: the request is well-formed, the invoice is just
+	// closed. (VoidInvoice has no rejection for a voided invoice —
+	// voiding one is an idempotent no-op — so the amendment carries
+	// its own closed-invoice error.)
 	ErrInvoiceNotOpen = errors.New("ledger: invoice is not open")
 )
 
