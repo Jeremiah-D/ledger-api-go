@@ -4566,6 +4566,53 @@ func (s *server) handleAmendPayoutRail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, amended)
 }
 
+// amendPayoutPayeeAccountRequest is the body of POST
+// /payouts/{id}/payee: the new payee account.
+type amendPayoutPayeeAccountRequest struct {
+	PayeeAccount string `json:"payee_account"`
+}
+
+// handleAmendPayoutPayeeAccount implements POST /payouts/{id}/payee
+// (LG-279): revises a draft payout instruction's payee account.
+// Returns the amended instruction. Unknown payout: 404; non-draft
+// instruction, empty payee, or a live destination mismatching the new
+// payee's registered external mapping: 422.
+func (s *server) handleAmendPayoutPayeeAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "payout id required"})
+		return
+	}
+	var req amendPayoutPayeeAccountRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	amended, err := s.ledgerFor(r).AmendPayoutPayeeAccountCtx(actx, id, ledger.AccountID(req.PayeeAccount))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition),
+			errors.Is(err, ledger.ErrEmptyPayoutAccount),
+			errors.Is(err, ledger.ErrEmptyPayoutDestination),
+			errors.Is(err, ledger.ErrPayoutUnknownDestination):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amended)
+}
+
 // amendCollateralHaircutRequest is the body of POST
 // /collateral/{account}/{asset}/haircut: the new haircut in basis
 // points (0..10000).
@@ -10818,6 +10865,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /payouts/{id}/destination", s.handleAmendPayoutDestination)
 	mux.HandleFunc("POST /payouts/{id}/currency", s.handleAmendPayoutCurrency)
 	mux.HandleFunc("POST /payouts/{id}/rail", s.handleAmendPayoutRail)
+	mux.HandleFunc("POST /payouts/{id}/payee", s.handleAmendPayoutPayeeAccount)
 	mux.HandleFunc("POST /payouts/expire", s.handleExpirePayouts)
 	// LG-161: ACH return (dishonored entry) file booking.
 	mux.HandleFunc("POST /ach/returns", s.handleACHReturns)
