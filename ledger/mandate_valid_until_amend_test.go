@@ -90,6 +90,7 @@ func TestAmendMandateValidUntilTerminalStates(t *testing.T) {
 
 func TestAmendMandateValidUntilEffectiveNextDebit(t *testing.T) {
 	l := New()
+	now := time.Now()
 	if _, _, err := l.Post(JournalEntry{ID: "fund-cust", DebitAccount: "cust", CreditAccount: "bank", AmountCents: 100000, Currency: "USD"}); err != nil {
 		t.Fatalf("fund Post: %v", err)
 	}
@@ -101,27 +102,27 @@ func TestAmendMandateValidUntilEffectiveNextDebit(t *testing.T) {
 		Currency:       "USD",
 		Frequency:      MandateFrequencyPerDay,
 		ValidFrom:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		ValidUntil:     time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC),
+		ValidUntil:     now.Add(24 * time.Hour),
 	}); err != nil {
 		t.Fatalf("CreateMandate: %v", err)
 	}
 	// A debit inside the original window books before the amendment
 	// and stays booked after it.
-	oct20 := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
-	if _, err := l.DebitWithMandate("m-sub", MandateDebit{ID: "d-0", AmountCents: 1000, CreatedAt: oct20}); err != nil {
+	beforeAmend := now.Add(-time.Hour)
+	if _, err := l.DebitWithMandate("m-sub", MandateDebit{ID: "d-0", AmountCents: 1000, CreatedAt: beforeAmend}); err != nil {
 		t.Fatalf("pre-amendment debit: %v", err)
 	}
 	// A debit past the old end is rejected as expired; the rejection
 	// books nothing, so the same debit ID is reusable after the
 	// extension.
-	nov5 := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
-	if _, err := l.DebitWithMandate("m-sub", MandateDebit{ID: "d-1", AmountCents: 1000, CreatedAt: nov5}); !errors.Is(err, ErrMandateExpired) {
+	pastOldEnd := now.Add(48 * time.Hour)
+	if _, err := l.DebitWithMandate("m-sub", MandateDebit{ID: "d-1", AmountCents: 1000, CreatedAt: pastOldEnd}); !errors.Is(err, ErrMandateExpired) {
 		t.Fatalf("debit past old end: err = %v, want ErrMandateExpired", err)
 	}
-	if _, err := l.AmendMandateValidUntil("m-sub", time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)); err != nil {
+	if _, err := l.AmendMandateValidUntil("m-sub", now.Add(90*24*time.Hour)); err != nil {
 		t.Fatalf("AmendMandateValidUntil: %v", err)
 	}
-	if _, err := l.DebitWithMandate("m-sub", MandateDebit{ID: "d-1", AmountCents: 1000, CreatedAt: nov5}); err != nil {
+	if _, err := l.DebitWithMandate("m-sub", MandateDebit{ID: "d-1", AmountCents: 1000, CreatedAt: pastOldEnd}); err != nil {
 		t.Fatalf("debit in extended window: %v", err)
 	}
 	debits, _, err := l.MandateDebits("m-sub", "", 10)
