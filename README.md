@@ -3966,6 +3966,22 @@ untouched, the version is not bumped, and no outbox event fires;
 it audits as `payout_expiry_extended` with the previous and new
 deadlines. This is orthogonal to the expiry mechanism itself
 (LG-213) and to the FX limit-order expiry extension (LG-234).
+
+Amending a draft amount (LG-273): before any approval has been given
+and before any money has moved, a draft instruction's amount
+(`AmendPayoutAmount`, `POST /payouts/{id}/amount`) may be corrected in
+place — a mistyped amount no longer forces a cancel-and-redraft, which
+would mint a new ID and UETR and leave a cancelled draft on the books.
+Only drafts qualify: any approved, submitted, settled, failed,
+cancelled, returned, or expired instruction is rejected (`422`), so
+an approved amount — the amount the checker signed off on — can never
+change behind the approval. The new amount must be positive.
+Amending to the current value is a silent no-op. Only the amount
+moves; the version is not bumped and no outbox event fires; the
+amendment audits as `payout_amount_amended` with the previous and new
+amounts. The four-eyes threshold reads the live amount at approval
+time, so a revised amount re-enters the maker-checker decision from
+the very next approval.
 Instructions are in-memory only (like clearing batches) — the journaled
 legs survive snapshots, and the fail-closed clearing account
 round-trips.

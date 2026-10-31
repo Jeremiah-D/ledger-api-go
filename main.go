@@ -4385,6 +4385,50 @@ func (s *server) handleCancelPayout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
+// amendPayoutAmountRequest is the body of POST /payouts/{id}/amount:
+// the new amount in cents.
+type amendPayoutAmountRequest struct {
+	AmountCents int64 `json:"amount_cents"`
+}
+
+// handleAmendPayoutAmount implements POST /payouts/{id}/amount
+// (LG-273): revises a draft payout instruction's amount. Returns the
+// amended instruction. Unknown payout: 404; non-draft instruction or
+// non-positive amount: 422.
+func (s *server) handleAmendPayoutAmount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "payout id required"})
+		return
+	}
+	var req amendPayoutAmountRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	amended, err := s.ledgerFor(r).AmendPayoutAmountCtx(actx, id, req.AmountCents)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition),
+			errors.Is(err, ledger.ErrPayoutNonPositiveAmount):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amended)
+}
+
 // handleExpirePayouts implements POST /payouts/expire (LG-213): the
 // operator-facing sweep that moves every approved payout instruction
 // past its opt-in ExpiresAt into the expired terminal status and
@@ -10540,6 +10584,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /payouts/{id}/settle", s.handleSettlePayout)
 	mux.HandleFunc("POST /payouts/{id}/fail", s.handleFailPayout)
 	mux.HandleFunc("POST /payouts/{id}/cancel", s.handleCancelPayout)
+	mux.HandleFunc("POST /payouts/{id}/amount", s.handleAmendPayoutAmount)
 	mux.HandleFunc("POST /payouts/expire", s.handleExpirePayouts)
 	// LG-161: ACH return (dishonored entry) file booking.
 	mux.HandleFunc("POST /ach/returns", s.handleACHReturns)
