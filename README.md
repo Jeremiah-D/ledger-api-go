@@ -7531,7 +7531,7 @@ appear in entries, the audit chain, or the version counter — but they
 drive the collections workflow that dunning escalates on.
 
 - **Lifecycle** (Go API: `IssueInvoice` / `ApplyPayment` / `VoidInvoice` /
-  `SweepOverdueInvoices` / `AmendInvoiceDueDate` / `AmendInvoiceMemo`, or the `POST /invoices*` endpoints): an invoice
+  `SweepOverdueInvoices` / `AmendInvoiceDueDate` / `AmendInvoiceMemo` / `AmendInvoiceCurrency`, or the `POST /invoices*` endpoints): an invoice
   opens as `issued`; `ApplyPayment` retires open invoices **FIFO** — the
   oldest invoice is paid first, a partially covered invoice becomes
   `partial`, a fully covered one becomes `paid`, and any amount beyond
@@ -7556,6 +7556,19 @@ drive the collections workflow that dunning escalates on.
   cap as at issue), and an empty memo clears the annotation; amending
   to the current memo is a no-op; the change is audited as
   `invoice_memo_amended` and does not bump the ledger version.
+  `AmendInvoiceCurrency` (`POST /invoices/{id}/currency`, LG-276)
+  re-denominates an open invoice's currency — a paid invoice is
+  rejected (`422`, same rejection as voiding one), a voided invoice
+  is rejected (`422`, not open); the new currency must be three
+  ASCII uppercase letters (ISO 4217, `400` otherwise — an empty
+  currency does not fall back to the default here, an amendment
+  names it explicitly); the amount in cents is untouched (no FX
+  re-pricing, the payment converts, not the invoice), and the new
+  currency governs the next `ListInvoices` filter, `ApplyPayment`,
+  and receivables-aging evaluation, so a payment in the old
+  currency no longer sees the invoice. Amending to the current
+  currency is a no-op; the change is audited as
+  `invoice_currency_amended` and does not bump the ledger version.
 - **Dunning 衔接**: open invoices past due feed the collections
   escalation directly — an overdue invoice is a FIFO lot aged from its
   due date, so a `(account, currency)` with a dunning policy escalates

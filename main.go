@@ -8835,6 +8835,45 @@ func (s *server) handleAmendInvoiceMemo(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, amended)
 }
 
+// amendInvoiceCurrencyRequest is the body of POST /invoices/{id}/currency:
+// the new currency. An absent currency decodes to "", which
+// AmendInvoiceCurrency rejects with ErrInvalidCurrency (400) — an
+// amendment names the currency explicitly, so there is no default.
+type amendInvoiceCurrencyRequest struct {
+	Currency string `json:"currency"`
+}
+
+// handleAmendInvoiceCurrency implements POST /invoices/{id}/currency
+// (LG-276): revises an open invoice's currency. Returns the amended
+// invoice.
+func (s *server) handleAmendInvoiceCurrency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invoice id required"})
+		return
+	}
+	var req amendInvoiceCurrencyRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	amended, err := s.ledgerFor(r).AmendInvoiceCurrencyCtx(actx, id, req.Currency)
+	if err != nil {
+		if !writeInvoiceError(w, err) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amended)
+}
+
 // handleSweepOverdueInvoices implements POST /invoices/sweep-overdue:
 // moves every issued/partial invoice past its due date to overdue and
 // returns their IDs.
@@ -10724,6 +10763,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /invoices/{id}/void", s.handleVoidInvoice)
 	mux.HandleFunc("POST /invoices/{id}/due-date", s.handleAmendInvoiceDueDate)
 	mux.HandleFunc("POST /invoices/{id}/memo", s.handleAmendInvoiceMemo)
+	mux.HandleFunc("POST /invoices/{id}/currency", s.handleAmendInvoiceCurrency)
 	mux.HandleFunc("POST /invoices/sweep-overdue", s.handleSweepOverdueInvoices)
 	mux.HandleFunc("POST /accounts/{id}/suspend", s.handleSuspendAccount)
 	mux.HandleFunc("POST /accounts/{id}/resume", s.handleResumeAccount)
