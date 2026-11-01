@@ -4466,6 +4466,31 @@ as `installment_num_periods_amended` (previous and new period counts,
 posted-period count, always zero). (Payments fintech: installment
 governance.)
 
+**Payer/payee amendment (LG-286):** `AmendInstallmentPlanPayer` and
+`AmendInstallmentPlanPayee` revise a live plan's payer or payee in
+place, alongside the rule (LG-264), first-due-date (LG-265), currency
+(LG-266), principal (LG-284), and period-count (LG-285) amendments:
+only active or overdue plans with zero posted periods may be amended
+(completed or settled_early plans fail closed with
+`ErrInstallmentBadTransition`, and so do plans that have already
+posted a period — moving the parties then would restate journaled
+history, which is out of scope); each new party reuses the creation
+gate, so an empty payer fails with `ErrEmptyInstallmentPayer`, an
+empty payee with `ErrEmptyInstallmentPayee`, and a payer equal to the
+live payee (or a payee equal to the live payer) with
+`ErrInstallmentSameAccount`. Each method moves exactly one party —
+payer or payee — and leaves the other alone; principal, period count,
+rule, first due date, currency, legs, status, and posted periods are
+untouched. The sweep reads the live parties at post time (debit the
+payee, credit the payer), so the new parties govern every period from
+the next sweep and the periods still sum to exactly the principal,
+just against the new accounts; with zero posted periods there is no
+posted history to reconcile. Amending to the current party is a no-op
+that emits no audit event; a real revision is audited as
+`installment_payer_amended` or `installment_payee_amended`
+(previous and new party, posted-period count, always zero).
+(Payments fintech: installment governance.)
+
 ### Installment late fees (LG-150)
 
 Overdue money is free money for the payer — unless the plan opts in:
