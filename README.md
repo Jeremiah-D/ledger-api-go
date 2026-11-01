@@ -7608,6 +7608,19 @@ drive the collections workflow that dunning escalates on.
   currency no longer sees the invoice. Amending to the current
   currency is a no-op; the change is audited as
   `invoice_currency_amended` and does not bump the ledger version.
+  `AmendInvoiceAmount` (`POST /invoices/{id}/amount`, LG-282)
+  re-prices an open invoice's amount — only an invoice that has
+  received no payment can be amended: a paid or partially paid
+  invoice is rejected (`422`, the amount locks the moment money
+  lands, since the settled cents were priced against the old
+  amount), a voided invoice is rejected (`422`, not open); the new
+  amount must be positive (`422` otherwise, the same gate as at
+  issue); only the amount moves (paid amount, currency, due date,
+  memo, account, and status are untouched), and the new amount
+  governs the next `ApplyPayment` and receivables-aging evaluation,
+  so a payment now retires the invoice against the new face value.
+  Amending to the current amount is a no-op; the change is audited
+  as `invoice_amount_amended` and does not bump the ledger version.
 - **Dunning 衔接**: open invoices past due feed the collections
   escalation directly — an overdue invoice is a FIFO lot aged from its
   due date, so a `(account, currency)` with a dunning policy escalates

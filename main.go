@@ -9103,6 +9103,52 @@ func (s *server) handleAmendInvoiceCurrency(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, amended)
 }
 
+// amendInvoiceAmountRequest is the body of POST /invoices/{id}/amount:
+// the new amount in cents. A missing amount_cents decodes to 0, which
+// AmendInvoiceAmount rejects with ErrNonPositiveAmount (422).
+type amendInvoiceAmountRequest struct {
+	AmountCents int64 `json:"amount_cents"`
+}
+
+// handleAmendInvoiceAmount implements POST /invoices/{id}/amount
+// (LG-282): revises an open, unpaid invoice's amount. Returns the
+// amended invoice.
+func (s *server) handleAmendInvoiceAmount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invoice id required"})
+		return
+	}
+	var req amendInvoiceAmountRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	amended, err := s.ledgerFor(r).AmendInvoiceAmountCtx(actx, id, req.AmountCents)
+	if err != nil {
+		// ErrNonPositiveAmount is not an invoice-register error, so
+		// it has no writeInvoiceError mapping: a non-positive amount
+		// is a well-formed request the ledger cannot apply (422),
+		// not a malformed field (400).
+		if errors.Is(err, ledger.ErrNonPositiveAmount) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if !writeInvoiceError(w, err) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amended)
+}
+
 // handleSweepOverdueInvoices implements POST /invoices/sweep-overdue:
 // moves every issued/partial invoice past its due date to overdue and
 // returns their IDs.
@@ -10998,6 +11044,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /invoices/{id}/due-date", s.handleAmendInvoiceDueDate)
 	mux.HandleFunc("POST /invoices/{id}/memo", s.handleAmendInvoiceMemo)
 	mux.HandleFunc("POST /invoices/{id}/currency", s.handleAmendInvoiceCurrency)
+	mux.HandleFunc("POST /invoices/{id}/amount", s.handleAmendInvoiceAmount)
 	mux.HandleFunc("POST /invoices/sweep-overdue", s.handleSweepOverdueInvoices)
 	mux.HandleFunc("POST /accounts/{id}/suspend", s.handleSuspendAccount)
 	mux.HandleFunc("POST /accounts/{id}/resume", s.handleResumeAccount)
