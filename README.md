@@ -3967,21 +3967,22 @@ it audits as `payout_expiry_extended` with the previous and new
 deadlines. This is orthogonal to the expiry mechanism itself
 (LG-213) and to the FX limit-order expiry extension (LG-234).
 
-Amending a draft (LG-273/LG-274/LG-277/LG-278/LG-279): before any approval has been
+Amending a draft (LG-273/LG-274/LG-277/LG-278/LG-279/LG-280): before any approval has been
 given and before any money has moved, a draft instruction's amount
 (`AmendPayoutAmount`, `POST /payouts/{id}/amount`), destination
 (`AmendPayoutDestination`, `POST /payouts/{id}/destination`),
 currency (`AmendPayoutCurrency`, `POST /payouts/{id}/currency`),
-settlement rail (`AmendPayoutRail`, `POST /payouts/{id}/rail`), or
-payee account (`AmendPayoutPayeeAccount`, `POST /payouts/{id}/payee`) may be
+settlement rail (`AmendPayoutRail`, `POST /payouts/{id}/rail`),
+payee account (`AmendPayoutPayeeAccount`, `POST /payouts/{id}/payee`), or
+purpose code (`AmendPayoutPurposeCode`, `POST /payouts/{id}/purpose`) may be
 corrected in place — a mistyped amount, a transposed digit in the
 external account, a draft denominated in the wrong currency, a
-draft routed down the wrong rail, or a draft drawn on the wrong
-account no longer forces a cancel-and-redraft, which would mint a new ID and
+draft routed down the wrong rail, a draft drawn on the wrong
+account, or a draft filed under the wrong purpose no longer forces a cancel-and-redraft, which would mint a new ID and
 UETR and leave a cancelled draft on the books.
 Only drafts qualify: any approved, submitted, settled, failed,
 cancelled, returned, or expired instruction is rejected (`422`),
-so an approved amount, destination, currency, rail, or payee — the terms the
+so an approved amount, destination, currency, rail, payee, or purpose — the terms the
 checker signed off on — can never change behind the approval. The new amount must
 be positive; the new destination reuses the creation gate (empty, or
 mismatching a registered LG-122 external mapping, is rejected); the
@@ -3993,14 +3994,17 @@ an empty rail clears it back to unspecified, and the next submit
 defaults to gpi); the new payee must be non-empty, and the live
 destination is re-validated against the new payee's registered
 external mapping (`422` when the destination names an account the
-new payee never registered). The amount in cents is untouched
+new payee never registered); the new purpose code must be in the
+admitted ISO 20022 subset (`422` otherwise — an empty code clears
+it back to "no purpose stated"). The amount in cents is untouched
 by a currency amendment (no FX re-pricing, the payment converts, not
 the instruction).
 Amending to the current value is a silent no-op. Only the one field
 moves; the version is not bumped and no outbox event fires; each
 amendment audits as `payout_amount_amended` /
 `payout_destination_amended` / `payout_currency_amended` /
-`payout_rail_amended` / `payout_payee_account_amended` with the
+`payout_rail_amended` / `payout_payee_account_amended` /
+`payout_purpose_code_amended` with the
 previous and new values. The
 four-eyes threshold reads the live amount at approval time, so a
 revised amount re-enters the maker-checker decision from the very
@@ -4013,7 +4017,9 @@ submit with no submit-path change; it likewise reads the live rail
 when it opens the settlement-SLA watch, so a revised rail governs
 the next submit's watch (an empty rail still defaults to gpi), and
 it journals the clearing leg against the live payee, so a revised
-payee governs the next submit's earmark.
+payee governs the next submit's earmark; the pacs.008 export reads
+the live purpose code, so a revised purpose governs the next export
+(the clearing leg itself carries no purpose code).
 Instructions are in-memory only (like clearing batches) — the journaled
 legs survive snapshots, and the fail-closed clearing account
 round-trips.

@@ -4613,6 +4613,52 @@ func (s *server) handleAmendPayoutPayeeAccount(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, amended)
 }
 
+// amendPayoutPurposeCodeRequest is the body of POST
+// /payouts/{id}/purpose: the new ISO 20022 purpose code. Empty
+// clears the purpose ("no purpose stated").
+type amendPayoutPurposeCodeRequest struct {
+	PurposeCode string `json:"purpose_code"`
+}
+
+// handleAmendPayoutPurposeCode implements POST /payouts/{id}/purpose
+// (LG-280): revises a draft payout instruction's ISO 20022 purpose
+// code. Returns the amended instruction. Unknown payout: 404;
+// non-draft instruction or a code outside the admitted ISO 20022
+// subset: 422.
+func (s *server) handleAmendPayoutPurposeCode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "payout id required"})
+		return
+	}
+	var req amendPayoutPurposeCodeRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	amended, err := s.ledgerFor(r).AmendPayoutPurposeCodeCtx(actx, id, req.PurposeCode)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition),
+			errors.Is(err, ledger.ErrInvalidPurposeCode):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amended)
+}
+
 // amendCollateralHaircutRequest is the body of POST
 // /collateral/{account}/{asset}/haircut: the new haircut in basis
 // points (0..10000).
@@ -10866,6 +10912,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /payouts/{id}/currency", s.handleAmendPayoutCurrency)
 	mux.HandleFunc("POST /payouts/{id}/rail", s.handleAmendPayoutRail)
 	mux.HandleFunc("POST /payouts/{id}/payee", s.handleAmendPayoutPayeeAccount)
+	mux.HandleFunc("POST /payouts/{id}/purpose", s.handleAmendPayoutPurposeCode)
 	mux.HandleFunc("POST /payouts/expire", s.handleExpirePayouts)
 	// LG-161: ACH return (dishonored entry) file booking.
 	mux.HandleFunc("POST /ach/returns", s.handleACHReturns)
