@@ -4659,6 +4659,51 @@ func (s *server) handleAmendPayoutPurposeCode(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, amended)
 }
 
+// amendPayoutExpiresAtRequest is the body of POST
+// /payouts/{id}/expires-at: the new expiry instant (RFC3339). Zero
+// (or an absent field) clears the deadline back to "never expires".
+type amendPayoutExpiresAtRequest struct {
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// handleAmendPayoutExpiresAt implements POST /payouts/{id}/expires-at
+// (LG-281): revises a draft payout instruction's expiry. Returns the
+// amended instruction. Unknown payout: 404; non-draft instruction or
+// a non-zero expiry that is not in the future: 422.
+func (s *server) handleAmendPayoutExpiresAt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "payout id required"})
+		return
+	}
+	var req amendPayoutExpiresAtRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	amended, err := s.ledgerFor(r).AmendPayoutExpiresAtCtx(actx, id, req.ExpiresAt)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPayoutNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPayoutInvalidTransition),
+			errors.Is(err, ledger.ErrInvalidPayoutExpiresAt):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amended)
+}
+
 // amendCollateralHaircutRequest is the body of POST
 // /collateral/{account}/{asset}/haircut: the new haircut in basis
 // points (0..10000).
@@ -10913,6 +10958,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /payouts/{id}/rail", s.handleAmendPayoutRail)
 	mux.HandleFunc("POST /payouts/{id}/payee", s.handleAmendPayoutPayeeAccount)
 	mux.HandleFunc("POST /payouts/{id}/purpose", s.handleAmendPayoutPurposeCode)
+	mux.HandleFunc("POST /payouts/{id}/expires-at", s.handleAmendPayoutExpiresAt)
 	mux.HandleFunc("POST /payouts/expire", s.handleExpirePayouts)
 	// LG-161: ACH return (dishonored entry) file booking.
 	mux.HandleFunc("POST /ach/returns", s.handleACHReturns)
