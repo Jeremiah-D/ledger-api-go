@@ -71,20 +71,31 @@ func TestHandleStatementDefaults(t *testing.T) {
 	defer srv.Close()
 
 	// No from/to: from defaults to the first day of the current UTC
-	// month at 00:00, to defaults to now. The seed entries are from
-	// 2026-10-01..03 and today is in October 2026, so they are included.
+	// month at 00:00, to defaults to now. The seed entries are
+	// fixed at 2026-10-01..03, so they are included only while the
+	// default window covers them — the expectation is computed from
+	// the seed dates, not assumed from the calendar (a fixed "want
+	// 3" goes stale the moment the month rolls past October 2026).
 	code, body := getJSON(t, srv.URL+"/accounts/cash/statement")
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
 	now := time.Now().UTC()
-	wantFrom := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	wantFrom := from.Format(time.RFC3339)
 	period := body["period"].(map[string]any)
 	if period["from"] != wantFrom {
 		t.Errorf("default from = %v, want %s", period["from"], wantFrom)
 	}
-	if len(body["entries"].([]any)) != 3 {
-		t.Errorf("default-window entries = %d, want 3", len(body["entries"].([]any)))
+	wantEntries := 0
+	for _, day := range []int{1, 2, 3} {
+		at := time.Date(2026, 10, day, 12, 0, 0, 0, time.UTC)
+		if !at.Before(from) && !at.After(now) {
+			wantEntries++
+		}
+	}
+	if got := len(body["entries"].([]any)); got != wantEntries {
+		t.Errorf("default-window entries = %d, want %d", got, wantEntries)
 	}
 }
 

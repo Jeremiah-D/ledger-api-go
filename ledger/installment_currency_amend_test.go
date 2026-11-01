@@ -3,6 +3,7 @@ package ledger
 import (
 	"errors"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 )
@@ -111,6 +112,9 @@ func TestAmendInstallmentPlanCurrencySweepHonorsNewCurrency(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("entries = %d, want 3", len(entries))
 	}
+	// Entries() ranges a map, so order is nondeterministic: sort
+	// by ID before indexing positionally.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	// Period 1's journaled row is untouched: still USD.
 	if first := entries[0]; first.ID != "installment/ip-currency-sweep/1" || first.Currency != "USD" || first.AmountCents != 333 {
 		t.Errorf("period 1 row = %+v, want installment/ip-currency-sweep/1 of 333 USD", first)
@@ -187,6 +191,9 @@ func TestAmendInstallmentPlanCurrencyOverdue(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("entries = %d, want 3", len(entries))
 	}
+	// Entries() ranges a map, so order is nondeterministic: sort
+	// by ID before indexing positionally.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	if entries[0].Currency != "USD" || entries[1].Currency != "EUR" || entries[2].Currency != "EUR" {
 		t.Errorf("entry currencies = %q, %q, %q, want USD, EUR, EUR", entries[0].Currency, entries[1].Currency, entries[2].Currency)
 	}

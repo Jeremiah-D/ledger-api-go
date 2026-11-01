@@ -326,7 +326,13 @@ func TestFileSARLifecycle(t *testing.T) {
 		t.Errorf("GetSAR returned a live reference: stored report mutated")
 	}
 
-	// The filing is sealed into the audit chain.
+	// The filing is sealed into the audit chain. The audit log
+	// writes asynchronously, so close (drain) before reading the
+	// on-disk files: reading first races the background writer and
+	// flakes under load.
+	if err := al.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	day := time.Now().UTC().Format("2006-01-02")
 	events, _, err := ReadAuditLog(al.Dir(), day)
 	if err != nil {

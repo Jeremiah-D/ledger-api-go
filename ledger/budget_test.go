@@ -351,7 +351,10 @@ func TestBudgetOrthogonalToDailyLimit(t *testing.T) {
 func TestBudgetLowerBelowUsageRejected(t *testing.T) {
 	l := New()
 	mustSetAccountBudget(t, l, "payer", "USD", 1000)
-	at := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	// SetAccountBudget measures usage in the current month, so the
+	// spend must land in this month too — a fixed 2026-10 fixture
+	// goes stale the moment the calendar rolls past October.
+	at := time.Now().UTC()
 	if _, _, err := postSpend(t, l, "e1", "payer", 600, at); err != nil {
 		t.Fatalf("post 600: %v", err)
 	}

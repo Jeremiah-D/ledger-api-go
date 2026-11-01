@@ -3,6 +3,7 @@ package ledger
 import (
 	"errors"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 )
@@ -130,6 +131,9 @@ func TestAmendInstallmentPlanFirstDueAtSweepHonorsNewDate(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("entries = %d, want 3", len(entries))
 	}
+	// Entries() ranges a map, so order is nondeterministic: sort
+	// by ID before indexing positionally.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	first := entries[0]
 	if first.ID != "installment/ip-first-due-sweep/1" || first.AmountCents != 333 ||
 		!first.CreatedAt.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
@@ -238,6 +242,9 @@ func TestAmendInstallmentPlanFirstDueAtEarlierThanPosted(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("entries = %d, want 3", len(entries))
 	}
+	// Entries() ranges a map, so order is nondeterministic: sort
+	// by ID (period order) before indexing positionally.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	if !entries[0].CreatedAt.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) ||
 		!entries[1].CreatedAt.Equal(time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)) ||
 		!entries[2].CreatedAt.Equal(time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)) {
