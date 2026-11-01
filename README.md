@@ -4422,6 +4422,28 @@ event; a real revision is audited as `installment_currency_amended`
 (previous and new currencies, posted-period count). (Payments fintech:
 installment governance.)
 
+**Principal amendment (LG-284):** `AmendInstallmentPlanPrincipal`
+revises a live plan's principal in place, alongside the rule (LG-264),
+first-due-date (LG-265), and currency (LG-266) amendments: only
+active or overdue plans with zero posted periods may be amended
+(completed or settled_early plans fail closed with
+`ErrInstallmentBadTransition`, and so do plans that have already
+posted a period — moving the principal then would restate journaled
+history, which is out of scope); the new principal reuses the
+creation gate, so a non-positive principal fails with
+`ErrInvalidInstallmentAmount`. Only PrincipalCents changes — payer,
+payee, period count, rule, first due date, currency, legs, status,
+and posted periods are untouched. Period amounts are derived live
+from principal and period count (floor division, final period absorbs
+the remainder), so the new principal governs every period from the
+next sweep and the periods still sum to exactly the new principal;
+with zero posted periods there is no posted history to reconcile.
+Amending to the current principal is a no-op that emits no audit
+event; a real revision is audited as
+`installment_principal_amended` (previous and new principals,
+posted-period count, always zero). (Payments fintech: installment
+governance.)
+
 ### Installment late fees (LG-150)
 
 Overdue money is free money for the payer — unless the plan opts in:
