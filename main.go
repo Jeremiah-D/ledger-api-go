@@ -9149,6 +9149,53 @@ func (s *server) handleAmendInvoiceAmount(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, amended)
 }
 
+// amendInvoiceAccountRequest is the body of POST /invoices/{id}/account:
+// the new payer account. An absent account decodes to "", which
+// AmendInvoiceAccount rejects with ErrInvalidInvoice (422).
+type amendInvoiceAccountRequest struct {
+	Account string `json:"account"`
+}
+
+// handleAmendInvoiceAccount implements POST /invoices/{id}/account
+// (LG-283): revises an open, unpaid invoice's payer account. Returns
+// the amended invoice.
+func (s *server) handleAmendInvoiceAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invoice id required"})
+		return
+	}
+	var req amendInvoiceAccountRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	amended, err := s.ledgerFor(r).AmendInvoiceAccountCtx(actx, id, ledger.AccountID(req.Account))
+	if err != nil {
+		// ErrInvalidInvoice is not an invoice-register error, so
+		// it has no writeInvoiceError mapping: an empty account is
+		// a well-formed request the ledger cannot apply (422),
+		// not a malformed field (400) — the same treatment the
+		// amount endpoint gives its value-gate error.
+		if errors.Is(err, ledger.ErrInvalidInvoice) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		if !writeInvoiceError(w, err) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, amended)
+}
+
 // handleSweepOverdueInvoices implements POST /invoices/sweep-overdue:
 // moves every issued/partial invoice past its due date to overdue and
 // returns their IDs.
@@ -11045,6 +11092,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /invoices/{id}/memo", s.handleAmendInvoiceMemo)
 	mux.HandleFunc("POST /invoices/{id}/currency", s.handleAmendInvoiceCurrency)
 	mux.HandleFunc("POST /invoices/{id}/amount", s.handleAmendInvoiceAmount)
+	mux.HandleFunc("POST /invoices/{id}/account", s.handleAmendInvoiceAccount)
 	mux.HandleFunc("POST /invoices/sweep-overdue", s.handleSweepOverdueInvoices)
 	mux.HandleFunc("POST /accounts/{id}/suspend", s.handleSuspendAccount)
 	mux.HandleFunc("POST /accounts/{id}/resume", s.handleResumeAccount)

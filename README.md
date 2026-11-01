@@ -7570,7 +7570,7 @@ appear in entries, the audit chain, or the version counter — but they
 drive the collections workflow that dunning escalates on.
 
 - **Lifecycle** (Go API: `IssueInvoice` / `ApplyPayment` / `VoidInvoice` /
-  `SweepOverdueInvoices` / `AmendInvoiceDueDate` / `AmendInvoiceMemo` / `AmendInvoiceCurrency`, or the `POST /invoices*` endpoints): an invoice
+  `SweepOverdueInvoices` / `AmendInvoiceDueDate` / `AmendInvoiceMemo` / `AmendInvoiceCurrency` / `AmendInvoiceAmount` / `AmendInvoiceAccount`, or the `POST /invoices*` endpoints): an invoice
   opens as `issued`; `ApplyPayment` retires open invoices **FIFO** — the
   oldest invoice is paid first, a partially covered invoice becomes
   `partial`, a fully covered one becomes `paid`, and any amount beyond
@@ -7621,6 +7621,22 @@ drive the collections workflow that dunning escalates on.
   so a payment now retires the invoice against the new face value.
   Amending to the current amount is a no-op; the change is audited
   as `invoice_amount_amended` and does not bump the ledger version.
+  `AmendInvoiceAccount` (`POST /invoices/{id}/account`, LG-283)
+  re-points an open invoice's payer account — only an invoice that
+  has received no payment can be amended: a paid or partially paid
+  invoice is rejected (`422`, the settled cents belong to the old
+  payer, and moving the invoice would hang them on the new
+  account's name), a voided invoice is rejected (`422`, not open);
+  the new account must be non-empty (`422` otherwise, the same gate
+  as at issue — existence is not checked, at issue or on amendment);
+  only the account moves (amount, paid amount, currency, due date,
+  memo, and status are untouched), the per-account invoice index
+  moves with it, and the new account governs the next
+  `ApplyPayment`, `ListInvoices` filter, and dunning evaluation, so
+  a payment from the old account no longer sees the invoice.
+  Amending to the current account is a no-op; the change is audited
+  as `invoice_account_amended` (both accounts in the event) and does
+  not bump the ledger version.
 - **Dunning 衔接**: open invoices past due feed the collections
   escalation directly — an overdue invoice is a FIFO lot aged from its
   due date, so a `(account, currency)` with a dunning policy escalates

@@ -245,6 +245,78 @@ func TestInvoiceAmendCurrencyHTTP(t *testing.T) {
 	}
 }
 
+func TestInvoiceAmendAccountHTTP(t *testing.T) {
+	srv := httptest.NewServer(newRouter(ledger.New()))
+	defer srv.Close()
+
+	// inv-open is issued to acme; inv-p2 lives on its own account so
+	// the FIFO apply retires it alone, leaving it paid; inv-part is
+	// partially paid on acme.
+	postJSON(t, srv.URL+"/invoices",
+		`{"id":"inv-open","account":"acme","currency":"USD","amount_cents":1000,"issued_at":"2026-10-01T00:00:00Z","due_date":"2026-10-31T00:00:00Z"}`)
+	postJSON(t, srv.URL+"/invoices",
+		`{"id":"inv-void","account":"acme","currency":"USD","amount_cents":1000,"issued_at":"2026-10-01T00:00:00Z","due_date":"2026-10-31T00:00:00Z"}`)
+	postJSON(t, srv.URL+"/invoices",
+		`{"id":"inv-p2","account":"other","currency":"USD","amount_cents":1000,"issued_at":"2026-10-01T00:00:00Z","due_date":"2026-10-31T00:00:00Z"}`)
+	postJSON(t, srv.URL+"/invoices",
+		`{"id":"inv-part","account":"acme","currency":"USD","amount_cents":2000,"issued_at":"2026-09-01T00:00:00Z","due_date":"2026-10-31T00:00:00Z"}`)
+	postJSON(t, srv.URL+"/invoices/apply",
+		`{"account":"other","currency":"USD","amount_cents":1000}`)
+	postJSON(t, srv.URL+"/invoices/apply",
+		`{"account":"acme","currency":"USD","amount_cents":500}`)
+	postJSON(t, srv.URL+"/invoices/inv-void/void", "")
+
+	// Happy path: the payer moves, everything else stays.
+	code, body := postJSON(t, srv.URL+"/invoices/inv-open/account",
+		`{"account":"globex"}`)
+	if code != 200 {
+		t.Fatalf("amend account: status=%d body=%v, want 200", code, body)
+	}
+	if body["account"] != "globex" || body["status"] != "issued" || body["amount_cents"] != float64(1000) {
+		t.Fatalf("amend body = %v, want account globex / issued / 1000 cents", body)
+	}
+
+	// Unknown invoice: 404.
+	code, _ = postJSON(t, srv.URL+"/invoices/nope/account",
+		`{"account":"globex"}`)
+	if code != 404 {
+		t.Fatalf("amend unknown: status=%d, want 404", code)
+	}
+	// Paid invoice: 422 (same rejection as voiding a paid invoice).
+	code, _ = postJSON(t, srv.URL+"/invoices/inv-p2/account",
+		`{"account":"globex"}`)
+	if code != 422 {
+		t.Fatalf("amend paid: status=%d, want 422", code)
+	}
+	// Partially paid invoice: 422 — the settled cents belong to
+	// the old payer.
+	code, _ = postJSON(t, srv.URL+"/invoices/inv-part/account",
+		`{"account":"globex"}`)
+	if code != 422 {
+		t.Fatalf("amend partial: status=%d, want 422", code)
+	}
+	// Voided invoice: 422.
+	code, _ = postJSON(t, srv.URL+"/invoices/inv-void/account",
+		`{"account":"globex"}`)
+	if code != 422 {
+		t.Fatalf("amend voided: status=%d, want 422", code)
+	}
+	// Missing account: 422 (an amendment names the payer
+	// explicitly, no default).
+	code, _ = postJSON(t, srv.URL+"/invoices/inv-open/account", `{}`)
+	if code != 422 {
+		t.Fatalf("amend missing account: status=%d, want 422", code)
+	}
+
+	// No-op: amending to the account it already carries is 200 and
+	// leaves the invoice unchanged.
+	code, body = postJSON(t, srv.URL+"/invoices/inv-open/account",
+		`{"account":"globex"}`)
+	if code != 200 || body["account"] != "globex" {
+		t.Fatalf("amend same account: status=%d body=%v, want 200 globex", code, body)
+	}
+}
+
 func TestInvoiceSweepOverdueHTTP(t *testing.T) {
 	srv := httptest.NewServer(newRouter(ledger.New()))
 	defer srv.Close()
