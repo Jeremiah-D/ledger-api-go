@@ -4444,6 +4444,28 @@ event; a real revision is audited as
 posted-period count, always zero). (Payments fintech: installment
 governance.)
 
+**Period-count amendment (LG-285):** `AmendInstallmentPlanNumPeriods`
+revises a live plan's period count in place, alongside the rule (LG-264),
+first-due-date (LG-265), currency (LG-266), and principal (LG-284)
+amendments: only active or overdue plans with zero posted periods may be
+amended (completed or settled_early plans fail closed with
+`ErrInstallmentBadTransition`, and so do plans that have already posted
+a period — moving the period count then would restate journaled
+history, which is out of scope); the new count reuses the creation
+gate, so a count below 1 fails with `ErrInvalidInstallmentPeriods`.
+Only NumPeriods changes — payer, payee, principal, rule, first due
+date, currency, legs, status, and posted periods are untouched. Period
+amounts are derived live from principal and period count (floor
+division, final period absorbs the remainder) and due dates from the
+live first due date and rule, so the new count governs every period
+from the next sweep and the periods still sum to exactly the principal
+over exactly the new number of periods; with zero posted periods there
+is no posted history to reconcile. Amending to the current period
+count is a no-op that emits no audit event; a real revision is audited
+as `installment_num_periods_amended` (previous and new period counts,
+posted-period count, always zero). (Payments fintech: installment
+governance.)
+
 ### Installment late fees (LG-150)
 
 Overdue money is free money for the payer — unless the plan opts in:
