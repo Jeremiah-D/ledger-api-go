@@ -5002,7 +5002,19 @@ basis-points cap (default 10%, `WithRateOverrideMaxDeviationBps`,
 checked at proposal and re-checked at approval — a market that moved in
 between blocks the approval), and every override auto-expires
 (per-call TTL, default one hour via `WithRateOverrideTTL`;
-`ExpireRateOverrides` sweeps lapsed overrides). While active, the pair's
+`ExpireRateOverrides` sweeps lapsed overrides). Both guardrails can
+also be revised at runtime without rebuilding the ledger:
+`SetRateOverrideTTL` installs a new default lifetime (a non-positive
+TTL is rejected, never silently re-installed) and
+`SetRateOverrideMaxDeviationBps` installs a new cap (a negative cap is
+rejected; there is no upper bound); only later proposals stamp the new
+TTL, while a tightened cap also re-checks pending approvals at once —
+already-active overrides are never repriced and run out on their stored
+`ExpiresAt`. Each revision lands one
+`fx_rate_override_ttl_amended` /
+`fx_rate_override_max_deviation_bps_amended` audit event; the
+guardrails do not ride snapshots, so a restored ledger is back on the
+one-hour / 1000 bps defaults and must be re-set. While active, the pair's
 FX transfers convert at the override price; each conversion emits an
 `fx_rate_overridden` audit event binding the transfer to the override's
 provenance (proposer, approver, reason, both rates, the measured
