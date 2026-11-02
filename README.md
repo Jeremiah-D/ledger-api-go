@@ -7429,7 +7429,13 @@ curl -s -X POST localhost:8080/compliance/sar/draft \
   subsequent drafts, never rewrites a filed report, and is audited
   as `sar_velocity_warn_ratio_amended`; it does not ride snapshots
   either, so a restored ledger comes back on the 0.8 default until
-  re-set.
+  re-set. The rapid-movement window and ratio (window > 0, ratio in
+  (0, 1]) can likewise be revised live with
+  `SetSARRapidMovement(window, ratio)` — it governs only
+  subsequent drafts, never rewrites a filed report, and is audited
+  as `sar_rapid_movement_amended`; it does not ride snapshots
+  either, so a restored ledger comes back on the 4h / 0.8 defaults
+  until re-set.
 - `ledger_sar_drafts_total` / `ledger_sar_filed_total` count drafts and
   filings.
 
