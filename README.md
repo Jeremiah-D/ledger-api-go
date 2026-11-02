@@ -7435,7 +7435,12 @@ curl -s -X POST localhost:8080/compliance/sar/draft \
   subsequent drafts, never rewrites a filed report, and is audited
   as `sar_rapid_movement_amended`; it does not ride snapshots
   either, so a restored ledger comes back on the 4h / 0.8 defaults
-  until re-set.
+  until re-set. The reporting entity can likewise be revised live
+  with `SetSARReportingEntity(entity)` — it governs only subsequent
+  drafts, never rewrites a filed report, and is audited as
+  `sar_reporting_entity_amended`; an empty entity restores the
+  default omission, and it does not ride snapshots either, so a
+  restored ledger comes back with the field omitted until re-set.
 - `ledger_sar_drafts_total` / `ledger_sar_filed_total` count drafts and
   filings.
 
