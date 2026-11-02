@@ -153,6 +153,41 @@ func TestSetRateOverrideMaxDeviationBpsNoOpWritesNoAudit(t *testing.T) {
 	}
 }
 
+func TestRateOverrideCapRevisionNeverRepricesActiveOverride(t *testing.T) {
+	l, _ := mustOverrideLedger(t)
+	mustSetRate(t, l, "USD", "EUR", 108, 100) // market 1.08
+
+	// Active at 1.00: 740.74 bps over the market.
+	activeOverride(t, l, "USD", "EUR", 100, 100, 30*time.Minute)
+	before, _ := l.GetRateOverride("USD", "EUR")
+	if before.Status != RateOverrideStatusActive {
+		t.Fatalf("override = %q, want active", before.Status)
+	}
+
+	// Tightening the cap far below the active price's deviation
+	// must not touch the live override: it runs out on its stored
+	// ExpiresAt, unrepriced.
+	if err := l.SetRateOverrideMaxDeviationBps(100); err != nil {
+		t.Fatalf("SetRateOverrideMaxDeviationBps(100): %v", err)
+	}
+	after, _ := l.GetRateOverride("USD", "EUR")
+	if after != before {
+		t.Errorf("active override changed by cap revision:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+func TestSetRateOverrideMaxDeviationBpsHasNoUpperBound(t *testing.T) {
+	l := New()
+	// Construction rejects only negatives; the runtime path
+	// invents no 10000 bps ceiling.
+	if err := l.SetRateOverrideMaxDeviationBps(20000); err != nil {
+		t.Errorf("SetRateOverrideMaxDeviationBps(20000): want nil, got %v", err)
+	}
+	if l.rateOverrideMaxDeviationBps != 20000 {
+		t.Errorf("rateOverrideMaxDeviationBps = %d, want 20000", l.rateOverrideMaxDeviationBps)
+	}
+}
+
 func TestRateOverrideConfigAmendAuditAndSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	al, err := NewAuditLog(dir)
