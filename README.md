@@ -503,7 +503,13 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
 - Reviews can carry an opt-in expiry (`LEDGER_REVIEW_EXPIRY`, e.g.
   `"24h"`): `POST /transfers/reviews/expire` — or the background worker
   (`LEDGER_REVIEW_SWEEP_INTERVAL`) — auto-rejects lapsed reviews so
-  frozen funds can never strand in dual-control limbo.
+  frozen funds can never strand in dual-control limbo. The lifetime can
+  be revised at runtime with `SetReviewExpiry` (a non-positive lifetime
+  disables auto-expiry): the new lifetime governs every review created
+  after the call, while already-pending reviews keep the `ExpiresAt`
+  stamped at their creation; the revision lands one
+  `review_expiry_amended` audit event and rides the `review_expiry`
+  config line through snapshots.
 - **Stalled-review escalation (LG-232):** an opt-in policy
   (`SetPendingReviewEscalationConfig`, enabled plus a threshold age)
   pages reviews that sit pending past the threshold: the sweep emits
