@@ -7423,7 +7423,13 @@ curl -s -X POST localhost:8080/compliance/sar/draft \
   drafts, never rewrites a filed report, and is audited as
   `sar_structuring_amended`; like other structural revisions it has
   no HTTP endpoint, and it does not ride snapshots, so a restored
-  ledger comes back on the 0.75 / 3 defaults until re-set.
+  ledger comes back on the 0.75 / 3 defaults until re-set. The
+  velocity warning band (ratio in (0, 1)) can likewise be revised
+  live with `SetSARVelocityWarnRatio(ratio)` — it governs only
+  subsequent drafts, never rewrites a filed report, and is audited
+  as `sar_velocity_warn_ratio_amended`; it does not ride snapshots
+  either, so a restored ledger comes back on the 0.8 default until
+  re-set.
 - `ledger_sar_drafts_total` / `ledger_sar_filed_total` count drafts and
   filings.
 
