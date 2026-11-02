@@ -3304,7 +3304,19 @@ entries, no outbox event — but it lands one
 `max_transfer_chunk_cents_amended` audit event carrying
 `previous_chunk_cents` and `chunk_cents`, and the amended cap rides
 the `max_transfer_chunk_cents` snapshot line like a construction-time
-cap. There is no HTTP endpoint for the revision.
+cap. There is no HTTP endpoint for the revision. The per-chunk fee
+mode revises the same way: `ledger.SetSplitFeePerChunk` (or the `Ctx`
+twin, which attributes the audit event to the operator via
+`ContextWithActor`) switches per-chunk fee resolution on or off in
+place, and only transfers posted after the call are fee'd under the
+new mode — splits already committed keep their journaled fee legs,
+and an explicit `FeeCents` is always charged once per transfer
+whatever the mode. Amending to the current mode is a silent no-op.
+The revision is structural — no version bump, no journal entries,
+no outbox event — but it lands one `split_fee_per_chunk_amended`
+audit event carrying `previous_enabled` and `enabled`, and the
+amended mode rides the `split_fee_per_chunk` snapshot line like a
+construction-time mode. There is no HTTP endpoint for the revision.
 
 ```go
 l := ledger.New(ledger.WithMaxTransferChunkCents(100000)) // $1,000 cap
