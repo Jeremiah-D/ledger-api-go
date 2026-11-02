@@ -83,7 +83,8 @@ type FXRateProvider interface {
 // WithFXRateProvider installs the opt-in market FX rate provider the
 // FX-rate watch polls on its interval (see StartFXRateWatch). A nil
 // provider — the default — disables provider refreshes entirely: the
-// watcher keeps its static-table behavior with zero change.
+// watcher keeps its static-table behavior with zero change. To swap
+// the provider at runtime, use SetFXRateProvider (LG-289).
 func WithFXRateProvider(p FXRateProvider) Option {
 	return func(l *Ledger) {
 		l.fxRateProvider = p
@@ -96,7 +97,12 @@ func WithFXRateProvider(p FXRateProvider) Option {
 // stopped by it. Called from FXRateWatch.tick; a no-op when the ledger
 // has no provider.
 func (l *Ledger) refreshFXRatesFromProvider(ctx context.Context, now time.Time) {
+	// Read live under a read lock: SetFXRateProvider (LG-289) writes
+	// this field under the write lock while watch ticks run
+	// concurrently, so an unlocked read would race the swap.
+	l.mu.RLock()
 	p := l.fxRateProvider
+	l.mu.RUnlock()
 	if p == nil {
 		return
 	}

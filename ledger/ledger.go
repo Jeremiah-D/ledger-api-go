@@ -1352,7 +1352,9 @@ type Ledger struct {
 	// fx_provider.go, LG-74): the FX-rate watch polls it on its
 	// interval and installs quotes through the SetFXRateRat write
 	// path. Nil — the default — disables provider refreshes and the
-	// watcher keeps its static-table behavior unchanged.
+	// watcher keeps its static-table behavior unchanged. Swappable
+	// at runtime with SetFXRateProvider (LG-289); the watch reads
+	// the live field on every tick, never a captured copy.
 	// fxRateRefreshes / fxRateMoves / fxRateProviderFails count
 	// provider quote installs, price moves (fx_rate_moved), and fetch
 	// failures (fx_rate_provider_failed). In-memory only — they do not

@@ -174,11 +174,14 @@ type FXRateWatch struct {
 	warningThreshold time.Duration
 	onAlert          func([]FXRateAlert)
 
-	// provider is the opt-in market FX rate adapter (see fx_provider.go,
-	// LG-74): read from the ledger at start. Nil disables provider
-	// refreshes and the tick is exactly the static-table behavior. ctx
-	// is the run context passed to the provider's FetchRates.
-	provider FXRateProvider
+	// ctx is the run context passed to the provider's FetchRates.
+	// The provider itself is NOT captured here: every tick reads the
+	// live l.fxRateProvider (LG-289), so a provider swapped at
+	// runtime with SetFXRateProvider governs the very next tick. A
+	// captured copy used to go stale — the watch kept polling the
+	// old source after a swap — and the field retired with that
+	// fix. Nil (no provider) leaves the tick exactly the
+	// static-table behavior.
 	ctx      context.Context
 
 	done     chan struct{}
@@ -206,10 +209,12 @@ type FXRateWatch struct {
 // interval, not immediately, so a freshly started process settles before
 // it scans.
 //
-// When the ledger was built with WithFXRateProvider (see fx_provider.go,
+// When the ledger has an opt-in FX rate provider (see fx_provider.go,
 // LG-74), every tick first refreshes the rate table from the provider
-// before the expiry scan runs. A nil provider leaves the tick exactly
-// the static-table behavior.
+// before the expiry scan runs. The provider is read live from the
+// ledger on every tick, so swapping it at runtime with
+// SetFXRateProvider (LG-289) governs the very next tick. A nil
+// provider leaves the tick exactly the static-table behavior.
 func StartFXRateWatch(ctx context.Context, l *Ledger, interval, warningThreshold time.Duration, onAlert func([]FXRateAlert)) *FXRateWatch {
 	if interval <= 0 {
 		return nil
@@ -219,7 +224,6 @@ func StartFXRateWatch(ctx context.Context, l *Ledger, interval, warningThreshold
 		interval:         interval,
 		warningThreshold: warningThreshold,
 		onAlert:          onAlert,
-		provider:         l.fxRateProvider,
 		ctx:              ctx,
 		done:             make(chan struct{}),
 		seen:             make(map[fxPair]fxWatchMark),
@@ -250,15 +254,16 @@ func (w *FXRateWatch) run(ctx context.Context) {
 // opt-in FX rate provider (see fx_provider.go, LG-74), the tick first
 // refreshes the table from it: provider quotes land through the
 // SetFXRateRat write path before the expiry scan reads the table.
+// The provider is read live from the ledger (LG-289), so a runtime
+// swap governs the next tick; a nil provider skips the refresh
+// inside refreshFXRatesFromProvider.
 func (w *FXRateWatch) tick() {
 	now := time.Now()
-	if w.provider != nil {
-		ctx := w.ctx
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		w.l.refreshFXRatesFromProvider(ctx, now)
+	ctx := w.ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	w.l.refreshFXRatesFromProvider(ctx, now)
 	alerts := w.l.ScanFXRateAlerts(now, w.warningThreshold)
 
 	pairs := make(map[fxPair]bool, len(alerts))

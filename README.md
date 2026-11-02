@@ -4959,7 +4959,14 @@ the quotes through the `SetFXRateRat` write path — the interface is
 defined by the library and implemented by the caller (a market-data
 feed client, a treasury pricing service), mirroring realtime-event-bus's
 `BridgeTransport`. Opt in with `WithFXRateProvider`; nil (the default)
-keeps the static-table behavior byte-for-byte. Per tick: each quote is
+keeps the static-table behavior byte-for-byte. The source can be swapped
+at runtime with `SetFXRateProvider` (nil clears it back to the static
+table): the running watch reads the live provider on every tick, so the
+next tick polls the new source; already-refreshed rates are untouched,
+reinstalling the same instance is a no-op, and the swap lands one
+`fx_rate_provider_replaced` audit event. The provider is a caller-held
+adapter and rides no snapshot row — after a restore it must be re-set.
+Per tick: each quote is
 validated like `SetFXRateRat`; a pair under an active manual override
 keeps the human price (the feed never writes it); an unchanged static
 quote skips the write (no snapshot churn); a moved price is installed
