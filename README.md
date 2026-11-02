@@ -3289,6 +3289,23 @@ rate (floored per chunk; the receipt discloses the summed conversion)
 with every leg keeping its single currency. The chunking config
 round-trips through disaster-recovery snapshots.
 
+The cap itself can be revised at runtime without rebuilding the
+ledger: `ledger.SetMaxTransferChunkCents` (or the `Ctx` twin, which
+attributes the audit event to the operator via `ContextWithActor`)
+installs a new cap in place, and only transfers posted after the call
+are chunked under it — splits already committed keep their journaled
+chunks, and a replayed idempotency key returns the original receipt.
+A negative cap is rejected with `ErrInvalidMaxTransferChunkCents`
+and the previous cap is left untouched (a runtime revision never
+silently normalizes, unlike the construction option, which panics);
+zero disables chunking, and amending to the current cap is a silent
+no-op. The revision is structural — no version bump, no journal
+entries, no outbox event — but it lands one
+`max_transfer_chunk_cents_amended` audit event carrying
+`previous_chunk_cents` and `chunk_cents`, and the amended cap rides
+the `max_transfer_chunk_cents` snapshot line like a construction-time
+cap. There is no HTTP endpoint for the revision.
+
 ```go
 l := ledger.New(ledger.WithMaxTransferChunkCents(100000)) // $1,000 cap
 receipt, err := l.PostTransferSplit(ledger.Transfer{
