@@ -7417,7 +7417,13 @@ curl -s -X POST localhost:8080/compliance/sar/draft \
 - Detector tuning is code-config: `WithSARStructuring(ratio, minCount)`,
   `WithSARVelocityWarnRatio(ratio)`, `WithSARRapidMovement(window,
   ratio)` — all fail fast on invalid values, like every other
-  risk-control option.
+  risk-control option. The structuring tuning (ratio in (0, 1),
+  minCount ≥ 2) can also be revised live with
+  `SetSARStructuring(ratio, minCount)` — it governs only subsequent
+  drafts, never rewrites a filed report, and is audited as
+  `sar_structuring_amended`; like other structural revisions it has
+  no HTTP endpoint, and it does not ride snapshots, so a restored
+  ledger comes back on the 0.75 / 3 defaults until re-set.
 - `ledger_sar_drafts_total` / `ledger_sar_filed_total` count drafts and
   filings.
 
