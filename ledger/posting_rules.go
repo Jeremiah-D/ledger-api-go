@@ -23,8 +23,10 @@ import (
 //
 // A posting rule is deployment config, like the transfer fee policy
 // (see transfer.go): rules are installed at construction with
-// WithPostingRules, validated fail-fast, and cannot be added or removed
-// at runtime. Structural config, like Freeze or SetDailyLimit: rule
+// WithPostingRules, validated fail-fast, and revised at runtime with
+// SetPostingRules (see posting_rules_amend.go), which validates the
+// whole replacement batch and installs it atomically under the write
+// lock. Structural config, like Freeze or SetDailyLimit: rule
 // installation does not bump the journal version, and the rule set
 // round-trips through the disaster-recovery snapshot config record
 // (see snapshot.go).
@@ -325,18 +327,9 @@ func ValidatePostingRule(r PostingRule) (PostingRule, error) {
 // list installs no rules: the ledger posts exactly as before.
 func WithPostingRules(rules []PostingRule) Option {
 	return func(l *Ledger) {
-		seen := make(map[string]bool, len(rules))
-		out := make([]PostingRule, 0, len(rules))
-		for _, r := range rules {
-			nr, err := ValidatePostingRule(r)
-			if err != nil {
-				panic(fmt.Sprintf("ledger: invalid posting rule %q: %v", r.Name, err))
-			}
-			if seen[nr.Name] {
-				panic(fmt.Sprintf("ledger: %v: %q", ErrPostingRuleDuplicateName, nr.Name))
-			}
-			seen[nr.Name] = true
-			out = append(out, nr)
+		out, err := validatePostingRuleSet(rules)
+		if err != nil {
+			panic(fmt.Sprintf("ledger: invalid posting rule set: %v", err))
 		}
 		l.postingRules = out
 	}

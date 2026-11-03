@@ -224,6 +224,14 @@ func (l *Ledger) cloneForDryRunLocked() *Ledger {
 		// payee-verification policy: the dry run's travel-rule gate
 		// must apply the same threshold the real PostTransfer does.
 		travelRulePolicy: l.travelRulePolicy,
+		// The automatic posting rules travel with the twin like the
+		// other structural registries (LG-299): the simulated post
+		// must evaluate the same rules the real PostTransfer /
+		// Post applies, or a dry run would silently drop the rule
+		// legs the real call would book. Deep-copied (slice + each
+		// rule's Legs) so the twin never shares backing arrays
+		// with the live ledger.
+		postingRules: clonePostingRules(l.postingRules),
 	}
 	for k, v := range l.balances {
 		c.balances[k] = v

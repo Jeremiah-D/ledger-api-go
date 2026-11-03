@@ -450,6 +450,22 @@ Semantics:
   panic, mirroring the fee schedule), and round-tripped through the
   disaster-recovery snapshot config. With no rules installed the
   ledger posts exactly as before.
+- **Runtime revision.** `SetPostingRules(rules)` /
+  `SetPostingRulesCtx(ctx, rules)` replaces the whole rule set in
+  place (LG-299): every rule is re-validated and the duplicate-name
+  gate re-checked, validate-all-then-install, so any illegal or
+  duplicate rule rejects the batch and leaves the old set untouched.
+  An empty list clears all rules. Revising to a set deep-equal to the
+  current one (including order) is a no-op with no audit event. Only
+  later transfer/capture/sweep events book legs under the new set;
+  already-posted rule legs are immutable journal entries, and
+  idempotent replays still rebuild from the `/rule:` IDs. The
+  revision is structural — no version bump, no journal entry, no
+  outbox event — and lands one `posting_rules_replaced` audit event
+  with the previous/current rule names and counts; the `Ctx`
+  variant records the operator. The replaced set rides snapshots
+  (restored in name order). Dry runs evaluate the live rule set. No
+  HTTP endpoint.
 - **Metrics.** `ledger_posting_rule_legs_total{rule}` counts committed
   derived legs per rule on `GET /metrics`.
 

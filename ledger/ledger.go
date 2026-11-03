@@ -1401,11 +1401,13 @@ type Ledger struct {
 	// postingRules is the installed automatic posting rules for
 	// transfer/capture/sweep events (see posting_rules.go), in
 	// registration order: rules are deployment config set at
-	// construction with WithPostingRules, validated fail-fast. Empty
-	// by default — a ledger without posting rules posts exactly as
-	// before. Rule installation is structural config, like frozen and
-	// dailyLimits: it does not bump the journal version and it
-	// survives disaster-recovery snapshots.
+	// construction with WithPostingRules, validated fail-fast, and
+	// replaceable at runtime with SetPostingRules (see
+	// posting_rules_amend.go). Empty by default — a ledger without
+	// posting rules posts exactly as before. Rule installation is
+	// structural config, like frozen and dailyLimits: it does not
+	// bump the journal version and it survives disaster-recovery
+	// snapshots.
 	postingRules []PostingRule
 	// postingRuleLegs counts derived posting-rule legs ever committed,
 	// per rule name: the source of truth for
