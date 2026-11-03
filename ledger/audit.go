@@ -229,6 +229,24 @@ type AuditLog struct {
 	// signer seals each flushed line with HMAC-SHA256 (LG-65). Nil
 	// means the log runs unsigned (degraded mode).
 	signer *auditSigner
+	// signMu guards signer, signingKeys and signingGrace (LG-305):
+	// the background writer and Signed() snapshot the signer under
+	// RLock, rotation swaps it under Lock. It is deliberately a
+	// separate mutex from chainMu (hash-chain sealing) and cfgMu
+	// (LG-301 maxBytes/retentionDays) — signing rotation is its own
+	// concern, and the writer must never contend with, or be ordered
+	// behind, chain sealing or config revision.
+	signMu sync.RWMutex
+	// signingKeys is the installed rotation set the live signer was
+	// built from (LG-305): the first non-retired key signs new lines,
+	// retired keys still verify inside grace. Key material lives only
+	// in memory, never on disk. Empty means the log runs unsigned.
+	signingKeys []AuditSigningKey
+	// signingGrace is the retired-key verification window the live
+	// signer was built with (LG-65, default
+	// DefaultAuditSigningGrace); rotation rebuilds the signer with
+	// this same grace.
+	signingGrace time.Duration
 }
 
 // NewAuditLog creates the audit directory (if needed) and starts the
@@ -246,11 +264,11 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 		return nil, fmt.Errorf("ledger: audit log: %w", err)
 	}
 	var signer *auditSigner
+	grace := cfg.signingGrace
+	if grace <= 0 {
+		grace = DefaultAuditSigningGrace
+	}
 	if len(cfg.signingKeys) > 0 {
-		grace := cfg.signingGrace
-		if grace <= 0 {
-			grace = DefaultAuditSigningGrace
-		}
 		s, err := newAuditSigner(cfg.signingKeys, grace)
 		if err != nil {
 			return nil, err
@@ -264,6 +282,12 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 		queue:         make(chan AuditEvent, cfg.queueSize),
 		done:          make(chan struct{}),
 		signer:        signer,
+		// LG-305: the rotation set and grace live with the signer so
+		// a runtime rotation can rebuild it; the stored copy is
+		// deep-copied so the caller's slice can never alias the live
+		// signer.
+		signingKeys:  copyAuditSigningKeys(cfg.signingKeys),
+		signingGrace: grace,
 	}
 	// Recover the hash-chain head from the newest sealed entry on
 	// disk (bounded scan), so a restart continues the chain instead
@@ -290,8 +314,14 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 }
 
 // Signed reports whether the log attaches per-line HMAC signatures
-// (LG-65): false means degraded unsigned mode.
-func (a *AuditLog) Signed() bool { return a.signer != nil }
+// (LG-65): false means degraded unsigned mode. The signer is read
+// under signMu (LG-305): rotation swaps it live, so a lock-free read
+// would race the writer's snapshot.
+func (a *AuditLog) Signed() bool {
+	a.signMu.RLock()
+	defer a.signMu.RUnlock()
+	return a.signer != nil
+}
 
 // Log enqueues an event for asynchronous writing. It never blocks: when
 // the queue is full, or the log is closed, the event is dropped, counted,
@@ -447,12 +477,17 @@ func (a *AuditLog) run() {
 			a.dropped.Add(1)
 			return
 		}
-		if a.signer != nil {
+		// LG-305: snapshot the live signer under signMu.RLock and
+		// sign with the snapshot. A rotation installs a new signer
+		// atomically under signMu.Lock; a line already being flushed
+		// keeps the signer it started with, so rotation only affects
+		// rows flushed afterwards (future-only).
+		if signer := a.snapshotSigner(); signer != nil {
 			// LG-65: seal the canonical line bytes (sig field absent)
 			// under the primary signing key, then re-marshal with the
 			// signature attached. The verifier strips sig and
 			// re-marshals to the identical bytes.
-			sig := a.signer.sign(line)
+			sig := signer.sign(line)
 			ev.Sig = &sig
 			if line, err = json.Marshal(ev); err != nil {
 				a.dropped.Add(1)

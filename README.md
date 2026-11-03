@@ -8354,6 +8354,31 @@ and reason (`corrupt` / `unknown_key` / `key_retired` /
 records an `audit_signing_disabled` alert as its first trail entry, so a
 later verification can tell "never signed" from "signatures stripped".
 
+**Runtime key rotation (LG-305).** `Ledger.RotateAuditSigningKeys(keys)`
+(and the `Ctx` variant, which attributes the operator) installs a new
+signing rotation set with no downtime — no restart, no gap in which the
+old keys govern. The first non-retired key of the new set signs
+subsequent lines; old keys absent from the new set are automatically
+carried as retired keys, so offline verification with the full set
+(new + retired) still verifies all history rows. The rotation is
+audited as `audit_signing_keys_rotated` carrying `previous_key_ids` /
+`new_key_ids` / `retired_key_ids` — key ids only, never key material —
+and the rotation event itself is signed by the new primary. Invalid
+sets are rejected with `ErrInvalidAuditSigningKeys` and leave the old
+set untouched: empty sets, all-retired sets, duplicate or empty ids,
+empty key material, and a key id that already exists with different
+key bytes. Rotating to the current set is a no-op with no audit event.
+An unsigned ledger rotates into signing (`Signed()` flips true; old
+unsigned rows stay counted, not failed). Key material never lands on
+disk — retired keys live only in the in-memory signer — and a restart
+restores the env values, so the operator must sync
+`LEDGER_AUDIT_SIGNING_KEYS` for a rotation to persist. Two honest
+boundaries: offline verification takes an explicit key set, so the
+operator must assemble the full set from the rotation event's three id
+groups (passing only the new keys makes old rows report
+`unknown_key`); and `GET /audit/export`'s manifest signature still
+reads the env keys, not the rotated set.
+
 ### Domain event outbox (`ledger/outbox.go`) — `GET /events`
 
 The audit log answers "who did what, when". The outbox answers "what

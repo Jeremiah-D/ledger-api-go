@@ -109,22 +109,29 @@ func newAuditSigner(keys []AuditSigningKey, grace time.Duration) (*auditSigner, 
 		return nil, fmt.Errorf("ledger: audit signing grace must be >= 0, got %v", grace)
 	}
 	byID := make(map[string]*AuditSigningKey, len(keys))
-	primary := &keys[0]
+	var primary *AuditSigningKey
 	for i := range keys {
 		k := &keys[i]
 		if _, dup := byID[k.ID]; dup {
 			return nil, fmt.Errorf("ledger: duplicate audit signing key id %q", k.ID)
 		}
+		// Every key registers, not just the ones before the primary:
+		// an earlier version broke out of this loop at the first
+		// non-retired key, so keys listed after the primary never
+		// entered byID and their rows verified as unknown_key. That
+		// only went unnoticed because existing rotation sets listed
+		// retired keys first (LG-305: a rotation installs
+		// [new primary, old retired...], so the retired keys sit
+		// after the primary and must still verify).
 		byID[k.ID] = k
-		if k.RetiredAt.IsZero() {
+		if primary == nil && k.RetiredAt.IsZero() {
 			primary = k
-			break
 		}
 	}
 	// Every key retired: sign with the last one listed rather than
 	// failing open — the operator explicitly configured keys, and an
 	// unsigned line would be worse than a line signed by a retired key.
-	if !primary.RetiredAt.IsZero() {
+	if primary == nil {
 		primary = &keys[len(keys)-1]
 	}
 	return &auditSigner{primary: primary, byID: byID, grace: grace}, nil
