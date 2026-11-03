@@ -7202,6 +7202,28 @@ curl -s -X POST localhost:8080/entries/tsa-anchor
   pinned cert, token signatures verify against the token's own embedded
   certificate and are honestly reported with `"trusted":false` — the
   timestamp is TSA-signed either way, but not anchored to *your* TSA.
+- The trust anchor can be rotated at runtime without restarting:
+  `Ledger.SetTSATrustCert(cert)` (or `SetTSATrustCertCtx` for operator
+  attribution) installs a new trust certificate. The certificate it
+  replaces is retired, not forgotten: it is recorded in
+  `tsa_retired_certs.jsonl` in the audit directory (subject, serial,
+  SHA-256 fingerprint, PEM, retirement time) before the live
+  certificate swaps, so every anchor countersigned under the old
+  certificate keeps verifying — `TimestampAnchorStatus` stays
+  `trusted`/`verified` and the Reconcile anchor health stays green
+  across the rotation, and a restart reloads the retired table from
+  the audit directory. A token naming a signer that is neither the
+  live certificate nor a retired one still fails closed. Installing a
+  nil certificate, or one past its `NotAfter`, is rejected and leaves
+  the current certificate untouched; re-installing the live
+  certificate is a no-op. Each rotation lands one
+  `tsa_trust_cert_rotated` audit event carrying previous/current
+  subjects, serials, and fingerprints only — never the certificate
+  PEM. `Ledger.TSATrustCertFingerprint()` reports the SHA-256 hex of
+  the live certificate's DER. Rotation changes no ledger version,
+  journal entry, or outbox event, and the TSA endpoint itself is a
+  separate concern (changing where timestamps come from does not
+  affect which signers are trusted).
 - A background worker (`LEDGER_TSA_INTERVAL`, e.g. `"1h"`) re-anchors
   the head on a cadence; the first tick happens after one full interval.
   Anchoring is idempotent for an unchanged head. TSA outages never block

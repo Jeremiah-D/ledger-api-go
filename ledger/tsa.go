@@ -840,6 +840,12 @@ type tsaAnchorState struct {
 	loaded    bool
 	trustCert *x509.Certificate
 	tsaURL    string
+	// retiredTrustCerts holds the trust certificates rotated out
+	// (LG-302): public certificates only, never private key material.
+	// Anchors countersigned under a retired certificate keep
+	// verifying against this table; a token naming an unknown signer
+	// still fails closed.
+	retiredTrustCerts []retiredTSATrustCert
 }
 
 // WithTSAURL configures the timestamp authority endpoint for periodic
@@ -903,6 +909,11 @@ func (l *Ledger) ensureTSAAnchorsLoaded() {
 		}
 		t.anchors = append(t.anchors, a)
 	}
+	// The retired-trust-certificate table (tsa_retired_certs.jsonl,
+	// LG-302) rides the same lazy load: a restart recovers the
+	// rotated-out certificates from the audit directory, so anchors
+	// countersigned under an old certificate keep verifying.
+	t.retiredTrustCerts = loadRetiredTSATrustCerts(filepath.Join(dir, retiredTSATrustCertsFileName))
 }
 
 func appendTSAAnchorLine(dir string, a TimestampAnchor) error {
@@ -1121,13 +1132,23 @@ func (l *Ledger) TimestampAnchorStatus() TimestampAnchorStatus {
 // to the trust anchor), its imprint must equal the recorded head hash,
 // and the recorded (seq, headHash) must still match the live chain — a
 // rewritten journal fails here. Callers must hold l.mu (read or write).
+//
+// The trust anchor is resolved per anchor by the token signer's
+// SHA-256 fingerprint (LG-302): the live trust certificate first, then
+// the retired-trust-certificate table, so anchors countersigned under
+// a rotated-out certificate keep verifying. A token naming an unknown
+// signer still fails closed, in the pre-rotation error shape. With no
+// trust certificate configured at all — live or retired — tokens
+// verify against their own embedded certificate, as before.
 func (l *Ledger) verifyTimestampAnchorsLocked() error {
 	t := &l.tsa
 	t.mu.Lock()
 	anchors := make([]TimestampAnchor, len(t.anchors))
 	copy(anchors, t.anchors)
-	trust := t.trustCert
+	live := t.trustCert
+	retired := append([]retiredTSATrustCert(nil), t.retiredTrustCerts...)
 	t.mu.Unlock()
+	trustPinned := live != nil || len(retired) > 0
 	var prevSeq uint64
 	for i, a := range anchors {
 		if i > 0 && a.Seq <= prevSeq {
@@ -1144,6 +1165,22 @@ func (l *Ledger) verifyTimestampAnchorsLocked() error {
 			return fmt.Errorf("tsa: anchor %d: bad head_hash", i)
 		}
 		copy(want[:], hb)
+		var trust *x509.Certificate
+		if trustPinned {
+			tok, err := parseTimestampToken(raw)
+			if err != nil {
+				return fmt.Errorf("tsa: anchor %d: token verification failed: %w", i, err)
+			}
+			signer, err := tok.signerCert()
+			if err != nil {
+				return fmt.Errorf("tsa: anchor %d: token verification failed: %w", i, err)
+			}
+			matched, ok := tsaTrustCertFor(tsaTrustCertFingerprint(signer), live, retired)
+			if !ok {
+				return fmt.Errorf("tsa: anchor %d: token verification failed: %w", i, errors.New("tsa: token signer is not the configured trust anchor"))
+			}
+			trust = matched
+		}
 		if _, err := VerifyTimestampToken(raw, want, trust); err != nil {
 			return fmt.Errorf("tsa: anchor %d: token verification failed: %w", i, err)
 		}
