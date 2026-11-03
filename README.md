@@ -2612,7 +2612,7 @@ ordinary journal row (own audit-chain link, version bump, full `Post`
 gates, no rules cascade, no dual-control, dormant stop skipped) with the
 memo `accrual:overdraft-interest`, reversible via `ReverseAccrual`.
 
-#### Funds transfer pricing (Go API: `SetFtpCurve` / `FtpRateBps` / `FtpPreview` / `ChargeFtp`)
+#### Funds transfer pricing (Go API: `SetFtpCurve` / `SetFtpAccounts` / `FtpRateBps` / `FtpPreview` / `ChargeFtp`)
 
 Internal funding priced like a market: business units with a funding
 shortfall pay the treasury pool for funding; units with surplus funding
@@ -2628,7 +2628,17 @@ effects. Curves are versioned (every `SetFtpCurve` bumps the version,
 stamps `SetAt`, and emits an `ftp_curve_set` audit event — the version
 on each charge names the curve that priced it), and curves plus the
 internal counterparties (`WithFtpAccounts`) round-trip through
-snapshots. Charges are system adjusting entries: full `Post` gates, own
+snapshots. The counterparties can be revised at runtime with
+`SetFtpAccounts` (or `SetFtpAccountsCtx` for operator attribution):
+the new triple governs later previews and charges only, already-booked
+charges keep their legs, an invalid triple is rejected with
+`ErrInvalidFtpAccounts` and leaves the old triple untouched, there is
+no way to clear the accounts (the zero triple fails validation, so an
+unconfigured ledger stays fail-closed), and revising to the current
+triple is a no-op with no audit event. A real revision is structural
+config — no version bump, no journal entry, no outbox event — and lands
+one `ftp_accounts_amended` audit event carrying the previous and new
+pool/expense/revenue accounts. Charges are system adjusting entries: full `Post` gates, own
 audit-chain link, no rules cascade, no dual-control. The charge is
 `floor(|gap| * rateBps / 10000 * tenorMonths / 12)` cents, overflow-safe;
 a dust charge that rounds to zero books nothing. `Reconcile` discloses
