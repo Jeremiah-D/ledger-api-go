@@ -4840,6 +4840,16 @@ account is rejected with `400` before anything is recorded
 (fail-closed); a zero spread (mid-only rate, active override, or dust)
 books no leg.
 
+The ledger-wide income account is revisable at runtime:
+`SetFXIncomeAccount(a)` (and `SetFXIncomeAccountCtx` with per-call
+operator attribution) swaps it in place — an empty account clears it,
+an account equal to the FX clearing account is rejected, and revising
+to the current value is a no-op. The next cross-currency transfer
+credits its spread leg to the new account (a transfer's own
+`fx_income_account` still wins); already-journaled legs are untouched,
+and the change is audited as `fx_income_account_amended`. The amended
+value rides snapshots like the original.
+
 The receipt's `fx` field discloses `direction`, the mid, the full
 two-sided quote, `spread_bps` (exact `big.Rat`), `spread_cents`, and
 `fx_income_account`; the `transfer` audit event seals the same detail.
