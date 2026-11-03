@@ -8576,6 +8576,26 @@ Delivery contract, stated honestly:
   grace period, so in-flight payloads signed with the old key stay
   verifiable. Rotate at runtime via the Go API
   (`dispatcher.RotateKey(endpoint, newID, newSecret)`).
+- The four delivery knobs are revisable at runtime without
+  re-registering the endpoint (LG-304, `ledger.SetWebhookDeliveryPolicy`
+  / `SetWebhookDeliveryPolicyCtx`): pass a partial
+  `WebhookDeliveryPolicy` (`MaxAttempts`, `InitialBackoff`,
+  `MaxBackoff`, `HTTPTimeout` — nil fields keep the live value) and
+  only the knobs you name move. The revision is future-only — a
+  delivery already in flight keeps the policy it started with — and
+  is validated merged (a bad merged value is rejected with the live
+  policy untouched, never silently normalized); an all-nil or
+  same-value revision is a no-op with no audit event. Every real
+  revision is audited as `webhook_delivery_policy_retuned` (endpoint
+  plus `previous_*`/`current_*` per changed field, durations in
+  nanoseconds), bumps neither the version nor the audit chain, and
+  writes no journal entry or outbox event. There is no HTTP endpoint
+  for it. The URL, the event filter, the keys, the enabled gate, and
+  the queue size are not revisable here (`RotateKey` owns keys,
+  `SetEnabled` owns the gate; the queue capacity is fixed at
+  construction). A revision affects every tenant sharing the
+  dispatcher. (Payments fintech / backend engineering: outbound
+  webhook delivery governance.)
 - `GET /webhooks/deliveries` queries recent delivery records
   (`event_seq`, `endpoint`, `attempts`, `status`, `last_error`, `at`),
   latest first, with `?endpoint=`, `?status=pending|delivered|failed`,

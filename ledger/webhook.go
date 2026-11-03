@@ -645,7 +645,13 @@ func (e *webhookEndpoint) run() {
 // outcome updates the delivery record; an exhausted delivery counts
 // one webhook failure. It never touches the ledger: the worker holds
 // no ledger lock, so a slow endpoint cannot stall Post/Transfer.
+//
+// The delivery runs under the policy snapshotted at entry (LG-304):
+// a SetDeliveryPolicy revision mid-delivery never changes the
+// backoff, the attempt budget, or the client of a delivery that
+// already started — only the next delivery reads the new values.
 func (e *webhookEndpoint) deliver(ev OutboxEvent) {
+	snap := e.deliverySnapshot()
 	body, err := json.Marshal(ev)
 	if err != nil {
 		// OutboxEvent is JSON-safe by construction; a marshal failure
@@ -672,10 +678,10 @@ func (e *webhookEndpoint) deliver(ev OutboxEvent) {
 		EventSeq: ev.Seq, Endpoint: e.cfg.Name,
 		Status: WebhookDeliveryPending, At: time.Now().UTC(),
 	})
-	backoff := e.cfg.InitialBackoff
+	backoff := snap.initialBackoff
 	for attempt := 1; ; attempt++ {
 		e.d.updateRecord(rec, func(r *DeliveryRecord) { r.Attempts = attempt })
-		status, perr := e.post(ev, body, sig, keyID)
+		status, perr := e.post(ev, body, sig, keyID, snap.client)
 		if perr == nil && status >= 200 && status < 300 {
 			e.d.updateRecord(rec, func(r *DeliveryRecord) {
 				r.Status = WebhookDeliveryDelivered
@@ -687,7 +693,7 @@ func (e *webhookEndpoint) deliver(ev OutboxEvent) {
 		e.d.failedAttempts.Add(1)
 		lastErr := describeDeliveryFailure(status, perr)
 		retryable := perr != nil || status == http.StatusTooManyRequests || status >= 500
-		if !retryable || attempt >= e.cfg.MaxAttempts {
+		if !retryable || attempt >= snap.maxAttempts {
 			e.d.updateRecord(rec, func(r *DeliveryRecord) {
 				r.Status = WebhookDeliveryFailed
 				r.LastError = lastErr
@@ -705,15 +711,16 @@ func (e *webhookEndpoint) deliver(ev OutboxEvent) {
 			return
 		}
 		backoff *= 2
-		if backoff > e.cfg.MaxBackoff {
-			backoff = e.cfg.MaxBackoff
+		if backoff > snap.maxBackoff {
+			backoff = snap.maxBackoff
 		}
 	}
 }
 
-// post sends one signed delivery attempt. It returns the HTTP status
-// (0 on transport failure) and the transport error, if any.
-func (e *webhookEndpoint) post(ev OutboxEvent, body []byte, sig, keyID string) (int, error) {
+// post sends one signed delivery attempt with the given client (the
+// snapshotted one — see deliver). It returns the HTTP status (0 on
+// transport failure) and the transport error, if any.
+func (e *webhookEndpoint) post(ev OutboxEvent, body []byte, sig, keyID string, client *http.Client) (int, error) {
 	req, err := http.NewRequestWithContext(e.ctx, http.MethodPost, e.cfg.URL, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
@@ -723,7 +730,7 @@ func (e *webhookEndpoint) post(ev OutboxEvent, body []byte, sig, keyID string) (
 	req.Header.Set("X-Ledger-Key-Id", keyID)
 	req.Header.Set("X-Ledger-Event-Type", ev.Type)
 	req.Header.Set("X-Ledger-Event-Seq", fmt.Sprintf("%d", ev.Seq))
-	resp, err := e.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
