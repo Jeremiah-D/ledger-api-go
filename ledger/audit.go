@@ -199,6 +199,14 @@ type AuditLog struct {
 	// ApplyAuditRetention deletes whole audit files older than the
 	// window. 0 means unlimited retention.
 	retentionDays int
+	// cfgMu guards maxBytes and retentionDays (LG-301): both are
+	// runtime-revisable via Ledger.SetAuditLogMaxBytes /
+	// SetAuditLogRetentionDays while the background writer (run) and
+	// the retention sweep read them live. It is deliberately a
+	// separate mutex from chainMu, which only serializes hash-chain
+	// sealing at enqueue — config reads must never contend with, or
+	// be ordered behind, chain sealing.
+	cfgMu sync.RWMutex
 	// retentionDeletions counts audit files deleted by retention
 	// sweeps; synced into ledger_audit_retention_deletions_total on
 	// every /metrics scrape.
@@ -424,7 +432,10 @@ func (a *AuditLog) run() {
 
 	write := func(ev AuditEvent) {
 		day := ev.Timestamp.UTC().Format("2006-01-02")
-		if f == nil || day != curDay || curSize >= a.maxBytes {
+		// The cap is read live under cfgMu (LG-301): a revision takes
+		// effect on the next write, with no forced immediate rotation
+		// of a file that already exceeds the new cap.
+		if f == nil || day != curDay || curSize >= a.MaxBytes() {
 			rotate(day)
 		}
 		if f == nil {

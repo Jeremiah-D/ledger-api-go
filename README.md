@@ -8275,7 +8275,12 @@ unaffected.
 
 Files rotate daily (UTC, `audit-2006-01-02.jsonl`) and on the size cap
 (default 100 MiB, `LEDGER_AUDIT_MAX_BYTES`); rotated files are gzipped in
-the background (`audit-2006-01-02.jsonl.gz`). Filenames are never reused,
+the background (`audit-2006-01-02.jsonl.gz`). The cap is revisable at
+runtime via `ledger.Ledger.SetAuditLogMaxBytes` (LG-301): the new cap
+takes effect on the next written event — a current file that already
+exceeds a tightened cap is not force-rotated, the next write rotates
+it — and the revision is recorded as an `audit_log_max_bytes_amended`
+event. Filenames are never reused,
 so a `.jsonl` and its `.gz` twin always carry identical events.
 `ledger.ReadAuditLog(dir, "2006-01-02")` reads a day's files (plain and
 gzipped, in order) and skips malformed lines — a damaged audit file never
@@ -8648,7 +8653,13 @@ At startup the server runs one retention sweep
 (`ledger.AuditLog.ApplyAuditRetention`, also callable periodically —
 it is idempotent): whole audit files whose UTC day is strictly older
 than `(today - retentionDays)` are deleted, plain `.jsonl` and `.gz`
-copies alike. Inside the retention window files are append-only (WORM)
+copies alike. The window is revisable at runtime via
+`ledger.Ledger.SetAuditLogRetentionDays` (LG-301): the setter runs a
+sweep synchronously under the new window, so the revision takes effect
+immediately instead of waiting for the next restart, and the revision
+is recorded as an `audit_log_retention_days_amended` event (a sweep
+failure returns an error while the new window stays installed).
+Inside the retention window files are append-only (WORM)
 — the sweep never modifies a file, only deletes whole ones past the
 cutoff. Files whose day cannot be parsed from the filename are never
 deleted, and today's active file is never a candidate.
@@ -9411,11 +9422,13 @@ Environment:
 - `LEDGER_AUDIT_MAX_BYTES` — caps a single audit file in bytes (default
   `104857600` = 100 MiB). Past the cap the writer rotates to a new file;
   rotated files are gzipped in the background. Unset or invalid means the
-  default.
+  default. Revisable at runtime via `Ledger.SetAuditLogMaxBytes` (LG-301).
 - `LEDGER_AUDIT_RETENTION_DAYS` — the audit-log retention window in whole
   days (see "Audit log retention" above): whole audit files older than the
   window are deleted by a sweep at startup, recorded as an
-  `audit_retention_deleted` event in the trail itself. Unset or `0` means
+  `audit_retention_deleted` event in the trail itself. Revisable at runtime
+  via `Ledger.SetAuditLogRetentionDays` (LG-301), which sweeps synchronously
+  under the new window. Unset or `0` means
   unlimited retention; a negative or non-integer value fails startup fast.
 - `LEDGER_ANCHOR_KEY` — the Ed25519 key for external audit-chain
   anchoring (see above): hex of a 32-byte seed or a 64-byte private key.

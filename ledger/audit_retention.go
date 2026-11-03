@@ -62,8 +62,14 @@ func WithAuditLogRetentionDays(n int) AuditLogOption {
 }
 
 // RetentionDays reports the configured retention window in days, or 0
-// for unlimited retention.
-func (a *AuditLog) RetentionDays() int { return a.retentionDays }
+// for unlimited retention. The value is read live under cfgMu (LG-301):
+// a runtime revision via Ledger.SetAuditLogRetentionDays is visible to
+// the next caller immediately.
+func (a *AuditLog) RetentionDays() int {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.retentionDays
+}
 
 // RetentionDeletions reports how many audit-log files the retention
 // sweep has deleted on this log. The HTTP layer syncs it into
@@ -103,10 +109,15 @@ func (a *AuditLog) RetentionDeletions() uint64 { return a.retentionDeletions.Loa
 // The sweep is idempotent: rerunning it deletes whatever an earlier run
 // left behind and reports only what it deleted this time.
 func (a *AuditLog) ApplyAuditRetention(now time.Time) (deleted []string, err error) {
-	if a.retentionDays <= 0 {
+	// Snapshot the window once, under cfgMu (LG-301): a concurrent
+	// runtime revision mid-sweep must not move the cutoff or the
+	// recorded window underneath this run — the sweep deletes
+	// exactly under the window it started with.
+	retentionDays := a.RetentionDays()
+	if retentionDays <= 0 {
 		return nil, nil
 	}
-	cutoffDay := now.UTC().Truncate(24 * time.Hour).AddDate(0, 0, -a.retentionDays).Format("2006-01-02")
+	cutoffDay := now.UTC().Truncate(24 * time.Hour).AddDate(0, 0, -retentionDays).Format("2006-01-02")
 	today := now.UTC().Format("2006-01-02")
 
 	files, err := listAuditFiles(a.dir)
@@ -153,7 +164,7 @@ func (a *AuditLog) ApplyAuditRetention(now time.Time) (deleted []string, err err
 		Details: map[string]any{
 			"deleted_files":  names,
 			"cutoff_day":     cutoffDay,
-			"retention_days": a.retentionDays,
+			"retention_days": retentionDays,
 			// last_seals attests the chain at the cut: each deleted
 			// file's last sealed hash ("" when the file held no
 			// sealed entries). Deleting old files truncates the
