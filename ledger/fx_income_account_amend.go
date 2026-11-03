@@ -42,10 +42,12 @@ import (
 //     accounts would book a self-leg. The post-time gate already
 //     rejects that state; the revision gate rejects it early, at
 //     amendment time. l.fxAccount has no runtime revision entry, so
-//     the comparison stays valid for the ledger's lifetime. No
-//     account-existence check is made at revision time, matching
-//     construction: WithFXIncomeAccount does not check existence
-//     either.
+//     the comparison stays valid: the gate reads the live l.fxAccount
+//     at revision time, and SetFXAccount (LG-297) rejects the mirror
+//     install from the other side, so the two accounts can never be
+//     made equal through either revision entry. No account-existence
+//     check is made at revision time, matching construction:
+//     WithFXIncomeAccount does not check existence either.
 //   - Revising to the current value is a no-op: no state change, no
 //     audit event. The no-op check runs before the clearing-account
 //     gate, so re-setting the live value never errors even if the

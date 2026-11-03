@@ -4850,6 +4850,16 @@ credits its spread leg to the new account (a transfer's own
 and the change is audited as `fx_income_account_amended`. The amended
 value rides snapshots like the original.
 
+The ledger-wide clearing account is likewise revisable at runtime:
+`SetFXAccount(a)` (and `SetFXAccountCtx` with per-call operator
+attribution) swaps it in place — an empty account clears it, an
+account equal to the FX spread-income account is rejected, and
+revising to the current value is a no-op. The next cross-currency
+transfer settles its clearing legs through the new account (a
+transfer's own `fx_account` still wins); already-journaled legs are
+untouched, and the change is audited as `fx_account_amended`. The
+amended value rides snapshots like the original.
+
 The receipt's `fx` field discloses `direction`, the mid, the full
 two-sided quote, `spread_bps` (exact `big.Rat`), `spread_cents`, and
 `fx_income_account`; the `transfer` audit event seals the same detail.
