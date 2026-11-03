@@ -12776,7 +12776,7 @@ func main() {
 	if tsaURL := os.Getenv("LEDGER_TSA_URL"); tsaURL != "" {
 		if interval, ok := tsaAnchorInterval(); ok {
 			authority := &tsaMetricsAuthority{
-				inner:   &ledger.RFC3161Client{URL: tsaURL},
+				ledger:  srv.ledger,
 				metrics: srv.metrics,
 			}
 			anchorer := ledger.StartTimestampAnchoring(ctx, srv.ledger, interval, authority, func(anchor ledger.TimestampAnchor) {
@@ -13051,13 +13051,27 @@ func reportSweepInterval() (time.Duration, bool) {
 // outcomes in the server metrics. Failures are additionally recorded
 // as `tsa_anchor_failed` audit events by the worker itself (the
 // degraded alert); the counter here feeds /metrics scraping.
+//
+// It holds the ledger, not a frozen client (LG-303): the TSA endpoint
+// is re-sourced at runtime via Ledger.SetTSAURL, so every Timestamp
+// call resolves the live Ledger.TSAURL() fresh and constructs a new
+// RFC3161Client for it. A frozen client would keep stamping against
+// the startup endpoint after a migration while the operator believed
+// the worker had followed. An empty URL returns
+// ErrTSAURLNotConfigured, which the worker treats on its existing
+// degraded path (tsa_anchor_failed audit event, retry next tick).
 type tsaMetricsAuthority struct {
-	inner   ledger.TimestampAuthority
+	ledger  *ledger.Ledger
 	metrics *Metrics
 }
 
 func (a *tsaMetricsAuthority) Timestamp(ctx context.Context, digest [32]byte) (ledger.TimestampToken, error) {
-	tok, err := a.inner.Timestamp(ctx, digest)
+	tsaURL := a.ledger.TSAURL()
+	if tsaURL == "" {
+		a.metrics.TSAAnchorFailuresTotal.Add(1)
+		return ledger.TimestampToken{}, ledger.ErrTSAURLNotConfigured
+	}
+	tok, err := (&ledger.RFC3161Client{URL: tsaURL}).Timestamp(ctx, digest)
 	if err != nil {
 		a.metrics.TSAAnchorFailuresTotal.Add(1)
 	}

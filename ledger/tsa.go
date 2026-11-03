@@ -839,7 +839,17 @@ type tsaAnchorState struct {
 	skipped   int
 	loaded    bool
 	trustCert *x509.Certificate
-	tsaURL    string
+	// tsaURL is the configured timestamp authority endpoint. It is
+	// an atomic.Pointer[string], not a plain string under mu
+	// (LG-303): the worker's resolving authority reads the live
+	// endpoint on every Timestamp call, and AnchorTimestamp holds
+	// tsa.mu across that call — a mutex-guarded read there would
+	// deadlock against the in-flight anchoring. (This toolchain's
+	// sync/atomic has no atomic.String, so the pointer form carries
+	// the value; a nil pointer means unset.) Load keeps the endpoint
+	// readable lock-free while the setter still swaps it atomically
+	// under l.mu -> tsa.mu alongside its audit event.
+	tsaURL atomic.Pointer[string]
 	// retiredTrustCerts holds the trust certificates rotated out
 	// (LG-302): public certificates only, never private key material.
 	// Anchors countersigned under a retired certificate keep
@@ -848,10 +858,19 @@ type tsaAnchorState struct {
 	retiredTrustCerts []retiredTSATrustCert
 }
 
+// tsaURLValue returns the configured timestamp authority endpoint,
+// or "" when unset (a nil pointer means no endpoint was configured).
+func (t *tsaAnchorState) tsaURLValue() string {
+	if p := t.tsaURL.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
 // WithTSAURL configures the timestamp authority endpoint for periodic
 // anchoring (see LEDGER_TSA_URL). Empty disables TSA anchoring.
 func WithTSAURL(url string) Option {
-	return func(l *Ledger) { l.tsa.tsaURL = url }
+	return func(l *Ledger) { l.tsa.tsaURL.Store(&url) }
 }
 
 // WithTSATrustCert pins the TSA trust anchor: VerifyTimestampToken and
@@ -979,7 +998,7 @@ func (l *Ledger) AnchorTimestamp(ctx context.Context, authority TimestampAuthori
 
 	t := &l.tsa
 	t.mu.Lock()
-	tsaURL := t.tsaURL
+	tsaURL := t.tsaURLValue()
 	if n := len(t.anchors); n > 0 {
 		if last := t.anchors[n-1]; last.Seq == seq && last.HeadHash == headHex && last.TSAURL == tsaURL {
 			// Idempotent re-anchor of an unchanged head: nothing new
@@ -1075,12 +1094,11 @@ type TimestampAnchorStatus struct {
 }
 
 // TSAURL returns the configured timestamp authority endpoint, or ""
-// when TSA anchoring is unconfigured.
+// when TSA anchoring is unconfigured. It reads the atomic endpoint
+// (LG-303) and takes no lock, so the worker's resolving authority
+// may call it while AnchorTimestamp holds tsa.mu.
 func (l *Ledger) TSAURL() string {
-	t := &l.tsa
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.tsaURL
+	return l.tsa.tsaURLValue()
 }
 
 // TimestampAnchorStatus returns the TSA anchoring status: configuration,
@@ -1100,8 +1118,8 @@ func (l *Ledger) TimestampAnchorStatus() TimestampAnchorStatus {
 		cp := t.anchors[n-1]
 		latest = &cp
 	}
-	configured := t.tsaURL != ""
-	url := t.tsaURL
+	url := l.tsa.tsaURLValue()
+	configured := url != ""
 	trusted := t.trustCert != nil
 	t.mu.Unlock()
 	st := TimestampAnchorStatus{
@@ -1126,12 +1144,34 @@ func (l *Ledger) TimestampAnchorStatus() TimestampAnchorStatus {
 	return st
 }
 
+// tsaAnchorSeqOK reports whether anchor a may follow prev in a journal.
+// Sequence numbers never go backwards; an equal sequence is a
+// legitimate re-anchor of the same head against a different TSA
+// (LG-303: the idempotency key includes the TSA URL, so a re-sourced
+// endpoint re-anchors the head it has not witnessed yet). The
+// re-anchor must name the same head, a different endpoint, and a
+// genuinely different token — an exact duplicate line with an edited
+// URL is still a rewrite and fails.
+func tsaAnchorSeqOK(prev, a TimestampAnchor) bool {
+	if a.Seq > prev.Seq {
+		return true
+	}
+	if a.Seq < prev.Seq {
+		return false
+	}
+	return a.HeadHash != "" && a.HeadHash == prev.HeadHash &&
+		a.TSAURL != "" && prev.TSAURL != "" && a.TSAURL != prev.TSAURL &&
+		a.Token != "" && a.Token != prev.Token
+}
+
 // verifyTimestampAnchorsLocked replays every loaded TSA anchor against
-// the live chain and the configured trust anchor: sequence numbers must
-// strictly increase, each token must cryptographically verify (pinned
-// to the trust anchor), its imprint must equal the recorded head hash,
-// and the recorded (seq, headHash) must still match the live chain — a
-// rewritten journal fails here. Callers must hold l.mu (read or write).
+// the live chain and the configured trust anchor: sequence numbers
+// never go backwards (an equal sequence is a same-head re-anchor
+// against a different TSA, LG-303 — see tsaAnchorSeqOK), each token
+// must cryptographically verify (pinned to the trust anchor), its
+// imprint must equal the recorded head hash, and the recorded
+// (seq, headHash) must still match the live chain — a rewritten
+// journal fails here. Callers must hold l.mu (read or write).
 //
 // The trust anchor is resolved per anchor by the token signer's
 // SHA-256 fingerprint (LG-302): the live trust certificate first, then
@@ -1149,12 +1189,17 @@ func (l *Ledger) verifyTimestampAnchorsLocked() error {
 	retired := append([]retiredTSATrustCert(nil), t.retiredTrustCerts...)
 	t.mu.Unlock()
 	trustPinned := live != nil || len(retired) > 0
-	var prevSeq uint64
+	var prev TimestampAnchor
 	for i, a := range anchors {
-		if i > 0 && a.Seq <= prevSeq {
-			return fmt.Errorf("tsa: anchor %d: seq %d not strictly increasing", i, a.Seq)
+		if i > 0 {
+			if a.Seq < prev.Seq {
+				return fmt.Errorf("tsa: anchor %d: seq %d not strictly increasing", i, a.Seq)
+			}
+			if a.Seq == prev.Seq && !tsaAnchorSeqOK(prev, a) {
+				return fmt.Errorf("tsa: anchor %d: seq %d repeats without a new TSA endpoint (same head, different TSA, different token required)", i, a.Seq)
+			}
 		}
-		prevSeq = a.Seq
+		prev = a
 		raw, err := base64.StdEncoding.DecodeString(a.Token)
 		if err != nil {
 			return fmt.Errorf("tsa: anchor %d: bad token encoding: %w", i, err)
@@ -1204,10 +1249,12 @@ func (l *Ledger) verifyTimestampAnchorsLocked() error {
 // VerifyTimestampAnchors is the offline verification entry point: it
 // replays every anchor in dir/tsa_anchors.jsonl, cryptographically
 // verifying each token against its recorded head hash. Sequence numbers
-// must strictly increase. When trusted != nil the signer must equal the
-// trust anchor and the report is trust-pinned; otherwise each token is
-// verified against its own embedded certificate (reported by the
-// caller via the returned count — see VerifiedTimestamp.Trusted).
+// never go backwards (an equal sequence is a same-head re-anchor
+// against a different TSA, LG-303 — see tsaAnchorSeqOK). When trusted
+// != nil the signer must equal the trust anchor and the report is
+// trust-pinned; otherwise each token is verified against its own
+// embedded certificate (reported by the caller via the returned count
+// — see VerifiedTimestamp.Trusted).
 // The first break names file and line, following the audit-verify
 // convention. This is the "keep the tokens off-site and check them
 // later" workflow: it needs no live ledger, only the anchor journal.
@@ -1218,7 +1265,7 @@ func VerifyTimestampAnchors(dir string, trusted *x509.Certificate) (verified int
 	}
 	defer f.Close()
 	dec := json.NewDecoder(f)
-	var prevSeq uint64
+	var prev TimestampAnchor
 	line := 0
 	for {
 		var a TimestampAnchor
@@ -1232,10 +1279,15 @@ func VerifyTimestampAnchors(dir string, trusted *x509.Certificate) (verified int
 		if a.HeadHash == "" || a.Token == "" {
 			return verified, fmt.Errorf("tsa: %s line %d: anchor missing head_hash/token", tsaAnchorsFileName, line)
 		}
-		if line > 1 && a.Seq <= prevSeq {
-			return verified, fmt.Errorf("tsa: %s line %d: seq %d not strictly increasing", tsaAnchorsFileName, line, a.Seq)
+		if line > 1 {
+			if a.Seq < prev.Seq {
+				return verified, fmt.Errorf("tsa: %s line %d: seq %d not strictly increasing", tsaAnchorsFileName, line, a.Seq)
+			}
+			if a.Seq == prev.Seq && !tsaAnchorSeqOK(prev, a) {
+				return verified, fmt.Errorf("tsa: %s line %d: seq %d repeats without a new TSA endpoint (same head, different TSA, different token required)", tsaAnchorsFileName, line, a.Seq)
+			}
 		}
-		prevSeq = a.Seq
+		prev = a
 		raw, err := base64.StdEncoding.DecodeString(a.Token)
 		if err != nil {
 			return verified, fmt.Errorf("tsa: %s line %d: bad token encoding: %w", tsaAnchorsFileName, line, err)

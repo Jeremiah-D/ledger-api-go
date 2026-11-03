@@ -7224,6 +7224,22 @@ curl -s -X POST localhost:8080/entries/tsa-anchor
   journal entry, or outbox event, and the TSA endpoint itself is a
   separate concern (changing where timestamps come from does not
   affect which signers are trusted).
+- The endpoint itself can be re-sourced at runtime without restarting:
+  `Ledger.SetTSAURL(url)` (or `SetTSAURLCtx` for operator attribution)
+  swaps the endpoint atomically. The background worker resolves the
+  live endpoint on every tick, so the next tick after a re-sourcing
+  dials the new TSA — the worker never holds a frozen startup
+  endpoint — and the manual `POST /entries/tsa-anchor` path reads the
+  live endpoint on every request. An empty, unparsable, non-http(s),
+  or hostless URL is rejected (`ErrInvalidTSAURL`) and the live
+  endpoint is left untouched; re-sourcing to the current URL is a
+  no-op. Each amendment lands one `tsa_url_amended` audit event
+  carrying `previous_url`/`new_url` only, never token material. Old
+  anchors keep their recorded URL and keep verifying (the URL never
+  participates in verification), and the same head is re-anchored
+  against the new TSA, which has not witnessed it yet. A restart
+  restores the `LEDGER_TSA_URL` value; the amendment events stay in
+  the audit trail.
 - A background worker (`LEDGER_TSA_INTERVAL`, e.g. `"1h"`) re-anchors
   the head on a cadence; the first tick happens after one full interval.
   Anchoring is idempotent for an unchanged head. TSA outages never block
