@@ -124,7 +124,15 @@ func (e SignedReconcileExport) VerifySignature(pub ed25519.PublicKey) bool {
 // archives.
 func (l *Ledger) ExportSignedReconcile(now time.Time, opts ReconcileOptions) (SignedReconcileExport, error) {
 	a := &l.anchor
-	if len(a.key) == 0 {
+	// Snapshot the live key under anchorState.mu (LG-300): SetAnchorKey
+	// swaps it under that mutex, so reading it outside would race the
+	// rotation. The snapshot is safe to use after release — the setter
+	// installs a fresh slice and never mutates the old key in place.
+	a.mu.Lock()
+	key := a.key
+	keyID := a.keyID
+	a.mu.Unlock()
+	if len(key) == 0 {
 		return SignedReconcileExport{}, ErrAnchorKeyNotConfigured
 	}
 	report, err := l.ReconcileWithOptions(now, opts)
@@ -135,7 +143,7 @@ func (l *Ledger) ExportSignedReconcile(now time.Time, opts ReconcileOptions) (Si
 	if err != nil {
 		return SignedReconcileExport{}, err
 	}
-	sig := ed25519.Sign(a.key, ExportSignatureMessage(canonical))
+	sig := ed25519.Sign(key, ExportSignatureMessage(canonical))
 	l.mu.RLock()
 	l.emitAudit(AuditEvent{
 		Op:            "reconcile_export",
@@ -144,7 +152,7 @@ func (l *Ledger) ExportSignedReconcile(now time.Time, opts ReconcileOptions) (Si
 		VersionBefore: report.Version,
 		VersionAfter:  report.Version,
 		Details: map[string]any{
-			"key_id":          a.keyID,
+			"key_id":          keyID,
 			"signature_bytes": len(sig),
 			"fx_applied":      report.FXApplied,
 		},
@@ -153,6 +161,6 @@ func (l *Ledger) ExportSignedReconcile(now time.Time, opts ReconcileOptions) (Si
 	return SignedReconcileExport{
 		Report:    report,
 		Signature: hex.EncodeToString(sig),
-		KeyID:     a.keyID,
+		KeyID:     keyID,
 	}, nil
 }

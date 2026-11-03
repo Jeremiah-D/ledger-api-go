@@ -7153,6 +7153,20 @@ curl -s -X POST localhost:8080/entries/anchor
   64-byte private key; invalid values fail the startup fast). The key
   itself never leaves the process — snapshots, checkpoints, and the audit
   log only ever record the `key_id` (public-key prefix).
+- The key can be rotated at runtime with `Ledger.SetAnchorKey` (or
+  `SetAnchorKeyCtx` for per-call operator attribution): later `Anchor()`
+  calls sign with the new key, and the same head is re-attested under
+  the new `key_id`. The old key's *public* key is recorded in
+  `anchor_retired_keys.jsonl` in the audit directory before the swap,
+  so checkpoints signed before the rotation keep verifying — a
+  checkpoint naming an unknown `key_id` still fails closed. Rotating
+  to the live `key_id` is a no-op; an illegal key (wrong length, or a
+  public half that does not match the seed half) is rejected and the
+  old key stays live. The rotation is audited as `anchor_key_rotated`
+  (previous and current `key_id` only — never key material), bumps
+  neither the ledger version nor the audit chain, and has no HTTP
+  endpoint. A restart recovers the retired public keys from the audit
+  directory, so old checkpoints keep verifying.
 - Anchoring is operator-driven (e.g. from the day-end reconcile job);
   `Anchor()` is idempotent for an unchanged head — re-anchoring without
   new posts returns the existing checkpoint instead of appending a
@@ -9405,8 +9419,10 @@ Environment:
   unlimited retention; a negative or non-integer value fails startup fast.
 - `LEDGER_ANCHOR_KEY` — the Ed25519 key for external audit-chain
   anchoring (see above): hex of a 32-byte seed or a 64-byte private key.
-  Checkpoints land in `LEDGER_AUDIT_DIR` as `checkpoints.jsonl`. Unset
-  means unconfigured; an invalid value fails startup fast.
+  Checkpoints land in `LEDGER_AUDIT_DIR` as `checkpoints.jsonl`; public
+  keys of rotated-out keys land there as `anchor_retired_keys.jsonl`
+  (see `Ledger.SetAnchorKey`). Unset means unconfigured; an invalid
+  value fails startup fast.
 - `LEDGER_OUTBOX_DIR` — enables the domain-event outbox (see above):
   every committed state change is appended as JSONL to this directory,
   one file per UTC day, fsync'd per event. Unset means disabled. The

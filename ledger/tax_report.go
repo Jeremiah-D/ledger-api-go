@@ -297,15 +297,22 @@ func taxReportSigningBytes(r *TaxReport) ([]byte, error) {
 // compliance lie.
 func (l *Ledger) signTaxReport(r *TaxReport) error {
 	a := &l.anchor
-	if len(a.key) == 0 {
+	// Snapshot the live key and KeyID under anchorState.mu (LG-300):
+	// SetAnchorKey swaps them under that mutex, so reading them
+	// outside would race the rotation.
+	a.mu.Lock()
+	key := a.key
+	keyID := a.keyID
+	a.mu.Unlock()
+	if len(key) == 0 {
 		return ErrAnchorKeyNotConfigured
 	}
 	msg, err := taxReportSigningBytes(r)
 	if err != nil {
 		return err
 	}
-	r.KeyID = a.keyID
-	r.Signature = hex.EncodeToString(ed25519.Sign(a.key, msg))
+	r.KeyID = keyID
+	r.Signature = hex.EncodeToString(ed25519.Sign(key, msg))
 	return nil
 }
 

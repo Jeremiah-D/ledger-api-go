@@ -121,17 +121,25 @@ func WithAnchorKey(key ed25519.PrivateKey) Option {
 // checkpoint list and the loaded flag; it never nests inside l.mu (see
 // the lock-order note on verifyAnchorsLocked).
 type anchorState struct {
-	key      ed25519.PrivateKey
-	keyID    string
-	mu       sync.Mutex
-	loaded   bool
-	skipped  int
+	key         ed25519.PrivateKey
+	keyID       string
+	mu          sync.Mutex
+	loaded      bool
+	skipped     int
 	checkpoints []AnchorCheckpoint
+	// retired holds the public keys of rotated-out anchor keys (LG-300):
+	// public keys only, never private key material. Checkpoints signed
+	// under a retired key keep verifying against this table; a
+	// checkpoint naming an unknown KeyID still fails closed.
+	retired []retiredAnchorKey
 }
 
 // ensureCheckpointsLoaded reads checkpoints.jsonl once, lazily, so a
 // ledger opened on an existing audit directory resumes its anchor
-// history. Takes only anchorState.mu.
+// history. The retired-key table (anchor_retired_keys.jsonl, LG-300)
+// rides the same lazy load: a restart recovers the rotated-out public
+// keys from the audit directory, so checkpoints signed under an old
+// key keep verifying. Takes only anchorState.mu.
 func (l *Ledger) ensureCheckpointsLoaded() {
 	a := &l.anchor
 	a.mu.Lock()
@@ -147,6 +155,7 @@ func (l *Ledger) ensureCheckpointsLoaded() {
 	cps, skipped := loadCheckpoints(filepath.Join(dir, checkpointsFileName))
 	a.checkpoints = cps
 	a.skipped = skipped
+	a.retired = loadRetiredAnchorKeys(filepath.Join(dir, retiredAnchorKeysFileName))
 }
 
 // loadCheckpoints reads a checkpoints file, skipping corrupt lines
@@ -240,13 +249,6 @@ func appendCheckpointLine(dir string, cp AnchorCheckpoint) error {
 // returns an error and records nothing in memory.
 func (l *Ledger) Anchor() (AnchorCheckpoint, error) {
 	a := &l.anchor
-	if len(a.key) == 0 {
-		return AnchorCheckpoint{}, ErrAnchorKeyNotConfigured
-	}
-	dir, ok := l.AuditDir()
-	if !ok {
-		return AnchorCheckpoint{}, fmt.Errorf("ledger: anchor requires an audit directory (LEDGER_AUDIT_DIR) as the durable home of checkpoints.jsonl")
-	}
 	l.ensureCheckpointsLoaded()
 	l.mu.RLock()
 	seq := uint64(len(l.chain))
@@ -258,6 +260,17 @@ func (l *Ledger) Anchor() (AnchorCheckpoint, error) {
 	headHex := hex.EncodeToString(head[:])
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// The empty-key check lives under anchorState.mu now (LG-300):
+	// SetAnchorKey swaps the key under this mutex, so reading it
+	// outside would race the rotation. The check still precedes the
+	// audit-directory check, so the error precedence is unchanged.
+	if len(a.key) == 0 {
+		return AnchorCheckpoint{}, ErrAnchorKeyNotConfigured
+	}
+	dir, ok := l.AuditDir()
+	if !ok {
+		return AnchorCheckpoint{}, fmt.Errorf("ledger: anchor requires an audit directory (LEDGER_AUDIT_DIR) as the durable home of checkpoints.jsonl")
+	}
 	if n := len(a.checkpoints); n > 0 {
 		if last := a.checkpoints[n-1]; last.Seq == seq && last.HeadHash == headHex && last.KeyID == a.keyID {
 			return last, nil
@@ -291,26 +304,47 @@ func (l *Ledger) AnchorCheckpoints() []AnchorCheckpoint {
 }
 
 // verifyAnchorsLocked replays every loaded checkpoint against the live
-// chain: sequence numbers must strictly increase, each checkpoint's head
+// chain: sequence numbers must not decrease, each checkpoint's head
 // hash must equal the chain link at its seq, and — when an anchor key is
-// configured — each signature must verify and name this ledger's key.
-// Callers must hold l.mu (read or write); the checkpoint list itself is
-// only read here, and every mutation path takes anchorState.mu without
-// holding l.mu, so the lock order stays l.mu -> anchorState.mu.
+// configured — each signature must verify against the public key named
+// by that checkpoint's KeyID: the live key, or a retired key from the
+// LG-300 table. A checkpoint naming an unknown KeyID fails closed, in
+// the same error shape as before. Callers must hold l.mu (read or
+// write); the verification inputs (live key, KeyID, checkpoint list,
+// retired table) are snapshotted under anchorState.mu at entry, so a
+// concurrent Anchor or SetAnchorKey cannot tear the replay — the lock
+// order stays l.mu -> anchorState.mu.
+//
+// Sequence numbers are non-decreasing rather than strictly increasing:
+// after a key rotation Anchor re-attests the unchanged head under the
+// new KeyID, so the same seq legitimately appears twice — once per
+// key. An equal seq is therefore allowed only when the KeyID differs
+// from the previous checkpoint's; the same seq under the same KeyID is
+// still a duplicated line and fails exactly as before, and a
+// decreasing seq still means the file was reordered.
 //
 // Lock-order audit: Anchor takes l.mu (released), then anchorState.mu;
 // AnchorStatus takes anchorState.mu (released), then l.mu; Reconcile
 // takes l.mu, then anchorState.mu inside ensureCheckpointsLoaded and
-// here. No path holds both in the opposite order.
+// here; SetAnchorKey takes l.mu, then anchorState.mu (and emits its
+// audit event under l.mu). No path holds both in the opposite order.
 func (l *Ledger) verifyAnchorsLocked() error {
 	a := &l.anchor
+	a.mu.Lock()
+	key := a.key
+	keyID := a.keyID
+	checkpoints := append([]AnchorCheckpoint(nil), a.checkpoints...)
+	retired := append([]retiredAnchorKey(nil), a.retired...)
+	a.mu.Unlock()
 	var prev uint64
-	for i, cp := range a.checkpoints {
-		if i > 0 && cp.Seq <= prev {
+	var prevKeyID string
+	for i, cp := range checkpoints {
+		if i > 0 && (cp.Seq < prev || (cp.Seq == prev && cp.KeyID == prevKeyID)) {
 			return fmt.Errorf("ledger: anchor checkpoint %d: seq %d not greater than previous seq %d (checkpoint file reordered or duplicated)",
 				i, cp.Seq, prev)
 		}
 		prev = cp.Seq
+		prevKeyID = cp.KeyID
 		var want [32]byte
 		if cp.Seq > 0 {
 			if cp.Seq > uint64(len(l.chain)) {
@@ -323,8 +357,9 @@ func (l *Ledger) verifyAnchorsLocked() error {
 			return fmt.Errorf("ledger: anchor checkpoint %d: head_hash does not match chain link %d (journal rewritten after anchoring)",
 				i, cp.Seq)
 		}
-		if len(a.key) > 0 {
-			if cp.KeyID != a.keyID {
+		if len(key) > 0 {
+			pub, ok := anchorPublicKeyFor(key, keyID, retired, cp.KeyID)
+			if !ok {
 				return fmt.Errorf("ledger: anchor checkpoint %d: key_id %q is not this ledger's anchor key",
 					i, cp.KeyID)
 			}
@@ -332,7 +367,7 @@ func (l *Ledger) verifyAnchorsLocked() error {
 			var hh [32]byte
 			copy(hh[:], headBytes)
 			sig, _ := hex.DecodeString(cp.Signature)
-			if !ed25519.Verify(a.key.Public().(ed25519.PublicKey), anchorMessage(cp.Seq, hh, cp.AnchoredAt), sig) {
+			if !ed25519.Verify(pub, anchorMessage(cp.Seq, hh, cp.AnchoredAt), sig) {
 				return fmt.Errorf("ledger: anchor checkpoint %d: signature invalid (checkpoint forged or corrupted)",
 					i)
 			}
