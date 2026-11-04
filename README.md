@@ -8643,6 +8643,27 @@ Delivery contract, stated honestly:
   operator. A restart restores the startup defaults — the four knobs
   have no env vars yet, so a revision that must survive a restart
   has to be re-applied. There is no HTTP endpoint for the revision.
+- **Runtime poll-interval retuning.** The idle wait between outbox
+  polls (1s by default) is revisable in place via
+  `(*AuditSink).SetSinkPollInterval` / `SetSinkPollIntervalCtx`
+  (LG-314), without stopping the forwarder: the cursor, the queue
+  order, the counters, the signing secret, and the four delivery
+  knobs all stay put. The revision is future-only — a sleep already
+  in progress keeps running out its old duration (the timer was
+  built when the sleep started) and only the next poll cycle uses
+  the new value, so tightening the interval never hurries an event
+  past the remainder of the sleep the sink is already in. The call
+  returns the pre-revision interval; a non-positive interval is
+  rejected with `ErrInvalidSinkPollInterval` and the live value is
+  untouched (zero is rejected too — a runtime revision never
+  silently normalizes to the default), and a same-value revision is
+  a no-op that writes no audit event. A real revision lands one
+  `sink_poll_interval_retuned` audit event
+  (`previous_poll_interval_ms`/`current_poll_interval_ms`, integer
+  milliseconds); the `Ctx` variant attributes the operator. A
+  restart restores the 1s default — there is no `PollInterval` env
+  var yet, so a revision that must survive a restart has to be
+  re-applied. There is no HTTP endpoint for the revision.
 - **Runtime key rotation.** The signing secret itself is rotatable
   in place via `(*AuditSink).RotateSinkSecret` /
   `RotateSinkSecretCtx` (LG-313), without stopping the forwarder:
@@ -9671,7 +9692,10 @@ Environment:
   (attempts, backoffs, per-attempt timeout) default to 10 attempts
   with 1s backoff doubling to 60s and a 10s timeout, are revisable
   at runtime via `(*AuditSink).SetDeliveryPolicy` (LG-306), and
-  revert to these defaults on restart.
+  revert to these defaults on restart. The idle poll interval
+  defaults to 1s, is revisable at runtime via
+  `(*AuditSink).SetSinkPollInterval` (LG-314), and likewise reverts
+  to 1s on restart — there is no `PollInterval` env var.
 - `LEDGER_AUDIT_SINK_SECRET` — the shared HMAC-SHA256 secret signing
   every webhook delivery (`X-Ledger-Signature: sha256=<hex>`).
   Required when `LEDGER_AUDIT_SINK_URL` is set: a URL without a secret

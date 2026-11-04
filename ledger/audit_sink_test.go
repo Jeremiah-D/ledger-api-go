@@ -31,6 +31,10 @@ type sinkCapture struct {
 	failFirst int
 	failAll   bool
 	delay     time.Duration // per-attempt handler latency (LG-306: timeout tests)
+	// onAttempt, when set, runs inside the handler after the attempt
+	// is recorded and before the response is written — i.e. while the
+	// sink is still blocked in client.Do (LG-314: revise mid-delivery).
+	onAttempt func()
 }
 
 func (c *sinkCapture) handler(w http.ResponseWriter, r *http.Request) {
@@ -46,6 +50,9 @@ func (c *sinkCapture) handler(w http.ResponseWriter, r *http.Request) {
 	c.types = append(c.types, r.Header.Get("X-Ledger-Event-Type"))
 	c.seqs = append(c.seqs, r.Header.Get("X-Ledger-Event-Seq"))
 	c.times = append(c.times, time.Now())
+	if c.onAttempt != nil {
+		c.onAttempt()
+	}
 	if c.failAll || c.failFirst > 0 {
 		if c.failFirst > 0 {
 			c.failFirst--
