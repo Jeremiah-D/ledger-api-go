@@ -1599,6 +1599,11 @@ type Ledger struct {
 	chainPrunedTo   uint64
 	version         uint64        // bumped by every successful Post
 	idempotencyTTL  time.Duration // 0 = never expire idempotency keys
+	// maxHoldDuration caps how far in the future a new hold's
+	// ExpiresAt may lie (see SetMaxHoldDuration, LG-312): 0 =
+	// unlimited, the default. Guarded by mu; live-revised, never
+	// carried by snapshots — a restore returns the default.
+	maxHoldDuration time.Duration
 	pruneInterval   time.Duration // min gap between lazy key sweeps
 	lastKeyPrune    time.Time
 	lastDailyPrune  time.Time // last run of the daily-outflow bucket sweep

@@ -120,6 +120,45 @@ func TestHTTPHoldRejections(t *testing.T) {
 	}
 }
 
+// TestHTTPHoldMaxDuration pins the LG-312 HTTP mapping: with a
+// 1-hour live cap, a hold expiring in 2 hours is a 422 semantic
+// rejection (and rides ledger_hold_rejections_total like
+// insufficient funds), while a hold inside the cap is admitted.
+func TestHTTPHoldMaxDuration(t *testing.T) {
+	l := ledger.New()
+	if _, _, err := l.Post(ledger.JournalEntry{
+		ID:            "fund-card",
+		DebitAccount:  "card",
+		CreditAccount: "equity",
+		AmountCents:   10000,
+		CreatedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("seed Post: %v", err)
+	}
+	if err := l.SetMaxHoldDuration(time.Hour); err != nil {
+		t.Fatalf("SetMaxHoldDuration(1h): %v", err)
+	}
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+
+	over := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	code, _ := postJSON(t, srv.URL+"/holds", fmt.Sprintf(
+		`{"hold_id":"h-cap","account":"card","amount_cents":1000,"expires_at":%q}`, over))
+	if code != http.StatusUnprocessableEntity {
+		t.Errorf("over-cap hold status = %d, want 422", code)
+	}
+
+	within := time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339)
+	code, body := postJSON(t, srv.URL+"/holds", fmt.Sprintf(
+		`{"hold_id":"h-ok","account":"card","amount_cents":1000,"expires_at":%q}`, within))
+	if code != http.StatusCreated {
+		t.Fatalf("within-cap hold status = %d, want 201 (body %v)", code, body)
+	}
+	if body["id"] != "h-ok" {
+		t.Errorf("within-cap hold body = %v, want id h-ok", body)
+	}
+}
+
 func TestHTTPHoldFrozen(t *testing.T) {
 	srv := seedHoldServer(t)
 	defer srv.Close()

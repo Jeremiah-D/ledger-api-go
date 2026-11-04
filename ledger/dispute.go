@@ -51,7 +51,11 @@ import (
 //     review workflow is the correct way to cancel it.
 //   - The freeze hold carries a long expiry (see defaultDisputeHoldTTL)
 //     so an open dispute keeps freezing the funds for the whole
-//     chargeback window. If the hold expires while the dispute is
+//     chargeback window. It is exempt from the LG-312
+//     maximum-hold-duration cap (holdLockedUncapped): the 120-day
+//     freeze is a risk-control action, not an operator-chosen
+//     authorization horizon, and capping it would make dispute
+//     raising fail. If the hold expires while the dispute is
 //     still open, the funds become available again — the dispute
 //     record stays open and resolving it still works (Release is
 //     idempotent), but the freeze guarantee lapsed with the hold.
@@ -271,9 +275,13 @@ func (l *Ledger) RaiseDispute(d Dispute) (dispute Dispute, duplicate bool, err e
 	// Its ID derives deterministically from the dispute ID. The hold
 	// is placed through the lock-held core so the dispute record and
 	// its hold land atomically — a replay above would otherwise be
-	// able to observe a dispute without its hold.
+	// able to observe a dispute without its hold. It goes through
+	// holdLockedUncapped, not holdLocked: the 120-day freeze is a
+	// fixed risk-control action, and the LG-312 maximum-hold-duration
+	// cap must never make dispute raising fail (see
+	// hold_max_duration_amend.go).
 	holdID := disputeHoldIDFor(d.ID)
-	if _, _, err := l.holdLocked(Hold{
+	if _, _, err := l.holdLockedUncapped(Hold{
 		ID:          holdID,
 		Account:     pt.To,
 		AmountCents: d.AmountCents,

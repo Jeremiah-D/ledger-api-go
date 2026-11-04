@@ -3120,9 +3120,11 @@ type createHoldRequest struct {
 // A first-time hold returns 201; a duplicate idempotency key returns 200
 // with the original hold; malformed requests return 400; a hold on a
 // frozen account returns 403; a hold the account's available funds cannot
-// cover returns 422. The currency field is optional and defaults to USD;
-// when given it must be a 3-letter uppercase ISO 4217 code. expires_at is
-// required — authorizations are always time-bound.
+// cover returns 422, as does a hold whose expiry lies past the live
+// maximum hold duration (LG-312, ErrHoldExceedsMaxDuration). The currency
+// field is optional and defaults to USD; when given it must be a
+// 3-letter uppercase ISO 4217 code. expires_at is required —
+// authorizations are always time-bound.
 func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -3163,6 +3165,16 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, ledger.ErrInsufficientAvailableFunds) {
+			s.metrics.HoldRejections.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		// A hold whose expiry lies past the live maximum hold
+		// duration (LG-312) is a 422-class semantic rejection
+		// like insufficient funds, so it rides the same
+		// ledger_hold_rejections_total counter — no separate
+		// counter is needed for this path.
+		if errors.Is(err, ledger.ErrHoldExceedsMaxDuration) {
 			s.metrics.HoldRejections.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return

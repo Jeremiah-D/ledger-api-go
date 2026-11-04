@@ -53,6 +53,17 @@ import (
 //     subsumes it. Unprotected accounts may carry negative balances (the
 //     sign convention), in which case any positive hold fails the
 //     available check.
+//   - A live maximum hold duration (see SetMaxHoldDuration, LG-312)
+//     caps how far in the future a new hold's ExpiresAt may lie:
+//     ExpiresAt strictly after now + max is rejected with
+//     ErrHoldExceedsMaxDuration (422). The cap runs after the
+//     idempotency replay check — a replay reserves nothing new, so
+//     it must not fail on a cap that landed after the original
+//     hold — and before the available-funds check, so a rejected
+//     hold never reserves anything. The dispute freeze hold is
+//     exempt (holdLockedUncapped): its fixed 120-day TTL is a
+//     risk-control freeze, and capping it would block dispute
+//     raising outright.
 //   - Captures are ordinary double-entry postings from the held account
 //     (the payer) to the payee: they run the same frozen and overdraft
 //     checks as Post. Note the reservation is advisory, not a balance
@@ -191,6 +202,8 @@ type CaptureReceipt struct {
 // currency, non-zero ExpiresAt), then the idempotency replay check on the
 // hold namespace (a replay returns the original hold with duplicate ==
 // true and reserves nothing new), then the frozen check, then the
+// maximum-hold-duration check (LG-312: ExpiresAt strictly after now +
+// the live cap is rejected with ErrHoldExceedsMaxDuration), then the
 // available-funds check: the hold is rejected with
 // ErrInsufficientAvailableFunds when balance - active held < amount. The
 // comparison is overflow-safe (see coversCents): a required total that
@@ -212,9 +225,31 @@ func (l *Ledger) Hold(h Hold) (held Hold, duplicate bool, err error) {
 
 // holdLocked is the shared implementation of Hold: see its doc comment
 // for the full contract. Callers must hold l.mu (the write lock).
-// RaiseDispute (see dispute.go) places its freeze hold through here so
-// the dispute record and its hold land atomically under the one lock.
+// Internal callers with an operator-chosen expiry (notably
+// SubmitMultisigOperation, multisig.go) go through here and are
+// capped; the dispute freeze hold uses holdLockedUncapped instead.
 func (l *Ledger) holdLocked(h Hold) (held Hold, duplicate bool, err error) {
+	return l.holdLockedCapped(h, true)
+}
+
+// holdLockedUncapped is holdLocked with the maximum-hold-duration cap
+// (LG-312) switched off. It exists for the dispute freeze hold only:
+// RaiseDispute (dispute.go) places a fixed 120-day risk-control
+// freeze, and capping it would make dispute raising fail the moment
+// an operator set a cap shorter than 120 days. The dispute
+// lifecycle (resolve/expire) bounds the freeze instead, so the cap
+// buys nothing there and can only break the flow. Every other
+// internal caller (notably SubmitMultisigOperation, whose expiry is
+// operator-chosen) goes through holdLocked and is capped.
+func (l *Ledger) holdLockedUncapped(h Hold) (held Hold, duplicate bool, err error) {
+	return l.holdLockedCapped(h, false)
+}
+
+// holdLockedCapped is the shared implementation of Hold and
+// holdLockedUncapped: enforceCap selects whether the LG-312
+// maximum-hold-duration check runs. Callers must hold l.mu (the
+// write lock).
+func (l *Ledger) holdLockedCapped(h Hold, enforceCap bool) (held Hold, duplicate bool, err error) {
 	if h.ID == "" {
 		return Hold{}, false, ErrEmptyHoldID
 	}
@@ -255,11 +290,26 @@ func (l *Ledger) holdLocked(h Hold) (held Hold, duplicate bool, err error) {
 		return Hold{}, false, ErrAccountSuspended
 	}
 
+	// The maximum-hold-duration cap (LG-312): a hold whose expiry
+	// lies strictly after now + the live cap is rejected. The check
+	// runs after the replay and frozen gates — a replay reserves
+	// nothing new, so it must not fail on a cap that landed after
+	// the original hold — and before the available-funds check, so
+	// a rejected hold never reserves anything. The boundary is
+	// inclusive: ExpiresAt exactly at now + max is admitted. The
+	// same now feeds the born-expired reading below, so the cap
+	// decision and the expiry decision can never disagree about
+	// "now". Dispute freeze holds bypass this check entirely (see
+	// holdLockedUncapped).
+	now := time.Now()
+	if enforceCap && l.maxHoldDuration > 0 && h.ExpiresAt.After(now.Add(l.maxHoldDuration)) {
+		return Hold{}, false, ErrHoldExceedsMaxDuration
+	}
+
 	// Holds consume available funds, not raw balance: balance - active
 	// held must cover the amount. For overdraft-protected accounts this
 	// check also guards the zero floor (their balance can never go
 	// below zero), so no separate overdraft check is needed here.
-	now := time.Now()
 	key := accountCurrency{account: h.Account, currency: h.Currency}
 	if !coversCents(l.balances[key], l.heldLocked(h.Account, h.Currency, now), h.AmountCents) {
 		return Hold{}, false, ErrInsufficientAvailableFunds

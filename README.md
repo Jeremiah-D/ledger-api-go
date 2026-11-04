@@ -3554,8 +3554,9 @@ curl -s -X POST localhost:8080/holds/expire
 
 Status codes: `201` first booking / `200` idempotent replay or release;
 `400` malformed request; `403` frozen account; `404` unknown hold;
-`422` insufficient available funds, capture exceeding the hold, or
-capture on a non-active/expired hold.
+`422` insufficient available funds, hold expiry past the live maximum
+hold duration (LG-312), capture exceeding the hold, or capture on a
+non-active/expired hold.
 
 #### Partial captures
 
@@ -3627,6 +3628,35 @@ automatically. The move lands one `hold_amount_amended` audit event
 with the old and new amounts; like the hold itself, an amendment is
 off-journal and bumps neither the version nor the audit chain, and
 the amended amount rides the hold record through snapshots.
+
+#### Maximum hold duration
+
+A hold's expiry is time-bound, but nothing used to bound *how far
+out* it could be — one authorization could lock an account's
+available funds for years. `SetMaxHoldDuration(d)` /
+`SetMaxHoldDurationCtx(ctx, d)` caps the horizon in place (LG-312):
+a hold created afterwards is rejected with `ErrHoldExceedsMaxDuration`
+(`422`, counted by the existing `ledger_hold_rejections_total`) when
+its `expires_at` lies strictly after now + d; an expiry exactly at
+now + d is admitted, and an already-past expiry is still accepted
+but born expired. Zero disables the cap (unlimited, the default);
+a negative duration is rejected with `ErrInvalidMaxHoldDuration`
+and the live value is untouched; revising to the current cap is a
+no-op with no audit event. The cap is future-only: already-placed
+holds keep their own expiry — tightening never expires a live hold
+early and loosening never extends one — and an idempotent replay of
+a pre-cap hold is unaffected by a cap that landed afterwards.
+`MaxHoldDuration()` reads the live value. The revision lands one
+`hold_max_duration_amended` audit event (`previous_max_hold_duration`
+/ `max_hold_duration`, duration strings, Ctx variant records the
+operator); it bumps neither the version nor the audit chain, and
+there is no environment variable or HTTP endpoint. The dispute
+freeze hold is exempt — its fixed 120-day TTL is a risk-control
+action, and capping it would block dispute raising outright — while
+multisig fund-freeze holds stay capped (their expiry is
+operator-chosen). Snapshots carry no hold cap: a disaster-recovery
+restore returns the default (unlimited) and the cap must be
+re-applied.
 
 ### Payment repair queue (支付修复队列，预发出修复)
 
