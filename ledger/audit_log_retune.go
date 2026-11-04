@@ -75,10 +75,10 @@ import (
 //     ledger snapshot): a restart restores the construction-time /
 //     env values, while the amendment events themselves stay in the
 //     audit trail for traceability.
-//   - Explicitly out of scope: QueueSize (the channel capacity is
-//     fixed at construction, audit.go) and signing (key rotation is
-//     its own concern, audit_sign.go). Neither is revisable here, so
-//     this module must not grow a setter for them.
+//   - Explicitly out of scope: QueueSize — the channel capacity is
+//     revisable in audit_queue_size.go (LG-309), and signing (key
+//     rotation is its own concern, audit_sign.go). Neither is
+//     revisable here, so this module must not grow a setter for them.
 //
 // Orthogonality: WithAuditLogMaxBytes / WithAuditLogRetentionDays own
 // construction-time install, LG-137 owns the retention sweep itself,

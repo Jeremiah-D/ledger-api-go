@@ -199,19 +199,55 @@ type AuditLog struct {
 	// ApplyAuditRetention deletes whole audit files older than the
 	// window. 0 means unlimited retention.
 	retentionDays int
-	// cfgMu guards maxBytes and retentionDays (LG-301): both are
+	// cfgMu guards maxBytes, retentionDays, queueSize and pending
+	// (LG-301, LG-309): maxBytes/retentionDays/queueSize are
 	// runtime-revisable via Ledger.SetAuditLogMaxBytes /
-	// SetAuditLogRetentionDays while the background writer (run) and
-	// the retention sweep read them live. It is deliberately a
-	// separate mutex from chainMu, which only serializes hash-chain
-	// sealing at enqueue — config reads must never contend with, or
-	// be ordered behind, chain sealing.
+	// SetAuditLogRetentionDays / SetAuditLogQueueSize while the
+	// background writer (run) and the retention sweep read them live.
+	// It is deliberately a separate mutex from chainMu, which only
+	// serializes hash-chain sealing at enqueue — config reads must
+	// never contend with, or be ordered behind, chain sealing.
 	cfgMu sync.RWMutex
 	// retentionDeletions counts audit files deleted by retention
 	// sweeps; synced into ledger_audit_retention_deletions_total on
 	// every /metrics scrape.
 	retentionDeletions atomic.Uint64
-	queue    chan AuditEvent
+	// queue is the async event channel between ledger operations and
+	// the background writer. Its capacity is queueSize (below): the
+	// writer owns the swap — a revision installs a new channel and the
+	// writer drains the old generation before reading the new one, so
+	// a revision can neither strand buffered events nor reorder them
+	// (LG-309).
+	queue chan AuditEvent
+	// queueSize is the live capacity of queue (LG-309): the
+	// construction-time WithAuditLogQueueSize value, revisable at
+	// runtime via Ledger.SetAuditLogQueueSize. Read it through
+	// QueueSize, never directly: the field moves under cfgMu when the
+	// writer installs a new generation.
+	queueSize int
+	// pending holds events drained out of a previous queue generation
+	// during a shrink (LG-309): when the capacity is revised down,
+	// buffered events are moved here instead of being dropped, and
+	// the writer flushes them — oldest first — before taking new
+	// events from the channel. While pending is non-empty the total
+	// depth (len(pending) + len(queue)) can exceed queueSize, and new
+	// events are dropped by plain channel semantics whenever the
+	// (smaller) new channel is full, until the writer works the
+	// backlog down.
+	pending []AuditEvent
+	// resizeReq carries at most one pending queue-size revision to
+	// the background writer (LG-309): the writer owns the swap, so a
+	// revision is applied at a point where the writer holds no
+	// received event and the old channel can be drained without
+	// reordering or stranding anything. Buffered 1; resizeMu
+	// serializes setters, so a send never blocks on a full channel.
+	resizeReq chan queueResizeRequest
+	// resizeMu serializes queue-size revisions and Close (LG-309): a
+	// revision in flight must finish before Close can stop the
+	// writer, and Close must finish before a revision can take the
+	// closed path — otherwise a swap could race the writer's final
+	// drain.
+	resizeMu sync.Mutex
 	done     chan struct{}
 	wg       sync.WaitGroup
 	gzWg     sync.WaitGroup // in-flight background gzipFile calls
@@ -280,8 +316,13 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 		maxBytes:      cfg.maxBytes,
 		retentionDays: cfg.retentionDays,
 		queue:         make(chan AuditEvent, cfg.queueSize),
-		done:          make(chan struct{}),
-		signer:        signer,
+		// LG-309: the live capacity starts at the construction-time
+		// value and moves only when the writer installs a new queue
+		// generation (setQueueSize / applyQueueResize).
+		queueSize: cfg.queueSize,
+		resizeReq: make(chan queueResizeRequest, 1),
+		done:      make(chan struct{}),
+		signer:    signer,
 		// LG-305: the rotation set and grace live with the signer so
 		// a runtime rotation can rebuild it; the stored copy is
 		// deep-copied so the caller's slice can never alias the live
@@ -350,13 +391,23 @@ func (a *AuditLog) Log(ev AuditEvent) bool {
 		ev.PrevHash = a.chainHead
 	}
 	ev.Hash = sealAuditEvent(ev)
+	// LG-309: the send holds cfgMu.RLock so a concurrent queue-size
+	// revision (which swaps the channel under cfgMu.Lock) either waits
+	// for this send to land in the old channel — where the writer's
+	// drain picks it up — or this send reads the new channel after
+	// the swap. Without the lock a send could land in an abandoned
+	// generation and be lost. The lock is held only for the
+	// non-blocking send attempt, so it can never stall a poster.
+	a.cfgMu.RLock()
 	select {
 	case a.queue <- ev:
 		a.chainHead = ev.Hash
+		a.cfgMu.RUnlock()
 		a.chainMu.Unlock()
 		return true
 	default:
 		a.dropped.Add(1)
+		a.cfgMu.RUnlock()
 		a.chainMu.Unlock()
 		return false
 	}
@@ -372,6 +423,123 @@ func (a *AuditLog) Stats() (written, dropped uint64) {
 // Dir returns the audit directory.
 func (a *AuditLog) Dir() string { return a.dir }
 
+// queueResizeRequest is one pending queue-capacity revision for the
+// background writer (LG-309). done is closed once the new channel is
+// installed; drained events are already in pending by then and are
+// flushed by the writer in order.
+type queueResizeRequest struct {
+	n    int
+	done chan struct{}
+}
+
+// QueueSize reports the current async event-queue capacity, read live
+// under cfgMu. It is the runtime counterpart of the construction-time
+// WithAuditLogQueueSize value (default DefaultAuditQueueSize).
+func (a *AuditLog) QueueSize() int {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.queueSize
+}
+
+// queueChan reads the current queue generation under cfgMu.RLock. The
+// writer calls it once at startup; afterwards it tracks generations
+// through applyQueueResize, never by re-reading mid-generation.
+func (a *AuditLog) queueChan() chan AuditEvent {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.queue
+}
+
+// takePending pops the oldest event drained out of a previous queue
+// generation during a shrink, if any. The writer flushes pending
+// before taking new events from the channel, so shrink survivors keep
+// their place in line.
+func (a *AuditLog) takePending() (AuditEvent, bool) {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	if len(a.pending) == 0 {
+		return AuditEvent{}, false
+	}
+	ev := a.pending[0]
+	a.pending[0] = AuditEvent{} // avoid retaining the sealed entry
+	a.pending = a.pending[1:]
+	if len(a.pending) == 0 {
+		a.pending = nil // release the backing array between revisions
+	}
+	return ev, true
+}
+
+// drainQueueLocked moves every event still buffered in ch into
+// pending, preserving order. Callers must hold cfgMu.Lock: Log sends
+// under cfgMu.RLock, so no event can enter the channel mid-drain, and
+// the writer is the only other consumer — and it is the caller here
+// (applyQueueResize) or has exited (the closed path of setQueueSize).
+func (a *AuditLog) drainQueueLocked(ch chan AuditEvent) {
+	for {
+		select {
+		case ev := <-ch:
+			a.pending = append(a.pending, ev)
+		default:
+			return
+		}
+	}
+}
+
+// applyQueueResize installs a new queue channel of capacity req.n and
+// reports it to the writer. It runs in the writer goroutine, at a
+// select point where the writer holds no received event: the old
+// generation is drained into pending under cfgMu (Log is excluded for
+// the duration, so nothing can enter the old channel mid-drain and no
+// drained event can be overtaken by a new one), then the new channel
+// is installed and the setter is released. The drained events are
+// flushed by the writer's takePending path, in order, before any event
+// taken from the new channel — a shrink therefore loses nothing, and
+// while the backlog drains, new events are dropped by plain channel
+// semantics whenever the (smaller) new channel is full.
+func (a *AuditLog) applyQueueResize(req queueResizeRequest, q chan AuditEvent) chan AuditEvent {
+	a.cfgMu.Lock()
+	a.drainQueueLocked(q)
+	next := make(chan AuditEvent, req.n)
+	a.queue = next
+	a.queueSize = req.n
+	a.cfgMu.Unlock()
+	close(req.done)
+	return next
+}
+
+// setQueueSize installs a new queue capacity and reports the previous
+// value and whether it changed. Callers must validate n > 0 first; the
+// swap itself is unconditional once past the same-value check, so a
+// rejected value leaves the live capacity untouched. A closed log takes
+// the inline path (Close holds resizeMu, so a closed log seen here
+// means the writer has exited and the queue is drained; any residual
+// buffered events move to pending the same way, though with no writer
+// they are never flushed — Close drains the queue, so in practice
+// there are none).
+func (a *AuditLog) setQueueSize(n int) (previous int, changed bool) {
+	a.resizeMu.Lock()
+	defer a.resizeMu.Unlock()
+	a.cfgMu.RLock()
+	previous = a.queueSize
+	closed := a.closed.Load()
+	a.cfgMu.RUnlock()
+	if previous == n {
+		return previous, false
+	}
+	if closed {
+		a.cfgMu.Lock()
+		a.drainQueueLocked(a.queue)
+		a.queue = make(chan AuditEvent, n)
+		a.queueSize = n
+		a.cfgMu.Unlock()
+		return previous, true
+	}
+	req := queueResizeRequest{n: n, done: make(chan struct{})}
+	a.resizeReq <- req
+	<-req.done
+	return previous, true
+}
+
 // AuditDir reports the audit-log directory when a log is attached
 // (WithAuditLog was used). It lets the HTTP layer run hash-chain
 // verification without reaching into the ledger's internals.
@@ -386,6 +554,14 @@ func (l *Ledger) AuditDir() (string, bool) {
 // background gzips to finish (so the file set is stable for readers
 // afterwards), syncs the current file, and returns. It is idempotent.
 func (a *AuditLog) Close() error {
+	// LG-309: serialize with queue-size revisions — a revision in
+	// flight must be applied (and its setter unblocked) before the
+	// writer stops, and no revision may take the closed path while
+	// the writer is still draining. The writer applies a pending
+	// revision from its main loop, which is still running here, so
+	// waiting on resizeMu cannot deadlock.
+	a.resizeMu.Lock()
+	defer a.resizeMu.Unlock()
 	if a.closed.Swap(true) {
 		return nil
 	}
@@ -509,16 +685,34 @@ func (a *AuditLog) run() {
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	// q is the queue generation the writer is draining (LG-309): the
+	// channel is re-read only when the writer itself installs a new
+	// one (applyQueueResize), never mid-generation, so a revision can
+	// neither strand buffered events nor reorder them.
+	q := a.queueChan()
 	for {
-		select {
-		case ev := <-a.queue:
+		// Events drained out of a previous generation during a
+		// shrink are older than anything in the channel: flush them
+		// first, in order, before taking new events.
+		if ev, ok := a.takePending(); ok {
 			write(ev)
+			continue
+		}
+		select {
+		case ev := <-q:
+			write(ev)
+		case req := <-a.resizeReq:
+			q = a.applyQueueResize(req, q)
 		case <-ticker.C:
 			syncFile()
 		case <-a.done:
 			for {
+				if ev, ok := a.takePending(); ok {
+					write(ev)
+					continue
+				}
 				select {
-				case ev := <-a.queue:
+				case ev := <-q:
 					write(ev)
 				default:
 					syncFile()

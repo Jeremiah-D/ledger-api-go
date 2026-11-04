@@ -8350,7 +8350,14 @@ runtime via `ledger.Ledger.SetAuditLogMaxBytes` (LG-301): the new cap
 takes effect on the next written event — a current file that already
 exceeds a tightened cap is not force-rotated, the next write rotates
 it — and the revision is recorded as an `audit_log_max_bytes_amended`
-event. Filenames are never reused,
+event. The queue capacity is likewise revisable at runtime via
+`ledger.Ledger.SetAuditLogQueueSize` (LG-309): a larger capacity takes
+effect immediately for the next burst, while a smaller one never drops
+buffered events — they are drained and flushed in order — and new
+events are dropped by plain channel semantics only while the
+(smaller) new channel is full, until the writer works the backlog
+down; the revision is recorded as an `audit_log_queue_size_amended`
+event (`previous_queue_size` / `queue_size`). Filenames are never reused,
 so a `.jsonl` and its `.gz` twin always carry identical events.
 `ledger.ReadAuditLog(dir, "2006-01-02")` reads a day's files (plain and
 gzipped, in order) and skips malformed lines — a damaged audit file never
