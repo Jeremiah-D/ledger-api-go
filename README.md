@@ -8643,6 +8643,27 @@ Delivery contract, stated honestly:
   operator. A restart restores the startup defaults — the four knobs
   have no env vars yet, so a revision that must survive a restart
   has to be re-applied. There is no HTTP endpoint for the revision.
+- **Runtime key rotation.** The signing secret itself is rotatable
+  in place via `(*AuditSink).RotateSinkSecret` /
+  `RotateSinkSecretCtx` (LG-313), without stopping the forwarder:
+  the cursor, the queue order, the counters, and the delivery policy
+  all stay put, a delivery already in flight keeps the signature it
+  computed at entry (including all its retries), and only the next
+  delivery is signed with the new key. The sink is the signer, not
+  the verifier, so rotation is an atomic value swap — there is no
+  retired-key table and no dual signing. An empty or nil secret is
+  rejected with `ErrInvalidSinkSecret` and the live secret is
+  untouched; a byte-identical secret is a no-op that writes no audit
+  event. A real rotation lands one `sink_secret_rotated` audit event
+  carrying only the previous and current SHA-256 hex prefixes (first
+  12 characters) — never key material. **Order matters: pre-provision
+  the new secret at the downstream (SIEM) before rotating** —
+  deliveries after the rotation are signed with the new key
+  immediately, and a downstream that has not pre-provisioned it
+  fails verification, so those events exhaust their retries into the
+  dead letter. A restart restores the `LEDGER_AUDIT_SINK_SECRET` env
+  value, so update the env var / secret store alongside the rotation
+  for it to persist. There is no HTTP endpoint for the rotation.
 
 `GET /metrics` exposes `ledger_audit_sink_sent_total`,
 `ledger_audit_sink_failed_attempts_total` (network errors and non-2xx
@@ -9655,7 +9676,9 @@ Environment:
   every webhook delivery (`X-Ledger-Signature: sha256=<hex>`).
   Required when `LEDGER_AUDIT_SINK_URL` is set: a URL without a secret
   fails startup fast, because unsigned webhooks can be forged. Never
-  logged.
+  logged. Rotatable at runtime via `(*AuditSink).RotateSinkSecret`
+  (LG-313), but a restart restores this env value — update the env var
+  / secret store alongside any rotation for it to persist.
 - `LEDGER_WEBHOOKS` — enables the outbound signed-webhook dispatcher
   (see above): a JSON array of endpoint objects (`name`, `url`,
   `events`, `secret`/`keys`, plus optional tunables — see
