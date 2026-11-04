@@ -3660,6 +3660,15 @@ operator 补全字段后可重新走完整的 `CreatePayout` 门控重新提交�
   `repair_queue_cap_amended`（`previous_cap` / `cap`，Ctx 变体记操作
   员）；不 bump 版本、不记账、不发 outbox；无环境变量与 HTTP 端点；
   快照不带修复队列，灾备恢复后回默认值 1000，须重设。
+- 存活期（TTL）可运行时修订（LG-311）：`SetRepairTTL(ttl)` /
+  `SetRepairTTLCtx(ctx, ttl)` 就地改每记录 TTL（缺省 7 天；只影响
+  此后入队记录——已 open 记录保留入队时盖戳的 TTL，缩短不提前过
+  期已 park 记录、加长不复活已过期记录，过期为终态；非正值报
+  `ErrInvalidRepairTTL` 且原值不动；同值 no-op 不审计），
+  `RepairTTL()` 读 live 值；审计 `repair_ttl_amended`
+  （`previous_ttl` / `ttl`，duration 字符串，Ctx 变体记操作员）；
+  不 bump 版本、不记账、不发 outbox；无环境变量与 HTTP 端点；
+  快照不带修复队列，灾备恢复后回默认值 7 天，须重设。
 - 审计链：`repair_enqueued`（before 快照）、`repair_resubmitted`
   （before + after，含 `success` 标志）、TTL 路径 `repair_expired`。
 - HTTP：`POST /repairs/{id}/fix`（body `{"fixed_fields": {...}}`，
@@ -3676,7 +3685,9 @@ curl -s -X POST -H 'x-ledger-actor: ops' localhost:8080/repairs/repair-3/fix \
 Go: `ledger.EnqueueRepair(instruction, ledger.RepairReasonMissingField, actor)` /
 `ledger.RepairAndResubmit(id, fixedFields, actor)` / `ledger.GetRepair(id)` /
 `ledger.SweepExpiredRepairs(now)` / `ledger.SetRepairQueueCap(n)` /
-`ledger.SetRepairQueueCapCtx(ctx, n)` / `ledger.RepairQueueCap()`。
+`ledger.SetRepairQueueCapCtx(ctx, n)` / `ledger.RepairQueueCap()` /
+`ledger.SetRepairTTL(ttl)` / `ledger.SetRepairTTLCtx(ctx, ttl)` /
+`ledger.RepairTTL()`。
 
 ### Transfer disputes (chargeback-style, 转账争议)
 

@@ -146,6 +146,7 @@ type repairQueue struct {
 	records map[string]*RepairRecord
 	seq     uint64 // repair-record sequence; IDs are "repair-<seq>"
 	cap     int
+	ttl     time.Duration // live per-record TTL stamped by EnqueueRepair (LG-311)
 }
 
 // repairQueues is the per-ledger registry (see the package comment).
@@ -160,7 +161,7 @@ var repairQueues = struct {
 func repairQueueForLocked(l *Ledger) *repairQueue {
 	q, ok := repairQueues.m[l]
 	if !ok {
-		q = &repairQueue{records: make(map[string]*RepairRecord), cap: defaultRepairQueueCap}
+		q = &repairQueue{records: make(map[string]*RepairRecord), cap: defaultRepairQueueCap, ttl: defaultRepairTTL}
 		repairQueues.m[l] = q
 	}
 	return q
@@ -312,7 +313,7 @@ func (l *Ledger) EnqueueRepair(instruction PayoutInstruction, reasonCode, actor 
 		Status:      RepairStatusOpen,
 		EnqueuedAt:  now,
 		UpdatedAt:   now,
-		TTL:         defaultRepairTTL,
+		TTL:         q.ttl,
 	}
 	q.records[rec.ID] = rec
 
