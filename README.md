@@ -8843,6 +8843,20 @@ anonymous-operator flow:
   secret for the same identity; the old secret dual-runs through the
   grace window so rolling deployments never drop in flight. `POST
   /api-keys/{id}/revoke` retires immediately (idempotent).
+- `ledger.ReviseAPIKey(id, patch)` revises a live key's attributes in
+  place — name, scopes, expiry, per-minute rate limit — without
+  revoke-and-recreate: the key keeps its identity and its secret (a
+  revision never re-issues one), so callers never swap credentials
+  and quota history and the audit chain stay intact. A non-nil zero
+  `expires_at` clears the expiry (never expires); nil fields leave
+  the value untouched. The merged key is re-validated with the same
+  gates as creation, a same-value revision is a no-op that writes no
+  audit event, and every real revision emits one `api_key_revised`
+  event with `key_id` and `previous_*`/`current_*` per changed field
+  (operator-attributed via `ReviseAPIKeyCtx`). Tightening the rate
+  limit clamps the token bucket to the new cap at once; raising it
+  grants no free top-up. No HTTP endpoint — key tuning is in-process
+  structural config, like the other runtime revisions.
 - Per-key per-minute rate quotas (opt-in) bound a compromised key's
   blast radius; over-quota requests get `429`.
 - Every lifecycle change emits a structured audit event
