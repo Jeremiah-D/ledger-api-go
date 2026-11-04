@@ -151,10 +151,16 @@ func (c SinkConfig) withDefaults() SinkConfig {
 // owns one background goroutine; Stop (or context cancellation) halts
 // it. The zero value is unusable — build one with StartAuditSink.
 type AuditSink struct {
-	l          *Ledger
-	dir        string
-	cfg        SinkConfig
-	client     *http.Client
+	l   *Ledger
+	dir string
+	// cfgMu guards cfg and client (LG-306): deliver snapshots them
+	// under RLock at entry, and SetDeliveryPolicy swaps them under
+	// Lock. It never nests with l.mu, and it is not l.mu (the ledger
+	// write lock must never enter the delivery path) nor LG-301's
+	// AuditLog cfgMu (a different component's config lock).
+	cfgMu  sync.RWMutex
+	cfg    SinkConfig
+	client *http.Client
 	cursorPath string
 
 	done     chan struct{}
@@ -257,13 +263,13 @@ func (s *AuditSink) run(ctx context.Context) {
 			// The outbox read is best-effort: a transient disk error
 			// must not kill the forwarder — the next poll retries.
 			fmt.Fprintf(os.Stderr, "ledger: audit sink: outbox read: %v\n", err)
-			if !sinkSleep(ctx, s.done, s.cfg.PollInterval) {
+			if !sinkSleep(ctx, s.done, s.pollInterval()) {
 				return
 			}
 			continue
 		}
 		if len(events) == 0 {
-			if !sinkSleep(ctx, s.done, s.cfg.PollInterval) {
+			if !sinkSleep(ctx, s.done, s.pollInterval()) {
 				return
 			}
 			continue
@@ -288,8 +294,11 @@ func (s *AuditSink) run(ctx context.Context) {
 // exponential backoff up to MaxAttempts. It returns false only when
 // the sink is stopping mid-delivery; both a delivered event and a
 // dead-lettered one advance the cursor — the cursor must never stick
-// on poison.
+// on poison. The delivery runs under the policy snapshotted at entry
+// (LG-306): a concurrent SetDeliveryPolicy governs only the next
+// delivery, never one already in flight.
 func (s *AuditSink) deliver(ctx context.Context, ev OutboxEvent) bool {
+	snap := s.deliverySnapshot()
 	body, err := json.Marshal(ev)
 	if err != nil {
 		// OutboxEvent is JSON-safe by construction; a marshal failure
@@ -298,12 +307,12 @@ func (s *AuditSink) deliver(ctx context.Context, ev OutboxEvent) bool {
 		s.deadLetter(ev, 0, 0, "marshal: "+err.Error())
 		return true
 	}
-	mac := hmac.New(sha256.New, s.cfg.Secret)
+	mac := hmac.New(sha256.New, snap.secret)
 	mac.Write(body)
 	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
-	backoff := s.cfg.InitialBackoff
+	backoff := snap.initialBackoff
 	for attempt := 1; ; attempt++ {
-		status, perr := s.post(ctx, ev, body, sig)
+		status, perr := s.post(ctx, snap.client, ev, body, sig)
 		if perr == nil && status >= 200 && status < 300 {
 			s.sent.Add(1)
 			return true
@@ -313,7 +322,7 @@ func (s *AuditSink) deliver(ctx context.Context, ev OutboxEvent) bool {
 		if perr != nil {
 			lastErr = perr.Error()
 		}
-		if attempt >= s.cfg.MaxAttempts {
+		if attempt >= snap.maxAttempts {
 			s.deadLetter(ev, attempt, status, lastErr)
 			return true
 		}
@@ -321,15 +330,16 @@ func (s *AuditSink) deliver(ctx context.Context, ev OutboxEvent) bool {
 			return false
 		}
 		backoff *= 2
-		if backoff > s.cfg.MaxBackoff {
-			backoff = s.cfg.MaxBackoff
+		if backoff > snap.maxBackoff {
+			backoff = snap.maxBackoff
 		}
 	}
 }
 
-// post sends one signed delivery attempt. It returns the HTTP status
+// post sends one signed delivery attempt with the given client (the
+// snapshot taken at deliver entry, LG-306). It returns the HTTP status
 // (0 on transport failure) and the transport error, if any.
-func (s *AuditSink) post(ctx context.Context, ev OutboxEvent, body []byte, sig string) (int, error) {
+func (s *AuditSink) post(ctx context.Context, client *http.Client, ev OutboxEvent, body []byte, sig string) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.URL, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
@@ -338,7 +348,7 @@ func (s *AuditSink) post(ctx context.Context, ev OutboxEvent, body []byte, sig s
 	req.Header.Set("X-Ledger-Signature", sig)
 	req.Header.Set("X-Ledger-Event-Type", ev.Type)
 	req.Header.Set("X-Ledger-Event-Seq", strconv.FormatUint(ev.Seq, 10))
-	resp, err := s.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}

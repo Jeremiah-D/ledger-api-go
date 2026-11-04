@@ -8537,6 +8537,23 @@ Delivery contract, stated honestly:
   forged, so the sink refuses to run unsigned. No outbox attached, an
   unavailable outbox directory, or a corrupt cursor file likewise fails
   startup fast rather than silently losing the stream.
+- **Runtime retuning.** The four delivery knobs — attempts, initial
+  backoff, max backoff, per-attempt HTTP timeout — are revisable in
+  place via `(*AuditSink).SetDeliveryPolicy` /
+  `SetDeliveryPolicyCtx` (LG-306), without stopping the forwarder:
+  the cursor, the queue order, the counters, and the signing secret
+  all stay put, a delivery already in flight keeps the policy it
+  started with, and only the next delivery reads the new values.
+  Each knob is optional (`nil` keeps the live value); an illegal
+  merged policy is rejected with `ErrInvalidSinkDeliveryPolicy` and
+  the live policy is untouched, and an all-nil or identical revision
+  is a no-op that writes no audit event. A real revision lands one
+  `audit_sink_delivery_policy_retuned` audit event (per changed
+  field, `previous_*`/`current_*` — attempts as integers, durations
+  as millisecond integers); the `Ctx` variant attributes the
+  operator. A restart restores the startup defaults — the four knobs
+  have no env vars yet, so a revision that must survive a restart
+  has to be re-applied. There is no HTTP endpoint for the revision.
 
 `GET /metrics` exposes `ledger_audit_sink_sent_total`,
 `ledger_audit_sink_failed_attempts_total` (network errors and non-2xx
@@ -9526,7 +9543,11 @@ Environment:
   fast. The outbox is closed on graceful shutdown.
 - `LEDGER_AUDIT_SINK_URL` — enables the audit-sink webhook forwarder
   (see above): outbox domain events POST as HMAC-signed JSON to this
-  absolute http(s) URL. Unset means disabled.
+  absolute http(s) URL. Unset means disabled. The delivery knobs
+  (attempts, backoffs, per-attempt timeout) default to 10 attempts
+  with 1s backoff doubling to 60s and a 10s timeout, are revisable
+  at runtime via `(*AuditSink).SetDeliveryPolicy` (LG-306), and
+  revert to these defaults on restart.
 - `LEDGER_AUDIT_SINK_SECRET` — the shared HMAC-SHA256 secret signing
   every webhook delivery (`X-Ledger-Signature: sha256=<hex>`).
   Required when `LEDGER_AUDIT_SINK_URL` is set: a URL without a secret

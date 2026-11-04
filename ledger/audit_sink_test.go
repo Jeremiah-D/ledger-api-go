@@ -27,11 +27,16 @@ type sinkCapture struct {
 	sigs      []string
 	types     []string
 	seqs      []string
+	times     []time.Time // arrival time of each attempt (LG-306: backoff gaps)
 	failFirst int
 	failAll   bool
+	delay     time.Duration // per-attempt handler latency (LG-306: timeout tests)
 }
 
 func (c *sinkCapture) handler(w http.ResponseWriter, r *http.Request) {
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
 	body, _ := io.ReadAll(r.Body)
 	r.Body.Close()
 	c.mu.Lock()
@@ -40,6 +45,7 @@ func (c *sinkCapture) handler(w http.ResponseWriter, r *http.Request) {
 	c.sigs = append(c.sigs, r.Header.Get("X-Ledger-Signature"))
 	c.types = append(c.types, r.Header.Get("X-Ledger-Event-Type"))
 	c.seqs = append(c.seqs, r.Header.Get("X-Ledger-Event-Seq"))
+	c.times = append(c.times, time.Now())
 	if c.failAll || c.failFirst > 0 {
 		if c.failFirst > 0 {
 			c.failFirst--
@@ -63,6 +69,21 @@ func (c *sinkCapture) snapshot() (bodies [][]byte, sigs, types, seqs []string) {
 		append([]string(nil), c.sigs...),
 		append([]string(nil), c.types...),
 		append([]string(nil), c.seqs...)
+}
+
+// setFailAll flips the fail-all switch under the capture lock, so a
+// test can arm it while deliveries are in flight (LG-306).
+func (c *sinkCapture) setFailAll(v bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failAll = v
+}
+
+// attemptTimes returns the arrival time of each recorded attempt.
+func (c *sinkCapture) attemptTimes() []time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Time(nil), c.times...)
 }
 
 func waitForSink(t *testing.T, timeout time.Duration, what string, cond func() bool) {
