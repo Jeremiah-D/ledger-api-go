@@ -1270,6 +1270,38 @@ registration and removal are audited as `autosweep_rule_registered` /
 they do not round-trip through disaster-recovery snapshots, so register
 them at process start alongside the other operator wiring.
 
+A live rule can be revised in place with `ReviseAutoSweepRule` /
+`ReviseAutoSweepRuleCtx` — no unregister/re-register gap, no lost
+`lastRunAt`, one `autosweep_rule_revised` audit event instead of two
+lifecycle events:
+
+```go
+// Tighten the nightly threshold from 800.00 to 500.00 and lower the
+// sweep-down-to target to 400.00; the next evaluation fires under
+// the new values. Nil fields keep the live value; Kind is not
+// revisable (changing kinds is unregister + register).
+threshold, target := int64(50000), int64(40000)
+revised, err := l.ReviseAutoSweepRule("nightly", ledger.AutoSweepRuleRevision{
+    ThresholdCents: &threshold,
+    TargetCents:    &target,
+})
+// Disable a rule without removing it; it stays listed and can be
+// re-enabled later.
+disabled := false
+_, err = l.ReviseAutoSweepRule("nightly", ledger.AutoSweepRuleRevision{
+    Enabled: &disabled,
+})
+```
+
+The patch merges over the live rule and the merged rule is re-validated
+with the registration-time gates; an illegal merge returns
+`ErrInvalidAutoSweepRuleRevision` with the live rule untouched (a
+runtime revision never silently normalizes). An unknown id returns
+`ErrAutoSweepRuleNotFound`; a same-value revision is a no-op with no
+audit event. Revisions are structural — no version bump, no journal
+entry, no outbox event — and govern only future `RunAutoSweepRules`
+evaluations. The `Ctx` variant attributes the operator (LG-73).
+
 ### `POST /merges`
 
 Account merge: atomically moves **every** currency balance of the source
