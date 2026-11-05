@@ -1095,6 +1095,32 @@ schedules. Run history is bounded to the newest 100 runs per schedule.
 Report subscriptions are process-lifetime operational state: they do not
 survive disaster-recovery snapshots (recreate them after a restore).
 
+Runtime revision (`Ledger.ReviseReportSchedule`, `Ctx` variant with
+operator attribution): an operator revises a live subscription's
+`interval`, `next_run_at`, `ends_at`, `params`, or `sink` in place —
+only the patched fields move; `kind`, `id`, `status`, `run_seq`,
+`created_at`, and the idempotency key are immutable, and status moves
+only via pause/resume/cancel. Unknown IDs are rejected, cancelled and
+completed subscriptions cannot be revised, paused ones can (the
+revision waits with the schedule; the first run after resume uses the
+new values). Every field reuses the creation gates, and a rejected
+revision leaves the live subscription untouched. An empty patch, or a
+patch identical to the live values, is a no-op with no audit event.
+An interval change never moves `next_run_at` — the new cadence applies
+from the next advance; a revision that lands after a sweep has
+snapshotted a schedule but before that run finalizes still advances
+that run by the snapshot interval, and the new interval governs from
+the following advance. A revised `next_run_at` moves the next trigger
+(a past value fires on the next sweep); `ends_at` may be widened, or
+cleared with a zero value, but never tightened to at or before the
+effective `next_run_at`. A sink revision affects only the next
+delivery. Each real revision emits one `report_schedule_revised`
+audit event (previous/current per changed field; sink by name only —
+the URL secret never appears in audit or serialization). Revisions
+are structural config: no version bump, no journal entries, no outbox
+events, and snapshots do not carry them — a revision shares its
+subscription's fate and is lost on restore along with it.
+
 ### `POST /sweeps`
 
 Treasury sweep: atomically moves the positive per-currency balances of the
