@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -249,4 +250,33 @@ func TestHandleCreateEntryStrictDecoding(t *testing.T) {
 			t.Errorf("error %q does not mention size", msg)
 		}
 	})
+}
+
+func TestServerReportSweeperHandle(t *testing.T) {
+	// main.go stores the started report sweeper on srv at startup
+	// (LG-316) so existing operator paths can retune the live scan
+	// interval in place instead of restarting the server.
+	srv := &server{ledger: ledger.New()}
+	if srv.reportSweeper != nil {
+		t.Fatalf("reportSweeper = %v, want nil before startup", srv.reportSweeper)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sw := ledger.StartReportSweeper(ctx, srv.ledger, 500*time.Millisecond, nil)
+	if sw == nil {
+		t.Fatalf("sweeper not started")
+	}
+	defer sw.Stop()
+	srv.reportSweeper = sw
+
+	prev, err := srv.reportSweeper.SetInterval(20 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("SetInterval through srv.reportSweeper: %v", err)
+	}
+	if prev != 500*time.Millisecond {
+		t.Fatalf("returned previous interval = %v, want 500ms", prev)
+	}
+	if got := srv.reportSweeper.Interval(); got != 20*time.Millisecond {
+		t.Fatalf("Interval() through srv.reportSweeper = %v, want 20ms", got)
+	}
 }

@@ -1068,7 +1068,18 @@ subscription (`id`, `kind: "reconcile"|"statement"`, kind-specific
 `next_run_at` RFC3339, optional `ends_at`, and a delivery `sink`); the
 background sweeper (`LEDGER_REPORT_SWEEP_INTERVAL`, e.g. `"1h"`) fires
 every due subscription via `Ledger.SweepReportsDue` (also callable
-directly). Each run generates its report **read-only** — no version
+directly). The sweeper interval only sets the scan cadence — how often
+the subscription table is checked — while each subscription's own
+`interval` sets how often that subscription fires; the two are
+independent, and revising one never moves the other. An operator can
+retune the live sweeper interval in place via
+`ReportSweeper.SetInterval` (no restart): a sweep already in progress
+runs to completion and the new interval governs from the next tick, a
+non-positive interval is rejected with the live value untouched, a
+same-value revision is a no-op, and every real revision lands one
+`report_sweep_interval_retuned` audit event (`previous`/`current`
+sweep interval in milliseconds; the `Ctx` variant attributes the
+operator). Each run generates its report **read-only** — no version
 bump, no journal entries, no audit-chain links — and delivers it:
 
 - `sink: {url, secret}` — one signed HTTPS POST per sweep,
@@ -9487,7 +9498,11 @@ Environment:
   retried next tick, missed runs skipped). The first tick fires after one
   full interval; SIGINT/SIGTERM stops the worker with the server. Unset
   or invalid means disabled — subscriptions stay registered but never
-  generate until the worker is enabled.
+  generate until the worker is enabled. The interval is read once at
+  startup; an operator can retune the live sweeper in place via
+  `ReportSweeper.SetInterval` (LG-316) without restarting — a restart
+  restores the env value, while the revision events stay in the audit
+  trail.
 - `LEDGER_HEALTH_WATCH_INTERVAL` — enables the background balance-health
   watchdog, e.g. `LEDGER_HEALTH_WATCH_INTERVAL=5m`. Each tick re-checks
   the invariants the write path promises — negative balances on

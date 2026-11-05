@@ -57,6 +57,13 @@ type server struct {
 	// (LEDGER_AUDIT_SINK_URL). Nil when disabled; GET /metrics mirrors
 	// its counters when present.
 	auditSink *ledger.AuditSink
+	// reportSweeper is the background report-schedule worker
+	// (LEDGER_REPORT_SWEEP_INTERVAL). Nil when disabled; operator
+	// paths revise its scan interval in place via
+	// ReportSweeper.SetInterval (LG-316) instead of restarting the
+	// server. The sweeper itself is owned by the server context —
+	// the deferred Stop in main stays the only teardown.
+	reportSweeper *ledger.ReportSweeper
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -12841,6 +12848,10 @@ func main() {
 				log.Printf("ledger-api-go: report sweep: generated=%d failed=%d", generated, failed)
 			}
 		})
+		// Keep the handle on srv so operator paths can retune the
+		// live scan interval in place (LG-316) instead of
+		// restarting the server.
+		srv.reportSweeper = sweeper
 		log.Printf("ledger-api-go: report sweep worker started (interval %v)", interval)
 		defer sweeper.Stop()
 	}
