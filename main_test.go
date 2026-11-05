@@ -496,3 +496,33 @@ func TestServerFXRateWatchHandle(t *testing.T) {
 		t.Fatalf("Interval() through srv.fxRateWatch = %v, want 20ms", got)
 	}
 }
+
+func TestServerFXConsistencyWatchHandle(t *testing.T) {
+	// main.go stores the started FX consistency watch on srv at
+	// startup (LG-325) so existing operator paths can revise the
+	// live triangular-consistency threshold in place instead of
+	// restarting the server.
+	srv := &server{ledger: ledger.New()}
+	if srv.fxConsistencyWatch != nil {
+		t.Fatalf("fxConsistencyWatch = %v, want nil before startup", srv.fxConsistencyWatch)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := ledger.StartFXConsistencyWatch(ctx, srv.ledger, 500*time.Millisecond, 50, nil)
+	if w == nil {
+		t.Fatalf("watch not started")
+	}
+	defer w.Stop()
+	srv.fxConsistencyWatch = w
+
+	prev, err := srv.fxConsistencyWatch.SetThresholdBps(25)
+	if err != nil {
+		t.Fatalf("SetThresholdBps through srv.fxConsistencyWatch: %v", err)
+	}
+	if prev != 50 {
+		t.Fatalf("returned previous threshold = %d, want 50", prev)
+	}
+	if got := srv.fxConsistencyWatch.ThresholdBps(); got != 25 {
+		t.Fatalf("ThresholdBps() through srv.fxConsistencyWatch = %d, want 25", got)
+	}
+}

@@ -204,7 +204,9 @@ func (l *Ledger) FXRateInconsistencyAlertCount() uint64 {
 // its first tick after one full interval, and is disabled (nil) on a
 // non-positive interval. A non-positive thresholdBps disables the
 // check: the threshold is opt-in — microscopic feed wobble must not
-// page by default.
+// page by default. The threshold is revisable at runtime in place
+// via SetThresholdBps (LG-325) — tick() re-reads the live value
+// every round, so no restart is needed.
 type FXConsistencyWatch struct {
 	l            *Ledger
 	interval     time.Duration
@@ -215,8 +217,13 @@ type FXConsistencyWatch struct {
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	seen map[[3]string][3]fxConsistencyLeg
+
+	// mu also guards thresholdBps: tick() re-reads the live value
+	// under RLock on every round, so a runtime revision via
+	// SetThresholdBps (LG-325) governs from the next tick without
+	// restarting the watch.
 
 	ticks atomic.Uint64
 	total atomic.Uint64
@@ -269,9 +276,11 @@ func (w *FXConsistencyWatch) run(ctx context.Context) {
 
 // tick runs one consistency scan, edge-triggers the newly inconsistent
 // cycles, and prunes dedup marks for cycles that no longer have all
-// three legs in the table.
+// three legs in the table. It reads the live threshold under RLock on
+// every round (LG-325): a revision governs from the next tick, and a
+// scan already in progress runs to completion on the threshold it read.
 func (w *FXConsistencyWatch) tick() {
-	alerts := w.l.ScanFXRateInconsistency(w.thresholdBps)
+	alerts := w.l.ScanFXRateInconsistency(w.ThresholdBps())
 
 	var fresh []FXRateInconsistency
 	w.mu.Lock()

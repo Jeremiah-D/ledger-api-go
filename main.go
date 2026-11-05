@@ -116,6 +116,15 @@ type server struct {
 	// server context — the deferred Stop in main stays the only
 	// teardown.
 	fxRateWatch *ledger.FXRateWatch
+	// fxConsistencyWatch is the background FX-rate triangular-
+	// consistency watcher (LEDGER_FX_CONSISTENCY_INTERVAL /
+	// LEDGER_FX_CONSISTENCY_THRESHOLD_BPS). Nil when disabled;
+	// operator paths revise its alert threshold in place via
+	// FXConsistencyWatch.SetThresholdBps (LG-325) instead of
+	// restarting the server. The watch itself is owned by the
+	// server context — the deferred Stop in main stays the only
+	// teardown.
+	fxConsistencyWatch *ledger.FXConsistencyWatch
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -12996,6 +13005,10 @@ func main() {
 		cw := ledger.StartFXConsistencyWatch(ctx, srv.ledger, interval, thresholdBps, func(as []ledger.FXRateInconsistency) {
 			log.Printf("ledger-api-go: fx consistency watch: %d alert(s)", len(as))
 		})
+		// Keep the handle on srv so operator paths can revise the
+		// live consistency threshold in place (LG-325) instead of
+		// restarting the server.
+		srv.fxConsistencyWatch = cw
 		log.Printf("ledger-api-go: fx consistency watch started (interval %v, threshold %d bps)", interval, thresholdBps)
 		defer cw.Stop()
 	}

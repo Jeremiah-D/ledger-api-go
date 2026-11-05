@@ -5273,7 +5273,29 @@ a cycle whose |product − 1| exceeds the opt-in threshold
 (`LEDGER_FX_CONSISTENCY_THRESHOLD_BPS`, integer basis points)
 edge-triggers an `fx_rate_inconsistent` audit event (path, legs,
 exact product, exact deviation in bps) and counts in
-`ledger_fx_rate_inconsistency_total`. The check is advisory only — it
+`ledger_fx_rate_inconsistency_total`. The threshold is revisable at
+runtime without restarting the server:
+`FXConsistencyWatch.SetThresholdBps(bps)` (and the operator-attributed
+`SetThresholdBpsCtx`, LG-325) returns the previous threshold in
+basis points, takes effect from the next tick, and lands one
+`fx_consistency_threshold_retuned` audit event (previous/current
+threshold, int64 basis points). A negative revision is rejected with
+`ErrInvalidFXConsistencyThresholdBps` and the live value is untouched;
+a zero revision explicitly disables the consistency check — the watch
+itself keeps ticking — unlike the sweeper interval retunes, which
+reject zero outright, because zero here silences one alert category,
+not the worker (the LG-323 zero semantics). A same-value revision is
+a silent no-op. The dedup marks are not reset: tightening lets a
+cycle that newly exceeds the gate report once on the next tick, an
+already-alerted cycle is not re-reported, and loosening prunes the
+marks of cycles that fall back inside the gate, so re-tightening
+re-arms them. Three knobs stay distinct: the threshold (the alert
+gate, in basis points), the scan interval (how often the table is
+scanned — a separate item, not this one), and each rate's own TTL
+(its `ExpiresAt`, set by `SetFXRateRat`). Revising the threshold
+moves neither the rates nor the `ErrFXRateExpired` transfer gate,
+and does not survive a restart — the env value governs the next
+start. The check is advisory only — it
 never blocks a conversion; the inconsistency is a data-quality problem
 in the operator's rate feed, not a booking bug. Edge-triggered like the
 expiry watch: a cycle that stays inconsistent across ticks alerts once
@@ -9672,7 +9694,15 @@ Environment:
   never blocked. The first tick fires after one full interval;
   SIGINT/SIGTERM stops the worker with the server. Unset or invalid
   interval disables the watcher; unset or invalid threshold disables the
-  check (the threshold is opt-in).
+  check (the threshold is opt-in). The live threshold can be revised
+  at runtime in place via `FXConsistencyWatch.SetThresholdBps` (LG-325,
+  no restart; negative rejected, zero disables the check while the
+  watch keeps ticking, same-value a no-op, each real revision audited
+  as `fx_consistency_threshold_retuned` with int64 basis points); a
+  revision does not survive a restart — the env value governs the next
+  start. The threshold is the alert gate only: the scan interval
+  (`LEDGER_FX_CONSISTENCY_INTERVAL`) sets the cadence, and each rate's
+  own TTL sets its expiry.
 - `LEDGER_SNAPSHOT_BACKUP_DIR` — enables the periodic snapshot backup
   worker (LG-39): the server exports disaster-recovery snapshots to this
   directory on `LEDGER_SNAPSHOT_BACKUP_INTERVAL` (e.g. `1h`). Every
