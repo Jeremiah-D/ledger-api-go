@@ -721,7 +721,20 @@ cancelled/completed are terminal), run history (`GET
 `Reconcile` report counts active plans (`active_transfer_schedules`).
 Fired runs increment `ledger_scheduled_transfers_total`. Schedules are
 structural state: they survive disaster-recovery snapshots (run history
-does not).
+does not). The sweeper interval only sets the scan cadence — how often
+the schedule table is checked — while each plan's own `interval` sets
+how often that plan fires; the two are independent, and revising one
+never moves the other. An operator can retune the live sweeper interval
+in place via `ScheduleSweeper.SetInterval` (no restart): a sweep already
+in progress runs to completion and the new interval governs from the
+next tick, a non-positive interval is rejected with the live value
+untouched (a runtime revision never silently disables the worker), a
+same-value revision is a no-op, and every real revision lands one
+`schedule_sweep_interval_retuned` audit event (`previous`/`current`
+sweep interval in milliseconds; the `Ctx` variant attributes the
+operator). A sweeper that was never started (env unset or invalid) has
+no handle to revise, and a revision does not survive a restart — the env
+value governs the next start.
 
 With `"business_day_cadence": true` on the create request, the plan
 advances T+N business days after each firing (N = the interval in whole
@@ -9490,7 +9503,11 @@ Environment:
   `ledger_scheduled_transfers_total`. The first tick fires after one
   full interval; SIGINT/SIGTERM stops the worker with the server. Unset
   or invalid means disabled — plans stay registered but never fire until
-  the worker is enabled.
+  the worker is enabled. While running, an operator can retune the live
+  scan interval in place via `ScheduleSweeper.SetInterval` (no restart;
+  a non-positive revision is rejected, never a silent disable) — see
+  "Scheduled transfers" above. The revision does not survive a restart:
+  the env value governs the next start.
 - `LEDGER_REPORT_SWEEP_INTERVAL` — enables the background report-schedule
   worker, e.g. `LEDGER_REPORT_SWEEP_INTERVAL=1h`. While enabled, the
   server generates due report subscriptions on the interval (the same
