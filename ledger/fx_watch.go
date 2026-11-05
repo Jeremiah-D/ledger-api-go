@@ -170,6 +170,11 @@ type fxWatchMark struct {
 // stale warnings while expiry alerts stay active. The threshold is
 // revisable at runtime in place via SetWarningThreshold (LG-323) —
 // tick() re-reads the live value every round, so no restart is needed.
+// The scan interval is revisable the same way via SetInterval
+// (LG-324): a revision wakes run() through retune, which stops the
+// old ticker, runs a tick that fired while the revision was in
+// flight (so the revision cannot swallow a due scan), and rebuilds
+// the ticker on the new live interval.
 type FXRateWatch struct {
 	l                *Ledger
 	interval         time.Duration
@@ -193,10 +198,19 @@ type FXRateWatch struct {
 	mu   sync.RWMutex
 	seen map[fxPair]fxWatchMark
 
-	// mu also guards warningThreshold: tick() re-reads the live
-	// value under RLock on every round, so a runtime revision via
-	// SetWarningThreshold (LG-323) governs from the next tick
-	// without restarting the watch.
+	// mu also guards warningThreshold and interval: tick()
+	// re-reads the live threshold under RLock on every round, so a
+	// runtime revision via SetWarningThreshold (LG-323) governs
+	// from the next tick without restarting the watch; run()
+	// re-reads the live interval under RLock when it rebuilds its
+	// ticker after a SetInterval revision (LG-324).
+
+	// retune wakes run() when SetInterval revises the live scan
+	// interval. Buffered 1 and sent non-blocking, along the
+	// ReportSweeper (LG-316) pattern: a revision never stalls on a
+	// loop that is mid-scan, and a newer revision supersedes a
+	// coalesced wakeup because run() re-reads the live value.
+	retune chan struct{}
 
 	ticks        atomic.Uint64
 	staleTotal   atomic.Uint64
@@ -233,6 +247,7 @@ func StartFXRateWatch(ctx context.Context, l *Ledger, interval, warningThreshold
 		onAlert:          onAlert,
 		ctx:              ctx,
 		done:             make(chan struct{}),
+		retune:           make(chan struct{}, 1),
 		seen:             make(map[fxPair]fxWatchMark),
 	}
 	w.wg.Add(1)
@@ -242,7 +257,7 @@ func StartFXRateWatch(ctx context.Context, l *Ledger, interval, warningThreshold
 
 func (w *FXRateWatch) run(ctx context.Context) {
 	defer w.wg.Done()
-	ticker := time.NewTicker(w.interval)
+	ticker := time.NewTicker(w.Interval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -250,6 +265,22 @@ func (w *FXRateWatch) run(ctx context.Context) {
 			return
 		case <-w.done:
 			return
+		case <-w.retune:
+			// A tick may have fired while the revision was in
+			// flight: run it now so the revision cannot swallow
+			// a due scan, then rebuild the ticker on the new
+			// live interval. The old ticker is stopped before
+			// the new one is built, so two tickers never run in
+			// parallel; a scan already in progress is
+			// unaffected — the loop only selects between scans,
+			// so the revision waits until it finishes.
+			ticker.Stop()
+			select {
+			case <-ticker.C:
+				w.tick()
+			default:
+			}
+			ticker = time.NewTicker(w.Interval())
 		case <-ticker.C:
 			w.tick()
 		}

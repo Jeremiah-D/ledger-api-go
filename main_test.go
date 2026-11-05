@@ -459,7 +459,8 @@ func TestServerFXRateWatchHandle(t *testing.T) {
 	// main.go stores the started FX rate watch on srv at startup
 	// (LG-323) so existing operator paths can revise the live
 	// stale-warning threshold in place instead of restarting the
-	// server.
+	// server. The same handle carries the scan interval revision
+	// (LG-324).
 	srv := &server{ledger: ledger.New()}
 	if srv.fxRateWatch != nil {
 		t.Fatalf("fxRateWatch = %v, want nil before startup", srv.fxRateWatch)
@@ -482,5 +483,16 @@ func TestServerFXRateWatchHandle(t *testing.T) {
 	}
 	if got := srv.fxRateWatch.WarningThreshold(); got != time.Hour {
 		t.Fatalf("WarningThreshold() through srv.fxRateWatch = %v, want 1h", got)
+	}
+
+	prev, err = srv.fxRateWatch.SetInterval(20 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("SetInterval through srv.fxRateWatch: %v", err)
+	}
+	if prev != 500*time.Millisecond {
+		t.Fatalf("returned previous interval = %v, want 500ms", prev)
+	}
+	if got := srv.fxRateWatch.Interval(); got != 20*time.Millisecond {
+		t.Fatalf("Interval() through srv.fxRateWatch = %v, want 20ms", got)
 	}
 }

@@ -5210,18 +5210,28 @@ without restarting the server: `FXRateWatch.SetWarningThreshold(d)`
 (and the operator-attributed `SetWarningThresholdCtx`, LG-323) returns
 the previous threshold, takes effect from the next tick, and lands one
 `fx_rate_warning_threshold_retuned` audit event (previous/current
-threshold, millisecond integers). A negative revision is rejected with
-`ErrInvalidFXRateWarningThreshold` and the live value is untouched; a
-zero revision explicitly silences stale warnings only (expiry warnings
-continue) — unlike the sweeper interval retunes, which reject zero
-outright, because zero here silences one warning category, not the
-worker. A same-value revision is a silent no-op. Three knobs stay
-distinct: the threshold (how far ahead of expiry a rate counts as
-stale), the scan interval (how often the table is scanned), and each
-rate's own TTL (its `ExpiresAt`, set by `SetFXRateRat`). Revising the
-threshold moves neither the rates nor the `ErrFXRateExpired` transfer
-gate, resets neither the dedup marks nor the counters, and does not
-survive a restart — the env value governs the next start.
+threshold, millisecond integers). The scan interval is revisable the
+same way: `FXRateWatch.SetInterval(d)` (and the operator-attributed
+`SetIntervalCtx`, LG-324) returns the previous interval, rebuilds the
+ticker on the new cadence — a tick that fired while the revision was
+in flight is run before the rebuild, so it is never swallowed — and
+lands one `fx_rate_watch_interval_retuned` audit event (previous /
+current watch interval, millisecond integers). A negative threshold
+revision is rejected with `ErrInvalidFXRateWarningThreshold` and the
+live value is untouched; a zero threshold revision explicitly silences
+stale warnings only (expiry warnings continue) — unlike the sweeper
+interval retunes, which reject zero outright, because zero here
+silences one warning category, not the worker. A non-positive interval
+revision is rejected with `ErrInvalidFXRateWatchInterval` — zero would
+stop the whole worker, so the interval retune rejects it outright like
+the sweepers. A same-value revision of either knob is a silent no-op.
+Three knobs stay distinct: the threshold (how far ahead of expiry a
+rate counts as stale), the scan interval (how often the table is
+scanned), and each rate's own TTL (its `ExpiresAt`, set by
+`SetFXRateRat`). Revising the threshold moves neither the rates nor
+the `ErrFXRateExpired` transfer gate, resets neither the dedup marks
+nor the counters, and does not survive a restart — the env value
+governs the next start.
 
 **Market FX rate provider adapter.** The rate table above is the static
 leg; the watch can also poll a caller-implemented `FXRateProvider`
@@ -9636,7 +9646,11 @@ Environment:
   expiry, counted in `ledger_fx_rate_stale_total` /
   `ledger_fx_rate_expired_total`. The first tick fires after one full
   interval; SIGINT/SIGTERM stops the worker with the server. Unset or
-  invalid means disabled.
+  invalid means disabled. The live interval can be revised at runtime
+  in place via `FXRateWatch.SetInterval` (LG-324, no restart;
+  non-positive rejected, same-value a no-op, each real revision
+  audited as `fx_rate_watch_interval_retuned`); a revision does not
+  survive a restart — the env value governs the next start.
 - `LEDGER_FX_RATE_WARNING_THRESHOLD` — the opt-in stale-warning window
   for the FX-rate watch, e.g. `LEDGER_FX_RATE_WARNING_THRESHOLD=72h`.
   Unset or invalid disables stale warnings only — expiry alerts stay
