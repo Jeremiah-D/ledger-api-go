@@ -5877,7 +5877,15 @@ gpi 回答"钱在哪"，SLA 回答"钱迟到了吗"：与 LG-165 的 gpi 状态�
   并 bump `ledger_sla_breaches_total{rail}` 计数器；每个 watch 最多 breach 一次，
   breach 标记 sticky（事后结算也不抹掉——breach 发生过就是发生过）。
 - 生产可用后台 sweeper：`LEDGER_SLA_SWEEP_INTERVAL`（如 `30s`，未设置=禁用），
-  每 tick 对默认租户跑一次 `CheckSLAClocks(time.Now().UTC())`。
+  每 tick 对默认租户跑一次 `CheckSLAClocks(time.Now().UTC())`。评估间隔可
+  在运行时原地修订、无需重启：`SLASweeper.SetInterval(d)`（及带操作员归属
+  的 `SetIntervalCtx`）只移动评估 cadence——同一 goroutine 继续 tick、
+  watch 与计数器不动，新间隔自下一个 tick 起生效（已在途的评估跑完）。
+  非正间隔以 `ErrInvalidSlaSweepInterval` 拒绝、live 值不动；与 live 值
+  相同的修订是无审计的 no-op；每次真实修订记一条
+  `sla_sweep_interval_retuned` 审计事件（previous/current 毫秒整数）。
+  间隔只决定评估频率——各 watch 的 `Deadline` 仍决定何时 breach，rail
+  的 SLA 时长仍由 `SetSLAConfig` 管；修订不随快照持久化，重启恢复 env 值。
 - watch 是内存态（与 payout/gpi 同惯例）；持久记录是 `sla_breached` 审计事件。
 
 ```bash
@@ -5893,7 +5901,8 @@ curl -s -X POST localhost:8080/sla/check | jq .breached
 
 Go: `ledger.SetSLAConfig` / `ledger.SLADuration` / `ledger.CheckSLAClocks` /
 `ledger.SLAWatch` / `ledger.SLAWatches` / `ledger.SLABreachCounts` /
-`ledger.StartSLASweeper`。
+`ledger.StartSLASweeper` / `ledger.SLASweeper.SetInterval` (LG-322, runtime
+retune of the sweeper interval, no restart)。
 
 ### `GET /exports/pain008` — ISO 20022 pain.008 直接扣款指令导出
 
@@ -9529,7 +9538,11 @@ Environment:
   audit event each and bump `ledger_sla_breaches_total{rail}`. The first
   tick fires after one full interval; SIGINT/SIGTERM stops the worker
   with the server. Unset or invalid means disabled — breaches are
-  evaluated on demand via `POST /sla/check`.
+  evaluated on demand via `POST /sla/check`. The live interval can be
+  retuned at runtime in place via `SLASweeper.SetInterval` (LG-322, no
+  restart; non-positive rejected, same-value a no-op, each real revision
+  audited as `sla_sweep_interval_retuned`); a revision does not survive
+  a restart — the env value governs the next start.
 - `LEDGER_PERIOD_AUTOCLOSE_INTERVAL` — enables the background period
   auto-close worker, e.g. `LEDGER_PERIOD_AUTOCLOSE_INTERVAL=1m`. While
   enabled, the server fires due plans registered with `POST

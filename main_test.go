@@ -425,3 +425,32 @@ func TestServerReviewSweeperHandle(t *testing.T) {
 		t.Fatalf("Interval() through srv.reviewSweeper = %v, want 20ms", got)
 	}
 }
+
+func TestServerSLASweeperHandle(t *testing.T) {
+	// main.go stores the started SLA sweeper on srv at startup
+	// (LG-322) so existing operator paths can retune the live
+	// evaluation interval in place instead of restarting the server.
+	srv := &server{ledger: ledger.New()}
+	if srv.slaSweeper != nil {
+		t.Fatalf("slaSweeper = %v, want nil before startup", srv.slaSweeper)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sw := ledger.StartSLASweeper(ctx, srv.ledger, 500*time.Millisecond, nil)
+	if sw == nil {
+		t.Fatalf("sweeper not started")
+	}
+	defer sw.Stop()
+	srv.slaSweeper = sw
+
+	prev, err := srv.slaSweeper.SetInterval(20 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("SetInterval through srv.slaSweeper: %v", err)
+	}
+	if prev != 500*time.Millisecond {
+		t.Fatalf("returned previous interval = %v, want 500ms", prev)
+	}
+	if got := srv.slaSweeper.Interval(); got != 20*time.Millisecond {
+		t.Fatalf("Interval() through srv.slaSweeper = %v, want 20ms", got)
+	}
+}

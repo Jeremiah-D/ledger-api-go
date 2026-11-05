@@ -100,6 +100,13 @@ type server struct {
 	// server. The sweeper itself is owned by the server context —
 	// the deferred Stop in main stays the only teardown.
 	reviewSweeper *ledger.ReviewSweeper
+	// slaSweeper is the background settlement-SLA clock evaluator
+	// (LEDGER_SLA_SWEEP_INTERVAL). Nil when disabled; operator paths
+	// revise its evaluation interval in place via
+	// SLASweeper.SetInterval (LG-322) instead of restarting the
+	// server. The sweeper itself is owned by the server context —
+	// the deferred Stop in main stays the only teardown.
+	slaSweeper *ledger.SLASweeper
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -12806,6 +12813,10 @@ func main() {
 	// stops it. Unset or invalid means disabled.
 	if interval, ok := slaSweepInterval(); ok {
 		slaSweeper := ledger.StartSLASweeper(ctx, srv.ledger, interval, nil)
+		// Keep the handle on srv so operator paths can retune the
+		// live evaluation interval in place (LG-322) instead of
+		// restarting the server.
+		srv.slaSweeper = slaSweeper
 		log.Printf("ledger-api-go: SLA sweep worker started (interval %v)", interval)
 		defer slaSweeper.Stop()
 	}
