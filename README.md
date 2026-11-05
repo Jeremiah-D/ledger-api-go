@@ -525,7 +525,20 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
   after the call, while already-pending reviews keep the `ExpiresAt`
   stamped at their creation; the revision lands one
   `review_expiry_amended` audit event and rides the `review_expiry`
-  config line through snapshots.
+  config line through snapshots. The sweeper's scan interval is a
+  separate knob from a review's `ExpiresAt`: it is revisable at runtime
+  without restarting the server via `ReviewSweeper.SetInterval(d)` (and
+  the `SetIntervalCtx` variant for operator attribution) — the same
+  goroutine keeps ticking, reviews and counters untouched, and the new
+  interval governs from the next tick (a tick already in flight runs to
+  completion). A non-positive interval is rejected with
+  `ErrInvalidReviewSweepInterval` and the live interval untouched; a
+  revision identical to the live interval is a no-op with no audit. Each
+  revision is audited as `review_sweep_interval_retuned`
+  (previous/current sweep interval in milliseconds). The interval only
+  decides how often the review table is scanned — each review's
+  `ExpiresAt` still decides when it lapses — and a revision is not
+  carried by snapshots: a restart restores the env value.
 - **Stalled-review escalation (LG-232):** an opt-in policy
   (`SetPendingReviewEscalationConfig`, enabled plus a threshold age)
   pages reviews that sit pending past the threshold: the sweep emits
@@ -9729,7 +9742,12 @@ Environment:
   review in `ledger_review_rejected_total`. The first tick fires after one
   full interval; SIGINT/SIGTERM stops the worker with the server. Unset
   or invalid means disabled — expiry stays lazy by predicate and
-  available on demand via `POST /transfers/reviews/expire`.
+  available on demand via `POST /transfers/reviews/expire`. The live
+  interval can be retuned at runtime in place via
+  `ReviewSweeper.SetInterval` (LG-321, no restart; non-positive rejected,
+  same-value a no-op, each real revision audited as
+  `review_sweep_interval_retuned`); a revision does not survive a restart
+  — the env value governs the next start.
 - `LEDGER_LARGE_TX_THRESHOLDS` — per-currency large-transaction (CTR)
   reporting thresholds, `"<currency>:<thresholdCents>,..."` (e.g.
   `LEDGER_LARGE_TX_THRESHOLDS="USD:1000000,EUR:900000"`): an account's

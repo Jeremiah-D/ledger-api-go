@@ -93,6 +93,13 @@ type server struct {
 	// server context — the deferred Stop in main stays the only
 	// teardown.
 	periodAutoCloseSweeper *ledger.PeriodAutoCloseSweeper
+	// reviewSweeper is the background review-expiry worker
+	// (LEDGER_REVIEW_SWEEP_INTERVAL). Nil when disabled; operator
+	// paths revise its scan interval in place via
+	// ReviewSweeper.SetInterval (LG-321) instead of restarting the
+	// server. The sweeper itself is owned by the server context —
+	// the deferred Stop in main stays the only teardown.
+	reviewSweeper *ledger.ReviewSweeper
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -12853,6 +12860,10 @@ func main() {
 		sweeper := ledger.StartReviewSweeper(ctx, srv.ledger, interval, func(expired int) {
 			srv.metrics.ReviewRejectedTotal.Add(uint64(expired))
 		})
+		// Keep the handle on srv so operator paths can retune the
+		// live scan interval in place (LG-321) instead of
+		// restarting the server.
+		srv.reviewSweeper = sweeper
 		log.Printf("ledger-api-go: review sweep worker started (interval %v)", interval)
 		defer sweeper.Stop()
 	}

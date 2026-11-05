@@ -396,3 +396,32 @@ func TestServerPeriodAutoCloseSweeperHandle(t *testing.T) {
 		t.Fatalf("Interval() through srv.periodAutoCloseSweeper = %v, want 20ms", got)
 	}
 }
+
+func TestServerReviewSweeperHandle(t *testing.T) {
+	// main.go stores the started review-expiry sweeper on srv at
+	// startup (LG-321) so existing operator paths can retune the live
+	// scan interval in place instead of restarting the server.
+	srv := &server{ledger: ledger.New()}
+	if srv.reviewSweeper != nil {
+		t.Fatalf("reviewSweeper = %v, want nil before startup", srv.reviewSweeper)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sw := ledger.StartReviewSweeper(ctx, srv.ledger, 500*time.Millisecond, nil)
+	if sw == nil {
+		t.Fatalf("sweeper not started")
+	}
+	defer sw.Stop()
+	srv.reviewSweeper = sw
+
+	prev, err := srv.reviewSweeper.SetInterval(20 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("SetInterval through srv.reviewSweeper: %v", err)
+	}
+	if prev != 500*time.Millisecond {
+		t.Fatalf("returned previous interval = %v, want 500ms", prev)
+	}
+	if got := srv.reviewSweeper.Interval(); got != 20*time.Millisecond {
+		t.Fatalf("Interval() through srv.reviewSweeper = %v, want 20ms", got)
+	}
+}
