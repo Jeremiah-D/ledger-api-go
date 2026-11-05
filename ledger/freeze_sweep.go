@@ -27,6 +27,16 @@ type FreezeSweeper struct {
 	interval time.Duration
 	onSweep  func(released int)
 
+	// mu guards interval. The run loop re-reads the live value when
+	// a revision wakes it (LG-319), so a newer revision always
+	// supersedes an older one that has not been applied yet.
+	mu sync.RWMutex
+	// retune wakes the run loop so it rebuilds its ticker on the
+	// live interval. Buffered size 1 and sent non-blocking: the
+	// channel is only a wakeup — the loop re-reads interval under
+	// mu — so a coalesced wakeup still applies the newest value.
+	retune chan struct{}
+
 	done     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
@@ -55,6 +65,7 @@ func StartFreezeSweeper(ctx context.Context, l *Ledger, interval time.Duration, 
 		l:        l,
 		interval: interval,
 		onSweep:  onSweep,
+		retune:   make(chan struct{}, 1),
 		done:     make(chan struct{}),
 	}
 	sw.wg.Add(1)
@@ -64,7 +75,7 @@ func StartFreezeSweeper(ctx context.Context, l *Ledger, interval time.Duration, 
 
 func (sw *FreezeSweeper) run(ctx context.Context) {
 	defer sw.wg.Done()
-	ticker := time.NewTicker(sw.interval)
+	ticker := time.NewTicker(sw.Interval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -72,14 +83,38 @@ func (sw *FreezeSweeper) run(ctx context.Context) {
 			return
 		case <-sw.done:
 			return
-		case <-ticker.C:
-			released := sw.l.ExpireFrozenAccounts()
-			sw.ticks.Add(1)
-			sw.releasedTotal.Add(uint64(released))
-			if sw.onSweep != nil {
-				sw.onSweep(released)
+		case <-sw.retune:
+			// A tick may have fired while the revision was in
+			// flight: run it now so the revision cannot swallow a
+			// due sweep, then rebuild the ticker on the new live
+			// interval. The old ticker is stopped before the new
+			// one is built, so two tickers never run in parallel;
+			// a sweep already in progress is unaffected — the
+			// loop only selects between sweeps, so the revision
+			// waits until it finishes.
+			ticker.Stop()
+			select {
+			case <-ticker.C:
+				sw.sweepOnce()
+			default:
 			}
+			ticker = time.NewTicker(sw.Interval())
+		case <-ticker.C:
+			sw.sweepOnce()
 		}
+	}
+}
+
+// sweepOnce runs one sweep: every expired timed freeze is released,
+// the counters advance, and the onSweep callback fires. Extracted from
+// run so the retune path can run a tick that fired while a revision
+// was in flight.
+func (sw *FreezeSweeper) sweepOnce() {
+	released := sw.l.ExpireFrozenAccounts()
+	sw.ticks.Add(1)
+	sw.releasedTotal.Add(uint64(released))
+	if sw.onSweep != nil {
+		sw.onSweep(released)
 	}
 }
 

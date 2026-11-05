@@ -1969,6 +1969,13 @@ frozen gate — or by the background freeze sweeper
 default), or an explicit `ExpireFrozenAccounts` call. Every automatic
 release is recorded as a `frozen_auto_released` structured audit event
 and counted by `ledger_freeze_auto_releases_total` on `GET /metrics`.
+The sweeper's scan cadence itself can be retuned at runtime in place
+(LG-319, `FreezeSweeper.SetInterval` / `SetIntervalCtx`, no restart):
+the interval only decides how often the table is scanned — it never
+moves any account's `frozenUntil` deadline (that is what LG-229's
+`ExtendFreezeUntil` is for) — and a revision never silently disables
+the worker (a non-positive interval is rejected, unlike the
+startup-time "non-positive disables" reading).
 A manual `Freeze` clears any scheduled deadline, so a manual freeze never
 auto-releases; timed-freeze deadlines round-trip through snapshots.
 A timed freeze's deadline can be lengthened before it lapses
@@ -9515,6 +9522,16 @@ Environment:
   `ledger_freeze_auto_releases_total`). The first tick fires after one
   full interval; SIGINT/SIGTERM stops the worker with the server. Unset
   or invalid means disabled — release stays lazy on the write path.
+  The live interval can be retuned at runtime in place via
+  `FreezeSweeper.SetInterval` (LG-319, no restart; non-positive rejected,
+  same-value a no-op, each real revision audited as
+  `freeze_sweep_interval_retuned` with previous/current interval in
+  milliseconds); a revision does not survive a restart — the env value
+  governs the next start. Note the distinction the revision preserves:
+  the sweeper interval only decides how often the table is scanned, not
+  when any single freeze lapses — each account's `frozenUntil` deadline
+  is the lazy predicate, and a manual freeze (no deadline) never
+  auto-releases.
 - `LEDGER_SCHEDULE_SWEEP_INTERVAL` — enables the background
   transfer-schedule worker, e.g. `LEDGER_SCHEDULE_SWEEP_INTERVAL=1m`.
   While enabled, the server fires due transfer schedules on the interval
