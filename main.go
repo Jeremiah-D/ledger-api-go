@@ -107,6 +107,15 @@ type server struct {
 	// server. The sweeper itself is owned by the server context —
 	// the deferred Stop in main stays the only teardown.
 	slaSweeper *ledger.SLASweeper
+	// fxRateWatch is the background FX-rate expiry watcher
+	// (LEDGER_FX_RATE_WATCH_INTERVAL /
+	// LEDGER_FX_RATE_WARNING_THRESHOLD). Nil when disabled; operator
+	// paths revise its stale-warning threshold in place via
+	// FXRateWatch.SetWarningThreshold (LG-323) instead of
+	// restarting the server. The watch itself is owned by the
+	// server context — the deferred Stop in main stays the only
+	// teardown.
+	fxRateWatch *ledger.FXRateWatch
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -12965,6 +12974,10 @@ func main() {
 		fw := ledger.StartFXRateWatch(ctx, srv.ledger, interval, threshold, func(as []ledger.FXRateAlert) {
 			log.Printf("ledger-api-go: fx rate watch: %d alert(s)", len(as))
 		})
+		// Keep the handle on srv so operator paths can revise the
+		// live stale-warning threshold in place (LG-323) instead of
+		// restarting the server.
+		srv.fxRateWatch = fw
 		log.Printf("ledger-api-go: fx rate watch started (interval %v, warning threshold %v)", interval, threshold)
 		defer fw.Stop()
 	}

@@ -5205,7 +5205,23 @@ and once more on crossing expiry (dedup identity: expiry + effective
 version, so renewing a rate re-arms both warnings); removing a pair
 drops its mark. Unset or invalid interval disables the watcher; unset
 or invalid threshold disables stale warnings only — expiry alerts stay
-active.
+active. The warning window itself can be revised at runtime, in place,
+without restarting the server: `FXRateWatch.SetWarningThreshold(d)`
+(and the operator-attributed `SetWarningThresholdCtx`, LG-323) returns
+the previous threshold, takes effect from the next tick, and lands one
+`fx_rate_warning_threshold_retuned` audit event (previous/current
+threshold, millisecond integers). A negative revision is rejected with
+`ErrInvalidFXRateWarningThreshold` and the live value is untouched; a
+zero revision explicitly silences stale warnings only (expiry warnings
+continue) — unlike the sweeper interval retunes, which reject zero
+outright, because zero here silences one warning category, not the
+worker. A same-value revision is a silent no-op. Three knobs stay
+distinct: the threshold (how far ahead of expiry a rate counts as
+stale), the scan interval (how often the table is scanned), and each
+rate's own TTL (its `ExpiresAt`, set by `SetFXRateRat`). Revising the
+threshold moves neither the rates nor the `ErrFXRateExpired` transfer
+gate, resets neither the dedup marks nor the counters, and does not
+survive a restart — the env value governs the next start.
 
 **Market FX rate provider adapter.** The rate table above is the static
 leg; the watch can also poll a caller-implemented `FXRateProvider`
@@ -9299,7 +9315,9 @@ curl -s localhost:8080/metrics
   incident — alert on it.
 - `ledger_fx_rate_stale_total` — `fx_rate_stale` alerts edge-triggered
   by the background FX-rate watch (rates that entered the opt-in warning
-  window). Synced from the ledger on every scrape.
+  window). Synced from the ledger on every scrape. Revising the live
+  warning threshold (`FXRateWatch.SetWarningThreshold`, LG-323) never
+  resets this counter — it keeps accumulating across revisions.
 - `ledger_fx_rate_expired_total` — `fx_rate_expired` alerts
   edge-triggered by the background FX-rate watch (rates whose expiry
   has passed; transfers for the pair are rejected until a fresh rate is
@@ -9622,7 +9640,14 @@ Environment:
 - `LEDGER_FX_RATE_WARNING_THRESHOLD` — the opt-in stale-warning window
   for the FX-rate watch, e.g. `LEDGER_FX_RATE_WARNING_THRESHOLD=72h`.
   Unset or invalid disables stale warnings only — expiry alerts stay
-  active.
+  active. The live window can be revised at runtime in place via
+  `FXRateWatch.SetWarningThreshold` (LG-323, no restart; negative
+  rejected, zero silences stale warnings only, same-value a no-op, each
+  real revision audited as `fx_rate_warning_threshold_retuned`); a
+  revision does not survive a restart — the env value governs the next
+  start. The threshold is the stale window only: the scan interval
+  (`LEDGER_FX_RATE_WATCH_INTERVAL`) sets the cadence, and each rate's
+  own TTL sets its expiry.
 - `LEDGER_FX_CONSISTENCY_INTERVAL` — enables the background FX
   triangular-consistency watch, e.g. `LEDGER_FX_CONSISTENCY_INTERVAL=5m`.
   Each tick scans the rate table, read-only, and edge-triggers

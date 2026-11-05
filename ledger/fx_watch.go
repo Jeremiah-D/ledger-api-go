@@ -167,7 +167,9 @@ type fxWatchMark struct {
 // context, fires its first tick after one full interval, and is disabled
 // (nil) on a non-positive interval. The warning threshold is the
 // opt-in stale window from ScanFXRateAlerts: non-positive disables
-// stale warnings while expiry alerts stay active.
+// stale warnings while expiry alerts stay active. The threshold is
+// revisable at runtime in place via SetWarningThreshold (LG-323) —
+// tick() re-reads the live value every round, so no restart is needed.
 type FXRateWatch struct {
 	l                *Ledger
 	interval         time.Duration
@@ -188,8 +190,13 @@ type FXRateWatch struct {
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	seen map[fxPair]fxWatchMark
+
+	// mu also guards warningThreshold: tick() re-reads the live
+	// value under RLock on every round, so a runtime revision via
+	// SetWarningThreshold (LG-323) governs from the next tick
+	// without restarting the watch.
 
 	ticks        atomic.Uint64
 	staleTotal   atomic.Uint64
@@ -264,7 +271,12 @@ func (w *FXRateWatch) tick() {
 		ctx = context.Background()
 	}
 	w.l.refreshFXRatesFromProvider(ctx, now)
-	alerts := w.l.ScanFXRateAlerts(now, w.warningThreshold)
+	// The threshold is read live under w.mu on every round (LG-323):
+	// a revision in flight governs from the next tick, never the
+	// scan already running — the value is captured before the scan,
+	// and w.mu is released before ScanFXRateAlerts takes l.mu.RLock,
+	// so the two locks are never held nested.
+	alerts := w.l.ScanFXRateAlerts(now, w.WarningThreshold())
 
 	pairs := make(map[fxPair]bool, len(alerts))
 	w.l.mu.RLock()

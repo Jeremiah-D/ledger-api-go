@@ -454,3 +454,33 @@ func TestServerSLASweeperHandle(t *testing.T) {
 		t.Fatalf("Interval() through srv.slaSweeper = %v, want 20ms", got)
 	}
 }
+
+func TestServerFXRateWatchHandle(t *testing.T) {
+	// main.go stores the started FX rate watch on srv at startup
+	// (LG-323) so existing operator paths can revise the live
+	// stale-warning threshold in place instead of restarting the
+	// server.
+	srv := &server{ledger: ledger.New()}
+	if srv.fxRateWatch != nil {
+		t.Fatalf("fxRateWatch = %v, want nil before startup", srv.fxRateWatch)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := ledger.StartFXRateWatch(ctx, srv.ledger, 500*time.Millisecond, 72*time.Hour, nil)
+	if w == nil {
+		t.Fatalf("watch not started")
+	}
+	defer w.Stop()
+	srv.fxRateWatch = w
+
+	prev, err := srv.fxRateWatch.SetWarningThreshold(time.Hour)
+	if err != nil {
+		t.Fatalf("SetWarningThreshold through srv.fxRateWatch: %v", err)
+	}
+	if prev != 72*time.Hour {
+		t.Fatalf("returned previous threshold = %v, want 72h", prev)
+	}
+	if got := srv.fxRateWatch.WarningThreshold(); got != time.Hour {
+		t.Fatalf("WarningThreshold() through srv.fxRateWatch = %v, want 1h", got)
+	}
+}
