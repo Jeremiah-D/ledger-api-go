@@ -325,6 +325,16 @@ type PeriodAutoCloseSweeper struct {
 	interval time.Duration
 	onSweep  func(decided int)
 
+	// mu guards interval. The run loop re-reads the live value when
+	// a revision wakes it (LG-320), so a newer revision always
+	// supersedes an older one that has not been applied yet.
+	mu sync.RWMutex
+	// retune wakes the run loop so it rebuilds its ticker on the
+	// live interval. Buffered size 1 and sent non-blocking: the
+	// channel is only a wakeup — the loop re-reads interval under
+	// mu — so a coalesced wakeup still applies the newest value.
+	retune chan struct{}
+
 	done     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
@@ -345,6 +355,7 @@ func StartPeriodAutoCloseSweeper(ctx context.Context, l *Ledger, interval time.D
 		l:        l,
 		interval: interval,
 		onSweep:  onSweep,
+		retune:   make(chan struct{}, 1),
 		done:     make(chan struct{}),
 	}
 	sw.wg.Add(1)
@@ -354,7 +365,7 @@ func StartPeriodAutoCloseSweeper(ctx context.Context, l *Ledger, interval time.D
 
 func (sw *PeriodAutoCloseSweeper) run(ctx context.Context) {
 	defer sw.wg.Done()
-	ticker := time.NewTicker(sw.interval)
+	ticker := time.NewTicker(sw.Interval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -362,14 +373,38 @@ func (sw *PeriodAutoCloseSweeper) run(ctx context.Context) {
 			return
 		case <-sw.done:
 			return
-		case <-ticker.C:
-			decided := sw.l.SweepPeriodAutoCloses(time.Now().UTC())
-			sw.ticks.Add(1)
-			sw.decidedTotal.Add(uint64(decided))
-			if sw.onSweep != nil {
-				sw.onSweep(decided)
+		case <-sw.retune:
+			// A tick may have fired while the revision was in
+			// flight: run it now so the revision cannot swallow a
+			// due sweep, then rebuild the ticker on the new live
+			// interval. The old ticker is stopped before the new
+			// one is built, so two tickers never run in parallel;
+			// a sweep already in progress is unaffected — the
+			// loop only selects between sweeps, so the revision
+			// waits until it finishes.
+			ticker.Stop()
+			select {
+			case <-ticker.C:
+				sw.sweepOnce()
+			default:
 			}
+			ticker = time.NewTicker(sw.Interval())
+		case <-ticker.C:
+			sw.sweepOnce()
 		}
+	}
+}
+
+// sweepOnce runs one sweep: every due plan is decided, the counters
+// advance, and the onSweep callback fires. Extracted from run so the
+// retune path can run a tick that fired while a revision was in
+// flight.
+func (sw *PeriodAutoCloseSweeper) sweepOnce() {
+	decided := sw.l.SweepPeriodAutoCloses(time.Now().UTC())
+	sw.ticks.Add(1)
+	sw.decidedTotal.Add(uint64(decided))
+	if sw.onSweep != nil {
+		sw.onSweep(decided)
 	}
 }
 

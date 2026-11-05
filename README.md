@@ -2426,7 +2426,20 @@ and plans round-trip through disaster-recovery snapshots, so a restore
 never silently cancels a month-end close. The worker is opt-in via
 `LEDGER_PERIOD_AUTOCLOSE_INTERVAL` (see [Environment](#running));
 `ledger_period_autocloses_total` counts fired plans, executed and
-failed.
+failed. The scan interval is revisable at runtime without restarting
+the server: `PeriodAutoCloseSweeper.SetInterval(d)` (and the
+`SetIntervalCtx` variant for operator attribution) moves the live
+cadence in place — the same goroutine keeps ticking, plans and
+counters untouched — and the new interval governs from the next tick
+(a tick already in flight runs to completion). A non-positive
+interval is rejected with `ErrInvalidPeriodAutoCloseSweepInterval`
+and the live interval untouched; a revision identical to the live
+interval is a no-op with no audit. Each revision is audited as
+`period_autoclose_sweep_interval_retuned` (previous/current sweep
+interval in milliseconds). The interval only decides how often the
+plan table is scanned — each plan's `CloseAt` still decides when it
+becomes due — and a revision is not carried by snapshots: a restart
+restores the env value.
 
 ### Idempotency key registry query (`GET /idempotency-keys`)
 

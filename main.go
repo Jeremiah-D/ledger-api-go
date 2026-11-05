@@ -85,6 +85,14 @@ type server struct {
 	// server. The sweeper itself is owned by the server context —
 	// the deferred Stop in main stays the only teardown.
 	freezeSweeper *ledger.FreezeSweeper
+	// periodAutoCloseSweeper is the background period auto-close
+	// worker (LEDGER_PERIOD_AUTOCLOSE_INTERVAL). Nil when disabled;
+	// operator paths revise its scan interval in place via
+	// PeriodAutoCloseSweeper.SetInterval (LG-320) instead of
+	// restarting the server. The sweeper itself is owned by the
+	// server context — the deferred Stop in main stays the only
+	// teardown.
+	periodAutoCloseSweeper *ledger.PeriodAutoCloseSweeper
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -12806,6 +12814,10 @@ func main() {
 		sweeper := ledger.StartPeriodAutoCloseSweeper(ctx, srv.ledger, interval, func(decided int) {
 			srv.metrics.PeriodAutoClosesTotal.Add(uint64(decided))
 		})
+		// Keep the handle on srv so operator paths can retune the
+		// live scan interval in place (LG-320) instead of
+		// restarting the server.
+		srv.periodAutoCloseSweeper = sweeper
 		log.Printf("ledger-api-go: period auto-close worker started (interval %v)", interval)
 		defer sweeper.Stop()
 	}
