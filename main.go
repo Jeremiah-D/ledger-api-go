@@ -71,6 +71,13 @@ type server struct {
 	// the server. The sweeper itself is owned by the server
 	// context — the deferred Stop in main stays the only teardown.
 	scheduleSweeper *ledger.ScheduleSweeper
+	// holdSweeper is the background hold-expiry worker
+	// (LEDGER_HOLD_SWEEP_INTERVAL). Nil when disabled; operator
+	// paths revise its scan interval in place via
+	// HoldSweeper.SetInterval (LG-318) instead of restarting the
+	// server. The sweeper itself is owned by the server context —
+	// the deferred Stop in main stays the only teardown.
+	holdSweeper *ledger.HoldSweeper
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -12762,6 +12769,10 @@ func main() {
 		sweeper := ledger.StartHoldSweeper(ctx, srv.ledger, interval, func(int) {
 			srv.metrics.HoldSweeps.Add(1)
 		})
+		// Keep the handle on srv so operator paths can retune the
+		// live scan interval in place (LG-318) instead of
+		// restarting the server.
+		srv.holdSweeper = sweeper
 		log.Printf("ledger-api-go: hold sweep worker started (interval %v)", interval)
 		defer sweeper.Stop()
 	}

@@ -3563,7 +3563,22 @@ lazy (an expired hold already counts as inactive for available-balance
 purposes before the sweep). A background worker can run the same sweep on
 a timer — see `LEDGER_HOLD_SWEEP_INTERVAL` under [Environment](#running) —
 so operators don't need to poll the endpoint; every worker tick is counted
-by the same `ledger_hold_sweeps_total` counter.
+by the same `ledger_hold_sweeps_total` counter. The sweeper interval only
+sets the scan cadence — how often the hold table is checked — while each
+hold's own `ExpiresAt` sets when that hold lapses (bounded at creation by
+`MaxHoldDuration`); the two are independent, and revising one never moves
+the other. An operator can retune the live sweeper interval in place via
+`HoldSweeper.SetInterval` (no restart): a sweep already in progress runs
+to completion and the new interval governs from the next tick, a
+non-positive interval is rejected with the live value untouched (a runtime
+revision never silently disables the worker), a same-value revision is a
+no-op, and every real revision lands one `hold_sweep_interval_retuned`
+audit event (`previous`/`current` sweep interval in milliseconds; the
+`Ctx` variant attributes the operator). A sweeper that was never started
+(env unset or invalid) has no handle to revise, and a revision does not
+survive a restart — the env value governs the next start. Expiry itself
+stays lazy by predicate: the sweep only decides when the `hold_expire`
+audit event and the `hold_expired` outbox event become visible.
 
 Holds are off-journal by design: they create no journal rows, no
 audit-chain links, and no ledger-version bumps (only the capture, which
@@ -9468,6 +9483,11 @@ Environment:
   The first tick fires after one full interval; SIGINT/SIGTERM stops the
   worker with the server. Unset or invalid means disabled — expiry stays
   lazy by predicate and available on demand via `POST /holds/expire`.
+  The live interval can be retuned at runtime in place via
+  `HoldSweeper.SetInterval` (LG-318, no restart; non-positive rejected,
+  same-value a no-op, each real revision audited as
+  `hold_sweep_interval_retuned`); a revision does not survive a restart
+  — the env value governs the next start.
 - `LEDGER_SLA_SWEEP_INTERVAL` — enables the background settlement-SLA
   clock evaluator (LG-185), e.g. `LEDGER_SLA_SWEEP_INTERVAL=30s`. While
   enabled, the server evaluates the default tenant's open SLA watches on
