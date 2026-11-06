@@ -9894,7 +9894,22 @@ Environment:
   `snapshot_backup_unencrypted` audit warning — fail-open, documented
   honestly — unless `LEDGER_SNAPSHOT_BACKUP_ENCRYPT_FAIL_CLOSED=1`
   (`true`/`yes` also work), which makes the tick fail instead with a
-  `snapshot_backup_encryption_missing` audit event.
+  `snapshot_backup_encryption_missing` audit event. While running, an
+  operator can revise the live fail-closed posture in place via
+  `SnapshotBackup.SetEncryptFailClosed` (LG-337, no restart; a bool
+  has no illegal value, same-value a no-op, each real revision audited
+  as `snapshot_backup_encrypt_fail_closed_retuned` with
+  `previous_fail_closed` / `current_fail_closed`): flipping toward
+  fail-closed stops plaintext backups from the next tick, flipping
+  back toward fail-open restores the backup flow, and each flip
+  re-arms the one-time warning for the new posture so its first tick
+  still signals its consequence once. A backup already past the
+  encryption branch runs to completion on the posture it read, and
+  the key ring never participates — with a key configured, flipping
+  changes nothing about the sealing path. A revision does not survive
+  a restart — the env value governs the next start. This is distinct
+  from the LG-329 interval, LG-332 retention depths, and LG-333
+  full/incremental cadence (the same worker, different knobs).
 - `LEDGER_BALANCE_HISTORY_DIR` (+ `LEDGER_BALANCE_HISTORY_INTERVAL`,
   `LEDGER_BALANCE_HISTORY_MAX_AGE_MS`) — enables the background
   balance-history recorder, e.g. `LEDGER_BALANCE_HISTORY_INTERVAL=5m`.
