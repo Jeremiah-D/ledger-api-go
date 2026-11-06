@@ -9808,6 +9808,25 @@ Environment:
   itself deletes no files — and a looser depth keeps older files from
   the next backup on. FullEvery, MaxRetries, and encryption stay
   separate knobs.
+- `LEDGER_SNAPSHOT_BACKUP_FULL_EVERY` — how often a backup is a full
+  snapshot, e.g. `LEDGER_SNAPSHOT_BACKUP_FULL_EVERY=6` (default 6):
+  every Nth backup is full, the rest are incremental deltas from the
+  last successful backup. While running, an operator can revise the
+  live alternation cadence in place via `SnapshotBackup.SetFullEvery`
+  (LG-333, no restart; non-positive rejected, same-value a no-op,
+  each real revision audited as `snapshot_backup_full_every_retuned`
+  with previous/current integer cadences); a revision does not survive
+  a restart — the env value governs the next start. The cadence is a
+  threshold the next backup reads live, so a revision never resets
+  the rotation counter (`backups`/`lastVersion`): the next backup's
+  kind is the uninterrupted counter against the new modulus, and a
+  backup already in flight finishes on the old cadence. `FullEvery=1`
+  means every backup from the next one on is full. The cadence only
+  decides whether a future backup is full or incremental: the backup
+  cadence (LG-329, how often a backup is taken), the retention depths
+  (LG-332, how many files survive pruning), the export retry count
+  (`MaxRetries`), and at-rest encryption (LG-77, whether files land
+  sealed) are separate knobs and do not participate in the revision.
 - `LEDGER_BACKUP_ENCRYPTION_KEY` — opt-in AES-256-GCM at-rest encryption
   for snapshot backup files (full and incremental alike): 64 hex chars
   for a single key, or `kid:hex,kid:hex,...` for a rotation ring (first

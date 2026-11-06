@@ -683,6 +683,50 @@ func TestServerSnapshotBackupRetentionHandle(t *testing.T) {
 	}
 }
 
+func TestServerSnapshotBackupFullEveryHandle(t *testing.T) {
+	// The same srv handle (LG-329) also carries the live
+	// full/incremental alternation cadence (LG-333): an operator
+	// revises it in place through srv.snapshotBackup instead of
+	// restarting the server. No tick fires during this test: the
+	// 500ms cadence outlives it and the worker is stopped at the end.
+	srv := &server{ledger: ledger.New()}
+	if srv.snapshotBackup != nil {
+		t.Fatalf("snapshotBackup = %v, want nil before startup", srv.snapshotBackup)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bk := ledger.StartSnapshotBackup(ctx, srv.ledger, ledger.SnapshotBackupConfig{
+		Dir: t.TempDir(), Interval: 500 * time.Millisecond,
+	}, nil)
+	if bk == nil {
+		t.Fatalf("backup worker not started")
+	}
+	defer bk.Stop()
+	srv.snapshotBackup = bk
+
+	// No FullEvery configured, so the live cadence starts at the
+	// default (every 6th backup full).
+	if got := srv.snapshotBackup.FullEvery(); got != 6 {
+		t.Fatalf("FullEvery() through srv.snapshotBackup = %d, want 6", got)
+	}
+	prev, err := srv.snapshotBackup.SetFullEvery(2)
+	if err != nil {
+		t.Fatalf("SetFullEvery through srv.snapshotBackup: %v", err)
+	}
+	if prev != 6 {
+		t.Fatalf("returned previous full-every = %d, want 6", prev)
+	}
+	if got := srv.snapshotBackup.FullEvery(); got != 2 {
+		t.Fatalf("FullEvery() through srv.snapshotBackup = %d, want 2", got)
+	}
+	if _, err := srv.snapshotBackup.SetFullEvery(0); err == nil {
+		t.Fatalf("SetFullEvery(0) through srv.snapshotBackup: want ErrInvalidSnapshotBackupFullEvery, got nil")
+	}
+	if got := srv.snapshotBackup.FullEvery(); got != 2 {
+		t.Fatalf("FullEvery() after rejected SetFullEvery(0) = %d, want still 2", got)
+	}
+}
+
 func TestServerBalanceHistoryRecorderHandle(t *testing.T) {
 	// main.go stores the started balance-history recorder on srv at
 	// startup (LG-330) so existing operator paths can revise the

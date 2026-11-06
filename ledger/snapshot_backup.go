@@ -112,10 +112,11 @@ func (c SnapshotBackupConfig) withDefaults() SnapshotBackupConfig {
 // StartSnapshotBackup; stop with Stop.
 //
 // The backup interval is revisable at runtime via SetInterval
-// (LG-329), and the retention depths are revisable at runtime via
-// SetKeepFull / SetKeepIncremental (LG-332): both revisions move the
-// live values in place with no restart, and the next backup's
-// pruning reads the live depths.
+// (LG-329), the retention depths are revisable at runtime via
+// SetKeepFull / SetKeepIncremental (LG-332), and the full/incremental
+// alternation cadence is revisable at runtime via SetFullEvery
+// (LG-333): all three revisions move the live values in place with
+// no restart, and the next backup reads the live values.
 type SnapshotBackup struct {
 	l        *Ledger
 	cfg      SnapshotBackupConfig
@@ -150,6 +151,21 @@ type SnapshotBackup struct {
 	keepFull        int
 	keepIncremental int
 	retentionMu     sync.RWMutex
+	// fullEvery is the live full/incremental alternation cadence
+	// (LG-333), guarded by fullEveryMu: StartSnapshotBackup seeds
+	// it from the withDefaults cfg value and SetFullEvery revises
+	// it in place. It is deliberately separate from both cfg and
+	// mu — and from intervalMu, which guards a different knob:
+	// backupOnce holds mu for a whole export + write + prune +
+	// audit, so a setter that took mu would stall behind a backup
+	// in flight; and cfg is a value struct read without a lock,
+	// so the live value cannot live there either. backupOnce
+	// re-reads it under fullEveryMu.RLock at kind-selection time,
+	// so the new cadence governs the next backup's kind without
+	// restarting the worker and without resetting the rotation
+	// counter.
+	fullEvery   int
+	fullEveryMu sync.RWMutex
 	// retune wakes run() when SetInterval revises the live backup
 	// interval. Buffered 1 and sent non-blocking, along the
 	// FXRateWatch (LG-324) pattern: a revision never stalls on a
@@ -194,6 +210,7 @@ func StartSnapshotBackup(ctx context.Context, l *Ledger, cfg SnapshotBackupConfi
 		interval:        cfg.Interval,
 		keepFull:        cfg.KeepFull,
 		keepIncremental: cfg.KeepIncremental,
+		fullEvery:       cfg.FullEvery,
 		retune:          make(chan struct{}, 1),
 	}
 	sw.wg.Add(1)
@@ -264,7 +281,11 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 	defer sw.mu.Unlock()
 
 	sw.backups++
-	full := (sw.backups-1)%uint64(sw.cfg.FullEvery) == 0
+	// The kind is a pure function of the uninterrupted rotation
+	// counter and the live alternation cadence (LG-333): a
+	// revision never resets backups, so the next backup's kind
+	// follows the counter against the new value.
+	full := (sw.backups-1)%uint64(sw.FullEvery()) == 0
 	kind = "incremental"
 	if full {
 		kind = "full"
