@@ -133,6 +133,14 @@ type server struct {
 	// server. The watch itself is owned by the server context —
 	// the deferred Stop in main stays the only teardown.
 	healthWatch *ledger.HealthWatch
+	// tsaAnchorer is the background TSA timestamp-anchoring worker
+	// (LEDGER_TSA_INTERVAL / LEDGER_TSA_URL). Nil when disabled;
+	// operator paths revise its anchoring interval in place via
+	// TimestampAnchorer.SetInterval (LG-328) instead of
+	// restarting the server. The worker itself is owned by the
+	// server context — the deferred Stop in main stays the only
+	// teardown.
+	tsaAnchorer *ledger.TimestampAnchorer
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -12882,6 +12890,10 @@ func main() {
 			anchorer := ledger.StartTimestampAnchoring(ctx, srv.ledger, interval, authority, func(anchor ledger.TimestampAnchor) {
 				srv.metrics.TSAAnchorsTotal.Add(1)
 			})
+			// Keep the handle on srv so operator paths can retune the
+			// live anchoring interval in place (LG-328) instead of
+			// restarting the server.
+			srv.tsaAnchorer = anchorer
 			log.Printf("ledger-api-go: TSA anchoring worker started (interval %v, url %s)", interval, tsaURL)
 			defer anchorer.Stop()
 		}

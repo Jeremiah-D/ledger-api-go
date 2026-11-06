@@ -1314,9 +1314,36 @@ func VerifyTimestampAnchors(dir string, trusted *x509.Certificate) (verified int
 // the configured TSA. A TSA outage never blocks posting: failures are
 // recorded as `tsa_anchor_failed` audit events and counted, and the
 // worker retries on the next tick.
+//
+// The anchoring cadence is a live value, not a startup constant: the
+// interval the worker started with is kept in the interval field and
+// the run loop rebuilds its ticker from the live value whenever
+// SetInterval (LG-328, ledger/tsa_anchor_interval.go) revises it, so
+// an operator can tighten or loosen the cadence in place instead of
+// restarting the server. mu guards interval; retune wakes run().
 type TimestampAnchorer struct {
-	stop     context.CancelFunc
-	done     chan struct{}
+	l         *Ledger
+	authority TimestampAuthority
+	onAnchor  func(TimestampAnchor)
+	ctx       context.Context
+	stop      context.CancelFunc
+	done      chan struct{}
+
+	// mu guards interval. The run loop re-reads the live interval
+	// under RLock when it rebuilds its ticker after a SetInterval
+	// revision (LG-328).
+	mu sync.RWMutex
+	// interval is the live anchoring cadence (the startup value
+	// until a revision moves it).
+	interval time.Duration
+	// retune wakes run() when SetInterval revises the live
+	// interval. Buffered 1 and sent non-blocking, along the
+	// ReportSweeper (LG-316) / FXRateWatch (LG-324) pattern: a
+	// revision never stalls on a loop that is mid-anchor, and a
+	// newer revision supersedes a coalesced wakeup because run()
+	// re-reads the live value.
+	retune chan struct{}
+
 	ticks    atomic.Uint64
 	anchored atomic.Uint64
 	failures atomic.Uint64
@@ -1331,41 +1358,81 @@ func StartTimestampAnchoring(ctx context.Context, l *Ledger, interval time.Durat
 		return nil
 	}
 	cctx, cancel := context.WithCancel(ctx)
-	a := &TimestampAnchorer{stop: cancel, done: make(chan struct{})}
-	go func() {
-		defer close(a.done)
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-cctx.Done():
-				return
-			case <-t.C:
-				a.ticks.Add(1)
-				anchor, err := l.AnchorTimestamp(cctx, authority)
-				if err != nil {
-					a.failures.Add(1)
-					// Degraded, never fatal: the books don't wait for
-					// the TSA. The audit event is the operator alert.
-					l.emitAudit(AuditEvent{
-						Op:            "tsa_anchor_failed",
-						Actor:         "TSAAnchorer",
-						VersionBefore: l.version,
-						VersionAfter:  l.version,
-						Details: map[string]any{
-							"error": err.Error(),
-						},
-					})
-					continue
-				}
-				a.anchored.Add(1)
-				if onAnchor != nil {
-					onAnchor(anchor)
-				}
-			}
-		}
-	}()
+	a := &TimestampAnchorer{
+		l:         l,
+		authority: authority,
+		onAnchor:  onAnchor,
+		ctx:       cctx,
+		stop:      cancel,
+		done:      make(chan struct{}),
+		interval:  interval,
+		retune:    make(chan struct{}, 1),
+	}
+	go a.run()
 	return a
+}
+
+// run is the worker loop. It owns the single ticker for the life of
+// the goroutine: a SetInterval revision (LG-328) stops the old ticker
+// and rebuilds it from the live interval inside this loop, so two
+// tickers never run in parallel.
+func (a *TimestampAnchorer) run() {
+	defer close(a.done)
+	ticker := time.NewTicker(a.Interval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-a.retune:
+			// A tick may have fired while the revision was in
+			// flight: run it now so the revision cannot swallow
+			// a due anchor, then rebuild the ticker on the new
+			// live interval. The old ticker is stopped before
+			// the new one is built, so two tickers never run in
+			// parallel; an anchor already in progress is
+			// unaffected — the loop only selects between
+			// anchors, so the revision waits until it finishes.
+			ticker.Stop()
+			select {
+			case <-ticker.C:
+				a.tick()
+			default:
+			}
+			ticker = time.NewTicker(a.Interval())
+		case <-ticker.C:
+			a.tick()
+		}
+	}
+}
+
+// tick runs one anchoring attempt: the degraded path on failure
+// (tsa_anchor_failed audit event + failures counter, never blocking
+// bookkeeping) and the onAnchor hook on success. It is the single
+// anchor path for both the ticker and the retune drain, so a revision
+// can never swallow a due anchor.
+func (a *TimestampAnchorer) tick() {
+	a.ticks.Add(1)
+	anchor, err := a.l.AnchorTimestamp(a.ctx, a.authority)
+	if err != nil {
+		a.failures.Add(1)
+		// Degraded, never fatal: the books don't wait for
+		// the TSA. The audit event is the operator alert.
+		a.l.emitAudit(AuditEvent{
+			Op:            "tsa_anchor_failed",
+			Actor:         "TSAAnchorer",
+			VersionBefore: a.l.version,
+			VersionAfter:  a.l.version,
+			Details: map[string]any{
+				"error": err.Error(),
+			},
+		})
+		return
+	}
+	a.anchored.Add(1)
+	if a.onAnchor != nil {
+		a.onAnchor(anchor)
+	}
 }
 
 // Stop halts the worker; idempotent.

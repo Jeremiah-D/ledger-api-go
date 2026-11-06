@@ -7494,7 +7494,19 @@ curl -s -X POST localhost:8080/entries/tsa-anchor
   Anchoring is idempotent for an unchanged head. TSA outages never block
   posting — each failure is degraded, not fatal: a `tsa_anchor_failed`
   audit event is recorded, `ledger_tsa_anchor_failures_total` ticks up,
-  and the worker retries on the next tick.
+  and the worker retries on the next tick. While running, an operator
+  can retune the live anchoring interval in place via
+  `TimestampAnchorer.SetInterval` (LG-328, no restart; a non-positive
+  revision is rejected, never a silent disable, and a same-value
+  revision is a no-op) — each real revision is audited as
+  `tsa_anchor_interval_retuned` with previous/current interval in
+  milliseconds. A revision does not survive a restart: the env value
+  governs the next start. Three knobs stay orthogonal: the interval
+  only decides *how often* the head is anchored, the endpoint
+  (`Ledger.SetTSAURL`, LG-303) decides *where* timestamps come from
+  and is still resolved on every tick, so the next tick after a retune
+  still dials the live URL, and the trust root (`Ledger.SetTSATrustCert`,
+  LG-302) decides *who* is trusted.
 - `GET /entries/verify` gains a `tsa` section (`configured`, `anchors`,
   `trusted`, `last_anchor`), and the Reconcile report's `audit_chain`
   section gains `tsa_anchors`, `tsa_anchor_ok`, `tsa_anchor_error`:
@@ -9733,6 +9745,24 @@ Environment:
   the env value governs the next start. The threshold is the alert
   gate only: the scan interval (`LEDGER_FX_CONSISTENCY_INTERVAL`)
   sets the cadence, and each rate's own TTL sets its expiry.
+- `LEDGER_TSA_INTERVAL` — enables the background RFC 3161 timestamp
+  anchoring worker (with `LEDGER_TSA_URL`), e.g.
+  `LEDGER_TSA_INTERVAL=1h`. Each tick countersigns the audit-chain
+  head with the external timestamp authority and appends the token to
+  `tsa_anchors.jsonl`; anchoring is idempotent for an unchanged head,
+  and a TSA outage never blocks posting — each failure is recorded as
+  a `tsa_anchor_failed` audit event and counted in
+  `ledger_tsa_anchor_failures_total`. The first tick fires after one
+  full interval; SIGINT/SIGTERM stops the worker with the server.
+  Unset or invalid means disabled. While running, an operator can
+  retune the live anchoring interval in place via
+  `TimestampAnchorer.SetInterval` (LG-328, no restart; non-positive
+  rejected, same-value a no-op, each real revision audited as
+  `tsa_anchor_interval_retuned` with millisecond integers); a revision
+  does not survive a restart — the env value governs the next start.
+  The interval only sets the anchoring cadence: the endpoint
+  (`LEDGER_TSA_URL`, re-sourcable at runtime via `Ledger.SetTSAURL`,
+  LG-303) and the trust root (LG-302) are separate knobs.
 - `LEDGER_SNAPSHOT_BACKUP_DIR` — enables the periodic snapshot backup
   worker (LG-39): the server exports disaster-recovery snapshots to this
   directory on `LEDGER_SNAPSHOT_BACKUP_INTERVAL` (e.g. `1h`). Every

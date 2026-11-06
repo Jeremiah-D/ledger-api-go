@@ -567,3 +567,34 @@ func TestServerHealthWatchHandle(t *testing.T) {
 		t.Fatalf("Interval() through srv.healthWatch = %v, want 20ms", got)
 	}
 }
+
+func TestServerTSAAnchorerHandle(t *testing.T) {
+	// main.go stores the started TSA anchoring worker on srv at
+	// startup (LG-328) so existing operator paths can revise the
+	// live anchoring interval in place instead of restarting the
+	// server. No tick fires during this test: the 500ms cadence
+	// outlives it and the worker is stopped at the end.
+	srv := &server{ledger: ledger.New()}
+	if srv.tsaAnchorer != nil {
+		t.Fatalf("tsaAnchorer = %v, want nil before startup", srv.tsaAnchorer)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := ledger.StartTimestampAnchoring(ctx, srv.ledger, 500*time.Millisecond, &ledger.RFC3161Client{URL: "http://127.0.0.1:1"}, nil)
+	if a == nil {
+		t.Fatalf("anchorer not started")
+	}
+	defer a.Stop()
+	srv.tsaAnchorer = a
+
+	prev, err := srv.tsaAnchorer.SetInterval(20 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("SetInterval through srv.tsaAnchorer: %v", err)
+	}
+	if prev != 500*time.Millisecond {
+		t.Fatalf("returned previous interval = %v, want 500ms", prev)
+	}
+	if got := srv.tsaAnchorer.Interval(); got != 20*time.Millisecond {
+		t.Fatalf("Interval() through srv.tsaAnchorer = %v, want 20ms", got)
+	}
+}
