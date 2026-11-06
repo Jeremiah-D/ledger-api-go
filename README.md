@@ -5140,7 +5140,15 @@ orders are rejected; the currency pair, side, limit price, fills,
 state, and expiry are untouched; audited as
 `fx_limit_order_amount_amended`); the sweep reads the live
 remainder, so an amended order fills up to its new size on the
-next sweep.
+next sweep. A pending order's deadline can be set to an absolute
+instant with `AmendLimitOrderExpiry` (the new expiry must be in the
+future, or zero to clear it so the order never expires — unlike
+`ExtendLimitOrderExpiry` it may also shorten the deadline or set one
+on a no-expiry order; filled, cancelled, and expired orders are
+rejected; the currency pair, side, limit price, amount, fills, and
+state are untouched; audited as `fx_limit_order_expiry_amended`);
+the sweep reads the live deadline, so an amended order expires at
+its new deadline on the next sweep.
 A fill that would route into dual-control review is
 skipped for that sweep instead of freezing funds — the order stays
 pending for the operator. The book survives disaster-recovery
