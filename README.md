@@ -72,7 +72,14 @@ curl -s -X POST localhost:8080/entries \
 - Invalid entry (empty account, debit == credit, amount ≤ 0, malformed JSON,
   unknown JSON field, or trailing data after the JSON value) → `400` with an
   `{"error": ...}` body.
-- Body larger than `LEDGER_MAX_BODY_BYTES` (default 1 MiB) → `413`.
+- Body larger than `LEDGER_MAX_BODY_BYTES` (default 1 MiB) → `413`. The cap
+  can be revised at runtime with `SetMaxBodyBytes` (LG-334): tightening or
+  loosening takes effect for the next request, a request already in flight
+  keeps the cap it started under, and a non-positive value is rejected with
+  the live cap unchanged. A restart restores the `LEDGER_MAX_BODY_BYTES`
+  value. A revision is recorded only in the process log, not the audit
+  chain — the chain records ledger-domain events only, and package main has
+  no seam to append arbitrary events to it.
 - Either leg of the entry names a **frozen** account → `403`
   `{"error":"ledger: account is frozen"}`. The rejection is counted in
   `ledger_frozen_rejections_total`.
@@ -9592,7 +9599,13 @@ Environment:
 - `LEDGER_MAX_BODY_BYTES` — max accepted `POST /entries` body in bytes
   (default `1048576` = 1 MiB). Larger bodies are rejected with `413`.
   Entry payloads are tiny, so the default is generous while bounding the
-  memory a single request can force the server to buffer.
+  memory a single request can force the server to buffer. The cap can be
+  revised at runtime with `SetMaxBodyBytes` (LG-334, `SetMaxBodyBytesCtx`
+  for operator attribution): the new cap governs the next request, a
+  request already in flight keeps the cap it started under, a non-positive
+  value is rejected with the live cap unchanged, and a restart restores
+  this environment value. A revision is recorded only in the process log,
+  not the audit chain.
 - `LEDGER_IDEMPOTENCY_TTL` — how long idempotency keys are retained, e.g.
   `LEDGER_IDEMPOTENCY_TTL=72h`. Keys older than the TTL are evicted so the
   replay-detection index can't grow forever in a long-running process; the

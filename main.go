@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,9 +38,15 @@ type server struct {
 	// review, schedule, freeze sweepers, snapshot backups, the
 	// balance-history recorder) keep operating on the default tenant's
 	// ledger: per-tenant background schedules are out of scope.
-	tenants      *ledger.TenantStore
-	metrics      *Metrics
-	maxBodyBytes int64
+	tenants *ledger.TenantStore
+	metrics *Metrics
+	// maxBodyBytes is the live cap on a single request body (see
+	// defaultMaxBodyBytes / maxRequestBodyBytes for the startup value).
+	// It is revised in place by SetMaxBodyBytes (LG-334) instead of
+	// restarting the server; maxBodyBytesMu guards it and every
+	// handler reads it through the MaxBodyBytes getter.
+	maxBodyBytes   int64
+	maxBodyBytesMu sync.RWMutex
 	// balanceHistoryDir is the directory the balance-history recorder
 	// writes to (LEDGER_BALANCE_HISTORY_DIR). Empty means unconfigured,
 	// and GET /balance-history answers 404 fail-closed.
@@ -350,7 +357,7 @@ func (s *server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	// decode strictly: unknown fields fail fast (surfacing client typos
 	// instead of silently dropping them), and trailing garbage after the
 	// JSON value is rejected.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req createEntryRequest
@@ -419,7 +426,7 @@ func (s *server) handleDryRunEntry(w http.ResponseWriter, r *http.Request) {
 
 	// Same transport contract as POST /entries: bounded body, strict
 	// decoding, no trailing garbage.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req createEntryRequest
@@ -626,7 +633,7 @@ func (s *server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 
 	// Same transport contract as POST /entries: bounded body, strict
 	// decoding, no trailing garbage.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req createTransferRequest
@@ -1115,7 +1122,7 @@ func (s *server) handleDryRunTransfer(w http.ResponseWriter, r *http.Request) {
 
 	// Same transport contract as POST /transfers: bounded body, strict
 	// decoding, no trailing garbage.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req createTransferRequest
@@ -1337,7 +1344,7 @@ func (s *server) handleFeeEstimate(w http.ResponseWriter, r *http.Request) {
 
 	// Same transport contract as POST /transfers: bounded body, strict
 	// decoding, no trailing garbage.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req createTransferRequest
@@ -1410,7 +1417,7 @@ func (s *server) handleRoutePayment(w http.ResponseWriter, r *http.Request) {
 
 	s.metrics.RoutingRequests.Add(1)
 
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req routePaymentRequest
@@ -1478,7 +1485,7 @@ func (s *server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 
 	// Same transport contract as POST /entries: bounded body, strict
 	// decoding, no trailing garbage.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req createBatchRequest
@@ -1636,7 +1643,7 @@ func (s *server) handleCreateBatchTransfer(w http.ResponseWriter, r *http.Reques
 
 	// Same transport contract as POST /entries: bounded body, strict
 	// decoding, no trailing garbage.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req createBatchTransferRequest
@@ -2479,7 +2486,7 @@ func (s *server) handleEntryLinks(w http.ResponseWriter, r *http.Request) {
 // whether decoding succeeded, writing the 400/413 itself on failure.
 func (s *server) decodeRequestBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
@@ -3183,7 +3190,7 @@ func (s *server) scheduleTransition(w http.ResponseWriter, r *http.Request, acti
 
 func (s *server) decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
@@ -5800,7 +5807,7 @@ func (s *server) handlePain001Settle(w http.ResponseWriter, r *http.Request) {
 // from the x-ledger-actor header, like the other operator actions.
 func (s *server) handlePain002Apply(w http.ResponseWriter, r *http.Request) {
 	s.metrics.Pain002Applies.Add(1)
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -6344,7 +6351,7 @@ type mt103ExportRequest struct {
 // is not approved or submitted is a 422.
 func (s *server) handleMT103Export(w http.ResponseWriter, r *http.Request) {
 	s.metrics.MT103Exports.Add(1)
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req mt103ExportRequest
@@ -6902,7 +6909,7 @@ func (s *server) handleCAMT056Export(w http.ResponseWriter, r *http.Request) {
 // x-ledger-actor header.
 func (s *server) handleCAMT029Apply(w http.ResponseWriter, r *http.Request) {
 	s.metrics.CAMT029Applies.Add(1)
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -7485,7 +7492,7 @@ func (s *server) handleSetParent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req setParentRequest
@@ -7556,7 +7563,7 @@ func (s *server) handleSetAccountTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req setAccountTagsRequest
@@ -7610,7 +7617,7 @@ func (s *server) handleSetAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req setAliasRequest
@@ -7699,7 +7706,7 @@ func (s *server) handleSetTransferAllowlist(w http.ResponseWriter, r *http.Reque
 
 	// Same transport contract as the other /accounts/{id} config
 	// endpoints: bounded body, strict decoding, no trailing garbage.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req setTransferAllowlistRequest
@@ -9543,7 +9550,7 @@ func (s *server) handleSetJournalRule(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rule id required"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req setJournalRuleRequest
@@ -9644,7 +9651,7 @@ func (s *server) handleSetVelocityLimit(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req setVelocityLimitRequest
@@ -9949,7 +9956,7 @@ func (s *server) handleSetClosingAccounts(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req closingAccountsRequest
@@ -10025,7 +10032,7 @@ func (s *server) handleSchedulePeriodAutoClose(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period id required"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req autoClosePlanRequest
@@ -10236,7 +10243,7 @@ func (s *server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 
 	// Bound the body like every other POST endpoint and decode strictly:
 	// unknown fields fail fast.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	opts, berr := parseReconcileBody(r)
 	if berr != nil {
 		writeJSON(w, berr.status, map[string]string{"error": berr.msg})
@@ -10280,7 +10287,7 @@ func (s *server) handleReconcileExport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	opts, berr := parseReconcileBody(r)
 	if berr != nil {
 		writeJSON(w, berr.status, map[string]string{"error": berr.msg})
@@ -10330,7 +10337,7 @@ func (s *server) handleLargeTxReports(w http.ResponseWriter, r *http.Request) {
 
 	// Bound the body like every other POST endpoint and decode strictly:
 	// unknown fields fail fast.
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	var req largeTxReportRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -10389,7 +10396,7 @@ type sarDraftRequest struct {
 // decodeSARBody bounds the body and decodes it strictly, like every
 // other POST endpoint: unknown fields fail fast.
 func (s *server) decodeSARBody(w http.ResponseWriter, r *http.Request, dst any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	switch err := dec.Decode(dst); {
@@ -12152,6 +12159,62 @@ func maxRequestBodyBytes() int64 {
 		return defaultMaxBodyBytes
 	}
 	return n
+}
+
+// ErrInvalidMaxBodyBytes is returned by SetMaxBodyBytes for a
+// non-positive limit. A runtime revision never silently normalizes:
+// 0 would make every POST fail with 413, so it is rejected with the
+// live limit untouched (unlike the startup path above, which falls back
+// to the default for an invalid LEDGER_MAX_BODY_BYTES).
+var ErrInvalidMaxBodyBytes = errors.New("ledger-api-go: max body bytes must be positive")
+
+// MaxBodyBytes reports the live request-body cap. Every handler reads
+// the cap through this getter (under maxBodyBytesMu) so a revision
+// takes effect for the next request.
+func (s *server) MaxBodyBytes() int64 {
+	s.maxBodyBytesMu.RLock()
+	defer s.maxBodyBytesMu.RUnlock()
+	return s.maxBodyBytes
+}
+
+// SetMaxBodyBytes revises the live request-body cap in place and
+// returns the previous cap. The revision is future-only: a request
+// already in flight built its MaxBytesReader under the old cap and is
+// unaffected; the new cap applies from the next request. A revision
+// identical to the live cap is a no-op returning the live value. A
+// non-positive cap returns ErrInvalidMaxBodyBytes with the live cap
+// untouched. The revision is recorded with log.Printf (previous /
+// current / actor) — it is not an audit-chain event: the audit chain
+// only records ledger-domain events and package main has no exported
+// seam to append arbitrary events to it, so the process log is the
+// honest channel (the same channel the startup configuration logs
+// use). Restarting restores the LEDGER_MAX_BODY_BYTES value.
+func (s *server) SetMaxBodyBytes(n int64) (int64, error) {
+	return s.SetMaxBodyBytesCtx(context.Background(), n)
+}
+
+// SetMaxBodyBytesCtx is SetMaxBodyBytes with per-call audit actor
+// attribution (LG-73): the actor is taken from ctx via
+// ledger.ActorFromContext and defaults to ledger.DefaultAuditActor
+// ("system") when none is set.
+func (s *server) SetMaxBodyBytesCtx(ctx context.Context, n int64) (int64, error) {
+	if n <= 0 {
+		return s.MaxBodyBytes(), ErrInvalidMaxBodyBytes
+	}
+	actor := ledger.ActorFromContext(ctx)
+	if actor == "" {
+		actor = ledger.DefaultAuditActor
+	}
+	s.maxBodyBytesMu.Lock()
+	previous := s.maxBodyBytes
+	if n == previous {
+		s.maxBodyBytesMu.Unlock()
+		return previous, nil
+	}
+	s.maxBodyBytes = n
+	s.maxBodyBytesMu.Unlock()
+	log.Printf("ledger-api-go: max body bytes revised: previous=%d current=%d actor=%s", previous, n, actor)
+	return previous, nil
 }
 
 // parseEntryListQuery parses the ?since=&until=&limit= query shared by the

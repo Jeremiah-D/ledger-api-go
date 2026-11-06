@@ -1,11 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -248,6 +255,234 @@ func TestHandleCreateEntryStrictDecoding(t *testing.T) {
 		}
 		if msg, _ := body["error"].(string); !strings.Contains(msg, "too large") {
 			t.Errorf("error %q does not mention size", msg)
+		}
+	})
+}
+
+// gatedBodyReader releases the first chunk of the body immediately (so
+// the handler starts decoding under the cap in force at that moment)
+// and holds the rest until release is closed.
+type gatedBodyReader struct {
+	data    []byte
+	first   int
+	pos     int
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *gatedBodyReader) Read(p []byte) (int, error) {
+	if g.pos >= len(g.data) {
+		return 0, io.EOF
+	}
+	if g.pos == 0 {
+		n := copy(p, g.data[:g.first])
+		g.pos += n
+		g.once.Do(func() { close(g.started) })
+		return n, nil
+	}
+	<-g.release
+	n := copy(p, g.data[g.pos:])
+	g.pos += n
+	return n, nil
+}
+
+func TestSetMaxBodyBytes(t *testing.T) {
+	valid := func(key string) string {
+		return `{"debit_account":"cash","credit_account":"equity","amount_cents":100,"idempotency_key":"` + key + `"}`
+	}
+
+	t.Run("invalid values are rejected and the live limit is unchanged", func(t *testing.T) {
+		srv := &server{ledger: ledger.New(), maxBodyBytes: defaultMaxBodyBytes}
+		for _, n := range []int64{0, -1, -1 << 20} {
+			prev, err := srv.SetMaxBodyBytes(n)
+			if !errors.Is(err, ErrInvalidMaxBodyBytes) {
+				t.Errorf("SetMaxBodyBytes(%d) err = %v, want ErrInvalidMaxBodyBytes", n, err)
+			}
+			if prev != defaultMaxBodyBytes {
+				t.Errorf("SetMaxBodyBytes(%d) prev = %d, want %d", n, prev, defaultMaxBodyBytes)
+			}
+			if got := srv.MaxBodyBytes(); got != defaultMaxBodyBytes {
+				t.Errorf("after rejected SetMaxBodyBytes(%d), MaxBodyBytes() = %d, want %d", n, got, defaultMaxBodyBytes)
+			}
+		}
+	})
+
+	t.Run("same value is a no-op", func(t *testing.T) {
+		srv := &server{ledger: ledger.New(), maxBodyBytes: defaultMaxBodyBytes}
+		prev, err := srv.SetMaxBodyBytes(defaultMaxBodyBytes)
+		if err != nil {
+			t.Fatalf("SetMaxBodyBytes(%d) err = %v", defaultMaxBodyBytes, err)
+		}
+		if prev != defaultMaxBodyBytes {
+			t.Errorf("prev = %d, want %d", prev, defaultMaxBodyBytes)
+		}
+		if got := srv.MaxBodyBytes(); got != defaultMaxBodyBytes {
+			t.Errorf("MaxBodyBytes() = %d, want %d", got, defaultMaxBodyBytes)
+		}
+	})
+
+	t.Run("getter follows the live value", func(t *testing.T) {
+		srv := &server{ledger: ledger.New(), maxBodyBytes: defaultMaxBodyBytes}
+		prev, err := srv.SetMaxBodyBytes(4096)
+		if err != nil || prev != defaultMaxBodyBytes {
+			t.Fatalf("SetMaxBodyBytes(4096) = (%d, %v), want (%d, nil)", prev, err, defaultMaxBodyBytes)
+		}
+		if got := srv.MaxBodyBytes(); got != 4096 {
+			t.Fatalf("MaxBodyBytes() = %d, want 4096", got)
+		}
+		prev, err = srv.SetMaxBodyBytes(defaultMaxBodyBytes)
+		if err != nil || prev != 4096 {
+			t.Fatalf("SetMaxBodyBytes(default) = (%d, %v), want (4096, nil)", prev, err)
+		}
+	})
+
+	t.Run("tightening makes the next request 413 and loosening lets it through", func(t *testing.T) {
+		srv := newServer(ledger.New())
+		ts := httptest.NewServer(srv.handler())
+		defer ts.Close()
+		if code, _ := postEntry(t, ts.URL+"/entries", valid("tight-1")); code != http.StatusCreated {
+			t.Fatalf("baseline POST status = %d, want 201", code)
+		}
+		if prev, err := srv.SetMaxBodyBytes(64); err != nil || prev != defaultMaxBodyBytes {
+			t.Fatalf("SetMaxBodyBytes(64) = (%d, %v), want (%d, nil)", prev, err, defaultMaxBodyBytes)
+		}
+		if code, _ := postEntry(t, ts.URL+"/entries", valid("tight-2")); code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("tightened POST status = %d, want 413", code)
+		}
+		if prev, err := srv.SetMaxBodyBytes(defaultMaxBodyBytes); err != nil || prev != 64 {
+			t.Fatalf("SetMaxBodyBytes(default) = (%d, %v), want (64, nil)", prev, err)
+		}
+		if code, _ := postEntry(t, ts.URL+"/entries", valid("tight-3")); code != http.StatusCreated {
+			t.Fatalf("loosened POST status = %d, want 201", code)
+		}
+	})
+
+	t.Run("revision does not interrupt an in-flight request", func(t *testing.T) {
+		srv := newServer(ledger.New())
+		body := valid("inflight-1")
+		// The gated reader is the handler's own request body here
+		// (the handler is invoked directly, so its first Read happens
+		// strictly after it built its MaxBytesReader under the old cap).
+		g := &gatedBodyReader{data: []byte(body), first: 60, started: make(chan struct{}), release: make(chan struct{})}
+		req := httptest.NewRequest(http.MethodPost, "/entries", g)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			srv.handleCreateEntry(rr, req)
+			close(done)
+		}()
+		select {
+		case <-g.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("handler did not start reading the request body")
+		}
+		// The handler has already built its MaxBytesReader under the
+		// 1 MiB cap; tightening to 64 must not touch this request.
+		if prev, err := srv.SetMaxBodyBytes(64); err != nil || prev != defaultMaxBodyBytes {
+			t.Fatalf("SetMaxBodyBytes(64) = (%d, %v), want (%d, nil)", prev, err, defaultMaxBodyBytes)
+		}
+		close(g.release)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("in-flight request did not complete")
+		}
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("in-flight POST status = %d, want 201 (judged by the old cap)", rr.Code)
+		}
+	})
+
+	t.Run("concurrent revisions and requests do not race", func(t *testing.T) {
+		srv := newServer(ledger.New())
+		ts := httptest.NewServer(srv.handler())
+		defer ts.Close()
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				for j := 0; j < 20; j++ {
+					if _, err := srv.SetMaxBodyBytes(int64(64 + i)); err != nil {
+						t.Errorf("SetMaxBodyBytes: %v", err)
+						return
+					}
+				}
+			}(i)
+		}
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				for j := 0; j < 10; j++ {
+					resp, err := http.Post(ts.URL+"/entries", "application/json", strings.NewReader(valid(fmt.Sprintf("race-%d-%d", i, j))))
+					if err != nil {
+						t.Errorf("POST: %v", err)
+						return
+					}
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+					if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusRequestEntityTooLarge {
+						t.Errorf("POST status = %d, want 201 or 413", resp.StatusCode)
+					}
+				}
+			}(i)
+		}
+		wg.Wait()
+	})
+
+	t.Run("ctx actor is recorded in the revision log", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(old)
+		srv := &server{ledger: ledger.New(), maxBodyBytes: defaultMaxBodyBytes}
+		ctx := ledger.ContextWithActor(context.Background(), "op-7")
+		if prev, err := srv.SetMaxBodyBytesCtx(ctx, 4096); err != nil || prev != defaultMaxBodyBytes {
+			t.Fatalf("SetMaxBodyBytesCtx = (%d, %v), want (%d, nil)", prev, err, defaultMaxBodyBytes)
+		}
+		if !strings.Contains(buf.String(), "previous=1048576 current=4096 actor=op-7") {
+			t.Errorf("log %q does not record previous/current/actor", buf.String())
+		}
+		mark := buf.Len()
+		if _, err := srv.SetMaxBodyBytes(8192); err != nil {
+			t.Fatalf("SetMaxBodyBytes(8192): %v", err)
+		}
+		if !strings.Contains(buf.String()[mark:], "previous=4096 current=8192 actor=system") {
+			t.Errorf("log %q does not default the actor to system", buf.String()[mark:])
+		}
+		// A same-value revision is a no-op and logs nothing.
+		mark = buf.Len()
+		if _, err := srv.SetMaxBodyBytes(8192); err != nil {
+			t.Fatalf("SetMaxBodyBytes(8192) again: %v", err)
+		}
+		if buf.Len() != mark {
+			t.Errorf("no-op revision logged %q, want silence", buf.String()[mark:])
+		}
+	})
+
+	t.Run("all MaxBytesReader sites use the getter", func(t *testing.T) {
+		src, err := os.ReadFile("main.go")
+		if err != nil {
+			t.Fatalf("read main.go: %v", err)
+		}
+		if got := strings.Count(string(src), "http.MaxBytesReader(w, r.Body, s.maxBodyBytes)"); got != 0 {
+			t.Errorf("found %d direct s.maxBodyBytes reads at MaxBytesReader sites, want 0", got)
+		}
+		if got := strings.Count(string(src), "http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())"); got != 25 {
+			t.Errorf("found %d MaxBytesReader sites using the getter, want 25", got)
+		}
+	})
+
+	t.Run("newServer still assembles from env and default", func(t *testing.T) {
+		t.Setenv("LEDGER_MAX_BODY_BYTES", "64")
+		if got := newServer(ledger.New()).MaxBodyBytes(); got != 64 {
+			t.Errorf("env 64: MaxBodyBytes() = %d, want 64", got)
+		}
+		t.Setenv("LEDGER_MAX_BODY_BYTES", "")
+		if got := newServer(ledger.New()).MaxBodyBytes(); got != defaultMaxBodyBytes {
+			t.Errorf("env unset: MaxBodyBytes() = %d, want %d", got, defaultMaxBodyBytes)
 		}
 	})
 }
