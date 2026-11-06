@@ -141,6 +141,14 @@ type server struct {
 	// server context — the deferred Stop in main stays the only
 	// teardown.
 	tsaAnchorer *ledger.TimestampAnchorer
+	// snapshotBackup is the periodic snapshot backup worker
+	// (LEDGER_SNAPSHOT_BACKUP_DIR / LEDGER_SNAPSHOT_BACKUP_INTERVAL).
+	// Nil when disabled; operator paths revise its backup interval
+	// in place via SnapshotBackup.SetInterval (LG-329) instead of
+	// restarting the server. The worker itself is owned by the
+	// server context — the deferred Stop in main stays the only
+	// teardown.
+	snapshotBackup *ledger.SnapshotBackup
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -13050,6 +13058,10 @@ func main() {
 				srv.metrics.SnapshotBackupsFailed.Add(1)
 			}
 		})
+		// Keep the handle on srv so operator paths can revise the
+		// live backup interval in place (LG-329) instead of
+		// restarting the server.
+		srv.snapshotBackup = bk
 		log.Printf("ledger-api-go: snapshot backup worker started (dir %s, interval %v)", cfg.Dir, cfg.Interval)
 		defer bk.Stop()
 	}

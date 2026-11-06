@@ -119,6 +119,24 @@ type SnapshotBackup struct {
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 
+	// interval is the live backup cadence (LG-329), guarded by
+	// intervalMu: StartSnapshotBackup seeds it from cfg.Interval and
+	// SetInterval revises it in place. It is deliberately separate
+	// from mu: backupOnce holds mu for a whole export + write +
+	// prune + audit, so a setter that took mu would stall behind a
+	// backup in flight; and cfg is a value struct read without a
+	// lock, so the live value cannot live there either. run()
+	// re-reads it under intervalMu.RLock when it rebuilds its
+	// ticker after a retune.
+	interval   time.Duration
+	intervalMu sync.RWMutex
+	// retune wakes run() when SetInterval revises the live backup
+	// interval. Buffered 1 and sent non-blocking, along the
+	// FXRateWatch (LG-324) pattern: a revision never stalls on a
+	// loop that is mid-backup, and a newer revision supersedes a
+	// coalesced wakeup because run() re-reads the live value.
+	retune chan struct{}
+
 	ticks atomic.Uint64
 	// mu guards backups and lastVersion: the tick sequence and the
 	// journal version the last successful backup covered.
@@ -153,6 +171,8 @@ func StartSnapshotBackup(ctx context.Context, l *Ledger, cfg SnapshotBackupConfi
 		cfg:      cfg,
 		onBackup: onBackup,
 		done:     make(chan struct{}),
+		interval: cfg.Interval,
+		retune:   make(chan struct{}, 1),
 	}
 	sw.wg.Add(1)
 	go sw.run(ctx)
@@ -171,7 +191,7 @@ func (sw *SnapshotBackup) Stop() {
 
 func (sw *SnapshotBackup) run(ctx context.Context) {
 	defer sw.wg.Done()
-	ticker := time.NewTicker(sw.cfg.Interval)
+	ticker := time.NewTicker(sw.Interval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -179,13 +199,36 @@ func (sw *SnapshotBackup) run(ctx context.Context) {
 			return
 		case <-sw.done:
 			return
-		case <-ticker.C:
-			kind, ok := sw.backupOnce()
-			sw.ticks.Add(1)
-			if sw.onBackup != nil {
-				sw.onBackup(kind, ok)
+		case <-sw.retune:
+			// A tick may have fired while the revision was in
+			// flight: run it now so the revision cannot swallow
+			// a due backup, then rebuild the ticker on the new
+			// live interval. The old ticker is stopped before
+			// the new one is built, so two tickers never run in
+			// parallel; a backup already in progress is
+			// unaffected — the loop only selects between ticks,
+			// so the revision waits until it finishes.
+			ticker.Stop()
+			select {
+			case <-ticker.C:
+				sw.tick()
+			default:
 			}
+			ticker = time.NewTicker(sw.Interval())
+		case <-ticker.C:
+			sw.tick()
 		}
+	}
+}
+
+// tick runs one backup tick: export, count, report. Shared by the
+// ticker case and the retune branch's drain, so a tick that fired
+// while a revision was in flight is never lost.
+func (sw *SnapshotBackup) tick() {
+	kind, ok := sw.backupOnce()
+	sw.ticks.Add(1)
+	if sw.onBackup != nil {
+		sw.onBackup(kind, ok)
 	}
 }
 

@@ -9776,6 +9776,22 @@ Environment:
   in `ledger_snapshot_backups_total` /
   `ledger_snapshot_backups_failed_total`. Unset dir or invalid interval
   means disabled.
+- `LEDGER_SNAPSHOT_BACKUP_INTERVAL` — the backup worker's cadence,
+  e.g. `LEDGER_SNAPSHOT_BACKUP_INTERVAL=1h`. The first tick fires
+  after one full interval; SIGINT/SIGTERM stops the worker with the
+  server. While running, an operator can retune the live backup
+  interval in place via `SnapshotBackup.SetInterval` (LG-329, no
+  restart; non-positive rejected, same-value a no-op, each real
+  revision audited as `snapshot_backup_interval_retuned` with
+  millisecond integers); a revision does not survive a restart — the
+  env value governs the next start. The interval only sets the backup
+  cadence: retention (`LEDGER_SNAPSHOT_BACKUP_KEEP_FULL` /
+  `LEDGER_SNAPSHOT_BACKUP_KEEP_INCR`, how many files survive
+  pruning) and at-rest encryption (`LEDGER_BACKUP_ENCRYPTION_KEY`,
+  LG-77, whether files land sealed) are separate knobs and do not
+  participate in the revision, and the FullEvery rotation counter is
+  not reset — the next backup's kind still follows the uninterrupted
+  full/incremental alternation.
 - `LEDGER_BACKUP_ENCRYPTION_KEY` — opt-in AES-256-GCM at-rest encryption
   for snapshot backup files (full and incremental alike): 64 hex chars
   for a single key, or `kid:hex,kid:hex,...` for a rotation ring (first
