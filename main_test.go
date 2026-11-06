@@ -501,7 +501,8 @@ func TestServerFXConsistencyWatchHandle(t *testing.T) {
 	// main.go stores the started FX consistency watch on srv at
 	// startup (LG-325) so existing operator paths can revise the
 	// live triangular-consistency threshold in place instead of
-	// restarting the server.
+	// restarting the server. The same handle carries the scan
+	// interval revision (LG-326).
 	srv := &server{ledger: ledger.New()}
 	if srv.fxConsistencyWatch != nil {
 		t.Fatalf("fxConsistencyWatch = %v, want nil before startup", srv.fxConsistencyWatch)
@@ -524,5 +525,16 @@ func TestServerFXConsistencyWatchHandle(t *testing.T) {
 	}
 	if got := srv.fxConsistencyWatch.ThresholdBps(); got != 25 {
 		t.Fatalf("ThresholdBps() through srv.fxConsistencyWatch = %d, want 25", got)
+	}
+
+	prevInterval, err := srv.fxConsistencyWatch.SetInterval(20 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("SetInterval through srv.fxConsistencyWatch: %v", err)
+	}
+	if prevInterval != 500*time.Millisecond {
+		t.Fatalf("returned previous interval = %v, want 500ms", prevInterval)
+	}
+	if got := srv.fxConsistencyWatch.Interval(); got != 20*time.Millisecond {
+		t.Fatalf("Interval() through srv.fxConsistencyWatch = %v, want 20ms", got)
 	}
 }

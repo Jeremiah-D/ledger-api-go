@@ -5285,16 +5285,28 @@ a zero revision explicitly disables the consistency check — the watch
 itself keeps ticking — unlike the sweeper interval retunes, which
 reject zero outright, because zero here silences one alert category,
 not the worker (the LG-323 zero semantics). A same-value revision is
-a silent no-op. The dedup marks are not reset: tightening lets a
+a silent no-op. The scan interval is revisable the same way:
+`FXConsistencyWatch.SetInterval(d)` (and the operator-attributed
+`SetIntervalCtx`, LG-326) returns the previous interval, takes effect
+from the next tick — a scan already in progress runs to completion,
+and a tick that fired while the revision was in flight runs before
+the ticker is rebuilt, so no due scan is swallowed — and lands one
+`fx_consistency_watch_interval_retuned` audit event (previous/current
+watch interval, millisecond integers). A non-positive revision is
+rejected with `ErrInvalidFXConsistencyWatchInterval` and the live
+value is untouched, and a cancelled context is fail-closed the same
+way. Zero is rejected outright here, unlike the threshold's zero:
+zero would stop the whole worker, not silence one alert category.
+The dedup marks are not reset: tightening lets a
 cycle that newly exceeds the gate report once on the next tick, an
 already-alerted cycle is not re-reported, and loosening prunes the
 marks of cycles that fall back inside the gate, so re-tightening
 re-arms them. Three knobs stay distinct: the threshold (the alert
 gate, in basis points), the scan interval (how often the table is
-scanned — a separate item, not this one), and each rate's own TTL
-(its `ExpiresAt`, set by `SetFXRateRat`). Revising the threshold
+scanned), and each rate's own TTL
+(its `ExpiresAt`, set by `SetFXRateRat`). Revising either knob
 moves neither the rates nor the `ErrFXRateExpired` transfer gate,
-and does not survive a restart — the env value governs the next
+and neither revision survives a restart — the env value governs the next
 start. The check is advisory only — it
 never blocks a conversion; the inconsistency is a data-quality problem
 in the operator's rate feed, not a booking bug. Edge-triggered like the
@@ -9698,11 +9710,15 @@ Environment:
   at runtime in place via `FXConsistencyWatch.SetThresholdBps` (LG-325,
   no restart; negative rejected, zero disables the check while the
   watch keeps ticking, same-value a no-op, each real revision audited
-  as `fx_consistency_threshold_retuned` with int64 basis points); a
-  revision does not survive a restart — the env value governs the next
-  start. The threshold is the alert gate only: the scan interval
-  (`LEDGER_FX_CONSISTENCY_INTERVAL`) sets the cadence, and each rate's
-  own TTL sets its expiry.
+  as `fx_consistency_threshold_retuned` with int64 basis points); the
+  live scan interval can be revised the same way via
+  `FXConsistencyWatch.SetInterval` (LG-326, no restart; non-positive
+  rejected, same-value a no-op, cancelled context fail-closed, each
+  real revision audited as `fx_consistency_watch_interval_retuned`
+  with millisecond integers); neither revision survives a restart —
+  the env value governs the next start. The threshold is the alert
+  gate only: the scan interval (`LEDGER_FX_CONSISTENCY_INTERVAL`)
+  sets the cadence, and each rate's own TTL sets its expiry.
 - `LEDGER_SNAPSHOT_BACKUP_DIR` — enables the periodic snapshot backup
   worker (LG-39): the server exports disaster-recovery snapshots to this
   directory on `LEDGER_SNAPSHOT_BACKUP_INTERVAL` (e.g. `1h`). Every

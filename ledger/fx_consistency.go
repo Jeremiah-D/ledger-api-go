@@ -206,7 +206,12 @@ func (l *Ledger) FXRateInconsistencyAlertCount() uint64 {
 // check: the threshold is opt-in — microscopic feed wobble must not
 // page by default. The threshold is revisable at runtime in place
 // via SetThresholdBps (LG-325) — tick() re-reads the live value
-// every round, so no restart is needed.
+// every round, so no restart is needed. The scan interval is
+// revisable the same way via SetInterval (LG-326): a revision wakes
+// run() through retune, which stops the old ticker, runs a tick
+// that fired while the revision was in flight (so the revision
+// cannot swallow a due scan), and rebuilds the ticker on the new
+// live interval.
 type FXConsistencyWatch struct {
 	l            *Ledger
 	interval     time.Duration
@@ -220,10 +225,19 @@ type FXConsistencyWatch struct {
 	mu   sync.RWMutex
 	seen map[[3]string][3]fxConsistencyLeg
 
-	// mu also guards thresholdBps: tick() re-reads the live value
-	// under RLock on every round, so a runtime revision via
-	// SetThresholdBps (LG-325) governs from the next tick without
-	// restarting the watch.
+	// mu also guards thresholdBps and interval: tick() re-reads
+	// the live threshold under RLock on every round, so a runtime
+	// revision via SetThresholdBps (LG-325) governs from the next
+	// tick without restarting the watch; run() re-reads the live
+	// interval under RLock when it rebuilds its ticker after a
+	// SetInterval revision (LG-326).
+
+	// retune wakes run() when SetInterval revises the live scan
+	// interval. Buffered 1 and sent non-blocking, along the
+	// ReportSweeper (LG-316) pattern: a revision never stalls on a
+	// loop that is mid-scan, and a newer revision supersedes a
+	// coalesced wakeup because run() re-reads the live value.
+	retune chan struct{}
 
 	ticks atomic.Uint64
 	total atomic.Uint64
@@ -251,6 +265,7 @@ func StartFXConsistencyWatch(ctx context.Context, l *Ledger, interval time.Durat
 		thresholdBps: thresholdBps,
 		onAlert:      onAlert,
 		done:         make(chan struct{}),
+		retune:       make(chan struct{}, 1),
 		seen:         make(map[[3]string][3]fxConsistencyLeg),
 	}
 	w.wg.Add(1)
@@ -260,7 +275,7 @@ func StartFXConsistencyWatch(ctx context.Context, l *Ledger, interval time.Durat
 
 func (w *FXConsistencyWatch) run(ctx context.Context) {
 	defer w.wg.Done()
-	ticker := time.NewTicker(w.interval)
+	ticker := time.NewTicker(w.Interval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -268,6 +283,22 @@ func (w *FXConsistencyWatch) run(ctx context.Context) {
 			return
 		case <-w.done:
 			return
+		case <-w.retune:
+			// A tick may have fired while the revision was in
+			// flight: run it now so the revision cannot swallow
+			// a due scan, then rebuild the ticker on the new
+			// live interval. The old ticker is stopped before
+			// the new one is built, so two tickers never run in
+			// parallel; a scan already in progress is
+			// unaffected — the loop only selects between scans,
+			// so the revision waits until it finishes.
+			ticker.Stop()
+			select {
+			case <-ticker.C:
+				w.tick()
+			default:
+			}
+			ticker = time.NewTicker(w.Interval())
 		case <-ticker.C:
 			w.tick()
 		}
