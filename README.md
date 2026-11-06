@@ -8997,6 +8997,23 @@ curl -s "localhost:8080/webhooks/deliveries?status=failed&limit=20"
 #   "status":"failed","last_error":"http 500","at":"2026-10-16T09:30:00Z"}]}
 ```
 
+- The delivery-record ring capacity is revisable at runtime without
+  restarting the dispatcher (LG-336, `ledger.SetWebhookMaxRecords` /
+  `SetWebhookMaxRecordsCtx`, with `ledger.WebhookMaxRecords` reporting
+  the live value): the default is 1024 records — tightening trims the
+  oldest records immediately, so the next query already sees the new
+  capacity, and widening deepens the look-back window from the next
+  delivery on (a record already rolled off stays gone). A capacity
+  below 1 is rejected with the live capacity untouched, a same-value
+  revision is a no-op with no audit event, and every real revision is
+  audited as `webhook_max_records_retuned` (`previous_max_records` /
+  `current_max_records`); a restart restores the default 1024. This is
+  distinct from the LG-304 delivery knobs (retry/backoff/timeout) and
+  the LG-335 signing-key grace window (how long a retired key
+  verifies) — this knob is how deep the delivery history reads back.
+  (Payments fintech / backend engineering: outbound webhook delivery
+  history retention.)
+
 ### `GET /audit/verify`
 
 Replays the audit log's hash chain over every audit file — all days,
