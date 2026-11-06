@@ -3716,6 +3716,19 @@ expiry. Like the hold itself, an extension is off-journal and bumps
 neither the version nor the audit chain; the extended hold simply
 survives `ExpireHolds` sweeps up to its new expiry.
 
+`AmendHoldExpiry` sets an active hold's deadline to an exact instant
+instead of only lengthening it: shortening is the point — a hold that
+must lapse sooner, or one whose deadline was simply entered wrong,
+is revised in place rather than released and re-placed. The new
+expiry must be in the future and within the live maximum-hold-duration
+cap (the same cap creation applies, so an amendment can never install
+a deadline the hold could not have been created with); a past instant
+or one beyond the cap is rejected and the original deadline is
+untouched. Captured, released, or expired holds are refused, and the
+move lands one `hold_expiry_amended` audit event with the old and new
+expiry. The sweep reads the live deadline, so a shortened hold expires
+sooner and a lengthened one survives past its old deadline.
+
 #### Amending a hold's amount
 
 A pre-authorization whose amount turns out wrong should not have to
