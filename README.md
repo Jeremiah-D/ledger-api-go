@@ -9799,7 +9799,15 @@ Environment:
   LG-77, whether files land sealed) are separate knobs and do not
   participate in the revision, and the FullEvery rotation counter is
   not reset — the next backup's kind still follows the uninterrupted
-  full/incremental alternation.
+  full/incremental alternation. The retention depths are revisable at
+  runtime too, via `SnapshotBackup.SetKeepFull` /
+  `SetKeepIncremental` (LG-332, same fail-closed shape, audited as
+  `snapshot_backup_keep_full_retuned` /
+  `snapshot_backup_keep_incremental_retuned`); a tighter depth only
+  takes effect at the next backup's regular pruning — the revision
+  itself deletes no files — and a looser depth keeps older files from
+  the next backup on. FullEvery, MaxRetries, and encryption stay
+  separate knobs.
 - `LEDGER_BACKUP_ENCRYPTION_KEY` — opt-in AES-256-GCM at-rest encryption
   for snapshot backup files (full and incremental alike): 64 hex chars
   for a single key, or `kid:hex,kid:hex,...` for a rotation ring (first

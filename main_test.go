@@ -632,6 +632,57 @@ func TestServerSnapshotBackupHandle(t *testing.T) {
 	}
 }
 
+func TestServerSnapshotBackupRetentionHandle(t *testing.T) {
+	// The same srv handle (LG-329) also carries the live retention
+	// depths (LG-332): an operator revises them in place through
+	// srv.snapshotBackup instead of restarting the server. No tick
+	// fires during this test: the 500ms cadence outlives it and the
+	// worker is stopped at the end.
+	srv := &server{ledger: ledger.New()}
+	if srv.snapshotBackup != nil {
+		t.Fatalf("snapshotBackup = %v, want nil before startup", srv.snapshotBackup)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bk := ledger.StartSnapshotBackup(ctx, srv.ledger, ledger.SnapshotBackupConfig{
+		Dir: t.TempDir(), Interval: 500 * time.Millisecond,
+	}, nil)
+	if bk == nil {
+		t.Fatalf("backup worker not started")
+	}
+	defer bk.Stop()
+	srv.snapshotBackup = bk
+
+	// No KeepFull / KeepIncremental configured, so the live depths
+	// start at the defaults (7 full, 24 incremental).
+	if got := srv.snapshotBackup.KeepFull(); got != 7 {
+		t.Fatalf("KeepFull() through srv.snapshotBackup = %d, want 7", got)
+	}
+	if got := srv.snapshotBackup.KeepIncremental(); got != 24 {
+		t.Fatalf("KeepIncremental() through srv.snapshotBackup = %d, want 24", got)
+	}
+	prev, err := srv.snapshotBackup.SetKeepFull(3)
+	if err != nil {
+		t.Fatalf("SetKeepFull through srv.snapshotBackup: %v", err)
+	}
+	if prev != 7 {
+		t.Fatalf("returned previous keep-full = %d, want 7", prev)
+	}
+	if got := srv.snapshotBackup.KeepFull(); got != 3 {
+		t.Fatalf("KeepFull() through srv.snapshotBackup = %d, want 3", got)
+	}
+	prev, err = srv.snapshotBackup.SetKeepIncremental(72)
+	if err != nil {
+		t.Fatalf("SetKeepIncremental through srv.snapshotBackup: %v", err)
+	}
+	if prev != 24 {
+		t.Fatalf("returned previous keep-incremental = %d, want 24", prev)
+	}
+	if got := srv.snapshotBackup.KeepIncremental(); got != 72 {
+		t.Fatalf("KeepIncremental() through srv.snapshotBackup = %d, want 72", got)
+	}
+}
+
 func TestServerBalanceHistoryRecorderHandle(t *testing.T) {
 	// main.go stores the started balance-history recorder on srv at
 	// startup (LG-330) so existing operator paths can revise the

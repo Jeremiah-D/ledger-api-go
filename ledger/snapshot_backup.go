@@ -110,6 +110,12 @@ func (c SnapshotBackupConfig) withDefaults() SnapshotBackupConfig {
 
 // SnapshotBackup is a running backup worker. Construct with
 // StartSnapshotBackup; stop with Stop.
+//
+// The backup interval is revisable at runtime via SetInterval
+// (LG-329), and the retention depths are revisable at runtime via
+// SetKeepFull / SetKeepIncremental (LG-332): both revisions move the
+// live values in place with no restart, and the next backup's
+// pruning reads the live depths.
 type SnapshotBackup struct {
 	l        *Ledger
 	cfg      SnapshotBackupConfig
@@ -130,6 +136,20 @@ type SnapshotBackup struct {
 	// ticker after a retune.
 	interval   time.Duration
 	intervalMu sync.RWMutex
+	// keepFull / keepIncremental are the live retention depths
+	// (LG-332), guarded by retentionMu: StartSnapshotBackup seeds
+	// them from the withDefaults cfg values and SetKeepFull /
+	// SetKeepIncremental revise them in place. They are deliberately
+	// separate from both cfg and mu: backupOnce holds mu for a
+	// whole export + write + prune + audit, so a setter that took
+	// mu would stall behind a backup in flight; and cfg is a value
+	// struct read without a lock, so the live values cannot live
+	// there either. backupOnce re-reads them under
+	// retentionMu.RLock at pruning time, so the new depths govern
+	// the next backup's pruning without restarting the worker.
+	keepFull        int
+	keepIncremental int
+	retentionMu     sync.RWMutex
 	// retune wakes run() when SetInterval revises the live backup
 	// interval. Buffered 1 and sent non-blocking, along the
 	// FXRateWatch (LG-324) pattern: a revision never stalls on a
@@ -167,12 +187,14 @@ func StartSnapshotBackup(ctx context.Context, l *Ledger, cfg SnapshotBackupConfi
 	}
 	cfg = cfg.withDefaults()
 	sw := &SnapshotBackup{
-		l:        l,
-		cfg:      cfg,
-		onBackup: onBackup,
-		done:     make(chan struct{}),
-		interval: cfg.Interval,
-		retune:   make(chan struct{}, 1),
+		l:               l,
+		cfg:             cfg,
+		onBackup:        onBackup,
+		done:            make(chan struct{}),
+		interval:        cfg.Interval,
+		keepFull:        cfg.KeepFull,
+		keepIncremental: cfg.KeepIncremental,
+		retune:          make(chan struct{}, 1),
 	}
 	sw.wg.Add(1)
 	go sw.run(ctx)
@@ -326,9 +348,9 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 
 	pruned := 0
 	if full {
-		pruned, _ = pruneSnapshots(sw.cfg.Dir, "full", sw.cfg.KeepFull)
+		pruned, _ = pruneSnapshots(sw.cfg.Dir, "full", sw.KeepFull())
 	} else {
-		pruned, _ = pruneSnapshots(sw.cfg.Dir, "incr", sw.cfg.KeepIncremental)
+		pruned, _ = pruneSnapshots(sw.cfg.Dir, "incr", sw.KeepIncremental())
 	}
 
 	sw.lastVersion = version
