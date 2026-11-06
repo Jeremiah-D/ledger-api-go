@@ -664,3 +664,41 @@ func TestServerBalanceHistoryRecorderHandle(t *testing.T) {
 		t.Fatalf("Interval() through srv.balanceHistoryRecorder = %v, want 20ms", got)
 	}
 }
+
+func TestServerBalanceHistoryRecorderMaxAgeHandle(t *testing.T) {
+	// The same srv handle (LG-330) also carries the live retention
+	// window (LG-331): an operator revises it in place through
+	// srv.balanceHistoryRecorder instead of restarting the server.
+	// No tick fires during this test: the 500ms cadence outlives it
+	// and the recorder is stopped at the end.
+	srv := &server{ledger: ledger.New()}
+	if srv.balanceHistoryRecorder != nil {
+		t.Fatalf("balanceHistoryRecorder = %v, want nil before startup", srv.balanceHistoryRecorder)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := ledger.StartBalanceHistoryRecorder(ctx, srv.ledger, ledger.BalanceHistoryConfig{
+		Dir: t.TempDir(), Interval: 500 * time.Millisecond,
+	}, nil)
+	if rec == nil {
+		t.Fatalf("balance-history recorder not started")
+	}
+	defer rec.Stop()
+	srv.balanceHistoryRecorder = rec
+
+	// No MaxAgeMs configured, so the live window starts at the
+	// 90-day default.
+	if got := srv.balanceHistoryRecorder.MaxAge(); got != 90*24*time.Hour {
+		t.Fatalf("MaxAge() through srv.balanceHistoryRecorder = %v, want 90d", got)
+	}
+	prev, err := srv.balanceHistoryRecorder.SetMaxAge(30 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("SetMaxAge through srv.balanceHistoryRecorder: %v", err)
+	}
+	if prev != 90*24*time.Hour {
+		t.Fatalf("returned previous window = %v, want 90d", prev)
+	}
+	if got := srv.balanceHistoryRecorder.MaxAge(); got != 30*24*time.Hour {
+		t.Fatalf("MaxAge() through srv.balanceHistoryRecorder = %v, want 30d", got)
+	}
+}

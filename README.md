@@ -5538,7 +5538,11 @@ curl -s "localhost:8080/balance-history?account=cash&currency=USD&since=2026-10-
   cadence is revisable at runtime via
   `BalanceHistoryRecorder.SetInterval` (LG-330): the live interval
   moves in place with no restart, while the retention window and the
-  query interface stay separate knobs.
+  query interface stay separate knobs. The retention window is
+  revisable at runtime too, via `BalanceHistoryRecorder.SetMaxAge`
+  (LG-331): the live window moves in place with no restart and takes
+  effect at the next tick's pruning — the revision itself deletes no
+  files.
 
 ### `GET /accounts/{id}/entries`
 
@@ -9839,7 +9843,13 @@ Environment:
   window (`LEDGER_BALANCE_HISTORY_MAX_AGE_MS`, how long files survive
   pruning) and the query interface (`GET /balance-history`, which reads
   the directory) are separate knobs and do not participate in the
-  revision, and the Ticks / PointsTotal counters are not reset.
+  revision, and the Ticks / PointsTotal counters are not reset. The
+  retention window itself is revisable at runtime too, via
+  `BalanceHistoryRecorder.SetMaxAge` (LG-331, same fail-closed shape,
+  audited as `balance_history_max_age_retuned` with millisecond
+  integers); a shorter window only takes effect at the next tick's
+  regular pruning — the revision itself deletes no files — and a
+  longer window keeps older files from the next tick on.
 - `LEDGER_BALANCE_HISTORY_INTERVAL` — the balance-history recorder's
   sampling cadence, e.g. `LEDGER_BALANCE_HISTORY_INTERVAL=5m`. The first
   tick fires after one full interval; SIGINT/SIGTERM stops the worker
@@ -9851,7 +9861,13 @@ Environment:
   env value governs the next start. The interval only sets how often a
   sample is taken: the retention window
   (`LEDGER_BALANCE_HISTORY_MAX_AGE_MS`) and the query interface
-  (`GET /balance-history`) are separate knobs.
+  (`GET /balance-history`) are separate knobs. The retention window
+  itself is revisable at runtime too, via
+  `BalanceHistoryRecorder.SetMaxAge` (LG-331, same fail-closed shape,
+  audited as `balance_history_max_age_retuned`); a shorter window only
+  takes effect at the next tick's regular pruning — the revision
+  itself deletes no files — and a longer window keeps older files
+  from the next tick on.
 - `LEDGER_TRANSFER_FEE` — default transfer fee policy. Flat form
   `"<rateBps>:<revenueAccount>"` (e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`
   for 2.5%), or tiered form `"<minCents>:<rateBps>,...@<revenueAccount>"`

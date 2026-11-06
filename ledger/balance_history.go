@@ -396,6 +396,11 @@ func dayStart(t time.Time) time.Time {
 // without restarting the worker — ticks and points keep accumulating,
 // and a tick that fired while the revision was in flight is run before
 // the rebuild so it is never swallowed.
+//
+// The retention window is revisable at runtime via SetMaxAge (LG-331):
+// the revision swaps the live window in place and the next tick's
+// pruning reads it — no ticker rebuild, no retune wakeup, no restart,
+// and the revision itself deletes no files.
 type BalanceHistoryRecorder struct {
 	l      *Ledger
 	cfg    BalanceHistoryConfig
@@ -412,7 +417,16 @@ type BalanceHistoryRecorder struct {
 	// live value cannot live there. run() re-reads it under mu.RLock
 	// when it rebuilds its ticker after a retune.
 	interval time.Duration
-	mu       sync.RWMutex
+	// maxAge is the live retention window (LG-331), guarded by the
+	// same mu: StartBalanceHistoryRecorder seeds it from
+	// cfg.MaxAge() and SetMaxAge revises it in place. It is
+	// deliberately separate from cfg for the same reason as
+	// interval. tick() re-reads it under mu.RLock on every tick,
+	// so a revised window governs the next tick's pruning with
+	// no ticker rebuild and no retune wakeup — the window is a
+	// per-tick threshold, not a cadence.
+	maxAge time.Duration
+	mu     sync.RWMutex
 	// retune wakes run() when SetInterval revises the live sampling
 	// interval. Buffered 1 and sent non-blocking, along the
 	// FXRateWatch (LG-324) pattern: a revision never stalls on a
@@ -444,6 +458,7 @@ func StartBalanceHistoryRecorder(ctx context.Context, l *Ledger, cfg BalanceHist
 		onTick:   onTick,
 		done:     make(chan struct{}),
 		interval: cfg.Interval,
+		maxAge:   cfg.MaxAge(),
 		retune:   make(chan struct{}, 1),
 	}
 	r.wg.Add(1)
@@ -484,15 +499,17 @@ func (r *BalanceHistoryRecorder) run(ctx context.Context) {
 }
 
 // tick captures one full (account, currency) snapshot, appends it, then
-// prunes files past the retention window. The ledger lock is held only
-// for the capture; disk I/O happens unlocked so a slow disk never blocks
+// prunes files past the live retention window (LG-331: the window is
+// re-read under mu.RLock on every tick, so a SetMaxAge revision governs
+// the next tick's pruning). The ledger lock is held only for the
+// capture; disk I/O happens unlocked so a slow disk never blocks
 // posting.
 func (r *BalanceHistoryRecorder) tick() {
 	points := r.l.SnapshotBalances()
 	var tickErr error
 	if err := WriteBalanceHistory(r.cfg.Dir, points); err != nil {
 		tickErr = err
-	} else if _, err := PruneBalanceHistory(r.cfg.Dir, r.cfg.MaxAge()); err != nil {
+	} else if _, err := PruneBalanceHistory(r.cfg.Dir, r.MaxAge()); err != nil {
 		tickErr = err
 	} else {
 		r.ticks.Add(1)
