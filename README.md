@@ -8963,6 +8963,28 @@ Delivery contract, stated honestly:
   construction). A revision affects every tenant sharing the
   dispatcher. (Payments fintech / backend engineering: outbound
   webhook delivery governance.)
+- The signing-key grace period is revisable at runtime without
+  re-registering the endpoint (LG-335, `ledger.SetWebhookKeyGracePeriod`
+  / `SetWebhookKeyGracePeriodCtx`, with `ledger.WebhookKeyGracePeriod`
+  reporting the live value): tightening it stops a retired key verifying
+  immediately, widening it keeps an un-purged retired key verifiable
+  longer — but a key already purged is never revived. A revision is
+  future-only for later verifications and purge timing; signatures
+  already taken and deliveries already in flight are unaffected, and the
+  endpoint worker is not restarted, so no event is lost. Unregister +
+  Register still works for a grace change but drops every event fanned
+  out while the endpoint is unregistered. A negative grace is rejected
+  with the live grace untouched; 0 is a legal strict value (retired keys
+  stop verifying at once); a same-value revision is a no-op with no audit
+  event. Every real revision is audited as
+  `webhook_key_grace_period_retuned` (endpoint plus
+  `previous_grace_period_ns`/`current_grace_period_ns`), bumps neither
+  the version nor the audit chain, and writes no journal entry or outbox
+  event. Restarting restores the grace the endpoint was registered with.
+  (This revises the verification window only — `RotateKey` still owns
+  the key material, LG-304's four delivery knobs are a separate
+  mechanism, and LG-305's audit-log signing-key rotation is a different
+  key system.)
 - `GET /webhooks/deliveries` queries recent delivery records
   (`event_seq`, `endpoint`, `attempts`, `status`, `last_error`, `at`),
   latest first, with `?endpoint=`, `?status=pending|delivered|failed`,
