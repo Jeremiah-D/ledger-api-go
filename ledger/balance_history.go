@@ -389,6 +389,13 @@ func dayStart(t time.Time) time.Time {
 // A failed tick (disk error) is reported through onTick and never kills
 // the worker: the next tick retries, so a transient disk stall costs one
 // sample, not the series.
+//
+// The sampling interval is revisable at runtime via SetInterval
+// (LG-330): the revision swaps the live interval in place, wakes run()
+// through retune, and the loop rebuilds its ticker on the new cadence
+// without restarting the worker — ticks and points keep accumulating,
+// and a tick that fired while the revision was in flight is run before
+// the rebuild so it is never swallowed.
 type BalanceHistoryRecorder struct {
 	l      *Ledger
 	cfg    BalanceHistoryConfig
@@ -397,6 +404,21 @@ type BalanceHistoryRecorder struct {
 	done     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+
+	// interval is the live sampling cadence (LG-330), guarded by
+	// mu: StartBalanceHistoryRecorder seeds it from cfg.Interval and
+	// SetInterval revises it in place. It is deliberately separate
+	// from cfg: cfg is a value struct read without a lock, so the
+	// live value cannot live there. run() re-reads it under mu.RLock
+	// when it rebuilds its ticker after a retune.
+	interval time.Duration
+	mu       sync.RWMutex
+	// retune wakes run() when SetInterval revises the live sampling
+	// interval. Buffered 1 and sent non-blocking, along the
+	// FXRateWatch (LG-324) pattern: a revision never stalls on a
+	// loop that is mid-sample, and a newer revision supersedes a
+	// coalesced wakeup because run() re-reads the live value.
+	retune chan struct{}
 
 	ticks       atomic.Uint64
 	pointsTotal atomic.Uint64
@@ -417,10 +439,12 @@ func StartBalanceHistoryRecorder(ctx context.Context, l *Ledger, cfg BalanceHist
 	}
 	cfg = cfg.withDefaults()
 	r := &BalanceHistoryRecorder{
-		l:      l,
-		cfg:    cfg,
-		onTick: onTick,
-		done:   make(chan struct{}),
+		l:        l,
+		cfg:      cfg,
+		onTick:   onTick,
+		done:     make(chan struct{}),
+		interval: cfg.Interval,
+		retune:   make(chan struct{}, 1),
 	}
 	r.wg.Add(1)
 	go r.run(ctx)
@@ -429,7 +453,7 @@ func StartBalanceHistoryRecorder(ctx context.Context, l *Ledger, cfg BalanceHist
 
 func (r *BalanceHistoryRecorder) run(ctx context.Context) {
 	defer r.wg.Done()
-	ticker := time.NewTicker(r.cfg.Interval)
+	ticker := time.NewTicker(r.Interval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -437,6 +461,22 @@ func (r *BalanceHistoryRecorder) run(ctx context.Context) {
 			return
 		case <-r.done:
 			return
+		case <-r.retune:
+			// A tick may have fired while the revision was in
+			// flight: run it now so the revision cannot swallow
+			// a due sample, then rebuild the ticker on the new
+			// live interval. The old ticker is stopped before
+			// the new one is built, so two tickers never run in
+			// parallel; a sample already in progress is
+			// unaffected — the loop only selects between ticks,
+			// so the revision waits until it finishes.
+			ticker.Stop()
+			select {
+			case <-ticker.C:
+				r.tick()
+			default:
+			}
+			ticker = time.NewTicker(r.Interval())
 		case <-ticker.C:
 			r.tick()
 		}

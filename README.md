@@ -5534,7 +5534,11 @@ curl -s "localhost:8080/balance-history?account=cash&currency=USD&since=2026-10-
   recorder takes the read lock, writes nothing to the books, and never
   bumps the version. Ticks are counted in
   `ledger_balance_history_snapshots_total` (one per tick, not per row);
-  failed ticks are logged and retried on the next tick.
+  failed ticks are logged and retried on the next tick. The sampling
+  cadence is revisable at runtime via
+  `BalanceHistoryRecorder.SetInterval` (LG-330): the live interval
+  moves in place with no restart, while the retention window and the
+  query interface stay separate knobs.
 
 ### `GET /accounts/{id}/entries`
 
@@ -9825,7 +9829,29 @@ Environment:
   restore, pointing the new process at the same directory resumes the
   series — old rows are never rewritten. The first tick fires after one
   full interval; SIGINT/SIGTERM stops the worker with the server. Unset
-  dir or invalid interval means disabled.
+  dir or invalid interval means disabled. While running, an operator can
+  retune the live sampling interval in place via
+  `BalanceHistoryRecorder.SetInterval` (LG-330, no restart;
+  non-positive rejected, same-value a no-op, each real revision audited
+  as `balance_history_interval_retuned` with millisecond integers); a
+  revision does not survive a restart — the env value governs the next
+  start. The interval only sets the sampling cadence: the retention
+  window (`LEDGER_BALANCE_HISTORY_MAX_AGE_MS`, how long files survive
+  pruning) and the query interface (`GET /balance-history`, which reads
+  the directory) are separate knobs and do not participate in the
+  revision, and the Ticks / PointsTotal counters are not reset.
+- `LEDGER_BALANCE_HISTORY_INTERVAL` — the balance-history recorder's
+  sampling cadence, e.g. `LEDGER_BALANCE_HISTORY_INTERVAL=5m`. The first
+  tick fires after one full interval; SIGINT/SIGTERM stops the worker
+  with the server. While running, an operator can retune the live
+  sampling interval in place via `BalanceHistoryRecorder.SetInterval`
+  (LG-330, no restart; non-positive rejected, same-value a no-op, each
+  real revision audited as `balance_history_interval_retuned` with
+  millisecond integers); a revision does not survive a restart — the
+  env value governs the next start. The interval only sets how often a
+  sample is taken: the retention window
+  (`LEDGER_BALANCE_HISTORY_MAX_AGE_MS`) and the query interface
+  (`GET /balance-history`) are separate knobs.
 - `LEDGER_TRANSFER_FEE` — default transfer fee policy. Flat form
   `"<rateBps>:<revenueAccount>"` (e.g. `LEDGER_TRANSFER_FEE="250:fee-revenue"`
   for 2.5%), or tiered form `"<minCents>:<rateBps>,...@<revenueAccount>"`

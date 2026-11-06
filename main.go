@@ -44,6 +44,15 @@ type server struct {
 	// writes to (LEDGER_BALANCE_HISTORY_DIR). Empty means unconfigured,
 	// and GET /balance-history answers 404 fail-closed.
 	balanceHistoryDir string
+	// balanceHistoryRecorder is the background balance-history
+	// recorder (LEDGER_BALANCE_HISTORY_DIR /
+	// LEDGER_BALANCE_HISTORY_INTERVAL). Nil when disabled; operator
+	// paths revise its sampling interval in place via
+	// BalanceHistoryRecorder.SetInterval (LG-330) instead of
+	// restarting the server. The recorder itself is owned by the
+	// server context — the deferred Stop in main stays the only
+	// teardown.
+	balanceHistoryRecorder *ledger.BalanceHistoryRecorder
 	// snapshotBackupDir is the directory the snapshot backup worker
 	// writes to (LEDGER_SNAPSHOT_BACKUP_DIR). Empty means unconfigured,
 	// and GET /snapshots/diff answers 404 fail-closed.
@@ -13090,6 +13099,10 @@ func main() {
 			}
 			srv.metrics.BalanceHistorySnapshots.Add(1)
 		})
+		// Keep the handle on srv so operator paths can revise the
+		// live sampling interval in place (LG-330) instead of
+		// restarting the server.
+		srv.balanceHistoryRecorder = rec
 		srv.balanceHistoryDir = cfg.Dir
 		log.Printf("ledger-api-go: balance history worker started (dir %s, interval %v)", cfg.Dir, cfg.Interval)
 		defer rec.Stop()

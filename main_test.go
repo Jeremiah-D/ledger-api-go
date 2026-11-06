@@ -631,3 +631,36 @@ func TestServerSnapshotBackupHandle(t *testing.T) {
 		t.Fatalf("Interval() through srv.snapshotBackup = %v, want 20ms", got)
 	}
 }
+
+func TestServerBalanceHistoryRecorderHandle(t *testing.T) {
+	// main.go stores the started balance-history recorder on srv at
+	// startup (LG-330) so existing operator paths can revise the
+	// live sampling interval in place instead of restarting the
+	// server. No tick fires during this test: the 500ms cadence
+	// outlives it and the recorder is stopped at the end.
+	srv := &server{ledger: ledger.New()}
+	if srv.balanceHistoryRecorder != nil {
+		t.Fatalf("balanceHistoryRecorder = %v, want nil before startup", srv.balanceHistoryRecorder)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := ledger.StartBalanceHistoryRecorder(ctx, srv.ledger, ledger.BalanceHistoryConfig{
+		Dir: t.TempDir(), Interval: 500 * time.Millisecond,
+	}, nil)
+	if rec == nil {
+		t.Fatalf("balance-history recorder not started")
+	}
+	defer rec.Stop()
+	srv.balanceHistoryRecorder = rec
+
+	prev, err := srv.balanceHistoryRecorder.SetInterval(20 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("SetInterval through srv.balanceHistoryRecorder: %v", err)
+	}
+	if prev != 500*time.Millisecond {
+		t.Fatalf("returned previous interval = %v, want 500ms", prev)
+	}
+	if got := srv.balanceHistoryRecorder.Interval(); got != 20*time.Millisecond {
+		t.Fatalf("Interval() through srv.balanceHistoryRecorder = %v, want 20ms", got)
+	}
+}
