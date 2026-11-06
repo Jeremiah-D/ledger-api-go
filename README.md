@@ -9356,7 +9356,10 @@ curl -s localhost:8080/metrics
 - `ledger_balance_health_violations_total` — balance-health violations
   found by the background health watchdog (advisory integrity signal).
   Synced from the ledger on every scrape. Any nonzero value is an
-  incident — alert on it.
+  incident — alert on it. The watchdog's scan interval is retunable at
+  runtime via `HealthWatch.SetInterval` (LG-327); a revision moves only
+  the scan cadence — the counters, the three invariant checks, and the
+  per-scan quarter coverage keep running unchanged.
 - `ledger_fx_rate_stale_total` — `fx_rate_stale` alerts edge-triggered
   by the background FX-rate watch (rates that entered the opt-in warning
   window). Synced from the ledger on every scrape. Revising the live
@@ -9672,7 +9675,18 @@ Environment:
   the watchdog never writes to the books — it verifies the write-path
   gates held, after bugs, bad restores, or config drift. The first tick
   fires after one full interval; SIGINT/SIGTERM stops the worker with
-  the server. Unset or invalid means disabled.
+  the server. Unset or invalid means disabled. While running, an
+  operator can retune the live scan interval in place via
+  `HealthWatch.SetInterval` (LG-327, no restart; a non-positive
+  revision is rejected, never a silent disable, and a same-value
+  revision is a no-op) — each real revision is audited as
+  `health_watch_interval_retuned` with previous/current interval in
+  milliseconds. The revision does not survive a restart: the env value
+  governs the next start. Note the distinction the revision preserves:
+  the interval only decides how often the book is scanned, not how
+  much each scan covers — every scan still spot-checks a rotating
+  quarter of the (account, currency) keys (full coverage every four
+  ticks), and the write-path risk gates are untouched.
 - `LEDGER_FX_RATE_WATCH_INTERVAL` — enables the background FX-rate
   expiry watch, e.g. `LEDGER_FX_RATE_WATCH_INTERVAL=5m`. Each tick scans
   the rate table, read-only, and edge-triggers `fx_rate_stale` when a

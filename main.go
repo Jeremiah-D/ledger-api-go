@@ -126,6 +126,13 @@ type server struct {
 	// owned by the server context — the deferred Stop in main
 	// stays the only teardown.
 	fxConsistencyWatch *ledger.FXConsistencyWatch
+	// healthWatch is the background balance-health watchdog
+	// (LEDGER_HEALTH_WATCH_INTERVAL). Nil when disabled; operator
+	// paths revise its scan interval in place via
+	// HealthWatch.SetInterval (LG-327) instead of restarting the
+	// server. The watch itself is owned by the server context —
+	// the deferred Stop in main stays the only teardown.
+	healthWatch *ledger.HealthWatch
 	// webhooks is the outbound signed-webhook dispatcher
 	// (LEDGER_WEBHOOKS, LG-102). Nil when disabled; GET
 	// /webhooks/deliveries 404s fail-closed and GET /metrics mirrors
@@ -12967,6 +12974,10 @@ func main() {
 		hw := ledger.StartHealthWatch(ctx, srv.ledger, interval, func(vs []ledger.HealthViolation) {
 			log.Printf("ledger-api-go: balance health watchdog: %d violation(s)", len(vs))
 		})
+		// Keep the handle on srv so operator paths can revise the
+		// live scan interval in place (LG-327) instead of
+		// restarting the server.
+		srv.healthWatch = hw
 		log.Printf("ledger-api-go: balance health watchdog started (interval %v)", interval)
 		defer hw.Stop()
 	}

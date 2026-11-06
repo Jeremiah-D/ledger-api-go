@@ -538,3 +538,32 @@ func TestServerFXConsistencyWatchHandle(t *testing.T) {
 		t.Fatalf("Interval() through srv.fxConsistencyWatch = %v, want 20ms", got)
 	}
 }
+
+func TestServerHealthWatchHandle(t *testing.T) {
+	// main.go stores the started balance-health watchdog on srv at
+	// startup (LG-327) so existing operator paths can revise the
+	// live scan interval in place instead of restarting the server.
+	srv := &server{ledger: ledger.New()}
+	if srv.healthWatch != nil {
+		t.Fatalf("healthWatch = %v, want nil before startup", srv.healthWatch)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hw := ledger.StartHealthWatch(ctx, srv.ledger, 500*time.Millisecond, nil)
+	if hw == nil {
+		t.Fatalf("watch not started")
+	}
+	defer hw.Stop()
+	srv.healthWatch = hw
+
+	prev, err := srv.healthWatch.SetInterval(20 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("SetInterval through srv.healthWatch: %v", err)
+	}
+	if prev != 500*time.Millisecond {
+		t.Fatalf("returned previous interval = %v, want 500ms", prev)
+	}
+	if got := srv.healthWatch.Interval(); got != 20*time.Millisecond {
+		t.Fatalf("Interval() through srv.healthWatch = %v, want 20ms", got)
+	}
+}

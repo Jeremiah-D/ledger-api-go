@@ -267,7 +267,12 @@ func (l *Ledger) HealthViolationCount() uint64 {
 // that calls RunHealthCheck on a ticker until its context is cancelled
 // or Stop is called. Like the hold/review/schedule sweepers it shares
 // the server context, fires its first tick after one full interval, and
-// is disabled (nil) on a non-positive interval.
+// is disabled (nil) on a non-positive interval. The scan interval is
+// revisable at runtime in place via SetInterval (LG-327): a revision
+// wakes run() through retune, which stops the old ticker, runs a tick
+// that fired while the revision was in flight (so the revision cannot
+// swallow a due scan), and rebuilds the ticker on the new live
+// interval.
 type HealthWatch struct {
 	l           *Ledger
 	interval    time.Duration
@@ -276,6 +281,19 @@ type HealthWatch struct {
 	done     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+
+	// mu guards interval: run() re-reads the live value under RLock
+	// when it rebuilds its ticker after a SetInterval revision
+	// (LG-327), so a runtime revision governs from the next tick
+	// without restarting the watch.
+	mu sync.RWMutex
+
+	// retune wakes run() when SetInterval revises the live scan
+	// interval. Buffered 1 and sent non-blocking, along the
+	// ReportSweeper (LG-316) pattern: a revision never stalls on a
+	// loop that is mid-scan, and a newer revision supersedes a
+	// coalesced wakeup because run() re-reads the live value.
+	retune chan struct{}
 
 	ticks           atomic.Uint64
 	violationsTotal atomic.Uint64
@@ -302,6 +320,7 @@ func StartHealthWatch(ctx context.Context, l *Ledger, interval time.Duration, on
 		interval:    interval,
 		onViolation: onViolation,
 		done:        make(chan struct{}),
+		retune:      make(chan struct{}, 1),
 	}
 	hw.wg.Add(1)
 	go hw.run(ctx)
@@ -310,7 +329,7 @@ func StartHealthWatch(ctx context.Context, l *Ledger, interval time.Duration, on
 
 func (hw *HealthWatch) run(ctx context.Context) {
 	defer hw.wg.Done()
-	ticker := time.NewTicker(hw.interval)
+	ticker := time.NewTicker(hw.Interval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -318,14 +337,38 @@ func (hw *HealthWatch) run(ctx context.Context) {
 			return
 		case <-hw.done:
 			return
-		case <-ticker.C:
-			violations := hw.l.RunHealthCheck()
-			hw.ticks.Add(1)
-			hw.violationsTotal.Add(uint64(len(violations)))
-			if len(violations) > 0 && hw.onViolation != nil {
-				hw.onViolation(violations)
+		case <-hw.retune:
+			// A tick may have fired while the revision was in
+			// flight: run it now so the revision cannot swallow
+			// a due scan, then rebuild the ticker on the new
+			// live interval. The old ticker is stopped before
+			// the new one is built, so two tickers never run in
+			// parallel; a scan already in progress is
+			// unaffected — the loop only selects between scans,
+			// so the revision waits until it finishes.
+			ticker.Stop()
+			select {
+			case <-ticker.C:
+				hw.tick()
+			default:
 			}
+			ticker = time.NewTicker(hw.Interval())
+		case <-ticker.C:
+			hw.tick()
 		}
+	}
+}
+
+// tick runs one health scan, records the violations it found, and
+// invokes onViolation (when non-nil) with them. It is the single
+// scan path for both the ticker and the retune drain, so a revision
+// can never swallow a due scan.
+func (hw *HealthWatch) tick() {
+	violations := hw.l.RunHealthCheck()
+	hw.ticks.Add(1)
+	hw.violationsTotal.Add(uint64(len(violations)))
+	if len(violations) > 0 && hw.onViolation != nil {
+		hw.onViolation(violations)
 	}
 }
 
