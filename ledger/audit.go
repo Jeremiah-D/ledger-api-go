@@ -91,6 +91,13 @@ const DefaultAuditMaxBytes = 100 * 1024 * 1024
 // slow disk can never stall Post.
 const DefaultAuditQueueSize = 4096
 
+// DefaultAuditFlushInterval is the default fsync cadence for audit
+// files: 1s. The writer fsyncs at most once per interval, plus once
+// every 128 written events (whichever comes first) — a longer interval
+// widens the crash-loss window, a shorter one costs more fsyncs.
+// Revisable at runtime via Ledger.SetAuditLogFlushInterval (LG-342).
+const DefaultAuditFlushInterval = time.Second
+
 // auditLogFilename lays out audit files as
 // audit-2006-01-02.jsonl, with -NNN suffixes when a day rotates on size:
 // audit-2006-01-02-001.jsonl. Days are UTC so rotation is deterministic
@@ -108,6 +115,13 @@ type AuditLogOption func(*auditLogConfig)
 type auditLogConfig struct {
 	maxBytes  int64
 	queueSize int
+	// flushInterval is the fsync cadence for the background writer
+	// (LG-342): how often the writer calls f.Sync() on the current
+	// audit file, on top of the every-128-events sync in run. 0 is
+	// never stored — NewAuditLog defaults it to
+	// DefaultAuditFlushInterval, and the option below keeps the
+	// default for non-positive values.
+	flushInterval time.Duration
 	// retentionDays is the audit-log retention window in whole days
 	// (LG-137, see audit_retention.go): ApplyAuditRetention deletes
 	// whole audit files older than the window. 0 (the default) keeps
@@ -137,6 +151,19 @@ func WithAuditLogQueueSize(n int) AuditLogOption {
 	return func(c *auditLogConfig) {
 		if n > 0 {
 			c.queueSize = n
+		}
+	}
+}
+
+// WithAuditLogFlushInterval sets how often the background writer fsyncs
+// the audit file (LG-342). A longer interval widens the crash-loss
+// window; a shorter one costs more fsyncs. Non-positive values keep
+// the default (DefaultAuditFlushInterval, 1s). Revisable at runtime
+// via Ledger.SetAuditLogFlushInterval.
+func WithAuditLogFlushInterval(d time.Duration) AuditLogOption {
+	return func(c *auditLogConfig) {
+		if d > 0 {
+			c.flushInterval = d
 		}
 	}
 }
@@ -199,10 +226,12 @@ type AuditLog struct {
 	// ApplyAuditRetention deletes whole audit files older than the
 	// window. 0 means unlimited retention.
 	retentionDays int
-	// cfgMu guards maxBytes, retentionDays, queueSize and pending
-	// (LG-301, LG-309): maxBytes/retentionDays/queueSize are
+	// cfgMu guards maxBytes, retentionDays, queueSize, flushInterval
+	// and pending (LG-301, LG-309, LG-342):
+	// maxBytes/retentionDays/queueSize/flushInterval are
 	// runtime-revisable via Ledger.SetAuditLogMaxBytes /
-	// SetAuditLogRetentionDays / SetAuditLogQueueSize while the
+	// SetAuditLogRetentionDays / SetAuditLogQueueSize /
+	// SetAuditLogFlushInterval while the
 	// background writer (run) and the retention sweep read them live.
 	// It is deliberately a separate mutex from chainMu, which only
 	// serializes hash-chain sealing at enqueue — config reads must
@@ -225,6 +254,12 @@ type AuditLog struct {
 	// QueueSize, never directly: the field moves under cfgMu when the
 	// writer installs a new generation.
 	queueSize int
+	// flushInterval is the live fsync cadence (LG-342): the
+	// construction-time WithAuditLogFlushInterval value, revisable at
+	// runtime via Ledger.SetAuditLogFlushInterval. Read it through
+	// FlushInterval, never directly: the field moves under cfgMu when
+	// a revision is applied.
+	flushInterval time.Duration
 	// pending holds events drained out of a previous queue generation
 	// during a shrink (LG-309): when the capacity is revised down,
 	// buffered events are moved here instead of being dropped, and
@@ -248,6 +283,20 @@ type AuditLog struct {
 	// closed path — otherwise a swap could race the writer's final
 	// drain.
 	resizeMu sync.Mutex
+	// flushReq carries at most one pending flush-interval revision to
+	// the background writer (LG-342): the writer owns the ticker, so
+	// a revision is applied at a select point where the writer holds
+	// no received event — it syncs once at the old cadence boundary,
+	// then stops and rebuilds the ticker at the new interval.
+	// Buffered 1; flushMu serializes setters, so a send never blocks
+	// on a full channel.
+	flushReq chan flushIntervalRequest
+	// flushMu serializes flush-interval revisions and Close (LG-342):
+	// a revision in flight must finish before Close can stop the
+	// writer, and Close must finish before a revision can take the
+	// closed path — otherwise a rebuild could race the writer's
+	// final drain.
+	flushMu sync.Mutex
 	done     chan struct{}
 	wg       sync.WaitGroup
 	gzWg     sync.WaitGroup // in-flight background gzipFile calls
@@ -289,7 +338,7 @@ type AuditLog struct {
 // background writer. The caller must Close the log on shutdown to flush
 // queued events.
 func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
-	cfg := auditLogConfig{maxBytes: DefaultAuditMaxBytes, queueSize: DefaultAuditQueueSize}
+	cfg := auditLogConfig{maxBytes: DefaultAuditMaxBytes, queueSize: DefaultAuditQueueSize, flushInterval: DefaultAuditFlushInterval}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -320,7 +369,12 @@ func NewAuditLog(dir string, opts ...AuditLogOption) (*AuditLog, error) {
 		// value and moves only when the writer installs a new queue
 		// generation (setQueueSize / applyQueueResize).
 		queueSize: cfg.queueSize,
+		// LG-342: the live fsync cadence starts at the
+		// construction-time value and moves only when the writer
+		// rebuilds its ticker (setFlushInterval).
+		flushInterval: cfg.flushInterval,
 		resizeReq: make(chan queueResizeRequest, 1),
+		flushReq:  make(chan flushIntervalRequest, 1),
 		done:      make(chan struct{}),
 		signer:    signer,
 		// LG-305: the rotation set and grace live with the signer so
@@ -562,6 +616,12 @@ func (a *AuditLog) Close() error {
 	// waiting on resizeMu cannot deadlock.
 	a.resizeMu.Lock()
 	defer a.resizeMu.Unlock()
+	// LG-342: serialize with flush-interval revisions the same way —
+	// a rebuild in flight must finish before the writer stops, and
+	// no revision may take the closed path while the writer is still
+	// draining.
+	a.flushMu.Lock()
+	defer a.flushMu.Unlock()
 	if a.closed.Swap(true) {
 		return nil
 	}
@@ -683,8 +743,11 @@ func (a *AuditLog) run() {
 		}
 	}
 
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	ticker := time.NewTicker(a.FlushInterval())
+	// The ticker is rebuilt by flush-interval revisions (LG-342):
+	// the deferred stop must read the current variable, not the
+	// ticker value captured at this line.
+	defer func() { ticker.Stop() }()
 	// q is the queue generation the writer is draining (LG-309): the
 	// channel is re-read only when the writer itself installs a new
 	// one (applyQueueResize), never mid-generation, so a revision can
@@ -703,6 +766,20 @@ func (a *AuditLog) run() {
 			write(ev)
 		case req := <-a.resizeReq:
 			q = a.applyQueueResize(req, q)
+		case req := <-a.flushReq:
+			// LG-342: sync once at the old cadence boundary, then
+			// rebuild the ticker at the new interval (retune-drain,
+			// along LG-328): a revision never swallows a due sync,
+			// and the new cadence governs from the next tick. The
+			// live field moves here, under cfgMu, so FlushInterval
+			// reports the new cadence the moment the ticker does.
+			syncFile()
+			ticker.Stop()
+			ticker = time.NewTicker(req.d)
+			a.cfgMu.Lock()
+			a.flushInterval = req.d
+			a.cfgMu.Unlock()
+			close(req.done)
 		case <-ticker.C:
 			syncFile()
 		case <-a.done:

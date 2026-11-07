@@ -8644,7 +8644,18 @@ buffered events — they are drained and flushed in order — and new
 events are dropped by plain channel semantics only while the
 (smaller) new channel is full, until the writer works the backlog
 down; the revision is recorded as an `audit_log_queue_size_amended`
-event (`previous_queue_size` / `queue_size`). Filenames are never reused,
+event (`previous_queue_size` / `queue_size`). The fsync cadence is
+likewise revisable at runtime via
+`ledger.Ledger.SetAuditLogFlushInterval` (LG-342): the writer syncs
+once at the old cadence boundary, then rebuilds its ticker at the new
+interval — a revision never swallows a due sync — and the
+every-128-events sync is untouched, so a long interval never delays
+the write path; the revision is recorded as an
+`audit_log_flush_interval_amended` event
+(`previous_flush_interval_ms` / `flush_interval_ms`, whole
+milliseconds), and the setters return the previous interval. A longer
+interval widens the crash-loss window; a shorter one costs more
+fsyncs. Filenames are never reused,
 so a `.jsonl` and its `.gz` twin always carry identical events.
 `ledger.ReadAuditLog(dir, "2006-01-02")` reads a day's files (plain and
 gzipped, in order) and skips malformed lines — a damaged audit file never
