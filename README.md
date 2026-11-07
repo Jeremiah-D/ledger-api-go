@@ -8973,6 +8973,28 @@ strings), `http_timeout` (default `10s`), `queue_size` (default 1024),
 fast; an endpoint without key material refuses to register — unsigned
 webhooks can be forged.
 
+The per-endpoint queue capacity is revisable at runtime without
+re-registering the endpoint (LG-343, `ledger.SetWebhookQueueSize` /
+`SetWebhookQueueSizeCtx`, with `ledger.WebhookQueueSize` reporting
+the live value): widening takes effect from the next event — a burst
+that filled the old queue stops dropping once the wider channel is
+installed — and tightening never drops an already-buffered event
+(survivors drain in outbox seq order); while the backlog drains, new
+events drop by plain channel semantics whenever the smaller channel
+is full. A capacity below 1 is rejected with the live capacity
+untouched, a same-value revision is a no-op with no audit event, and
+every real revision is audited as `webhook_queue_size_retuned`
+(endpoint plus `previous_queue_size`/`current_queue_size`). The
+revision is future-only — a delivery already in flight keeps the
+policy it started with — bumps neither the version nor the audit
+chain, and writes no journal entry or outbox event. A restart
+restores the construction-time capacity. This is distinct from the
+LG-304 delivery knobs (retry/backoff/timeout), the LG-335
+signing-key grace window, and the LG-336 delivery-record ring (how
+deep the history reads back) — this knob is how deep the live
+fan-out buffers. (Payments fintech / backend engineering: outbound
+payment-callback fan-out admission buffer.)
+
 Delivery contract, stated honestly:
 
 - Every delivery POSTs the outbox event JSON with
@@ -9011,10 +9033,9 @@ Delivery contract, stated honestly:
   plus `previous_*`/`current_*` per changed field, durations in
   nanoseconds), bumps neither the version nor the audit chain, and
   writes no journal entry or outbox event. There is no HTTP endpoint
-  for it. The URL, the event filter, the keys, the enabled gate, and
-  the queue size are not revisable here (`RotateKey` owns keys,
-  `SetEnabled` owns the gate; the queue capacity is fixed at
-  construction). A revision affects every tenant sharing the
+  for it. The URL, the event filter, the keys, and the enabled gate
+  are not revisable here (`RotateKey` owns keys, `SetEnabled` owns
+  the gate; the queue capacity is revisable separately, see above). A revision affects every tenant sharing the
   dispatcher. (Payments fintech / backend engineering: outbound
   webhook delivery governance.)
 - The signing-key grace period is revisable at runtime without

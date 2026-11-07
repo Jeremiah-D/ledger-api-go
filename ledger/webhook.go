@@ -570,9 +570,27 @@ func buildKeyRing(items []webhookKeyJSON, grace time.Duration) (*RotatingKey, er
 }
 
 // webhookEndpoint is a registered endpoint plus its delivery worker.
+//
+// The delivery queue is a channel, so its capacity cannot be revised
+// by writing a field: the worker reads its generation in run, and
+// Notify sends into it. The capacity is therefore revised by a
+// generation swap (LG-343, along LG-309's audit-log queue): the
+// worker owns the swap, the setter hands it a queueResizeRequest, and
+// the old generation is drained into pending (oldest first) so a
+// shrink never drops a buffered event. queue, queueSize and pending
+// are guarded by queueMu; Notify's send reads the generation and
+// sends under the same queueMu.RLock, so no event can enter the old
+// channel mid-drain and no drained event can be overtaken by a new
+// one. The worker never takes d.mu while swapping, and Notify never
+// touches the bare queue field.
 type webhookEndpoint struct {
 	cfg    WebhookEndpointConfig
-	queue  chan OutboxEvent
+	queue  chan OutboxEvent // current generation; guarded by queueMu
+	queueSize int           // live capacity; guarded by queueMu
+	pending []OutboxEvent   // shrink survivors, oldest first; guarded by queueMu
+	resizeReq chan queueResizeRequest // buffered 1; the worker applies
+	resizeMu sync.Mutex    // serializes setQueueSize callers
+	queueMu sync.RWMutex   // guards queue, queueSize, pending
 	client *http.Client
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -607,34 +625,68 @@ func (e *webhookEndpoint) stop() {
 // run drains the endpoint's queue serially: one event's retries fully
 // complete (or exhaust) before the next event starts, so per-endpoint
 // delivery order matches outbox seq order.
+//
+// The worker tracks its queue generation in q, read once at startup
+// through queueChan and afterwards only through applyQueueResize —
+// it never re-reads the bare queue field, so a capacity revision
+// cannot race the receive. Before taking a new event from the
+// channel it flushes shrink survivors from pending, oldest first, so
+// a shrink keeps the enqueue order; a shutdown request wins over the
+// flush, and survivors still buffered at shutdown are dropped and
+// counted like the rest of the queue.
 func (e *webhookEndpoint) run() {
 	defer e.wg.Done()
+	q := e.queueChan()
 	for {
 		select {
 		case <-e.done:
-			// Prompt shutdown: queued-but-undelivered events are
-			// dropped and counted — they never left the process, so
-			// the outbox stream stays the durable record.
-			n := 0
-		drain:
-			for {
-				select {
-				case <-e.queue:
-					n++
-				default:
-					break drain
-				}
-			}
-			if n > 0 {
-				e.d.dropped.Add(uint64(n))
-			}
+			e.shutdownDrain(q)
 			return
-		case ev, ok := <-e.queue:
+		default:
+		}
+		if ev, ok := e.takePending(); ok {
+			e.deliver(ev)
+			continue
+		}
+		select {
+		case <-e.done:
+			e.shutdownDrain(q)
+			return
+		case req := <-e.resizeReq:
+			q = e.applyQueueResize(req, q)
+		case ev, ok := <-q:
 			if !ok {
 				return
 			}
 			e.deliver(ev)
 		}
+	}
+}
+
+// shutdownDrain drops every event still buffered — shrink survivors
+// in pending plus the current queue generation — and counts them,
+// matching the pre-LG-343 stop semantics: queued-but-undelivered
+// events never left the process, so the outbox stream stays the
+// durable record. The closed-channel check matters: Unregister closes
+// the queue before stopping the worker, and a receive on a closed,
+// drained channel returns a zero value immediately — counting it
+// would spin forever.
+func (e *webhookEndpoint) shutdownDrain(q chan OutboxEvent) {
+	n := e.dropPending()
+drain:
+	for {
+		select {
+		case _, ok := <-q:
+			if !ok {
+				break drain
+			}
+			n++
+		default:
+			break drain
+		}
+	}
+	if n > 0 {
+		e.d.dropped.Add(uint64(n))
 	}
 }
 
@@ -840,13 +892,15 @@ func (d *WebhookDispatcher) Register(cfg WebhookEndpointConfig) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ep := &webhookEndpoint{
-		cfg:    cfg,
-		queue:  make(chan OutboxEvent, cfg.QueueSize),
-		client: &http.Client{Timeout: cfg.HTTPTimeout},
-		ctx:    ctx,
-		cancel: cancel,
-		done:   make(chan struct{}),
-		d:      d,
+		cfg:       cfg,
+		queue:     make(chan OutboxEvent, cfg.QueueSize),
+		queueSize: cfg.QueueSize,
+		resizeReq: make(chan queueResizeRequest, 1),
+		client:    &http.Client{Timeout: cfg.HTTPTimeout},
+		ctx:       ctx,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		d:         d,
 	}
 	d.endpoints[cfg.Name] = ep
 	d.order = append(d.order, cfg.Name)
@@ -873,7 +927,11 @@ func (d *WebhookDispatcher) Unregister(name string) bool {
 		}
 	}
 	d.mu.Unlock()
-	close(ep.queue)
+	// Close the current queue generation under queueMu, so no Notify
+	// send can race the close (a send on a closed channel panics).
+	// Buffered events still drain through the worker's receive case
+	// in order; the worker returns once the generation is empty.
+	ep.closeQueue()
 	ep.stop()
 	return true
 }
@@ -928,13 +986,14 @@ func (d *WebhookDispatcher) Notify(ev OutboxEvent) {
 		if !ep.cfg.Enabled || !ep.matches(ev.Type) {
 			continue
 		}
-		select {
-		case ep.queue <- ev:
-		default:
-			// The queue is full: drop, don't block. The outbox
-			// stream stays the durable record; the webhook is a
-			// live fan-out and a slow consumer must not stall the
-			// ledger's commit path.
+		// tryEnqueue reads the current queue generation and sends
+		// under the same queueMu.RLock (the LG-309 shape): a
+		// capacity revision draining the old generation holds
+		// queueMu, so no send can enter the old channel mid-drain
+		// and no drained event can be overtaken by a new one. A
+		// full queue still drops the event (counted) instead of
+		// stalling the commit.
+		if !ep.tryEnqueue(ev) {
 			d.dropped.Add(1)
 		}
 	}
