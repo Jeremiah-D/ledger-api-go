@@ -115,10 +115,11 @@ func (c SnapshotBackupConfig) withDefaults() SnapshotBackupConfig {
 // (LG-329), the retention depths are revisable at runtime via
 // SetKeepFull / SetKeepIncremental (LG-332), the full/incremental
 // alternation cadence is revisable at runtime via SetFullEvery
-// (LG-333), and the encryption fail-closed posture is revisable at
-// runtime via SetEncryptFailClosed (LG-337): all four revisions move
-// the live values in place with no restart, and the next backup reads
-// the live values.
+// (LG-333), the encryption fail-closed posture is revisable at
+// runtime via SetEncryptFailClosed (LG-337), and the export retry
+// budget is revisable at runtime via SetMaxRetries (LG-344): all five
+// revisions move the live values in place with no restart, and the
+// next backup reads the live values.
 type SnapshotBackup struct {
 	l        *Ledger
 	cfg      SnapshotBackupConfig
@@ -185,6 +186,21 @@ type SnapshotBackup struct {
 	// revision.
 	failClosed   bool
 	failClosedMu sync.RWMutex
+	// maxRetries is the live export retry budget (LG-344), guarded by
+	// maxRetriesMu: StartSnapshotBackup seeds it from the
+	// withDefaults cfg value and SetMaxRetries revises it in place.
+	// It is deliberately separate from both cfg and mu — and from
+	// intervalMu / retentionMu / fullEveryMu / failClosedMu, each of
+	// which guards a different knob: backupOnce holds mu for a whole
+	// export + write + prune + audit, so a setter that took mu would
+	// stall behind a backup in flight; and cfg is a value struct
+	// read without a lock, so the live value cannot live there
+	// either. backupOnce reads it once under maxRetriesMu.RLock at
+	// the retry loop's entry, so the new budget governs the next
+	// backup without restarting the worker and without rewriting a
+	// backup already in flight.
+	maxRetries   int
+	maxRetriesMu sync.RWMutex
 	// retune wakes run() when SetInterval revises the live backup
 	// interval. Buffered 1 and sent non-blocking, along the
 	// FXRateWatch (LG-324) pattern: a revision never stalls on a
@@ -231,6 +247,7 @@ func StartSnapshotBackup(ctx context.Context, l *Ledger, cfg SnapshotBackupConfi
 		keepIncremental: cfg.KeepIncremental,
 		fullEvery:       cfg.FullEvery,
 		failClosed:      cfg.Encryption.FailClosed,
+		maxRetries:      cfg.MaxRetries,
 		retune:          make(chan struct{}, 1),
 	}
 	sw.wg.Add(1)
@@ -321,7 +338,11 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 		merkleRoot string
 		err        error
 	)
-	for attempt := 0; attempt <= sw.cfg.MaxRetries; attempt++ {
+	// The retry budget is read once at the loop's entry (LG-344): a
+	// revision mid-tick never rewrites the budget of a backup
+	// already in flight — the new budget governs from the next tick.
+	maxRetries := sw.MaxRetries()
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var buf bytes.Buffer
 		if full {
 			err = sw.l.ExportSnapshot(&buf)
@@ -353,7 +374,7 @@ func (sw *SnapshotBackup) backupOnce() (kind string, ok bool) {
 		}
 		// Brief backoff between attempts; the final attempt reports
 		// the failure without sleeping.
-		if attempt < sw.cfg.MaxRetries {
+		if attempt < maxRetries {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}

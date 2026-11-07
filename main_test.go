@@ -962,6 +962,71 @@ func TestServerSnapshotBackupFullEveryHandle(t *testing.T) {
 	}
 }
 
+func TestServerSnapshotBackupMaxRetriesHandle(t *testing.T) {
+	// The same srv handle (LG-329) also carries the live export
+	// retry budget (LG-344): an operator revises it in place through
+	// srv.snapshotBackup instead of restarting the server. The
+	// worker keeps running after the revision: the 500ms cadence
+	// outlives the revision itself, and a backup file lands on the
+	// original schedule afterwards.
+	srv := &server{ledger: ledger.New()}
+	if srv.snapshotBackup != nil {
+		t.Fatalf("snapshotBackup = %v, want nil before startup", srv.snapshotBackup)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	bk := ledger.StartSnapshotBackup(ctx, srv.ledger, ledger.SnapshotBackupConfig{
+		Dir: dir, Interval: 500 * time.Millisecond,
+	}, nil)
+	if bk == nil {
+		t.Fatalf("backup worker not started")
+	}
+	defer bk.Stop()
+	srv.snapshotBackup = bk
+
+	// No MaxRetries configured, so the live budget starts at the
+	// default (3 retries) — there is no env knob for it.
+	if got := srv.snapshotBackup.MaxRetries(); got != 3 {
+		t.Fatalf("MaxRetries() through srv.snapshotBackup = %d, want 3", got)
+	}
+	prev, err := srv.snapshotBackup.SetMaxRetries(8)
+	if err != nil {
+		t.Fatalf("SetMaxRetries through srv.snapshotBackup: %v", err)
+	}
+	if prev != 3 {
+		t.Fatalf("returned previous max-retries = %d, want 3", prev)
+	}
+	if got := srv.snapshotBackup.MaxRetries(); got != 8 {
+		t.Fatalf("MaxRetries() through srv.snapshotBackup = %d, want 8", got)
+	}
+	// Zero is the legal fail-fast budget, not a rejection.
+	if prev, err := srv.snapshotBackup.SetMaxRetries(0); err != nil || prev != 8 {
+		t.Fatalf("SetMaxRetries(0) through srv.snapshotBackup = (%d, %v), want (8, nil)", prev, err)
+	}
+	if got := srv.snapshotBackup.MaxRetries(); got != 0 {
+		t.Fatalf("MaxRetries() through srv.snapshotBackup = %d, want 0", got)
+	}
+	// The worker was not restarted by the revision: it is still the
+	// same handle, and a backup lands on its original 500ms cadence.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		for _, e := range entries {
+			if len(e.Name()) > 9 && e.Name()[:9] == "snapshot-" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no backup file landed within 3s of the revision; the worker did not keep ticking")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestServerBalanceHistoryRecorderHandle(t *testing.T) {
 	// main.go stores the started balance-history recorder on srv at
 	// startup (LG-330) so existing operator paths can revise the

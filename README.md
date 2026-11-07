@@ -9933,8 +9933,9 @@ Environment:
   `snapshot_backup_keep_incremental_retuned`); a tighter depth only
   takes effect at the next backup's regular pruning — the revision
   itself deletes no files — and a looser depth keeps older files from
-  the next backup on. FullEvery, MaxRetries, and encryption stay
-  separate knobs.
+  the next backup on. FullEvery and encryption stay separate knobs;
+  the export retry count is itself revisable at runtime via
+  `SnapshotBackup.SetMaxRetries` (LG-344, see below).
 - `LEDGER_SNAPSHOT_BACKUP_FULL_EVERY` — how often a backup is a full
   snapshot, e.g. `LEDGER_SNAPSHOT_BACKUP_FULL_EVERY=6` (default 6):
   every Nth backup is full, the rest are incremental deltas from the
@@ -9954,6 +9955,19 @@ Environment:
   (LG-332, how many files survive pruning), the export retry count
   (`MaxRetries`), and at-rest encryption (LG-77, whether files land
   sealed) are separate knobs and do not participate in the revision.
+- Export retry budget (LG-344) — while running, an operator can revise
+  the live export retry budget in place via `SnapshotBackup.SetMaxRetries`
+  (no restart; negative rejected, same-value a no-op, each real revision
+  audited as `snapshot_backup_max_retries_retuned` with previous/current
+  integer counts); a revision does not survive a restart — the startup
+  value (default 3) governs the next start, and there is no env knob for
+  it. `MaxRetries=0` means fail-fast: a failed export is tried once with
+  no backoff sleep. The budget is read once per backup tick, so a revision
+  never rewrites a backup already in flight — it governs from the next
+  backup. The retry count only decides how many times a failed export is
+  retried: the backup cadence (LG-329), the retention depths (LG-332),
+  the full/incremental cadence (LG-333), and at-rest encryption (LG-77)
+  are separate knobs and do not participate in the revision.
 - `LEDGER_BACKUP_ENCRYPTION_KEY` — opt-in AES-256-GCM at-rest encryption
   for snapshot backup files (full and incremental alike): 64 hex chars
   for a single key, or `kid:hex,kid:hex,...` for a rotation ring (first
