@@ -1663,6 +1663,16 @@ a debit rejected under the old window books nothing, so it can simply
 be retried under the extended window. The revision is audited as
 `mandate_valid_until_amended` and rides the mandate record through
 snapshots.
+`AmendMandatePayee` revises a live mandate's payee in place — active
+mandates only (suspended, cancelled, or expired mandates fail closed,
+lazy expiry included), and the new payee must be non-empty and differ
+from the payer, the same gates creation applies — without touching
+payer, cap, currency, frequency, or the validity window. Amending to
+the current payee is a no-op that writes no audit event. Past debits
+stay journaled to the old payee, and the new payee governs the very
+next debit, because `DebitWithMandate` reads the live payee; the
+revision is audited as `mandate_payee_amended` and rides the mandate
+record through snapshots.
 `GET /mandates/{id}` reads a mandate with its effective status;
 `GET /mandates/{id}/debits` is the per-mandate reconciliation query —
 the debits in debit order, paged by `limit`/`cursor`. Repeating a debit
