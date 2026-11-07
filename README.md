@@ -9006,6 +9006,25 @@ Delivery contract, stated honestly:
   restart restores the 1s default — there is no `PollInterval` env
   var yet, so a revision that must survive a restart has to be
   re-applied. There is no HTTP endpoint for the revision.
+- **Runtime poll-page-limit retuning.** How many events one outbox
+  poll pulls (100 by default) is revisable in place via
+  `(*AuditSink).SetSinkPollLimit` / `SetSinkPollLimitCtx` (LG-350),
+  without stopping the forwarder: the cursor, the queue order, the
+  counters, the signing secret, the four delivery knobs, and the
+  poll interval all stay put. The revision is future-only — a page
+  already fetched delivers in full under the old limit and only the
+  next poll uses the new value, so shrinking the page never strands
+  an event the sink already holds. The call returns the pre-revision
+  limit; a limit below 1 is rejected with `ErrInvalidSinkPollLimit`
+  and the live value is untouched (zero is rejected too — a runtime
+  revision never silently normalizes to the default), and a
+  same-value revision is a no-op that writes no audit event. A real
+  revision lands one `sink_poll_limit_retuned` audit event
+  (`previous_poll_limit`/`current_poll_limit`, plain integers); the
+  `Ctx` variant attributes the operator. A restart restores the
+  100-event default — there is no `LEDGER_AUDIT_SINK_POLL_LIMIT` env
+  var, so a revision that must survive a restart has to be
+  re-applied. There is no HTTP endpoint for the revision.
 - **Runtime key rotation.** The signing secret itself is rotatable
   in place via `(*AuditSink).RotateSinkSecret` /
   `RotateSinkSecretCtx` (LG-313), without stopping the forwarder:

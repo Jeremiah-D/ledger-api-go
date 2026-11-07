@@ -62,7 +62,9 @@ const (
 )
 
 // sinkCursorFilename is the default cursor file name inside the outbox
-// directory; sinkPollLimit caps one outbox poll page.
+// directory; sinkPollLimit caps one outbox poll page at start (the live
+// page limit is revisable in place via SetSinkPollLimit, LG-350, and a
+// restart restores this default).
 const (
 	sinkCursorFilename = "audit-sink.cursor"
 	sinkPollLimit      = 100
@@ -157,11 +159,19 @@ type AuditSink struct {
 	// under RLock at entry, and SetDeliveryPolicy swaps them under
 	// Lock. It never nests with l.mu, and it is not l.mu (the ledger
 	// write lock must never enter the delivery path) nor LG-301's
-	// AuditLog cfgMu (a different component's config lock).
+	// AuditLog cfgMu (a different component's config lock). It also
+	// guards pollPageLimit (LG-350): the run goroutine reads the live
+	// page limit under RLock on every poll.
 	cfgMu  sync.RWMutex
 	cfg    SinkConfig
 	client *http.Client
-	cursorPath string
+	// pollPageLimit caps one outbox poll page (LG-350). It starts at
+	// sinkPollLimit and is revisable in place via SetSinkPollLimit;
+	// it is deliberately not a SinkConfig field, so the startup-time
+	// env parsing of the five delivery/poll knobs (LG-351) stays
+	// independent of it.
+	pollPageLimit int
+	cursorPath    string
 
 	done     chan struct{}
 	stopOnce sync.Once
@@ -220,13 +230,14 @@ func StartAuditSink(ctx context.Context, l *Ledger, cfg SinkConfig) (*AuditSink,
 		}
 	}
 	s := &AuditSink{
-		l:          l,
-		dir:        dir,
-		cfg:        cfg,
-		client:     &http.Client{Timeout: cfg.HTTPTimeout},
-		cursorPath: cursorPath,
-		cursor:     cursor,
-		done:       make(chan struct{}),
+		l:             l,
+		dir:           dir,
+		cfg:           cfg,
+		client:        &http.Client{Timeout: cfg.HTTPTimeout},
+		pollPageLimit: sinkPollLimit,
+		cursorPath:    cursorPath,
+		cursor:        cursor,
+		done:          make(chan struct{}),
 	}
 	s.wg.Add(1)
 	go s.run(ctx)
@@ -258,7 +269,7 @@ func (s *AuditSink) run(ctx context.Context) {
 		if !sinkAlive(ctx, s.done) {
 			return
 		}
-		events, _, _, err := ReadOutboxEvents(s.dir, OutboxQuery{AfterSeq: s.cursor, Limit: sinkPollLimit})
+		events, _, _, err := ReadOutboxEvents(s.dir, OutboxQuery{AfterSeq: s.cursor, Limit: s.pollLimit()})
 		if err != nil {
 			// The outbox read is best-effort: a transient disk error
 			// must not kill the forwarder — the next poll retries.
