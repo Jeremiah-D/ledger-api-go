@@ -112,6 +112,14 @@ var (
 	// (LG-268); the salvage and method amendments (LG-269, LG-270)
 	// reuse it for the same gate.
 	ErrFixedAssetFullyDepreciated = errors.New("ledger: fixed asset is fully depreciated and has no future depreciation to revise")
+	// ErrFixedAssetDepreciationPosted is returned when amending a
+	// fixed asset's cost after any depreciation month has been
+	// posted: the booked months were computed on the old cost, so
+	// changing the cost would rewrite the economics of history.
+	// Introduced by AmendFixedAssetCost (LG-341); the gate counts
+	// posted months, not the net accumulated total, so a month that
+	// was booked and later reversed still blocks the revision.
+	ErrFixedAssetDepreciationPosted = errors.New("ledger: fixed asset already has depreciation posted and its cost cannot be amended")
 	// ErrInvalidDepreciationAccount is returned when a depreciation leg
 	// account is empty or contains '/'.
 	ErrInvalidDepreciationAccount = errors.New("ledger: depreciation leg accounts must be non-empty and must not contain '/'")

@@ -2869,7 +2869,19 @@ depreciated asset rejects the revision with
 `ErrFixedAssetFullyDepreciated`, an invalid method is rejected with
 `ErrInvalidDepreciationMethod` leaving the original method
 untouched, and the change is audited as
-`fixed_asset_method_amended`.
+`fixed_asset_method_amended`. Capitalized cost is revisable in place
+with `AmendFixedAssetCost` (LG-341): only before the first
+depreciation month is posted — an asset with any month posted
+rejects the revision with `ErrFixedAssetDepreciationPosted`
+(following the installment `PostedPeriods == 0` precedent, so a
+booked-then-reversed month still counts, since the month was posted);
+the new cost must be positive and above the salvage (otherwise
+`ErrInvalidAssetCost` / `ErrInvalidSalvage`, original cost untouched);
+the new cost governs from the next `Depreciate` (straight-line
+`(new cost-salvage)/life`, double-declining `bookValue*2/life`), and
+the change is audited as `fixed_asset_cost_amended`. No `Ctx`
+variant: the fixed-asset module has none (LG-264 precedent), like
+LG-268/269/270.
 
 ### Business-day calendar (LG-95)
 
