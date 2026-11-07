@@ -8806,6 +8806,7 @@ curl -N localhost:8080/events/stream '?cursor=<opaque>&account=cash'
 # data: {"seq":41,"type":"entry_posted",...}
 #
 # : ping          <- every 15s, keeps idle connections alive
+#                   (default 15s, revisable at runtime, LG-345)
 ```
 
 Semantics:
@@ -8826,6 +8827,17 @@ Semantics:
   its last id. (This is the Go equivalent of a writableLength guard.)
   Slow-consumer drops are counted by the outbox; open streams are the
   `ledger_outbox_stream_connections` gauge on `GET /metrics`.
+- **Heartbeat.** The `: ping` interval is 15s by default and revisable at
+  runtime via `SetOutboxStreamHeartbeatInterval` (LG-345, no restart;
+  non-positive rejected, same-value a no-op, each real revision recorded
+  in the process log with previous/current/actor — not an audit-chain
+  event, along LG-334: the audit chain only records ledger-domain events
+  and package main has no exported seam to append arbitrary events to
+  it); a revision does not survive a restart. The new interval governs
+  streams opened after the revision; a stream already open keeps the
+  ticker it started with. The heartbeat only sets the keep-alive rhythm:
+  events are still pushed the moment they commit, and resume, filters,
+  backpressure, and auth are untouched.
 - **Auth.** Like every `GET` route it needs the `read:ledger` API key
   scope when key enforcement is on; with zero keys configured it is
   fail-open, exactly like `GET /events`. Without

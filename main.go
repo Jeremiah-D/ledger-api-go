@@ -47,6 +47,17 @@ type server struct {
 	// handler reads it through the MaxBodyBytes getter.
 	maxBodyBytes   int64
 	maxBodyBytesMu sync.RWMutex
+	// outboxStreamHeartbeatInterval is the live SSE heartbeat
+	// interval on GET /events/stream (see outboxStreamHeartbeatInterval
+	// for the startup value). It is revised in place by
+	// SetOutboxStreamHeartbeatInterval (LG-345) instead of restarting
+	// the server; outboxStreamHeartbeatIntervalMu guards it and
+	// handleOutboxStream reads it through the
+	// OutboxStreamHeartbeatInterval getter when it builds a new
+	// stream's ticker, so a revision governs streams opened after it
+	// and never touches a stream already open.
+	outboxStreamHeartbeatInterval   time.Duration
+	outboxStreamHeartbeatIntervalMu sync.RWMutex
 	// balanceHistoryDir is the directory the balance-history recorder
 	// writes to (LEDGER_BALANCE_HISTORY_DIR). Empty means unconfigured,
 	// and GET /balance-history answers 404 fail-closed.
@@ -8411,7 +8422,7 @@ func (s *server) handleOutboxStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Live push.
-	ticker := time.NewTicker(outboxStreamHeartbeatInterval)
+	ticker := time.NewTicker(s.OutboxStreamHeartbeatInterval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -11048,7 +11059,7 @@ func newRouter(l *ledger.Ledger) http.Handler {
 func newServer(l *ledger.Ledger, opts ...ledger.Option) *server {
 	store := ledger.NewTenantStore(opts...)
 	store.Adopt(ledger.DefaultTenantID, l)
-	return &server{ledger: l, tenants: store, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes()}
+	return &server{ledger: l, tenants: store, metrics: &Metrics{}, maxBodyBytes: maxRequestBodyBytes(), outboxStreamHeartbeatInterval: outboxStreamHeartbeatInterval}
 }
 
 // ledgerFor resolves the request to its tenant's ledger: the
@@ -12214,6 +12225,66 @@ func (s *server) SetMaxBodyBytesCtx(ctx context.Context, n int64) (int64, error)
 	s.maxBodyBytes = n
 	s.maxBodyBytesMu.Unlock()
 	log.Printf("ledger-api-go: max body bytes revised: previous=%d current=%d actor=%s", previous, n, actor)
+	return previous, nil
+}
+
+// ErrInvalidOutboxStreamHeartbeatInterval is returned by
+// SetOutboxStreamHeartbeatInterval for a non-positive interval. A
+// runtime revision never silently normalizes: 0 would make
+// time.NewTicker panic, so it is rejected with the live interval
+// untouched (unlike the startup path, which keeps the 15s default
+// because the interval is a package var, not an env knob).
+var ErrInvalidOutboxStreamHeartbeatInterval = errors.New("ledger-api-go: outbox stream heartbeat interval must be positive")
+
+// OutboxStreamHeartbeatInterval reports the live SSE heartbeat interval
+// on GET /events/stream. handleOutboxStream reads the interval through
+// this getter (under outboxStreamHeartbeatIntervalMu) when it builds a
+// new stream's ticker, so a revision takes effect for the next stream
+// opened; a stream already open keeps the ticker it started with.
+func (s *server) OutboxStreamHeartbeatInterval() time.Duration {
+	s.outboxStreamHeartbeatIntervalMu.RLock()
+	defer s.outboxStreamHeartbeatIntervalMu.RUnlock()
+	return s.outboxStreamHeartbeatInterval
+}
+
+// SetOutboxStreamHeartbeatInterval revises the live SSE heartbeat
+// interval in place and returns the previous interval. The revision is
+// future-only: a stream already open built its ticker under the old
+// interval and is unaffected; the new interval applies from the next
+// stream opened. A revision identical to the live interval is a no-op
+// returning the live value. A non-positive interval returns
+// ErrInvalidOutboxStreamHeartbeatInterval with the live interval
+// untouched. The revision is recorded with log.Printf (previous /
+// current / actor) — it is not an audit-chain event: the audit chain
+// only records ledger-domain events and package main has no exported
+// seam to append arbitrary events to it, so the process log is the
+// honest channel (the same channel the startup configuration logs
+// use, along LG-334). Restarting restores the 15s default.
+func (s *server) SetOutboxStreamHeartbeatInterval(d time.Duration) (time.Duration, error) {
+	return s.SetOutboxStreamHeartbeatIntervalCtx(context.Background(), d)
+}
+
+// SetOutboxStreamHeartbeatIntervalCtx is SetOutboxStreamHeartbeatInterval
+// with per-call audit actor attribution (LG-73): the actor is taken
+// from ctx via ledger.ActorFromContext and defaults to
+// ledger.DefaultAuditActor ("system") when none is set.
+func (s *server) SetOutboxStreamHeartbeatIntervalCtx(ctx context.Context, d time.Duration) (time.Duration, error) {
+	if d <= 0 {
+		return s.OutboxStreamHeartbeatInterval(), ErrInvalidOutboxStreamHeartbeatInterval
+	}
+	actor := ledger.ActorFromContext(ctx)
+	if actor == "" {
+		actor = ledger.DefaultAuditActor
+	}
+	s.outboxStreamHeartbeatIntervalMu.Lock()
+	previous := s.outboxStreamHeartbeatInterval
+	if d == previous {
+		s.outboxStreamHeartbeatIntervalMu.Unlock()
+		return previous, nil
+	}
+	s.outboxStreamHeartbeatInterval = d
+	s.outboxStreamHeartbeatIntervalMu.Unlock()
+	log.Printf("ledger-api-go: outbox stream heartbeat interval revised: previous=%v current=%v actor=%s", previous, d, actor)
 	return previous, nil
 }
 
