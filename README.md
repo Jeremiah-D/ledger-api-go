@@ -8736,6 +8736,23 @@ and reason (`corrupt` / `unknown_key` / `key_retired` /
 records an `audit_signing_disabled` alert as its first trail entry, so a
 later verification can tell "never signed" from "signatures stripped".
 
+**Runtime grace revision (LG-348).** `Ledger.SetAuditSigningGrace(d)` (and
+the `Ctx` variant, which attributes the operator) revises the retired-key
+verification window in place and returns the pre-revision grace. The live
+signer is rebuilt immediately from the same key set with the new grace, so
+the next verification judges against it; an unsigned ledger only stores
+the grace, and the next rotation installs a signer built with it. A
+non-positive grace is rejected with `ErrInvalidAuditSigningGrace` — 0 is
+not a legal "off" state, it would void all history verification for
+retired keys the instant they retire — and the live grace is left
+untouched; revising to the current grace is a no-op with no audit event.
+The revision is audited as `audit_signing_grace_retuned` carrying
+`previous_grace` / `current_grace` (duration strings). A restart restores
+the env/default value (24h). Two honest boundaries: offline
+`VerifyAuditSignatures` takes an explicit grace argument, so a live
+revision changes no offline call; and export manifest signatures still
+use the 24h constant, not the revised grace.
+
 **Runtime key rotation (LG-305).** `Ledger.RotateAuditSigningKeys(keys)`
 (and the `Ctx` variant, which attributes the operator) installs a new
 signing rotation set with no downtime — no restart, no gap in which the

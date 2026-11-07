@@ -175,7 +175,7 @@ func WithAuditLogFlushInterval(d time.Duration) AuditLogOption {
 // lines, retired keys still verify inside grace (see
 // ParseAuditSigningKeys and VerifyAuditSignatures). A non-positive grace
 // keeps DefaultAuditSigningGrace. An empty keys slice keeps the log
-// unsigned.
+// unsigned. Revisable at runtime via Ledger.SetAuditSigningGrace.
 func WithAuditLogSigning(keys []AuditSigningKey, grace time.Duration) AuditLogOption {
 	return func(c *auditLogConfig) {
 		c.signingKeys = keys
