@@ -1614,7 +1614,7 @@ type Ledger struct {
 	// unlimited, the default. Guarded by mu; live-revised, never
 	// carried by snapshots — a restore returns the default.
 	maxHoldDuration time.Duration
-	pruneInterval   time.Duration // min gap between lazy key sweeps
+	pruneInterval   time.Duration // min gap between lazy key sweeps; live-revised via SetKeyPruneInterval (LG-349)
 	lastKeyPrune    time.Time
 	lastDailyPrune  time.Time // last run of the daily-outflow bucket sweep
 	lastBudgetPrune time.Time // last run of the monthly-spend bucket sweep

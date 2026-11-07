@@ -14,7 +14,7 @@ The design borrows its posting semantics from a publicly described concept: **"i
 - Entries are validated before booking: non-empty ID, distinct non-empty debit/credit accounts, and `amount_cents > 0`.
 - Every post commits atomically under one mutex: the journal row, the idempotency index, both net balances, and both per-account debit/credit totals land together — readers never see a half-posted entry.
 - The ledger tracks per-account total debits and total credits alongside net balances, so any account's trial balance is a single read. `VerifyAccountingEquation` checks the books: every account's net equals its debits minus its credits, and total debits equal total credits ledger-wide.
-- Posting is idempotent: submitting an entry with a previously used `IdempotencyKey` returns the original entry and books nothing again. The retention TTL can be revised at runtime with `SetIdempotencyTTL` (a non-positive TTL disables expiry): the new TTL governs every later `ExpireIdempotencyKeys` sweep and `Post` lazy sweep immediately, since both read the live field, while already-evicted keys are never resurrected; the revision lands one `idempotency_ttl_amended` audit event and rides the `idempotency_ttl` config line through snapshots.
+- Posting is idempotent: submitting an entry with a previously used `IdempotencyKey` returns the original entry and books nothing again. The retention TTL can be revised at runtime with `SetIdempotencyTTL` (a non-positive TTL disables expiry): the new TTL governs every later `ExpireIdempotencyKeys` sweep and `Post` lazy sweep immediately, since both read the live field, while already-evicted keys are never resurrected; the revision lands one `idempotency_ttl_amended` audit event and rides the `idempotency_ttl` config line through snapshots. The lazy sweep's throttle interval can be revised at runtime with `SetKeyPruneInterval` (LG-349, default 1m, non-positive intervals rejected): one valve paces the idempotency-key sweep and the monthly-spend, large-tx-report, and daily-outflow bucket sweeps, effective from the next lazy check, audited as `key_prune_interval_retuned`, and a restart restores 1m.
 - All state is guarded by an `RWMutex`: reads (`Balance`, `Snapshot`, listings, chain verification) take the read lock and run concurrently, while `Post` and idempotency-key expiry take the write lock. Reads never block each other — only writers serialize.
 - A per-account index maps each account to the IDs of the entries that touched it (as debit or credit leg), so per-account listing scans only that account's entries instead of the whole journal.
 - Every post appends a tamper-evident audit-chain link: `SHA-256(prevHash || entry)` over a length-prefixed encoding of the entry's fields (standard library only). Rewriting a journaled entry, deleting a link, or splicing the chain breaks the hash continuity, and `VerifyChain` / `GET /entries/verify` detect it by recomputation.
@@ -2494,6 +2494,15 @@ listing is operator tooling: it requires the operator API-key scope even
 though it is a `GET` (`read:ledger` keys are refused when API-key auth
 is enabled), and it never exposes business payloads — amounts,
 accounts, and memo text are not in the response.
+
+The lazy sweep that evicts expired keys is throttled by one interval
+shared with the monthly-spend, large-tx-report, and daily-outflow
+bucket sweeps: `SetKeyPruneInterval` (LG-349) revises it live (default
+1m; a non-positive interval is rejected, since 0 would make every `Post`
+full-scan the key table). The new interval governs the next lazy check;
+the revision itself evicts nothing, resets no last-prune timestamp, and
+never changes the TTL (LG-242) — only how often dead keys are swept.
+Audited as `key_prune_interval_retuned`; a restart restores 1m.
 
 ### Overdraft protection
 
