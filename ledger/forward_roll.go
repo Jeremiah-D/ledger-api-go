@@ -156,7 +156,12 @@ func (l *Ledger) maybeRollForwardLocked(c *FXForward, now time.Time) (*FXForward
 	if cfg == nil || c.Rolls >= cfg.MaxRolls {
 		return c, false, nil
 	}
-	lastSettleable := c.SettleAt.Add(ForwardSettlementGracePeriod)
+	// The roll window's anchor is SettleAt + the live grace period
+	// (LG-347): a revised grace moves the last settleable instant,
+	// and with it the window. Snapshotted once under the write lock
+	// the caller holds.
+	grace := l.forwardGracePeriod
+	lastSettleable := c.SettleAt.Add(grace)
 	remaining := lastSettleable.Sub(now)
 	if remaining <= 0 || remaining > cfg.RollWindow {
 		return c, false, nil

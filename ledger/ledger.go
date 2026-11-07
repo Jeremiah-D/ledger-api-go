@@ -768,6 +768,16 @@ type Ledger struct {
 	// disabled. Structural config — like the rate table — setting or
 	// clearing it does not bump the journal version.
 	forwardRollover *ForwardRolloverConfig
+	// forwardGracePeriod is the live settlement grace period for FX
+	// forward contracts (LG-347, see forward_grace_period.go): how
+	// long after SettleAt a booked forward may still settle before
+	// it is considered lapsed. Seeded from
+	// ForwardSettlementGracePeriod (24h) at construction and revised
+	// in place by SetForwardSettlementGracePeriod. Structural config
+	// — like forwardRollover — it does not bump the journal version
+	// and does not round-trip through snapshots: a restart restores
+	// the 24h default.
+	forwardGracePeriod time.Duration
 	// ftpCurves is the per-currency FTP rate-curve registry (see
 	// ftp.go), keyed by normalized currency code. Each SetFtpCurve
 	// bumps the currency's version. ftpAccounts names the internal
@@ -1872,6 +1882,10 @@ func New(opts ...Option) *Ledger {
 		railConfigs:          make(map[string]RailCapability),
 		fxRateSnapshots:      make(map[uint64]FXRateTableSnapshot),
 		forwards:             make(map[string]*FXForward),
+		// LG-347: the forward settlement grace period starts at
+		// the construction-time default (24h); it is revised in
+		// place by SetForwardSettlementGracePeriod.
+		forwardGracePeriod: ForwardSettlementGracePeriod,
 		rateOverrides:        make(map[fxPair]*RateOverride),
 		// LG-69 defaults: one-hour override lifetime, 10% deviation
 		// cap. Both are construction-time config (see

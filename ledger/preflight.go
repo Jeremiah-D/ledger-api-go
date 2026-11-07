@@ -163,10 +163,13 @@ func (l *Ledger) ClosePeriodPreflight(now time.Time, id string) (PreflightReport
 	// Booked (unsettled, unrolled-forward) FX forwards: the ledger still
 	// owes their settlement. Lapsed contracts are excluded — expiry is
 	// cancellation (see forward.go) — applying the same lazy-expiry
-	// predicate the forward-book report uses.
+	// predicate the forward-book report uses. The lapse is judged
+	// against the live grace period, snapshotted once under the read
+	// lock (LG-347).
+	grace := l.forwardGracePeriod
 	var forwardIDs []string
 	for fid, c := range l.forwards {
-		if c.Status == ForwardBooked && !forwardLapsed(c, now) {
+		if c.Status == ForwardBooked && !forwardLapsed(c, now, grace) {
 			forwardIDs = append(forwardIDs, fid)
 		}
 	}

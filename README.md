@@ -5204,6 +5204,51 @@ l.PlaceLimitOrder(ledger.LimitOrder{
 res := l.MatchLimitOrders(time.Now()) // res.Fills, res.Expires
 ```
 
+#### FX forwards (Go API: `BookForward`)
+
+A **forward** books a bilateral rate agreement: convert
+`notional_cents` of `from_currency` into `to_currency` for
+`from_account` → `to_account` at a locked rate on a value date
+(`SettleAt`), instead of at whatever the market does that day.
+Booking pins the rate and the market-table version (the receipt
+names the locked price while `RateSnapshotVersion` names the
+market table at booking); settlement posts a normal FX transfer
+at the locked rate through the same legs, fee, overdraft, and
+review gates as a market transfer, so forwards add *timing*,
+not a second settlement engine. Lifecycle is `booked` →
+`settled` | `cancelled`: a contract may still settle for 24h
+past its value date (the settlement grace period — the value
+date is the agreement, and the grace covers operational delay:
+a settlement that misses the value date by minutes is still
+the same economic event, one that misses it by a day is stale);
+past the grace it lapses to `cancelled` (reason `"expired"`),
+`SettleForward` reports `ErrForwardExpired`, and the lapse is
+idempotent and records no journal entries (the money never
+moved). The grace is a live value: `SetForwardSettlementGracePeriod`
+revises it in place (non-positive rejected with
+`ErrInvalidForwardSettlementGracePeriod`; same-value a no-op;
+audited as `fx_forward_grace_period_retuned` with
+`previous_grace_period` / `current_grace_period` as duration
+strings; the `Ctx` variant attributes the operator, defaulting
+to `"system"`). Widening re-admits booked contracts no sweep,
+settle, or read has yet lapsed — lazy expiry recomputes on
+every call — while a contract already persisted as
+cancelled/expired is terminal and is never revived; tightening
+lapses contracts sooner on the next decision that touches them.
+The grace also anchors the auto-rollover window
+(`lastSettleable = SettleAt + grace`): revising it moves the
+window, but `RollWindow` and `MaxRolls` are untouched. A restart
+(or a snapshot restore) restores the 24h default. No
+environment variable and no HTTP endpoint: forward tuning is
+in-process structural config. This is the payments-fintech leg
+of FX: corporate treasury desks lock a conversion rate for a
+known future payment and the ledger settles it at the agreed
+price when the value date arrives.
+
+```go
+l.SetForwardSettlementGracePeriod(48 * time.Hour) // widen the window during a settlement-system fault
+```
+
 #### Rate-table snapshot versioning
 
 Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,

@@ -661,9 +661,12 @@ func (l *Ledger) ExpireForwards(now time.Time) int {
 // expireForwardsLocked is the lock-held core of ExpireForwards.
 // Callers must hold the write lock.
 func (l *Ledger) expireForwardsLocked(now time.Time) int {
+	// Snapshot the live grace once: every lapse decision in this
+	// sweep judges against the same value (LG-347).
+	grace := l.forwardGracePeriod
 	expired := 0
 	for _, c := range l.forwards {
-		if c.Status != ForwardBooked || !forwardLapsed(c, now) {
+		if c.Status != ForwardBooked || !forwardLapsed(c, now, grace) {
 			continue
 		}
 		c.Status = ForwardCancelled
@@ -679,7 +682,7 @@ func (l *Ledger) expireForwardsLocked(now time.Time) int {
 			Details: map[string]any{
 				"forward_id":   c.ID,
 				"settle_at":    c.SettleAt.UTC().Format(time.RFC3339),
-				"grace_period": ForwardSettlementGracePeriod.String(),
+				"grace_period": grace.String(),
 			},
 		})
 	}
@@ -688,17 +691,21 @@ func (l *Ledger) expireForwardsLocked(now time.Time) int {
 
 // forwardLapsed reports whether a booked contract is past its
 // settlement grace period as of now: SettleAt + the grace is the last
-// instant it may still settle.
-func forwardLapsed(c *FXForward, now time.Time) bool {
-	return !now.Before(c.SettleAt.Add(ForwardSettlementGracePeriod))
+// instant it may still settle. grace is the live grace period the
+// caller snapshotted under l.mu (LG-347) — never the
+// construction-time constant, which is only the default.
+func forwardLapsed(c *FXForward, now time.Time, grace time.Duration) bool {
+	return !now.Before(c.SettleAt.Add(grace))
 }
 
 // forwardEffectiveStatus returns the contract's status as of now: a
 // booked contract past its settlement grace period reads as expired
 // (the ExpireForwards sweep persists the same transition). Read-only —
 // used by the Reconcile forward_book section, which must not mutate.
-func forwardEffectiveStatus(c *FXForward, now time.Time) (status string, expired bool) {
-	if c.Status == ForwardBooked && forwardLapsed(c, now) {
+// grace is the live grace period the caller snapshotted under l.mu
+// (LG-347).
+func forwardEffectiveStatus(c *FXForward, now time.Time, grace time.Duration) (status string, expired bool) {
+	if c.Status == ForwardBooked && forwardLapsed(c, now, grace) {
 		return ForwardCancelled, true
 	}
 	return c.Status, false
@@ -751,10 +758,13 @@ type FXForwardBookReport struct {
 // hold totals. Callers must hold l.mu; the read lock suffices.
 func (l *Ledger) forwardBookReportLocked(now time.Time) FXForwardBookReport {
 	rep := FXForwardBookReport{}
+	// Snapshot the live grace once: every lapse decision in this
+	// report judges against the same value (LG-347).
+	grace := l.forwardGracePeriod
 	byPair := make(map[fxPair]*FXForwardPairTotals)
 	for _, c := range l.forwards {
 		rep.Total++
-		status, expired := forwardEffectiveStatus(c, now)
+		status, expired := forwardEffectiveStatus(c, now, grace)
 		switch status {
 		case ForwardBooked:
 			rep.Booked++
