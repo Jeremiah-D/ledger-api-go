@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +74,144 @@ func TestAuditLogEndToEnd(t *testing.T) {
 		if !strings.Contains(sb.String(), want) {
 			t.Errorf("/metrics missing %q", want)
 		}
+	}
+}
+
+func TestAuditSinkMaxAttemptsEnv(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  int
+	}{
+		{"", ledger.DefaultSinkMaxAttempts},
+		{"3", 3},
+		{"1", 1},
+		{"garbage", ledger.DefaultSinkMaxAttempts},
+		{"0", ledger.DefaultSinkMaxAttempts},
+		{"-5", ledger.DefaultSinkMaxAttempts},
+		{"2.5", ledger.DefaultSinkMaxAttempts},
+	} {
+		t.Run("value="+tc.value, func(t *testing.T) {
+			t.Setenv("LEDGER_AUDIT_SINK_MAX_ATTEMPTS", tc.value)
+			if got := auditSinkMaxAttempts(); got != tc.want {
+				t.Errorf("auditSinkMaxAttempts() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAuditSinkDurationEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+		def   time.Duration
+		want  time.Duration
+	}{
+		{"LEDGER_AUDIT_SINK_INITIAL_BACKOFF", "", ledger.DefaultSinkInitialBackoff, ledger.DefaultSinkInitialBackoff},
+		{"LEDGER_AUDIT_SINK_INITIAL_BACKOFF", "500ms", ledger.DefaultSinkInitialBackoff, 500 * time.Millisecond},
+		{"LEDGER_AUDIT_SINK_INITIAL_BACKOFF", "garbage", ledger.DefaultSinkInitialBackoff, ledger.DefaultSinkInitialBackoff},
+		{"LEDGER_AUDIT_SINK_INITIAL_BACKOFF", "-1s", ledger.DefaultSinkInitialBackoff, ledger.DefaultSinkInitialBackoff},
+		{"LEDGER_AUDIT_SINK_MAX_BACKOFF", "2m", ledger.DefaultSinkMaxBackoff, 2 * time.Minute},
+		{"LEDGER_AUDIT_SINK_MAX_BACKOFF", "garbage", ledger.DefaultSinkMaxBackoff, ledger.DefaultSinkMaxBackoff},
+		{"LEDGER_AUDIT_SINK_POLL_INTERVAL", "250ms", ledger.DefaultSinkPollInterval, 250 * time.Millisecond},
+		{"LEDGER_AUDIT_SINK_POLL_INTERVAL", "garbage", ledger.DefaultSinkPollInterval, ledger.DefaultSinkPollInterval},
+		{"LEDGER_AUDIT_SINK_HTTP_TIMEOUT", "30s", ledger.DefaultSinkHTTPTimeout, 30 * time.Second},
+		{"LEDGER_AUDIT_SINK_HTTP_TIMEOUT", "-1s", ledger.DefaultSinkHTTPTimeout, ledger.DefaultSinkHTTPTimeout},
+	} {
+		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
+			t.Setenv(tc.name, tc.value)
+			if got := auditSinkDuration(tc.name, tc.def); got != tc.want {
+				t.Errorf("auditSinkDuration(%s, %v) = %v, want %v", tc.name, tc.def, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAuditSinkConfigEnvEndToEnd wires the five env vars through
+// auditSinkConfig into a running sink: valid values take effect, and
+// an InitialBackoff above MaxBackoff is clamped by withDefaults at
+// StartAuditSink.
+func TestAuditSinkConfigEnvEndToEnd(t *testing.T) {
+	t.Setenv("LEDGER_AUDIT_SINK_MAX_ATTEMPTS", "3")
+	t.Setenv("LEDGER_AUDIT_SINK_INITIAL_BACKOFF", "10s")
+	t.Setenv("LEDGER_AUDIT_SINK_MAX_BACKOFF", "1s")
+	t.Setenv("LEDGER_AUDIT_SINK_POLL_INTERVAL", "250ms")
+	t.Setenv("LEDGER_AUDIT_SINK_HTTP_TIMEOUT", "2s")
+
+	dir := t.TempDir()
+	outbox, err := ledger.NewOutbox(filepath.Join(dir, "outbox"))
+	if err != nil {
+		t.Fatalf("NewOutbox: %v", err)
+	}
+	t.Cleanup(func() { _ = outbox.Close() })
+	l := ledger.New(ledger.WithOutbox(outbox))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sink, err := ledger.StartAuditSink(ctx, l, auditSinkConfig("https://example.com/hook", "test-secret"))
+	if err != nil {
+		t.Fatalf("StartAuditSink: %v", err)
+	}
+	defer sink.Stop()
+
+	pol := sink.DeliveryPolicy()
+	if got := *pol.MaxAttempts; got != 3 {
+		t.Errorf("MaxAttempts = %d, want 3", got)
+	}
+	if got := *pol.InitialBackoff; got != time.Second {
+		t.Errorf("InitialBackoff = %v, want 1s (clamped to MaxBackoff)", got)
+	}
+	if got := *pol.MaxBackoff; got != time.Second {
+		t.Errorf("MaxBackoff = %v, want 1s", got)
+	}
+	if got := *pol.HTTPTimeout; got != 2*time.Second {
+		t.Errorf("HTTPTimeout = %v, want 2s", got)
+	}
+	if got := sink.PollInterval(); got != 250*time.Millisecond {
+		t.Errorf("PollInterval() = %v, want 250ms", got)
+	}
+}
+
+// TestAuditSinkConfigEnvInvalidFallsBackToDefaults wires five invalid
+// env values through auditSinkConfig: the sink starts on the
+// documented defaults and never fails startup over a bad env var.
+func TestAuditSinkConfigEnvInvalidFallsBackToDefaults(t *testing.T) {
+	t.Setenv("LEDGER_AUDIT_SINK_MAX_ATTEMPTS", "garbage")
+	t.Setenv("LEDGER_AUDIT_SINK_INITIAL_BACKOFF", "garbage")
+	t.Setenv("LEDGER_AUDIT_SINK_MAX_BACKOFF", "-5s")
+	t.Setenv("LEDGER_AUDIT_SINK_POLL_INTERVAL", "garbage")
+	t.Setenv("LEDGER_AUDIT_SINK_HTTP_TIMEOUT", "-1s")
+
+	dir := t.TempDir()
+	outbox, err := ledger.NewOutbox(filepath.Join(dir, "outbox"))
+	if err != nil {
+		t.Fatalf("NewOutbox: %v", err)
+	}
+	t.Cleanup(func() { _ = outbox.Close() })
+	l := ledger.New(ledger.WithOutbox(outbox))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sink, err := ledger.StartAuditSink(ctx, l, auditSinkConfig("https://example.com/hook", "test-secret"))
+	if err != nil {
+		t.Fatalf("StartAuditSink: %v", err)
+	}
+	defer sink.Stop()
+
+	pol := sink.DeliveryPolicy()
+	if got := *pol.MaxAttempts; got != ledger.DefaultSinkMaxAttempts {
+		t.Errorf("MaxAttempts = %d, want default %d", got, ledger.DefaultSinkMaxAttempts)
+	}
+	if got := *pol.InitialBackoff; got != ledger.DefaultSinkInitialBackoff {
+		t.Errorf("InitialBackoff = %v, want default %v", got, ledger.DefaultSinkInitialBackoff)
+	}
+	if got := *pol.MaxBackoff; got != ledger.DefaultSinkMaxBackoff {
+		t.Errorf("MaxBackoff = %v, want default %v", got, ledger.DefaultSinkMaxBackoff)
+	}
+	if got := *pol.HTTPTimeout; got != ledger.DefaultSinkHTTPTimeout {
+		t.Errorf("HTTPTimeout = %v, want default %v", got, ledger.DefaultSinkHTTPTimeout)
+	}
+	if got := sink.PollInterval(); got != ledger.DefaultSinkPollInterval {
+		t.Errorf("PollInterval() = %v, want default %v", got, ledger.DefaultSinkPollInterval)
 	}
 }
 

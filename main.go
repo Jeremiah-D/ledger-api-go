@@ -13257,10 +13257,7 @@ func main() {
 		if sinkSecret == "" {
 			log.Fatalf("ledger-api-go: LEDGER_AUDIT_SINK_URL is set but LEDGER_AUDIT_SINK_SECRET is empty: refusing to forward unsigned webhooks")
 		}
-		sink, err := ledger.StartAuditSink(ctx, srv.ledger, ledger.SinkConfig{
-			URL:    sinkURL,
-			Secret: []byte(sinkSecret),
-		})
+		sink, err := ledger.StartAuditSink(ctx, srv.ledger, auditSinkConfig(sinkURL, sinkSecret))
 		if err != nil {
 			log.Fatalf("ledger-api-go: audit sink: %v", err)
 		}
@@ -13292,6 +13289,60 @@ func auditMaxBytes() int64 {
 		return ledger.DefaultAuditMaxBytes
 	}
 	return n
+}
+
+// auditSinkMaxAttempts reads LEDGER_AUDIT_SINK_MAX_ATTEMPTS (an
+// integer attempt count, e.g. "3") for the audit sink's per-event
+// retry budget (LG-351). Unset means the default; invalid or below-1
+// values fall back to the default with a log line, never a fatal.
+func auditSinkMaxAttempts() int {
+	raw := os.Getenv("LEDGER_AUDIT_SINK_MAX_ATTEMPTS")
+	if raw == "" {
+		return ledger.DefaultSinkMaxAttempts
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		log.Printf("ledger-api-go: ignoring invalid LEDGER_AUDIT_SINK_MAX_ATTEMPTS %q, using %d", raw, ledger.DefaultSinkMaxAttempts)
+		return ledger.DefaultSinkMaxAttempts
+	}
+	return n
+}
+
+// auditSinkDuration reads one LEDGER_AUDIT_SINK_* duration env var (a
+// Go duration string, e.g. "500ms"). Unset means the default; invalid
+// or negative values fall back to the default with a log line, never
+// a fatal. A zero value is passed through and filled with the default
+// downstream by SinkConfig.withDefaults at StartAuditSink.
+func auditSinkDuration(name string, def time.Duration) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		log.Printf("ledger-api-go: ignoring invalid %s %q, using %v", name, raw, def)
+		return def
+	}
+	return d
+}
+
+// auditSinkConfig assembles the audit sink's startup config from its
+// env vars (LG-351): the five tunables read above, with the URL and
+// secret passed in by the caller. The live-revision setters
+// (LG-306/314/350) still win at runtime; a restart restores these env
+// values. URL, secret, and the cursor file are untouched by this
+// round, and there is deliberately no LEDGER_AUDIT_SINK_POLL_LIMIT —
+// the poll page limit (LG-350) is not a SinkConfig field.
+func auditSinkConfig(url, secret string) ledger.SinkConfig {
+	return ledger.SinkConfig{
+		URL:            url,
+		Secret:         []byte(secret),
+		MaxAttempts:    auditSinkMaxAttempts(),
+		InitialBackoff: auditSinkDuration("LEDGER_AUDIT_SINK_INITIAL_BACKOFF", ledger.DefaultSinkInitialBackoff),
+		MaxBackoff:     auditSinkDuration("LEDGER_AUDIT_SINK_MAX_BACKOFF", ledger.DefaultSinkMaxBackoff),
+		PollInterval:   auditSinkDuration("LEDGER_AUDIT_SINK_POLL_INTERVAL", ledger.DefaultSinkPollInterval),
+		HTTPTimeout:    auditSinkDuration("LEDGER_AUDIT_SINK_HTTP_TIMEOUT", ledger.DefaultSinkHTTPTimeout),
+	}
 }
 
 // auditSigningGrace reads LEDGER_AUDIT_SIGNING_GRACE (a Go duration

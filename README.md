@@ -8982,9 +8982,11 @@ Delivery contract, stated honestly:
   `audit_sink_delivery_policy_retuned` audit event (per changed
   field, `previous_*`/`current_*` — attempts as integers, durations
   as millisecond integers); the `Ctx` variant attributes the
-  operator. A restart restores the startup defaults — the four knobs
-  have no env vars yet, so a revision that must survive a restart
-  has to be re-applied. There is no HTTP endpoint for the revision.
+  operator. A restart restores the startup env values
+  (`LEDGER_AUDIT_SINK_MAX_ATTEMPTS`, `LEDGER_AUDIT_SINK_INITIAL_BACKOFF`,
+  `LEDGER_AUDIT_SINK_MAX_BACKOFF`, `LEDGER_AUDIT_SINK_HTTP_TIMEOUT`,
+  LG-351), so a revision that must survive a restart has to be set
+  through those env vars. There is no HTTP endpoint for the revision.
 - **Runtime poll-interval retuning.** The idle wait between outbox
   polls (1s by default) is revisable in place via
   `(*AuditSink).SetSinkPollInterval` / `SetSinkPollIntervalCtx`
@@ -9003,9 +9005,9 @@ Delivery contract, stated honestly:
   `sink_poll_interval_retuned` audit event
   (`previous_poll_interval_ms`/`current_poll_interval_ms`, integer
   milliseconds); the `Ctx` variant attributes the operator. A
-  restart restores the 1s default — there is no `PollInterval` env
-  var yet, so a revision that must survive a restart has to be
-  re-applied. There is no HTTP endpoint for the revision.
+  restart restores the `LEDGER_AUDIT_SINK_POLL_INTERVAL` env value
+  (LG-351), so a revision that must survive a restart has to be set
+  through that env var. There is no HTTP endpoint for the revision.
 - **Runtime poll-page-limit retuning.** How many events one outbox
   poll pulls (100 by default) is revisable in place via
   `(*AuditSink).SetSinkPollLimit` / `SetSinkPollLimitCtx` (LG-350),
@@ -10310,14 +10312,21 @@ Environment:
   fast. The outbox is closed on graceful shutdown.
 - `LEDGER_AUDIT_SINK_URL` — enables the audit-sink webhook forwarder
   (see above): outbox domain events POST as HMAC-signed JSON to this
-  absolute http(s) URL. Unset means disabled. The delivery knobs
-  (attempts, backoffs, per-attempt timeout) default to 10 attempts
-  with 1s backoff doubling to 60s and a 10s timeout, are revisable
-  at runtime via `(*AuditSink).SetDeliveryPolicy` (LG-306), and
-  revert to these defaults on restart. The idle poll interval
-  defaults to 1s, is revisable at runtime via
-  `(*AuditSink).SetSinkPollInterval` (LG-314), and likewise reverts
-  to 1s on restart — there is no `PollInterval` env var.
+  absolute http(s) URL. Unset means disabled. The five tunables
+  default to 10 attempts with 1s backoff doubling to 60s, a 1s idle
+  poll, and a 10s per-attempt timeout, and are settable at startup
+  via `LEDGER_AUDIT_SINK_MAX_ATTEMPTS` (integer, below 1 falls back
+  to the default), `LEDGER_AUDIT_SINK_INITIAL_BACKOFF`,
+  `LEDGER_AUDIT_SINK_MAX_BACKOFF`, `LEDGER_AUDIT_SINK_POLL_INTERVAL`,
+  and `LEDGER_AUDIT_SINK_HTTP_TIMEOUT` (Go duration strings; invalid
+  or negative values fall back to the default with a log line, never
+  a fatal — an initial backoff above the max backoff is clamped to
+  it). All five are revisable at runtime — the four delivery knobs
+  via `(*AuditSink).SetDeliveryPolicy` (LG-306), the poll interval
+  via `(*AuditSink).SetSinkPollInterval` (LG-314) — and a restart
+  restores these env values, so a live revision that must survive a
+  restart has to be re-applied through the env vars. The poll page
+  limit (100 by default, LG-350) has no env var yet.
 - `LEDGER_AUDIT_SINK_SECRET` — the shared HMAC-SHA256 secret signing
   every webhook delivery (`X-Ledger-Signature: sha256=<hex>`).
   Required when `LEDGER_AUDIT_SINK_URL` is set: a URL without a secret
