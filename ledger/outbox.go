@@ -232,6 +232,14 @@ type Outbox struct {
 	subs      map[uint64]chan OutboxEvent
 	nextSub   uint64
 	slowDrops atomic.Uint64
+	// Live-tuned per-subscriber live-event queue depth (LG-346):
+	// guarded by streamBufferSizeMu — never by o.mu, so a revision
+	// is never serialized behind the commit path (see
+	// SetOutboxStreamBufferSize). Subscribe reads it under o.mu, so
+	// the lock order is o.mu -> streamBufferSizeMu, and the setter
+	// never takes o.mu at all.
+	streamBufferSize   int
+	streamBufferSizeMu sync.RWMutex
 }
 
 // NewOutbox creates the outbox directory (if needed), recovers the
@@ -242,7 +250,7 @@ func NewOutbox(dir string) (*Outbox, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("ledger: outbox: %w", err)
 	}
-	o := &Outbox{dir: dir, subs: make(map[uint64]chan OutboxEvent)}
+	o := &Outbox{dir: dir, subs: make(map[uint64]chan OutboxEvent), streamBufferSize: outboxStreamBuffer}
 	maxSeq, corrupt, err := scanOutboxMaxSeq(dir)
 	if err != nil {
 		return nil, err
@@ -347,19 +355,22 @@ const outboxStreamBuffer = 512
 // Subscribe registers a live tail on the outbox (LG-133, see
 // GET /events/stream): every event Emit commits from here on is also
 // delivered on the returned channel, in seq order. The channel is
-// buffered to outboxStreamBuffer events; when a subscriber falls behind
-// past that, Emit drops the subscription and closes the channel — the
-// consumer must reconnect with its last cursor (Last-Event-ID) to catch
-// up from disk. Call the returned function to unsubscribe; it is
-// idempotent. ok is false when the outbox is closed: there is no live
-// tail to subscribe to.
+// buffered to the live stream buffer size (outboxStreamBuffer by
+// default; revisable at runtime via Ledger.SetOutboxStreamBufferSize,
+// LG-346 — a revision governs only subscriptions opened after it,
+// a subscription already open keeps the capacity it was built with);
+// when a subscriber falls behind past that, Emit drops the
+// subscription and closes the channel — the consumer must reconnect
+// with its last cursor (Last-Event-ID) to catch up from disk. Call
+// the returned function to unsubscribe; it is idempotent. ok is false
+// when the outbox is closed: there is no live tail to subscribe to.
 func (o *Outbox) Subscribe() (ch <-chan OutboxEvent, unsubscribe func(), ok bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.closed.Load() {
 		return nil, nil, false
 	}
-	sub := make(chan OutboxEvent, outboxStreamBuffer)
+	sub := make(chan OutboxEvent, o.StreamBufferSize())
 	id := o.nextSub
 	o.nextSub++
 	o.subs[id] = sub

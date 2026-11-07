@@ -8286,7 +8286,9 @@ var outboxStreamHeartbeatInterval = 15 * time.Second
 //	    through proxies; the stream opens with a ": connected" comment.
 //
 // Backpressure is honest: the live subscription is a bounded queue
-// (512 events). A consumer that falls behind past that is dropped —
+// (512 events by default, revisable at runtime via
+// Ledger.SetOutboxStreamBufferSize, LG-346). A consumer that falls
+// behind past that is dropped —
 // the commit path never blocks on a slow consumer — the stream ends
 // with a ": slow-consumer-disconnected" comment, and the consumer
 // reconnects with its last id. Dropped subscribers are counted by the

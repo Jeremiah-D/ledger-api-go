@@ -8820,8 +8820,9 @@ Semantics:
 - **Filters.** `account` and `type` filter the replay and the live
   push alike (same `account` semantics as `GET /events`: the event's
   account or either leg of an `entry_posted`).
-- **Backpressure.** The live subscription is a bounded 512-event
-  queue. A consumer that falls behind past that is dropped — the
+- **Backpressure.** The live subscription is a bounded queue (512
+  events by default, revisable at runtime — see below). A consumer
+  that falls behind past that is dropped — the
   commit path never blocks on a slow consumer — the stream ends with
   `: slow-consumer-disconnected`, and the consumer reconnects with
   its last id. (This is the Go equivalent of a writableLength guard.)
@@ -8838,6 +8839,16 @@ Semantics:
   ticker it started with. The heartbeat only sets the keep-alive rhythm:
   events are still pushed the moment they commit, and resume, filters,
   backpressure, and auth are untouched.
+- **Buffer capacity.** The slow-consumer queue depth is 512 events by
+  default and revisable at runtime via
+  `Ledger.SetOutboxStreamBufferSize` (LG-346, no restart; non-positive
+  rejected with the live capacity untouched, same-value a no-op, each
+  real revision recorded as an `outbox_stream_buffer_size_retuned`
+  audit event with previous/current capacities); the new capacity
+  governs subscriptions opened after the revision — a stream already
+  open keeps the capacity its channel was built with — and a restart
+  restores 512. The heartbeat, resume, filters, disconnect policy,
+  and auth are untouched.
 - **Auth.** Like every `GET` route it needs the `read:ledger` API key
   scope when key enforcement is on; with zero keys configured it is
   fail-open, exactly like `GET /events`. Without

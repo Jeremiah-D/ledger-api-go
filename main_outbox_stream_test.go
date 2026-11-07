@@ -588,3 +588,104 @@ func TestSetOutboxStreamHeartbeatInterval(t *testing.T) {
 		}
 	})
 }
+
+// waitSSECommentDiscarding reads SSE lines until one contains substr,
+// discarding everything else: a slow-consumer burst can precede the
+// disconnect comment with megabytes of event frames, so nothing is
+// accumulated (unlike readSSEUntil, which keeps the whole transcript
+// and would scan it quadratically).
+func waitSSECommentDiscarding(t *testing.T, r *bufio.Reader, substr string, timeout time.Duration) {
+	t.Helper()
+	type result struct{ found bool }
+	ch := make(chan result, 1)
+	go func() {
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				ch <- result{found: false}
+				return
+			}
+			if strings.Contains(line, substr) {
+				ch <- result{found: true}
+				return
+			}
+		}
+	}()
+	select {
+	case res := <-ch:
+		if !res.found {
+			t.Fatalf("stream closed before %q arrived", substr)
+		}
+	case <-time.After(timeout):
+		t.Fatalf("timeout waiting for %q in SSE stream", substr)
+	}
+}
+
+// newOutboxStreamBufferTestServer builds a stream test server and
+// hands back the outbox handle, so the test can Emit directly (no HTTP
+// round trip per event) while the stream reads through the server.
+func newOutboxStreamBufferTestServer(t *testing.T) (*server, *httptest.Server, *ledger.Outbox) {
+	t.Helper()
+	dir := t.TempDir()
+	ob, err := ledger.NewOutbox(dir)
+	if err != nil {
+		t.Fatalf("NewOutbox: %v", err)
+	}
+	t.Cleanup(func() { _ = ob.Close() })
+	srv := newServer(ledger.New(ledger.WithOutbox(ob)))
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+	return srv, ts, ob
+}
+
+func TestSetOutboxStreamBufferSizeStream(t *testing.T) {
+	t.Run("widened buffer keeps a slow new stream alive past 512 events", func(t *testing.T) {
+		srv, ts, ob := newOutboxStreamBufferTestServer(t)
+		if prev, err := srv.ledger.SetOutboxStreamBufferSize(2048); err != nil || prev != 512 {
+			t.Fatalf("SetOutboxStreamBufferSize(2048) = (%d, %v), want (512, nil)", prev, err)
+		}
+		cancel, _ := openSSE(t, ts.URL+"/events/stream", nil)
+		defer cancel()
+		waitForGauge(t, srv, 1, 5*time.Second)
+		// 600 events, never read: at the default 512 the 513th would
+		// drop the stream; at 2048 the subscription holds them all.
+		for i := 0; i < 600; i++ {
+			if !ob.Emit(ledger.OutboxEvent{Type: ledger.OutboxEntryPosted}) {
+				t.Fatalf("Emit %d blocked or failed", i)
+			}
+		}
+		if drops, ok := srv.ledger.OutboxSlowDrops(); !ok || drops != 0 {
+			t.Fatalf("OutboxSlowDrops() = %d, %v; want 0, true", drops, ok)
+		}
+		// The stream is still open: the handler has not returned.
+		waitForGauge(t, srv, 1, 5*time.Second)
+	})
+
+	t.Run("tightened buffer disconnects a slow new stream fast", func(t *testing.T) {
+		srv, ts, ob := newOutboxStreamBufferTestServer(t)
+		if prev, err := srv.ledger.SetOutboxStreamBufferSize(4); err != nil || prev != 512 {
+			t.Fatalf("SetOutboxStreamBufferSize(4) = (%d, %v), want (512, nil)", prev, err)
+		}
+		cancel, r := openSSE(t, ts.URL+"/events/stream", nil)
+		defer cancel()
+		waitForGauge(t, srv, 1, 5*time.Second)
+		// Flood the stream without reading: each event carries a
+		// 200KB pad, so ~30MB of frames far exceed the socket
+		// buffers — the handler stalls on its write, the 4-deep
+		// queue fills, and Emit drops the subscription.
+		pad := strings.Repeat("x", 200_000)
+		for i := 0; i < 150; i++ {
+			if !ob.Emit(ledger.OutboxEvent{Type: "buffer_probe", Details: map[string]any{"pad": pad}}) {
+				t.Fatalf("Emit %d blocked or failed", i)
+			}
+		}
+		if drops, ok := srv.ledger.OutboxSlowDrops(); !ok || drops != 1 {
+			t.Fatalf("OutboxSlowDrops() = %d, %v; want 1, true", drops, ok)
+		}
+		// Reading again drains the stalled socket, so the handler
+		// reaches the closed channel and ends the stream with the
+		// terminal comment.
+		waitSSECommentDiscarding(t, r, ": slow-consumer-disconnected", 15*time.Second)
+		waitForGauge(t, srv, 0, 5*time.Second)
+	})
+}
