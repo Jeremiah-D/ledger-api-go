@@ -700,7 +700,13 @@ curl -s -X POST localhost:8080/transfers/tx-2026-007/reject \
 - **N-of-M Ed25519 multi-signature approval (cryptographic quorum):**
   `RegisterMultisigApprover` binds an approver ID to an Ed25519 public
   key and `SetMultisigPolicy` installs a per-operation-type (`transfer`
-  / `payout` / `reversal`) N-of-M policy. `SubmitMultisigOperation`
+  / `payout` / `reversal`) N-of-M policy. `RevokeMultisigApprover`
+  removes an approver's key — refused for an unknown ID and for an
+  approver still named by any live policy (remove them from the policy
+  first, so revocation never silently rewrites a threshold); past votes
+  stay on their operations and a pending op's vote count is unchanged,
+  and re-registering the same ID under a new key restores it.
+  `SubmitMultisigOperation`
   parks a large operation in the `pending_multisig` queue and freezes
   its funds with a hold (available drops, journal untouched); approvers
   vote with `VoteMultisig`, each vote an Ed25519 signature over the

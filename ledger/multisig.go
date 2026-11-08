@@ -197,6 +197,53 @@ func (l *Ledger) RegisterMultisigApprover(id string, pub ed25519.PublicKey) erro
 	return nil
 }
 
+// RevokeMultisigApprover removes an approver's registered key (LG-354):
+// the departure / key-compromise counterpart to RegisterMultisigApprover.
+// Revocation is fail-closed and never rewrites history or policy:
+//
+//   - an unknown ID is refused and the live registry is untouched;
+//   - an approver still named by any live policy is refused — remove
+//     them from every policy with SetMultisigPolicy first, so revocation
+//     never silently rewrites a threshold or a member list;
+//   - past votes stay on their operations and a pending op's recorded
+//     vote count is unchanged — history is never rewritten;
+//   - after revocation the ID votes no more (the VoteMultisig
+//     unregistered-approver path refuses it);
+//   - re-registering the same ID restores it under a new key, with the
+//     old votes still standing as history.
+//
+// The revocation is audited as "multisig_approver_revoked" (approver ID
+// only — never key material).
+func (l *Ledger) RevokeMultisigApprover(id string) error {
+	return l.RevokeMultisigApproverCtx(context.Background(), id)
+}
+
+// RevokeMultisigApproverCtx is RevokeMultisigApprover with per-call
+// audit actor attribution (LG-73): the audit event records the operator
+// carried by ctx when set, and the entrypoint name otherwise.
+func (l *Ledger) RevokeMultisigApproverCtx(ctx context.Context, id string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.multisigApprovers[id]; !ok {
+		return fmt.Errorf("%w: %q", ErrMultisigApproverUnknown, id)
+	}
+	for opType, policy := range l.multisigPolicies {
+		if multisigPolicyHasApprover(policy, id) {
+			return fmt.Errorf("%w: approver %q is still named by the %q policy; remove it with SetMultisigPolicy first",
+				ErrMultisigInvalidPolicy, id, opType)
+		}
+	}
+	delete(l.multisigApprovers, id)
+	l.emitAuditCtx(ctx, AuditEvent{
+		Op:     "multisig_approver_revoked",
+		Actor:  "RevokeMultisigApprover",
+		Details: map[string]any{
+			"approver": id,
+		},
+	})
+	return nil
+}
+
 // SetMultisigPolicy installs the N-of-M policy for one operation
 // type ("transfer", "payout", "reversal"): thresholdN distinct approve
 // signatures from approverIDs execute a submitted op, ttl bounds the
