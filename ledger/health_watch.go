@@ -35,10 +35,12 @@ import (
 //     write path guarantees.
 //  2. accounting_equation — spot check: for a rotating subset of
 //     (account, currency) keys, net balance == total debits − total
-//     credits. Each scan covers a deterministic quarter of the keys
-//     (sorted, windowed, cursor-advanced), so every key is re-checked at
-//     least once every four scans — a full equation audit amortized
-//     over time. Per-account balance implies the global per-currency
+//     credits. Each scan covers a deterministic slice of the keys
+//     (sorted, windowed, cursor-advanced), so every key is re-checked
+//     at least once every healthWatchWindowDivisor scans — a full
+//     equation audit amortized over time. The divisor defaults to 4
+//     and is revisable at runtime via SetHealthWatchWindowDivisor
+//     (LG-356). Per-account balance implies the global per-currency
 //     equality, so the rotation converges to the whole check.
 //  3. version_continuity — len(chain) == version and the head link's
 //     seq == version: the audit chain and the journal version counter
@@ -82,10 +84,13 @@ type HealthViolation struct {
 	DetectedAt time.Time `json:"detected_at"`
 }
 
-// healthWatchWindowDivisor sets the spot-check window: each scan checks
-// ceil(n/divisor) of the (account, currency) keys, so every key is
-// re-checked at least once every divisor scans.
-const healthWatchWindowDivisor = 4
+// defaultHealthWatchWindowDivisor is the default spot-check window:
+// each scan checks ceil(n/divisor) of the (account, currency) keys,
+// so every key is re-checked at least once every divisor scans. The
+// live value is Ledger.healthWatchWindowDivisor, revisable at runtime
+// via SetHealthWatchWindowDivisor (LG-356); this const is only the
+// construction-time default, restored on restart.
+const defaultHealthWatchWindowDivisor = 4
 
 // ScanBalanceHealth runs one read-only health scan and returns every
 // violation found, sorted by (check, account, currency) for
@@ -149,9 +154,11 @@ func (l *Ledger) scanBalanceHealthLocked() []HealthViolation {
 	}
 
 	// 2. Accounting-equation spot check on a rotating window: every key
-	// is re-checked at least once every healthWatchWindowDivisor scans.
+	// is re-checked at least once every l.healthWatchWindowDivisor
+	// scans (default 4, revisable at runtime via
+	// SetHealthWatchWindowDivisor, LG-356).
 	if n := len(keys); n > 0 {
-		size := (n + healthWatchWindowDivisor - 1) / healthWatchWindowDivisor
+		size := (n + l.healthWatchWindowDivisor - 1) / l.healthWatchWindowDivisor
 		if size < 1 {
 			size = 1
 		}

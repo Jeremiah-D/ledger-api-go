@@ -74,13 +74,13 @@ func TestScanBalanceHealthEquationCorruption(t *testing.T) {
 	// Simulate corruption the write path cannot produce: mutate a net
 	// balance directly, breaking balance == debits - credits for one
 	// (account, currency). The rotating spot check must catch it within
-	// one full rotation (healthWatchWindowDivisor scans).
+	// one full rotation (defaultHealthWatchWindowDivisor scans).
 	l.mu.Lock()
 	l.balances[accountCurrency{account: "cash", currency: "USD"}] += 1
 	l.mu.Unlock()
 
 	var found *HealthViolation
-	for i := 0; i < healthWatchWindowDivisor; i++ {
+	for i := 0; i < defaultHealthWatchWindowDivisor; i++ {
 		for _, v := range l.ScanBalanceHealth() {
 			if v.Check == HealthCheckAccountingEquation && v.Account == "cash" {
 				vv := v
@@ -146,7 +146,7 @@ func TestScanBalanceHealthRotationCoversAllKeys(t *testing.T) {
 	l.mu.Unlock()
 
 	found := false
-	for i := 0; i < healthWatchWindowDivisor; i++ {
+	for i := 0; i < defaultHealthWatchWindowDivisor; i++ {
 		for _, v := range l.ScanBalanceHealth() {
 			if v.Check == HealthCheckAccountingEquation && v.Account == "fxd" {
 				found = true

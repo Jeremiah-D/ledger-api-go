@@ -76,12 +76,13 @@ import (
 //     to be re-read, a later round.
 //   - The interval is NOT the per-scan coverage: it only decides
 //     how often the book is scanned. Each scan still spot-checks
-//     exactly a quarter of the (account, currency) keys
-//     (healthWatchWindowDivisor = 4, a hard-coded design constant),
-//     so every key is still re-checked at least once every four
-//     scans — tightening the cadence only shortens the wall-clock
-//     time to full coverage. The rotation cursor is an atomic
-//     counter and is not reset by a revision.
+//     ceil(n/divisor) of the (account, currency) keys — the divisor
+//     defaults to 4 and is revisable at runtime via
+//     SetHealthWatchWindowDivisor (LG-356) — so every key is still
+//     re-checked at least once every divisor scans; tightening the
+//     cadence only shortens the wall-clock time to full coverage.
+//     The rotation cursor is an atomic counter and is not reset by
+//     a revision of either knob.
 //   - A watch that was never started (env unset or invalid, so
 //     healthWatchInterval() returned false and StartHealthWatch was
 //     never called) has no handle to revise: the revision applies

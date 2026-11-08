@@ -1349,9 +1349,16 @@ type Ledger struct {
 	// "balance_health_violation" audit events emitted. In-memory only —
 	// it does not round-trip through snapshots. healthCursor is the
 	// atomic rotation cursor of the equation spot check: observability
-	// state, not books.
-	healthViolations uint64
-	healthCursor     atomic.Uint64
+	// state, not books. healthWatchWindowDivisor is the live spot-check
+	// window (default 4, see defaultHealthWatchWindowDivisor): each scan
+	// checks ceil(n/divisor) of the (account, currency) keys, so every
+	// key is re-checked at least once every divisor scans. It is
+	// revisable at runtime via SetHealthWatchWindowDivisor (LG-356)
+	// and, like the other health-watch knobs, does not round-trip
+	// through snapshots — a restore starts again at the default.
+	healthViolations          uint64
+	healthCursor              atomic.Uint64
+	healthWatchWindowDivisor  int
 	// fxRateStaleAlerts / fxRateExpiredAlerts count the edge-triggered
 	// "fx_rate_stale" / "fx_rate_expired" audit events from the
 	// background FX-rate watch (see fx_watch.go). In-memory only — they
@@ -1907,6 +1914,7 @@ func New(opts ...Option) *Ledger {
 		disputeKeys:                 make(map[string]string),
 		representments:              make(map[string]Representment),
 		representmentWindow:         defaultRepresentmentWindow,
+		healthWatchWindowDivisor:    defaultHealthWatchWindowDivisor,
 		journalRules:                make(map[string]JournalRule),
 		fixedAssets:                 make(map[string]FixedAsset),
 		revalBaselines:              make(map[revalKey]revalBaseline),

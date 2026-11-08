@@ -9671,7 +9671,10 @@ curl -s localhost:8080/metrics
   incident — alert on it. The watchdog's scan interval is retunable at
   runtime via `HealthWatch.SetInterval` (LG-327); a revision moves only
   the scan cadence — the counters, the three invariant checks, and the
-  per-scan quarter coverage keep running unchanged.
+  per-scan coverage keep running unchanged. The per-scan coverage
+  itself is a separate live knob: `Ledger.SetHealthWatchWindowDivisor`
+  (LG-356) revises how many keys each scan covers (default a quarter,
+  divisor 4), audited as `health_watch_window_divisor_retuned`.
 - `ledger_fx_rate_stale_total` — `fx_rate_stale` alerts edge-triggered
   by the background FX-rate watch (rates that entered the opt-in warning
   window). Synced from the ledger on every scrape. Revising the live
@@ -9985,8 +9988,9 @@ Environment:
   overdraft-protected accounts (the only accounts the write path
   guarantees can never go negative; credit-normal accounts legitimately
   carry negative balances), an accounting-equation spot check over a
-  rotating quarter of the (account, currency) keys (full coverage every
-  four ticks), and audit-chain/version continuity
+  rotating slice of the (account, currency) keys — ceil(n/divisor) per
+  scan, divisor 4 by default, so full coverage every four ticks — and
+  audit-chain/version continuity
   (`len(chain) == version`, head seq in step). Every break is recorded
   as a structured audit event (`balance_health_violation`) and counted
   in `ledger_balance_health_violations_total`. The scan is read-only:
@@ -10002,9 +10006,11 @@ Environment:
   milliseconds. The revision does not survive a restart: the env value
   governs the next start. Note the distinction the revision preserves:
   the interval only decides how often the book is scanned, not how
-  much each scan covers — every scan still spot-checks a rotating
-  quarter of the (account, currency) keys (full coverage every four
-  ticks), and the write-path risk gates are untouched.
+  much each scan covers — every scan still spot-checks ceil(n/divisor)
+  of the (account, currency) keys, and the divisor itself is revisable
+  at runtime via `Ledger.SetHealthWatchWindowDivisor` (LG-356, audited
+  as `health_watch_window_divisor_retuned`, no restart, never resets
+  the rotation cursor) — and the write-path risk gates are untouched.
 - `LEDGER_FX_RATE_WATCH_INTERVAL` — enables the background FX-rate
   expiry watch, e.g. `LEDGER_FX_RATE_WATCH_INTERVAL=5m`. Each tick scans
   the rate table, read-only, and edge-triggers `fx_rate_stale` when a
