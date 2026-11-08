@@ -2977,6 +2977,22 @@ audit-chain link, version bump, entry_posted outbox event — and
 `Reconcile` discloses every declared dividend (pool, record date,
 total, per-holder payouts) in its `dividends` section.
 
+Voiding a declaration (LG-360): `VoidDividend(dividendID, actor)`
+reverses every leg through `ReverseEntry` — deterministic
+`<leg>/reversal` IDs, full `Post` gate order per leg — netting the
+declaration to zero while leaving the original legs and their
+reversals in the journal. The void is atomic: every leg is first
+validated against a dry-run twin, so a rejection on any leg (frozen
+holder, overdraft on the way back, daily limit, closed period)
+aborts the whole void with zero records. Re-voiding returns the
+original receipt with `Duplicate == true` and books nothing;
+re-declaring the same (pool, recordDate) still replays the original
+receipt — the void does not release the declaration ID. `Dividends()`
+and `Reconcile` carry the void marker (`VoidedAt`) on fully reversed
+declarations, and the void is audited as `dividend_voided`. Voiding
+reverses only the journaled legs; it does not claw money back from
+holders already paid out.
+
 ### Journal rules (`PUT /rules/{id}` / `DELETE /rules/{id}` / `GET /rules`)
 
 Opt-in automatic journaling: rules that match raw journal postings on

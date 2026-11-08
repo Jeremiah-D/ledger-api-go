@@ -70,7 +70,9 @@ type DividendPayout struct {
 // DividendReceipt is the immutable record of one dividend declaration:
 // the deterministic dividend ID plus the per-holder payouts. A receipt
 // with Duplicate == true is a replay of an earlier declaration — the
-// journaled rows are the original ones.
+// journaled rows are the original ones. VoidedAt is set once every leg
+// has been reversed (see VoidDividend): a nil VoidedAt means the
+// declaration is still live.
 type DividendReceipt struct {
 	DividendID string           `json:"dividend_id"`
 	Pool       AccountID        `json:"pool"`
@@ -79,6 +81,26 @@ type DividendReceipt struct {
 	RecordDate time.Time        `json:"record_date"`
 	Payouts    []DividendPayout `json:"payouts"`
 	Duplicate  bool             `json:"duplicate"`
+	// VoidedAt is the time the declaration was voided: the latest
+	// reversal timestamp across its legs. Nil while any leg is live.
+	VoidedAt *time.Time `json:"voided_at,omitempty"`
+}
+
+// DividendVoidReceipt is the record of one voided dividend
+// declaration: the original declaration's identity and totals plus
+// the reversal entries that netted it. A receipt with Duplicate ==
+// true is a replay of an earlier void — no new rows were booked.
+type DividendVoidReceipt struct {
+	DividendID string    `json:"dividend_id"`
+	Pool       AccountID `json:"pool"`
+	TotalCents int64     `json:"total_cents"`
+	Currency   string    `json:"currency"`
+	RecordDate time.Time `json:"record_date"`
+	// ReversedLegs lists the reversal entry IDs ("<leg>/reversal"),
+	// in leg order.
+	ReversedLegs []string  `json:"reversed_legs"`
+	VoidedAt     time.Time `json:"voided_at"`
+	Duplicate    bool      `json:"duplicate"`
 }
 
 // Validation errors for dividend declarations.
@@ -100,6 +122,10 @@ var (
 	// make two different declarations share one entry ID (see the
 	// accrual convention in accrual.go).
 	ErrDividendAccountSeparator = errors.New("ledger: dividend account IDs must not contain '/'")
+	// ErrDividendNotFound is returned when VoidDividend names a
+	// dividend ID the ledger never declared. It is a 404-class error:
+	// the caller named a declaration that has no journaled legs.
+	ErrDividendNotFound = errors.New("ledger: dividend not found")
 )
 
 // dividendEntryID builds the deterministic dividend declaration ID.
@@ -302,7 +328,182 @@ func (l *Ledger) DeclareDividend(pool AccountID, totalCents int64, currency stri
 			EntryID:     posted.ID,
 		})
 	}
+	// A replayed declaration keeps its void state: re-declaring a
+	// voided dividend returns the original (voided) receipt, not a
+	// live one (see VoidDividend).
+	receipt.VoidedAt = l.dividendVoidedAtLocked(receipt.Payouts)
 	return receipt, nil
+}
+
+// dividendVoidMetadataKey marks a reversal entry as one leg of a
+// dividend void: the marker value carries the voided dividend's ID.
+// ReverseEntry owns the reversal memo ("reversal_of:<leg>"), so the
+// void identity rides in metadata instead — searchable, journaled,
+// and covered by the audit-chain hash like every other journaled
+// field.
+const dividendVoidMetadataKey = "dividend_void"
+
+// dividendVoidMetadataValue builds the metadata value stamped on
+// every reversal entry of a dividend void.
+func dividendVoidMetadataValue(dividendID string) string {
+	return "dividend-void:" + dividendID
+}
+
+// dividendVoidedAtLocked returns when a dividend's legs were all
+// reversed — the latest reversal timestamp — or nil when any leg is
+// still live. A dividend is void when every leg carries its genuine
+// reversal ("<leg>/reversal", memo "reversal_of:<leg>"); a leg
+// reversed by hand counts the same as one reversed by VoidDividend,
+// because the money is back either way. Callers must hold l.mu.
+func (l *Ledger) dividendVoidedAtLocked(payouts []DividendPayout) *time.Time {
+	if len(payouts) == 0 {
+		return nil
+	}
+	var latest time.Time
+	for _, p := range payouts {
+		rev, ok := l.entries[reversalIDFor(p.EntryID)]
+		if !ok || !isGenuineReversalOf(rev, p.EntryID) {
+			return nil
+		}
+		if rev.CreatedAt.After(latest) {
+			latest = rev.CreatedAt
+		}
+	}
+	return &latest
+}
+
+// VoidDividend voids a whole declared dividend: every leg is reversed
+// through ReverseEntry (deterministic "<leg>/reversal" IDs, full Post
+// gate order per leg), netting the declaration's balance effects to
+// zero while leaving the original legs and their reversals visible in
+// the journal forever.
+//
+// Atomicity is two-phase, reusing the dry-run twin pattern (see
+// PostBatchTransfer): every leg's reversal first runs against a
+// private deep copy of the ledger, in leg order, and only if every
+// leg passes does the live ledger commit them. A rejection on any
+// leg — a frozen holder, an overdraft on the way back, the daily
+// limit, a closed period — aborts the whole void with zero records:
+// no journal rows, no chain links, no version bump. The write lock
+// is held throughout, so the live commit cannot fail after the twin
+// pass succeeded.
+//
+// The void is idempotent: re-voiding a voided declaration returns
+// the original receipt with Duplicate == true and books nothing new.
+// A dividend whose legs were partly reversed by hand is voided the
+// same way — the already-reversed legs replay, the rest reverse.
+//
+// Voiding does not release the declaration ID: re-declaring the same
+// (pool, recordDate) still replays the original receipt (see
+// DeclareDividend) — the declaration is not resurrected. Voiding
+// reverses only the journaled legs; it does not claw money back from
+// holders who were already paid out — that recovery is a business
+// process outside the ledger.
+func (l *Ledger) VoidDividend(dividendID string, actor string) (DividendVoidReceipt, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Locate the declaration: dividendsLocked derives every dividend
+	// from the journaled legs, so an unknown ID is an error, not an
+	// empty receipt.
+	var declared *DividendReceipt
+	for _, d := range l.dividendsLocked() {
+		if d.DividendID == dividendID {
+			dd := d
+			declared = &dd
+			break
+		}
+	}
+	if declared == nil {
+		return DividendVoidReceipt{}, ErrDividendNotFound
+	}
+
+	legIDs := make([]string, 0, len(declared.Payouts))
+	for _, p := range declared.Payouts {
+		legIDs = append(legIDs, p.EntryID)
+	}
+
+	// Already void: every leg carries its genuine reversal. Return
+	// the original receipt with Duplicate == true and book nothing.
+	if voidedAt := l.dividendVoidedAtLocked(declared.Payouts); voidedAt != nil {
+		reversed := make([]string, 0, len(legIDs))
+		for _, id := range legIDs {
+			reversed = append(reversed, reversalIDFor(id))
+		}
+		return DividendVoidReceipt{
+			DividendID:   declared.DividendID,
+			Pool:         declared.Pool,
+			TotalCents:   declared.TotalCents,
+			Currency:     declared.Currency,
+			RecordDate:   declared.RecordDate,
+			ReversedLegs: reversed,
+			VoidedAt:     *voidedAt,
+			Duplicate:    true,
+		}, nil
+	}
+
+	// Twin validation pass: run every leg's reversal through the
+	// exact production code path on a private deep copy, in leg
+	// order. Any rejection aborts the whole void here, with zero
+	// records on the live ledger. The twin is disposable: its
+	// commits advance only its own copy, and its audit log is nil,
+	// so the pass emits no audit events and no domain events.
+	metadata := map[string]string{dividendVoidMetadataKey: dividendVoidMetadataValue(dividendID)}
+	twin := l.cloneForDryRunLocked()
+	for _, legID := range legIDs {
+		if _, _, err := twin.reverseEntryLocked(legID, "", metadata); err != nil {
+			return DividendVoidReceipt{}, fmt.Errorf("ledger: void dividend %q leg %q: %w", dividendID, legID, err)
+		}
+	}
+
+	// Atomic commit: every leg reverses through the same function
+	// the twin validated, in the same order, under the same write
+	// lock.
+	versionBefore := l.version
+	reversed := make([]string, 0, len(legIDs))
+	accounts := []AccountID{declared.Pool}
+	for _, p := range declared.Payouts {
+		accounts = append(accounts, p.Account)
+	}
+	var voidedAt time.Time
+	for _, legID := range legIDs {
+		rev, _, err := l.reverseEntryLocked(legID, "", metadata)
+		if err != nil {
+			// Unreachable by construction (see the package comment
+			// on PostBatchTransfer): the twin pass already proved
+			// every leg reverses. Reported, never silently
+			// partial.
+			return DividendVoidReceipt{}, fmt.Errorf("ledger: void dividend %q commit failed after twin validation: %w", dividendID, err)
+		}
+		reversed = append(reversed, rev.ID)
+		if rev.CreatedAt.After(voidedAt) {
+			voidedAt = rev.CreatedAt
+		}
+	}
+	l.emitAudit(AuditEvent{
+		Op:            "dividend_voided",
+		Actor:         NormalizeAuditActor(actor),
+		TraceID:       dividendID,
+		VersionBefore: versionBefore,
+		VersionAfter:  l.version,
+		EntryIDs:      reversed,
+		Accounts:      accounts,
+		Details: map[string]any{
+			"total_cents":   declared.TotalCents,
+			"currency":      declared.Currency,
+			"reversed_legs": reversed,
+		},
+	})
+	return DividendVoidReceipt{
+		DividendID:   declared.DividendID,
+		Pool:         declared.Pool,
+		TotalCents:   declared.TotalCents,
+		Currency:     declared.Currency,
+		RecordDate:   declared.RecordDate,
+		ReversedLegs: reversed,
+		VoidedAt:     voidedAt,
+		Duplicate:    false,
+	}, nil
 }
 
 // Dividends lists every declared dividend, sorted by dividend ID: the
@@ -363,6 +564,9 @@ func (l *Ledger) dividendsLocked() []DividendReceipt {
 		r := meta[dividendID]
 		r.TotalCents = total
 		r.Payouts = payouts
+		// A fully reversed declaration reports when it was voided;
+		// Reconcile discloses it through this same read path.
+		r.VoidedAt = l.dividendVoidedAtLocked(payouts)
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].DividendID < out[j].DividendID })
