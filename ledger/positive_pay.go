@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -29,6 +30,14 @@ import (
 // the returned disposition). Every step — issue, clear, exception,
 // decision — is audited, and the adjudication itself enters the audit
 // chain like any other ledger event (see emitAudit).
+//
+// A stop-payment order (LG-355) is the pre-emptive counterpart for a
+// lost or stolen check: StopIssuedCheck marks a registered, uncleared
+// check stopped, and its presentment then enters the exception queue
+// with reason "stopped" instead of clearing — even on a full field
+// match — for the same human adjudication. ReleaseStopIssuedCheck
+// lifts the order and restores ordinary comparison, but never
+// silently clears an exception the stop already produced.
 //
 // Payee matching is exact after normalization (case-insensitive,
 // whitespace-collapsed, the normalizePayeeName convention) — not
@@ -85,6 +94,10 @@ const (
 	// PositivePayReasonCurrencyMismatch: the presented currency
 	// differs from the issued currency.
 	PositivePayReasonCurrencyMismatch = "currency_mismatch"
+	// PositivePayReasonStopped: the check is under a stop-payment
+	// order (LG-355) — it enters the exception queue even though
+	// every field matches the register.
+	PositivePayReasonStopped = "stopped"
 )
 
 // Positive-pay decisions.
@@ -117,6 +130,13 @@ var (
 	// ErrPositivePayInvalidDecision is returned for an adjudication
 	// decision other than "pay" or "return".
 	ErrPositivePayInvalidDecision = errors.New("ledger: positive pay: decision must be pay or return")
+	// ErrPositivePayCheckNotRegistered is returned when stopping a
+	// check that has no entry in the issued-check register: there is
+	// nothing to stop.
+	ErrPositivePayCheckNotRegistered = errors.New("ledger: positive pay: check is not registered")
+	// ErrPositivePayCheckCleared is returned when stopping a check
+	// that already cleared: the money is gone, a stop is meaningless.
+	ErrPositivePayCheckCleared = errors.New("ledger: positive pay: check already cleared")
 )
 
 // IssuedCheck is one entry in the issued-check register: the check the
@@ -190,6 +210,9 @@ func (l *Ledger) ensurePositivePayLocked() {
 	}
 	if l.positivePayExceptions == nil {
 		l.positivePayExceptions = make(map[positivePayKey]*PositivePayException)
+	}
+	if l.positivePayStops == nil {
+		l.positivePayStops = make(map[positivePayKey]bool)
 	}
 }
 
@@ -275,6 +298,30 @@ func (l *Ledger) PresentCheck(p PresentedCheck) (PositivePayResult, error) {
 	rec, ok := l.issuedChecks[key]
 	if ok && rec.cleared {
 		return PositivePayResult{Disposition: PositivePayCleared}, nil
+	}
+	if l.positivePayStops[key] {
+		// Stop-payment (LG-355): a stopped check never clears on
+		// sight, even when every field matches the register. It
+		// enters the exception queue as pending (reason "stopped")
+		// for a human to adjudicate with DecidePositivePayException,
+		// exactly like any other exception; a re-presentment returns
+		// the same pending exception through the branch above.
+		exc := &PositivePayException{
+			Account: p.Account, Number: p.Number,
+			Reason: PositivePayReasonStopped, Status: PositivePayExceptionPending,
+			Presented: p,
+		}
+		l.positivePayExceptions[key] = exc
+		l.emitAudit(AuditEvent{
+			Op:       "positive_pay_exception",
+			Actor:    "PresentCheck",
+			Accounts: []AccountID{p.Account},
+			Details: map[string]any{
+				"check_number": p.Number,
+				"reason":       exc.Reason,
+			},
+		})
+		return PositivePayResult{Disposition: PositivePayDispositionException, Exception: exc}, nil
 	}
 	if !ok {
 		exc := &PositivePayException{
@@ -364,6 +411,80 @@ func (l *Ledger) DecidePositivePayException(account AccountID, number, decision 
 			"check_number": number,
 			"decision":     decision,
 		},
+	})
+	return nil
+}
+
+// StopIssuedCheck places a stop-payment order on a registered,
+// uncleared check (LG-355): the lost/stolen-check counterpart to the
+// register. A stopped check's presentment enters the exception queue
+// with reason "stopped" instead of clearing, and a human adjudicates
+// it with DecidePositivePayException. The stop touches only the
+// stop-payment set — the register entry (amount, payee, issue date)
+// is never modified. Stopping an unregistered or already-cleared
+// check is refused fail-closed (there is nothing to stop, or the
+// money is already gone); stopping an already-stopped check is a
+// silent no-op with no second audit event. The stop itself is audited
+// as "positive_pay_stop" (account + number only).
+func (l *Ledger) StopIssuedCheck(account AccountID, number string) error {
+	return l.StopIssuedCheckCtx(context.Background(), account, number)
+}
+
+// StopIssuedCheckCtx is StopIssuedCheck with per-call audit actor
+// attribution (LG-73): the audit event records the operator carried
+// by ctx when set, and the entrypoint name otherwise.
+func (l *Ledger) StopIssuedCheckCtx(ctx context.Context, account AccountID, number string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ensurePositivePayLocked()
+	key := positivePayKey{account: account, number: number}
+	rec, ok := l.issuedChecks[key]
+	if !ok {
+		return fmt.Errorf("%w: %s:%s", ErrPositivePayCheckNotRegistered, account, number)
+	}
+	if rec.cleared {
+		return fmt.Errorf("%w: %s:%s", ErrPositivePayCheckCleared, account, number)
+	}
+	if l.positivePayStops[key] {
+		return nil
+	}
+	l.positivePayStops[key] = true
+	l.emitAuditCtx(ctx, AuditEvent{
+		Op:       "positive_pay_stop",
+		Actor:    "StopIssuedCheck",
+		Accounts: []AccountID{account},
+		Details:  map[string]any{"check_number": number},
+	})
+	return nil
+}
+
+// ReleaseStopIssuedCheck lifts a stop-payment order (LG-355):
+// presentments go back to the ordinary register comparison. Releasing
+// does not silently clear an exception a stopped presentment already
+// produced — that exception stays pending until a human adjudicates
+// it. Releasing a check that is not stopped is a silent no-op with
+// no audit event. The release is audited as
+// "positive_pay_stop_released" (account + number only).
+func (l *Ledger) ReleaseStopIssuedCheck(account AccountID, number string) error {
+	return l.ReleaseStopIssuedCheckCtx(context.Background(), account, number)
+}
+
+// ReleaseStopIssuedCheckCtx is ReleaseStopIssuedCheck with per-call
+// audit actor attribution (LG-73).
+func (l *Ledger) ReleaseStopIssuedCheckCtx(ctx context.Context, account AccountID, number string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ensurePositivePayLocked()
+	key := positivePayKey{account: account, number: number}
+	if !l.positivePayStops[key] {
+		return nil
+	}
+	delete(l.positivePayStops, key)
+	l.emitAuditCtx(ctx, AuditEvent{
+		Op:       "positive_pay_stop_released",
+		Actor:    "ReleaseStopIssuedCheck",
+		Accounts: []AccountID{account},
+		Details:  map[string]any{"check_number": number},
 	})
 	return nil
 }

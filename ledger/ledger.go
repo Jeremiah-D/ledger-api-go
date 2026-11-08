@@ -528,6 +528,11 @@ type Ledger struct {
 	// snapshot.
 	issuedChecks          map[positivePayKey]*positivePayIssuedRecord
 	positivePayExceptions map[positivePayKey]*PositivePayException
+	// positivePayStops is the stop-payment set (see positive_pay.go,
+	// LG-355): account + number pairs whose presentment must enter
+	// the exception queue instead of clearing. Process-local
+	// operational state, like the register itself.
+	positivePayStops map[positivePayKey]bool
 	// businessCalendar is the ledger's holiday calendar (see
 	// businessday.go): weekend days plus the custom holiday table, with
 	// a version counter bumped on every change. Structural config, like
@@ -1761,6 +1766,7 @@ func New(opts ...Option) *Ledger {
 		travelRulePolicy:        DefaultTravelRulePolicy(),
 		issuedChecks:            make(map[positivePayKey]*positivePayIssuedRecord),
 		positivePayExceptions:   make(map[positivePayKey]*PositivePayException),
+		positivePayStops:        make(map[positivePayKey]bool),
 		largeTxThresholds:       make(map[string]int64),
 		largeTxReportCurrency:   DefaultCurrency,
 		largeTxReports:          make(map[largeTxReportKey]LargeTxReport),

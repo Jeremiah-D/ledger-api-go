@@ -3404,8 +3404,17 @@ human adjudicates it (`DecidePositivePayException`: `pay` approves it
 for posting, so a later present returns cleared; `return` bounces it,
 so a later present returns returned). Deciding a missing or
 already-decided exception, or an unknown decision, is an error.
+A stop-payment order (`StopIssuedCheck`, for a lost or stolen check)
+marks a registered, uncleared check stopped: its presentment then enters
+the exception queue with reason `stopped` instead of clearing — even on
+a full field match — for the same human adjudication; stopping an
+unregistered or already-cleared check is refused, and a duplicate stop
+is a no-op. `ReleaseStopIssuedCheck` lifts the order and restores
+ordinary comparison, but never silently clears an exception the stop
+already produced.
 Every step is audited (`positive_pay_issued`, `positive_pay_cleared`,
-`positive_pay_exception`, `positive_pay_decision`) with check number,
+`positive_pay_exception`, `positive_pay_decision`, `positive_pay_stop`,
+`positive_pay_stop_released`) with check number,
 reason, and decision only — never the payee name. `GetPositivePayException`
 and `ListPositivePayExceptions` (sorted by account, then number) read
 the queue. This module books no journal entries itself: the caller
