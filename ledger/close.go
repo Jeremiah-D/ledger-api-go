@@ -11,11 +11,12 @@ import (
 // entry through a closed account: Post, PostBatch, PostTransfer (both
 // principal and fee legs), FX transfers, reversals, sweeps, merges,
 // holds and hold captures, closing entries, revaluation entries, and
-// journal-rule derived legs. A closed account is a terminal lifecycle
-// state, unlike the reversible risk-control freeze: closing is
-// irreversible, and rejected postings record nothing, bump nothing, and
-// leave the ledger version untouched — the close is about refusing new
-// activity, not rewriting history.
+// journal-rule derived legs. A closed account is a lifecycle stop: it
+// refuses new activity until reopened with ReopenAccount (LG-362) —
+// unlike the freeze, which is a risk-control stop lifted by Unfreeze,
+// a close is lifted only by an explicit reopen. Rejected postings
+// record nothing, bump nothing, and leave the ledger version untouched
+// — the close is about refusing new activity, not rewriting history.
 //
 // Ordering inside Post is deliberate: the closed check runs right after
 // the idempotency replay check (a replay of a key posted before the
@@ -27,10 +28,10 @@ import (
 // while it is stopped.
 var ErrAccountClosed = errors.New("ledger: account is closed")
 
-// AccountClosure is the terminal-state record of one account's lifecycle
-// close (see CloseAccount). It is structural config, like the
-// frozen-account list: closing never bumps the ledger version and
-// survives snapshots.
+// AccountClosure is the lifecycle-close record of one account (see
+// CloseAccount, reversed by ReopenAccount). It is structural config,
+// like the frozen-account list: closing never bumps the ledger version
+// and survives snapshots.
 type AccountClosure struct {
 	Account  AccountID `json:"account"`
 	ClosedAt time.Time `json:"closed_at"`
@@ -38,11 +39,12 @@ type AccountClosure struct {
 
 // CloseAccount closes an account: from this point on, every write path
 // that would book a new journal entry through the account is rejected
-// with ErrAccountClosed. Closing is irreversible — there is no unclose —
-// and idempotent: closing an already-closed account returns the original
-// closure record with alreadyClosed == true and changes nothing. Closing
-// an unknown account is allowed (the account may appear later; the close
-// is advisory until then) and takes effect immediately.
+// with ErrAccountClosed. Closing is reversible via ReopenAccount
+// (LG-362), and idempotent: closing an already-closed account returns
+// the original closure record with alreadyClosed == true and changes
+// nothing. Closing an unknown account is allowed (the account may
+// appear later; the close is advisory until then) and takes effect
+// immediately.
 //
 // With cascade == true, every descendant in the sub-account hierarchy
 // (see SetParent) is closed in the same call: the whole subtree becomes
@@ -107,6 +109,90 @@ func (l *Ledger) CloseAccountCtx(ctx context.Context, a AccountID, cascade bool)
 		})
 	}
 	return l.closed[a], false, nil
+}
+
+// ReopenAccount reopens an account previously closed with CloseAccount,
+// restoring its write paths immediately: every write path reads the live
+// closed map, so a reopened account accepts new postings at once. The
+// reopen is the inverse of CloseAccount (LG-362): the merchant-offboarding
+// reversal and the operator-error recovery path — a merchant that returns
+// after going offline, or an account closed by mistake, comes back
+// without rebuilding its aliases, budgets, KYC, and authorizations
+// under a new account.
+//
+// Reopening an account that was never closed is an idempotent no-op
+// returning wasClosed == false and no audit event; reopening an unknown
+// account is likewise a no-op — there is nothing to restore. The
+// returned record is the deleted original closure.
+//
+// With cascade == true, every descendant in the sub-account hierarchy
+// (see SetParent) is reopened in the same call: the whole subtree comes
+// back at once, and the returned record is the root account's. With
+// cascade == false only the root reopens — a descendant closed
+// independently stays closed.
+//
+// The reopen does not bump the ledger version (balances are unchanged),
+// does not touch the journal, and does not resurrect postings rejected
+// while the account was closed (they were never booked). It is recorded
+// as an "account_reopen" structured audit event naming every reopened
+// account, and as one "account_reopened" outbox event per reopened
+// account, so downstream consumers can react. Freezing and dormancy are
+// orthogonal: reopening a frozen account leaves it frozen, and
+// reopening a dormant account leaves the dormancy mark in place.
+func (l *Ledger) ReopenAccount(a AccountID, cascade bool) (closure AccountClosure, wasClosed bool, err error) {
+	return l.ReopenAccountCtx(context.Background(), a, cascade)
+}
+
+// ReopenAccountCtx is ReopenAccount with per-call audit actor attribution
+// (LG-73): the account_reopen audit event records the operator carried by
+// ctx when set, and the entrypoint name otherwise.
+func (l *Ledger) ReopenAccountCtx(ctx context.Context, a AccountID, cascade bool) (closure AccountClosure, wasClosed bool, err error) {
+	if a == "" {
+		return AccountClosure{}, false, ErrEmptyAccountID
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	orig, ok := l.closed[a]
+	if !ok {
+		// Idempotent no-op: the account is not closed, so there is
+		// nothing to restore — like closing an already-closed
+		// account, a reopen of a live account changes nothing and
+		// audits nothing.
+		return AccountClosure{}, false, nil
+	}
+	targets := []AccountID{a}
+	if cascade {
+		targets = l.closeCascadeTargetsLocked(a)
+	}
+	reopened := make([]AccountID, 0, len(targets))
+	for _, t := range targets {
+		if _, ok := l.closed[t]; ok {
+			delete(l.closed, t)
+			reopened = append(reopened, t)
+		}
+	}
+	now := time.Now().UTC()
+	details := map[string]any{
+		"closed_at":   orig.ClosedAt.Format(time.RFC3339),
+		"reopened_at": now.Format(time.RFC3339),
+		"cascade":     cascade,
+	}
+	l.emitAuditCtx(ctx, AuditEvent{
+		Op:            "account_reopen",
+		Actor:         "ReopenAccount",
+		TraceID:       string(a),
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Accounts:      reopened,
+		Details:       details,
+	})
+	for _, t := range reopened {
+		l.emitOutboxLocked(OutboxEvent{
+			Type:    OutboxAccountReopened,
+			Account: t,
+		})
+	}
+	return orig, true, nil
 }
 
 // closeCascadeTargetsLocked returns the root plus every descendant of a

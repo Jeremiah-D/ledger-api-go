@@ -90,6 +90,10 @@ const (
 	OutboxAccountFrozen   = "account_frozen"
 	OutboxAccountUnfrozen = "account_unfrozen"
 	OutboxAccountClosed   = "account_closed"
+	// Account reopen lifecycle (see close.go, LG-362): the inverse of
+	// the close above — one event per account whose write paths come
+	// back, so downstream consumers can re-admit the account.
+	OutboxAccountReopened = "account_reopened"
 	// Account suspension lifecycle (see suspend.go): the operational
 	// pause is reversible, unlike the terminal close above.
 	OutboxAccountSuspended = "account_suspended"

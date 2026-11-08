@@ -2063,8 +2063,8 @@ curl -s -X POST localhost:8080/accounts/cash/resume
 ```
 
 **Operator attribution (`x-ledger-actor`).** Every operator action —
-freeze/unfreeze, suspend/resume, transfer-review approve/reject, account close, period
-close/reopen — records *who* invoked it in the audit event's `actor`
+freeze/unfreeze, suspend/resume, transfer-review approve/reject, account
+close/reopen, period close/reopen — records *who* invoked it in the audit event's `actor`
 field. Send the operator identity as the `x-ledger-actor` request header;
 it defaults to `"system"` when absent (overlong values or control
 characters are rejected with `400`). In-process ledger callers use the
@@ -2084,7 +2084,8 @@ which accounts were stopped.
 
 The terminal lifecycle state of an account (Go: `ledger.CloseAccount`,
 `ledger.IsClosed`). Where the freeze above is a *reversible* risk-control
-stop, closing is **irreversible**: there is no unclose. A closed account
+stop, closing is a lifecycle stop lifted only by an explicit reopen
+(`ledger.ReopenAccount`, LG-362): there is no silent unclose. A closed account
 rejects every write path that would book a new journal entry through it —
 `POST /entries`, batches, transfers (principal *and* fee legs), FX
 transfers, reversals, sweeps, merges, holds and hold captures, closing
@@ -2117,6 +2118,18 @@ With `{"cascade": true}`, the close propagates to the whole sub-account
 subtree (`POST /accounts/{id}/parent` hierarchy) in the same call — the
 merchant-offboarding path; each member gets its own closure record with
 the same `closed_at`.
+
+Reopening (`ledger.ReopenAccount`, `ReopenAccountCtx`) restores the write
+paths immediately — a reopened account accepts new postings at once, and
+reopening a never-closed or unknown account is a no-op (`wasClosed:
+false`, no audit event). With `cascade: true` the whole subtree reopens;
+with `false` only the root reopens and independently closed descendants
+stay closed. A reopen is audited as `account_reopen` (with the original
+`closed_at`, `reopened_at`, and `cascade`) plus one `account_reopened`
+outbox event per reopened account; it bumps no version, books nothing,
+and never resurrects postings rejected while the account was closed.
+Freeze and dormancy are orthogonal: reopening a frozen account leaves it
+frozen, and reopening a dormant account leaves the dormancy mark in place.
 
 ### Dormant accounts (Go API: `DetectDormant` / `ReactivateAccount` / `IsDormant` / `ChargeDormancyFee`)
 

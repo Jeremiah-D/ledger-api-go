@@ -62,9 +62,10 @@ func TestCloseAccountPostRejected(t *testing.T) {
 	}
 }
 
-// Closing is irreversible and idempotent: there is no unclose, and
-// re-closing returns the original record instead of an error.
-func TestCloseAccountIrreversibleAndIdempotent(t *testing.T) {
+// Closing is idempotent: re-closing returns the original record instead
+// of an error. (Closing is reversible — see ReopenAccount, LG-362 —
+// this test pins only the close replay.)
+func TestCloseAccountIdempotent(t *testing.T) {
 	l := New()
 	c1, already1, err := l.CloseAccount("cash", false)
 	if err != nil || already1 {
