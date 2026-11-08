@@ -702,6 +702,9 @@ drain:
 // a SetDeliveryPolicy revision mid-delivery never changes the
 // backoff, the attempt budget, or the client of a delivery that
 // already started — only the next delivery reads the new values.
+// The target URL joins that snapshot (LG-353): a
+// ReviseWebhookEndpoint revision mid-delivery never changes the
+// address of a delivery that already started either.
 func (e *webhookEndpoint) deliver(ev OutboxEvent) {
 	snap := e.deliverySnapshot()
 	body, err := json.Marshal(ev)
@@ -733,7 +736,7 @@ func (e *webhookEndpoint) deliver(ev OutboxEvent) {
 	backoff := snap.initialBackoff
 	for attempt := 1; ; attempt++ {
 		e.d.updateRecord(rec, func(r *DeliveryRecord) { r.Attempts = attempt })
-		status, perr := e.post(ev, body, sig, keyID, snap.client)
+		status, perr := e.post(ev, body, sig, keyID, snap.client, snap.url)
 		if perr == nil && status >= 200 && status < 300 {
 			e.d.updateRecord(rec, func(r *DeliveryRecord) {
 				r.Status = WebhookDeliveryDelivered
@@ -770,10 +773,11 @@ func (e *webhookEndpoint) deliver(ev OutboxEvent) {
 }
 
 // post sends one signed delivery attempt with the given client (the
-// snapshotted one — see deliver). It returns the HTTP status (0 on
+// snapshotted one — see deliver) to the given URL (the snapshotted
+// one — see deliver, LG-353). It returns the HTTP status (0 on
 // transport failure) and the transport error, if any.
-func (e *webhookEndpoint) post(ev OutboxEvent, body []byte, sig, keyID string, client *http.Client) (int, error) {
-	req, err := http.NewRequestWithContext(e.ctx, http.MethodPost, e.cfg.URL, bytes.NewReader(body))
+func (e *webhookEndpoint) post(ev OutboxEvent, body []byte, sig, keyID string, client *http.Client, url string) (int, error) {
+	req, err := http.NewRequestWithContext(e.ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}

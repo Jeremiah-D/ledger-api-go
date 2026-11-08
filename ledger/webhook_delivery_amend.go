@@ -82,9 +82,9 @@ import (
 //   - Tenancy: WithWebhooks hands the same dispatcher to lazily
 //     provisioned tenant ledgers, so a revision affects every tenant
 //     sharing that dispatcher.
-//   - Explicitly out of scope: URL (endpoint identity — changing the
-//     address is Unregister + Register), Events (the subscription
-//     filter, not a delivery knob), Keys (RotateKey owns them),
+//   - Explicitly out of scope: URL and Events (endpoint identity
+//     and the subscription filter — LG-353 owns their live revision,
+//     ReviseWebhookEndpoint), Keys (RotateKey owns them),
 //     Enabled (SetEnabled owns it), and QueueSize (the channel
 //     capacity is fixed at construction — along LG-301's QueueSize
 //     exclusion for the audit log).
@@ -214,12 +214,16 @@ func ptrDuration(v time.Duration) *time.Duration { return &v }
 // under d.mu.RLock at deliver entry and thrown away after the delivery.
 // The client pointer is only ever read through the snapshot, so an
 // HTTPTimeout revision that rebuilds e.client can never tear a
-// delivery that already started.
+// delivery that already started. The target URL joins the snapshot
+// (LG-353): post reads snap.url, never e.cfg.URL, so a
+// ReviseWebhookEndpoint revision mid-delivery cannot tear a delivery
+// that already started either.
 type webhookDeliverySnapshot struct {
 	maxAttempts    int
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
 	client         *http.Client
+	url            string
 }
 
 // deliverySnapshot snapshots the endpoint's live delivery policy.
@@ -233,6 +237,7 @@ func (e *webhookEndpoint) deliverySnapshot() webhookDeliverySnapshot {
 		initialBackoff: e.cfg.InitialBackoff,
 		maxBackoff:     e.cfg.MaxBackoff,
 		client:         e.client,
+		url:            e.cfg.URL,
 	}
 }
 

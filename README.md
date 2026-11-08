@@ -9164,11 +9164,36 @@ Delivery contract, stated honestly:
   plus `previous_*`/`current_*` per changed field, durations in
   nanoseconds), bumps neither the version nor the audit chain, and
   writes no journal entry or outbox event. There is no HTTP endpoint
-  for it. The URL, the event filter, the keys, and the enabled gate
-  are not revisable here (`RotateKey` owns keys, `SetEnabled` owns
-  the gate; the queue capacity is revisable separately, see above). A revision affects every tenant sharing the
-  dispatcher. (Payments fintech / backend engineering: outbound
-  webhook delivery governance.)
+  for it. The keys and the enabled gate are not revisable here
+  (`RotateKey` owns keys, `SetEnabled` owns the gate; the queue
+  capacity is revisable separately, see above) — but the URL and the
+  event filter are, see the next bullet. A revision affects every
+  tenant sharing the dispatcher. (Payments fintech / backend
+  engineering: outbound webhook delivery governance.)
+- The delivery target URL and the event subscription are revisable at
+  runtime without re-registering the endpoint (LG-353,
+  `ledger.ReviseWebhookEndpoint` / `ReviseWebhookEndpointCtx`, with
+  `ledger.WebhookEndpoint` reporting the live config): pass a partial
+  `WebhookEndpointRevision` (`URL`, `Events` — nil fields keep the
+  live value) and only the fields you name move. The revision is
+  future-only — a delivery already in flight keeps the target it
+  started with (including all its retries), an event already queued
+  was matched at fan-out under the old filter and still delivers, and
+  only the next delivery and the next fan-out read the new values —
+  so the queue, the delivery order, and the delivery records all
+  survive it. An empty `Events` list means all types, the same as a
+  nil list. The merged endpoint is validated (an illegal URL is
+  rejected with `ErrInvalidWebhookEndpointRevision` and the live
+  endpoint is untouched, never silently normalized); an all-nil or
+  same-value revision is a no-op with no audit event. Every real
+  revision is audited as `webhook_endpoint_revised` (endpoint plus
+  `previous_url`/`current_url` and `previous_events`/`current_events`
+  per changed field — URLs and event-type lists only, never key
+  material), bumps neither the version nor the audit chain, and writes
+  no journal entry or outbox event. There is no HTTP endpoint for it.
+  A restart restores the `LEDGER_WEBHOOKS` values. (Payments fintech
+  / backend engineering: outbound webhook receiver migration and
+  subscription tuning without dropping queued callbacks.)
 - The signing-key grace period is revisable at runtime without
   re-registering the endpoint (LG-335, `ledger.SetWebhookKeyGracePeriod`
   / `SetWebhookKeyGracePeriodCtx`, with `ledger.WebhookKeyGracePeriod`
