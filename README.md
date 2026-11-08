@@ -3752,9 +3752,13 @@ which the funds sit unreserved. `ExtendHoldExpiry` moves an active
 hold's deadline in place: the new expiry must be strictly later than
 the current one (extensions only lengthen, never shorten — an equal,
 earlier, or past expiry is rejected and the original deadline is
-untouched), and captured, released, or expired holds are refused
-(the sweep state and the lazy-expiry reading agree: a lapsed hold is
-never resurrected by an extension). Amount, currency, and the
+untouched), and, when the live maximum-hold-duration cap is set, no
+later than now + the cap — a new expiry strictly after now + the cap
+is rejected with `ErrHoldExceedsMaxDuration` (LG-359), so the cap
+cannot be bypassed by creating short and extending long; dispute
+freeze holds are exempt from the cap. Captured, released, or expired
+holds are refused (the sweep state and the lazy-expiry reading agree:
+a lapsed hold is never resurrected by an extension). Amount, currency, and the
 partial-capture position are untouched — a partially captured hold
 stays active with its remainder still reserving funds — and the move
 lands one `hold_expiry_extended` audit event with the old and new
@@ -3803,7 +3807,11 @@ a hold created afterwards is rejected with `ErrHoldExceedsMaxDuration`
 (`422`, counted by the existing `ledger_hold_rejections_total`) when
 its `expires_at` lies strictly after now + d; an expiry exactly at
 now + d is admitted, and an already-past expiry is still accepted
-but born expired. Zero disables the cap (unlimited, the default);
+but born expired. The cap also bounds extensions (LG-359):
+`ExtendHoldExpiry` rejects a new expiry strictly after now + the
+live cap with the same error, so the cap cannot be bypassed by
+creating short and extending long; the boundary stays inclusive.
+Zero disables the cap (unlimited, the default);
 a negative duration is rejected with `ErrInvalidMaxHoldDuration`
 and the live value is untouched; revising to the current cap is a
 no-op with no audit event. The cap is future-only: already-placed
@@ -3816,11 +3824,12 @@ a pre-cap hold is unaffected by a cap that landed afterwards.
 operator); it bumps neither the version nor the audit chain, and
 there is no environment variable or HTTP endpoint. The dispute
 freeze hold is exempt — its fixed 120-day TTL is a risk-control
-action, and capping it would block dispute raising outright — while
-multisig fund-freeze holds stay capped (their expiry is
-operator-chosen). Snapshots carry no hold cap: a disaster-recovery
-restore returns the default (unlimited) and the cap must be
-re-applied.
+action, and capping it would block dispute raising outright — and
+the exemption extends to extensions: a dispute freeze hold may be
+extended past the cap, while multisig fund-freeze holds stay capped
+(their expiry is operator-chosen). Snapshots carry no hold cap: a
+disaster-recovery restore returns the default (unlimited) and the
+cap must be re-applied.
 
 ### Payment repair queue (支付修复队列，预发出修复)
 

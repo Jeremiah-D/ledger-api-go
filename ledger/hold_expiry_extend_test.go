@@ -169,3 +169,149 @@ func TestExtendHoldExpiryAudit(t *testing.T) {
 		t.Errorf("expires_at = %v, want %v", d["expires_at"], extended.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 }
+
+// TestExtendHoldExpiryOverCapRejectedAndHoldUntouched pins the LG-359
+// cap: with a 30-day cap, an extension past now + 30 days is rejected
+// with ErrHoldExceedsMaxDuration and the hold keeps its old expiry.
+func TestExtendHoldExpiryOverCapRejectedAndHoldUntouched(t *testing.T) {
+	l := extendHoldSeed(t, "h1", 6000)
+	before, _ := l.GetHold("h1")
+	if err := l.SetMaxHoldDuration(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("SetMaxHoldDuration(30d): %v", err)
+	}
+	if _, err := l.ExtendHoldExpiry("h1", time.Now().Add(31*24*time.Hour)); !errors.Is(err, ErrHoldExceedsMaxDuration) {
+		t.Fatalf("over-cap extension err = %v, want ErrHoldExceedsMaxDuration", err)
+	}
+	if h, _ := l.GetHold("h1"); h.ExpiresAt.UnixNano() != before.ExpiresAt.UnixNano() || h.Status != HoldStatusActive {
+		t.Errorf("hold after rejected extension = %+v, want original expiry, still active", h)
+	}
+	// And a within-cap extension still works afterwards.
+	if _, err := l.ExtendHoldExpiry("h1", time.Now().Add(10*24*time.Hour)); err != nil {
+		t.Errorf("within-cap extension after rejection: %v", err)
+	}
+}
+
+// TestExtendHoldExpiryWithinCapSucceeds is the happy path under a cap:
+// extending inside now + cap succeeds and moves only the deadline.
+func TestExtendHoldExpiryWithinCapSucceeds(t *testing.T) {
+	l := extendHoldSeed(t, "h1", 6000)
+	if err := l.SetMaxHoldDuration(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("SetMaxHoldDuration(30d): %v", err)
+	}
+	extended, err := l.ExtendHoldExpiry("h1", time.Now().Add(10*24*time.Hour))
+	if err != nil {
+		t.Fatalf("within-cap extension: %v", err)
+	}
+	if extended.AmountCents != 6000 || extended.Status != HoldStatusActive {
+		t.Errorf("hold after extension = %+v, want amount/status untouched", extended)
+	}
+}
+
+// TestExtendHoldExpiryCapZeroUnlimited pins that cap == 0 (the
+// default) imposes no bound: a year-long extension succeeds.
+func TestExtendHoldExpiryCapZeroUnlimited(t *testing.T) {
+	l := extendHoldSeed(t, "h1", 6000)
+	if got := l.MaxHoldDuration(); got != 0 {
+		t.Fatalf("default cap = %v, want 0 (unlimited)", got)
+	}
+	if _, err := l.ExtendHoldExpiry("h1", time.Now().Add(365*24*time.Hour)); err != nil {
+		t.Fatalf("year-long extension with no cap: %v", err)
+	}
+}
+
+// TestExtendHoldExpiryDisputeHoldExempt pins the LG-359 exemption: a
+// dispute freeze hold extends past the cap like its creation — the
+// risk-control freeze is not an operator-chosen horizon.
+func TestExtendHoldExpiryDisputeHoldExempt(t *testing.T) {
+	l := seedDisputeLedger(t)
+	if _, _, err := l.RaiseDispute(Dispute{
+		ID:          "d1",
+		TransferID:  "t1",
+		ReasonCode:  DisputeReasonUnauthorized,
+		AmountCents: 6000,
+	}); err != nil {
+		t.Fatalf("RaiseDispute: %v", err)
+	}
+	if err := l.SetMaxHoldDuration(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("SetMaxHoldDuration(30d): %v", err)
+	}
+	// The freeze currently expires ~120 days out; extending it to
+	// ~150 days is far past the 30-day cap and must still succeed.
+	extended, err := l.ExtendHoldExpiry("dispute/d1", time.Now().Add(150*24*time.Hour))
+	if err != nil {
+		t.Fatalf("dispute-hold extension past the cap: %v (the dispute freeze must stay exempt)", err)
+	}
+	if extended.ExpiresAt.Before(time.Now().Add(149 * 24 * time.Hour)) {
+		t.Errorf("dispute hold expiry = %v, want ~150 days out", extended.ExpiresAt)
+	}
+}
+
+// TestExtendHoldExpiryCapTightenedAfterPlacement pins that the cap is
+// read live at extension time: a hold placed before any cap was set
+// is judged against the cap in force when it is extended.
+func TestExtendHoldExpiryCapTightenedAfterPlacement(t *testing.T) {
+	l := New()
+	fundAccount(t, l, "card", 10000, "")
+	if _, _, err := l.Hold(Hold{ID: "h1", Account: "card", AmountCents: 6000, ExpiresAt: time.Now().Add(10 * 24 * time.Hour)}); err != nil {
+		t.Fatalf("Hold (no cap yet): %v", err)
+	}
+	if err := l.SetMaxHoldDuration(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("SetMaxHoldDuration(30d): %v", err)
+	}
+	if _, err := l.ExtendHoldExpiry("h1", time.Now().Add(31*24*time.Hour)); !errors.Is(err, ErrHoldExceedsMaxDuration) {
+		t.Fatalf("over-cap extension after tightening err = %v, want ErrHoldExceedsMaxDuration", err)
+	}
+	if _, err := l.ExtendHoldExpiry("h1", time.Now().Add(20*24*time.Hour)); err != nil {
+		t.Errorf("within-cap extension after tightening: %v", err)
+	}
+}
+
+// TestExtendHoldExpiryCapBoundaryExactAdmitted pins the inclusive
+// boundary, like creation: an expiry exactly at now + cap is
+// admitted, not rejected.
+func TestExtendHoldExpiryCapBoundaryExactAdmitted(t *testing.T) {
+	l := extendHoldSeed(t, "h1", 6000)
+	if err := l.SetMaxHoldDuration(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("SetMaxHoldDuration(30d): %v", err)
+	}
+	// The target is computed from this test's now; the call's own
+	// now is a hair later, so the target sits at (just inside)
+	// now + cap — admitted, like a creation at the boundary.
+	if _, err := l.ExtendHoldExpiry("h1", time.Now().Add(30*24*time.Hour)); err != nil {
+		t.Fatalf("boundary extension to now+cap: %v", err)
+	}
+}
+
+// TestExtendHoldExpiryCheckOrderUnchanged pins that the cap check
+// runs last: unknown IDs, expired holds, and not-lengthening targets
+// report their own errors even when the target is also over the cap —
+// and an already-lapsed hold reports expired, never over-cap, because
+// both decisions read the same now.
+func TestExtendHoldExpiryCheckOrderUnchanged(t *testing.T) {
+	l := New()
+	fundAccount(t, l, "card", 10000, "")
+	if err := l.SetMaxHoldDuration(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("SetMaxHoldDuration(30d): %v", err)
+	}
+	// Unknown ID first, even with an over-cap target.
+	if _, err := l.ExtendHoldExpiry("no-such-hold", time.Now().Add(40*24*time.Hour)); !errors.Is(err, ErrHoldNotFound) {
+		t.Errorf("unknown hold err = %v, want ErrHoldNotFound", err)
+	}
+	// A hold whose expiry is already past: born expired, so the
+	// extension reports expired — the cap never gets a say.
+	if _, _, err := l.Hold(Hold{ID: "h-exp", Account: "card", AmountCents: 1000, ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("Hold with past expiry: %v", err)
+	}
+	if _, err := l.ExtendHoldExpiry("h-exp", time.Now().Add(40*24*time.Hour)); !errors.Is(err, ErrHoldExpired) {
+		t.Errorf("expired hold err = %v, want ErrHoldExpired", err)
+	}
+	// A not-lengthening target reports its own error, not the cap's.
+	l2 := extendHoldSeed(t, "h1", 6000)
+	if err := l2.SetMaxHoldDuration(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("SetMaxHoldDuration(30d): %v", err)
+	}
+	before, _ := l2.GetHold("h1")
+	if _, err := l2.ExtendHoldExpiry("h1", before.ExpiresAt); !errors.Is(err, ErrInvalidHoldExpiryExtension) {
+		t.Errorf("equal target err = %v, want ErrInvalidHoldExpiryExtension", err)
+	}
+}

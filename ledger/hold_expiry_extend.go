@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,18 @@ import (
 //     or past new expiry fails with ErrInvalidHoldExpiryExtension
 //     and the original expiry is untouched — fail-closed, so a
 //     mistaken call cannot silently cut a reservation short.
+//   - The new expiry must also respect the live
+//     maximum-hold-duration cap (LG-312, LG-359): when a cap is
+//     set, a new expiry strictly after now + the cap fails with
+//     ErrHoldExceedsMaxDuration, the same error and boundary as
+//     hold creation — an expiry exactly at now + the cap is
+//     admitted. The check runs after the state and lengthen
+//     gates, reusing the same now, so an expired or
+//     not-lengthening request reports its own error, never the
+//     cap's. Dispute freeze holds ("dispute/<id>") are exempt,
+//     like their creation: the risk-control freeze is not an
+//     operator-chosen horizon. A rejected extension leaves the
+//     hold exactly as it was.
 //   - The extension touches the expiry and nothing else: amount,
 //     currency, and the partial-capture position (CapturedCents,
 //     see CapturePartial) are unchanged, and a partially captured
@@ -56,11 +69,15 @@ var (
 )
 
 // ExtendHoldExpiry moves an active hold's expiry to newExpiresAt.
-// The new expiry must be strictly later than the current one; the
-// amount, currency, and capture position are untouched, and a
-// failed extension leaves the hold exactly as it was. Extending is
-// off-journal — it does not bump the ledger version — but it is
-// audited as hold_expiry_extended.
+// The new expiry must be strictly later than the current one, and,
+// when the live maximum-hold-duration cap (LG-312) is set, no later
+// than now + the cap — an expiry strictly after now + the cap fails
+// with ErrHoldExceedsMaxDuration (LG-359); dispute freeze holds
+// ("dispute/<id>") are exempt from the cap. The amount, currency,
+// and capture position are untouched, and a failed extension leaves
+// the hold exactly as it was. Extending is off-journal — it does
+// not bump the ledger version — but it is audited as
+// hold_expiry_extended.
 func (l *Ledger) ExtendHoldExpiry(holdID string, newExpiresAt time.Time) (Hold, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -81,6 +98,22 @@ func (l *Ledger) ExtendHoldExpiry(holdID string, newExpiresAt time.Time) (Hold, 
 	}
 	if !newExpiresAt.After(h.ExpiresAt) {
 		return Hold{}, ErrInvalidHoldExpiryExtension
+	}
+	// The live maximum-hold-duration cap (LG-312, LG-359): an
+	// extension can never install a deadline the hold could not
+	// have been created with — otherwise the cap is bypassed by
+	// creating short and extending long, one extension at a time.
+	// The boundary is inclusive, exactly like creation: an expiry
+	// exactly at now + the cap is admitted. The check reuses the
+	// same now as the expiry check above, so the cap decision and
+	// the expired decision can never disagree about "now".
+	// Dispute freeze holds (IDs with the "dispute/" prefix, see
+	// disputeHoldIDFor) stay exempt, like their creation through
+	// holdLockedUncapped: the 120-day freeze is a risk-control
+	// action, not an operator-chosen authorization horizon, and
+	// capping its extension would strand a dispute mid-freeze.
+	if l.maxHoldDuration > 0 && !strings.HasPrefix(h.ID, "dispute/") && newExpiresAt.After(now.Add(l.maxHoldDuration)) {
+		return Hold{}, ErrHoldExceedsMaxDuration
 	}
 	previous := h.ExpiresAt
 	h.ExpiresAt = newExpiresAt

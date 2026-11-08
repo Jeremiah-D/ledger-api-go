@@ -86,11 +86,10 @@ import (
 // owns the idempotency-key TTL. There is no environment variable
 // or HTTP endpoint for the revision (per LG-241/242): hold-cap
 // tuning is in-process structural config. ExtendHoldExpiry
-// (hold_expiry_extend.go) is untouched: the cap governs hold
-// creation only, so an extension can still move a deadline past
-// the cap — extending an existing reservation is a separate
-// decision from admitting a new one, and is left to a later item
-// if operators want it bounded too.
+// (hold_expiry_extend.go) is bounded by the cap too (LG-359): an
+// extension can never install a deadline the hold could not have
+// been created with, so the cap cannot be bypassed by creating
+// short and extending long.
 
 var (
 	// ErrInvalidMaxHoldDuration is returned by SetMaxHoldDuration
