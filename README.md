@@ -1801,11 +1801,18 @@ RfP 保持 issued，错误原样返回）；`POST /rfp/{id}/reject` 拒绝。
 - 过期惰性失效（hold 同惯例）：`expires_at` 必填且必须在未来；
   过期后 accept/reject 一律 `422`；`ExpireRfPs` 显式清扫供运维
   观测。
+- 接受前可修订条款（Go: `ledger.AmendRfP`，LG-363）：issued 态的
+  金额/币种/到期日可原地改（`RfPAmendment` 指针字段，nil 不动；
+  creditor/debtor 是请求身份、不可改）；过期的先惰性标 expired
+  再报 `422`，已 paid/rejected 的修订报 `422`，非法合并值
+  （非正金额、非 3 位大写币种、非未来到期日）报 `400` 且原记录
+  不动；与现任三项全同为 no-op 不审计；修订记 `rfp_amended`
+  （previous/current 三条款），零分录、零 version bump。
 - payout transfer ID 确定性：`rfp/<id>/payout`，memo
   `rfp_of:<id>`（`GET /entries?memo=` 可检索）；重复 accept 重放
   原 receipt（`duplicate: true`）。
 - 审计：`rfp_issued` / `rfp_accepted` / `rfp_paid` /
-  `rfp_rejected` / `rfp_expired` 进结构化审计链；`x-ledger-actor`
+  `rfp_rejected` / `rfp_expired` / `rfp_amended` 进结构化审计链；`x-ledger-actor`
   透传操作员身份。
 - 内存态：RfP 记录不进灾难恢复快照（payout 指令同惯例）——落账
   的 transfer 行在 journal 里，钱是安全的。
