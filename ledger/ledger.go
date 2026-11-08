@@ -1339,11 +1339,16 @@ type Ledger struct {
 	// submitted inside the evidence window after the claim is filed and
 	// adjudicated by an operator or arbiter. representmentWindow is the
 	// window (default 7 days, see defaultRepresentmentWindow),
-	// measured from the dispute's CreatedAt. Like dispute records,
-	// representments are operational state that does not round-trip
-	// through disaster-recovery snapshots.
-	representments      map[string]Representment
-	representmentWindow time.Duration
+	// measured from the dispute's CreatedAt. representmentMaxDocuments
+	// is the live cap on one package's document hashes (default 32,
+	// see defaultRepresentmentMaxDocuments), revisable at runtime via
+	// SetRepresentmentMaxDocuments (LG-357); it does not round-trip
+	// through snapshots — a restore starts again at the default. Like
+	// dispute records, representments are operational state that does
+	// not round-trip through disaster-recovery snapshots.
+	representments           map[string]Representment
+	representmentWindow      time.Duration
+	representmentMaxDocuments int
 	// healthViolations counts balance-health violations found by the
 	// background watchdog (see health_watch.go): the number of
 	// "balance_health_violation" audit events emitted. In-memory only —
@@ -1914,6 +1919,7 @@ func New(opts ...Option) *Ledger {
 		disputeKeys:                 make(map[string]string),
 		representments:              make(map[string]Representment),
 		representmentWindow:         defaultRepresentmentWindow,
+		representmentMaxDocuments:  defaultRepresentmentMaxDocuments,
 		healthWatchWindowDivisor:    defaultHealthWatchWindowDivisor,
 		journalRules:                make(map[string]JournalRule),
 		fixedAssets:                 make(map[string]FixedAsset),

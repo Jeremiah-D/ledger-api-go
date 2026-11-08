@@ -54,10 +54,14 @@ import (
 // a misconfiguration, not a policy.
 const defaultRepresentmentWindow = 7 * 24 * time.Hour
 
-// maxRepresentmentDocuments caps one representment's evidence package
-// at 32 document hashes: enough for a receipt, a delivery proof, and
-// a contract, few enough to keep the record bounded.
-const maxRepresentmentDocuments = 32
+// defaultRepresentmentMaxDocuments is the default cap on one
+// representment's evidence package: 32 document hashes — enough for a
+// receipt, a delivery proof, and a contract, few enough to keep the
+// record bounded. The live value is Ledger.representmentMaxDocuments,
+// revisable at runtime via SetRepresentmentMaxDocuments (LG-357);
+// this const is only the construction-time default, restored on
+// restart.
+const defaultRepresentmentMaxDocuments = 32
 
 // maxRepresentmentDocumentHashRunes caps one document hash at 128
 // UTF-8 characters: enough for a hex SHA-256 digest plus a scheme
@@ -115,8 +119,9 @@ var (
 	// ErrInvalidRepresentmentDocument is returned by
 	// SubmitRepresentment for a document hash that is empty or longer
 	// than maxRepresentmentDocumentHashRunes, or when the package
-	// exceeds maxRepresentmentDocuments hashes.
-	ErrInvalidRepresentmentDocument = errors.New("ledger: representment document hashes must be non-empty, at most 128 characters each, at most 32 per representment")
+	// exceeds the live per-representment document limit (default 32,
+	// revisable via SetRepresentmentMaxDocuments, LG-357).
+	ErrInvalidRepresentmentDocument = errors.New("ledger: representment document hashes must be non-empty, at most 128 characters each, within the configured per-representment limit")
 	// ErrEmptyAdjudicator is returned by AdjudicateRepresentment when
 	// the adjudicator identity is empty: every adjudication is
 	// attributed to an operator or arbiter.
@@ -173,15 +178,18 @@ func (l *Ledger) RepresentmentWindow() time.Duration {
 
 // checkRepresentmentEvidence enforces the evidence contract: at least
 // one document hash or a non-empty statement (an empty representment
-// defends nothing), at most maxRepresentmentDocuments non-empty hashes
-// of at most maxRepresentmentDocumentHashRunes characters, and a
-// statement of at most maxRepresentmentStatementRunes characters.
-func checkRepresentmentEvidence(docHashes []string, statement string) error {
+// defends nothing), at most l.representmentMaxDocuments non-empty
+// hashes of at most maxRepresentmentDocumentHashRunes characters, and
+// a statement of at most maxRepresentmentStatementRunes characters.
+// Callers must hold l.mu (the write lock suffices — SubmitRepresentment
+// holds it); the limit is read live, so a revision governs the next
+// submission while already-submitted packages are untouched.
+func (l *Ledger) checkRepresentmentEvidence(docHashes []string, statement string) error {
 	if len(docHashes) == 0 && strings.TrimSpace(statement) == "" {
 		return ErrEmptyRepresentmentEvidence
 	}
-	if len(docHashes) > maxRepresentmentDocuments {
-		return fmt.Errorf("%w: %d hashes, at most %d", ErrInvalidRepresentmentDocument, len(docHashes), maxRepresentmentDocuments)
+	if len(docHashes) > l.representmentMaxDocuments {
+		return fmt.Errorf("%w: %d hashes, at most %d", ErrInvalidRepresentmentDocument, len(docHashes), l.representmentMaxDocuments)
 	}
 	for _, h := range docHashes {
 		if h == "" || len([]rune(h)) > maxRepresentmentDocumentHashRunes {
@@ -219,17 +227,24 @@ func representmentEvidenceEqual(r Representment, docHashes []string, statement s
 // SubmitRepresentment records the payee's evidence package against an
 // open transfer dispute: the second phase of the dispute defense.
 //
-// The check order: field validation (non-empty dispute ID, a
-// well-formed evidence package — at least one document hash or a
-// non-empty statement), then the dispute lookup (unknown IDs fail
-// with ErrDisputeNotFound; resolved disputes fail with
-// ErrDisputeAlreadyResolved), then the replay check — resubmitting the
-// same evidence returns the original representment with duplicate ==
-// true, submitting different evidence fails with
+// The check order: field validation (non-empty dispute ID), then the
+// dispute lookup (unknown IDs fail with ErrDisputeNotFound; resolved
+// disputes fail with ErrDisputeAlreadyResolved), then the replay check
+// — resubmitting the same evidence returns the original representment
+// with duplicate == true, submitting different evidence fails with
 // ErrRepresentmentAlreadySubmitted (one evidence package per dispute)
-// — and finally the window: submissions after the evidence window
-// closed are rejected with ErrRepresentmentWindowExpired,
-// fail-closed.
+// — and finally the evidence validation for a genuinely new package
+// and the window: submissions after the evidence window closed are
+// rejected with ErrRepresentmentWindowExpired, fail-closed.
+//
+// The replay check runs before the evidence validation on purpose:
+// the stored package is returned as filed, without re-validating it
+// against the live cap, so a cap revision (LG-357) never breaks the
+// idempotent replay of a package filed under a wider cap — a client
+// retrying a submission after an operator tightened the cap still
+// gets the 200 replay, not a 400 for a package that was valid when
+// filed. Only a genuinely new package is validated against the live
+// cap.
 //
 // The commit is atomic under the write lock: the representment
 // record lands alone — submission books no journal rows and touches
@@ -245,9 +260,6 @@ func (l *Ledger) SubmitRepresentment(disputeID string, docHashes []string, state
 	if strings.TrimSpace(disputeID) == "" {
 		return Representment{}, false, ErrEmptyDisputeID
 	}
-	if err := checkRepresentmentEvidence(docHashes, statement); err != nil {
-		return Representment{}, false, err
-	}
 	d, ok := l.disputes[disputeID]
 	if !ok {
 		return Representment{}, false, ErrDisputeNotFound
@@ -257,11 +269,17 @@ func (l *Ledger) SubmitRepresentment(disputeID string, docHashes []string, state
 	}
 	// Replay: the same evidence returns the original; different
 	// evidence is a second package, which one dispute never gets.
+	// This runs before the evidence validation (see the doc comment):
+	// a stored package is returned as filed, never re-validated
+	// against a cap revised after it was filed.
 	if existing, ok := l.representments[disputeID]; ok {
 		if representmentEvidenceEqual(existing, docHashes, statement) {
 			return existing, true, nil
 		}
 		return Representment{}, false, ErrRepresentmentAlreadySubmitted
+	}
+	if err := l.checkRepresentmentEvidence(docHashes, statement); err != nil {
+		return Representment{}, false, err
 	}
 
 	now := time.Now()

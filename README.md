@@ -3973,7 +3973,9 @@ the documents stay off-ledger) plus a free-form defense statement —
 and an operator or arbiter adjudicates it:
 
 - `POST /disputes/{id}/representment` — submit. Body:
-  `document_hashes` (at most 32, each at most 128 chars) and/or
+  `document_hashes` (at most the configured limit — default 32,
+  revisable at runtime via `Ledger.SetRepresentmentMaxDocuments`,
+  LG-357 — each at most 128 chars) and/or
   `statement` (at most 4000 chars); at least one of the two is
   required. Returns `201` with the representment, `200` on idempotent
   replay of the same evidence; `404` on an unknown dispute; `409` when
@@ -3997,6 +3999,12 @@ window gates the submission, not the adjudication). Audit events:
 `representment_submitted`, `representment_adjudicated`, and
 `representment_auto_upheld` (the marker on the sweep's upholds), plus
 `representment_submitted` / `representment_adjudicated` outbox events.
+The package cap itself is revisable at runtime via
+`Ledger.SetRepresentmentMaxDocuments` (LG-357, no restart; a cap below
+1 is rejected, a same-value revision is a no-op) — each real revision
+is audited as `representment_max_documents_retuned` with previous /
+current cap, already-submitted packages are unaffected, and a restart
+restores the default 32.
 `GET /metrics` exposes `ledger_representments_submitted_total` and
 `ledger_representments_adjudicated_total`.
 
