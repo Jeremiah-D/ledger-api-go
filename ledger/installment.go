@@ -37,7 +37,9 @@ import (
 // later sweep that posts every outstanding period recovers the plan to
 // active. Early settlement closes the plan in one row for the remaining
 // balance; completing the final period normally closes it as
-// completed. Every transition is audited.
+// completed. Cancellation (see CancelInstallmentPlan) ends a plan
+// without settling the remainder: posted periods stay booked, future
+// periods and late fees stop. Every transition is audited.
 //
 // Idempotency: period rows carry the deterministic entry ID and
 // idempotency key "installment/<planID>/<seq>", and the early-settle
@@ -63,12 +65,15 @@ const (
 )
 
 // Installment plan statuses. Only active and overdue plans accrue new
-// due periods; the other two are terminal.
+// due periods; the other three are terminal. A cancelled plan keeps
+// its posted periods and never settles its remaining principal (see
+// CancelInstallmentPlan).
 const (
 	InstallmentActive       = "active"
 	InstallmentOverdue      = "overdue"
 	InstallmentSettledEarly = "settled_early"
 	InstallmentCompleted    = "completed"
+	InstallmentCancelled    = "cancelled"
 )
 
 // Validation and state errors returned by the installment APIs.
@@ -485,6 +490,52 @@ func (l *Ledger) SettleInstallmentEarly(id string, now time.Time) (InstallmentPl
 		Details: map[string]any{
 			"remaining_cents": remaining,
 			"posted_periods":  plan.NumPeriods,
+		},
+	})
+	return plan, nil
+}
+
+// CancelInstallmentPlan cancels an active or overdue plan: future
+// periods stop, the late-fee rule stops accruing, and the remaining
+// principal is never settled. The periods already journaled stay
+// booked — cancellation is not a reversal — and the posted sum does
+// not move. This is the lifecycle end for a default, a debt
+// restructuring, or a terminated agreement, where the alternative
+// (SettleInstallmentEarly) would wrongly demand the remaining
+// principal in one row.
+//
+// InstallmentsDue and AccrueInstallmentLateFees only sweep active and
+// overdue plans, so a cancelled plan is skipped by both from the next
+// sweep on — no status check was added to either sweeper, the
+// exclusion is the existing gate.
+//
+// Re-cancelling a terminal plan (completed, settled early, or already
+// cancelled) returns it unchanged, following SettleInstallmentEarly's
+// terminal idempotency. An unknown plan is ErrInstallmentNotFound.
+func (l *Ledger) CancelInstallmentPlan(id string, actor string) (InstallmentPlan, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	plan, ok := l.installments[id]
+	if !ok {
+		return InstallmentPlan{}, ErrInstallmentNotFound
+	}
+	if plan.Status == InstallmentCompleted || plan.Status == InstallmentSettledEarly || plan.Status == InstallmentCancelled {
+		return plan, nil
+	}
+	plan.Status = InstallmentCancelled
+	l.installments[id] = plan
+	l.emitAudit(AuditEvent{
+		Op:            "installment_plan_cancelled",
+		Actor:         NormalizeAuditActor(actor),
+		TraceID:       plan.ID,
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Accounts:      []AccountID{plan.Payer, plan.Payee},
+		Details: map[string]any{
+			"posted_periods":  plan.PostedPeriods,
+			"principal_cents": plan.PrincipalCents,
+			"remaining_cents": plan.PrincipalCents - installmentPostedSum(plan),
 		},
 	})
 	return plan, nil

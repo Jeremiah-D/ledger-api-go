@@ -4692,13 +4692,18 @@ credited).
 
 Lifecycle: `active → overdue → active → completed`, plus
 `active|overdue → settled_early` via `SettleInstallmentEarly`, which
-closes the plan in one row for the remaining principal. A rejected
+closes the plan in one row for the remaining principal, and
+`active|overdue → cancelled` via `CancelInstallmentPlan` (LG-361),
+which ends the plan without settling the remainder: posted periods
+stay booked, future periods and late fees stop. A rejected
 period posting (frozen account, overdraft, …) moves the plan to
 `overdue` and stops that plan's sweep — later periods wait rather than
 skipping the queue; a later sweep that posts every outstanding period
 recovers it to `active`. Every transition emits an audit event
 (`installment_overdue`, `installment_recovered`, `installment_completed`,
-`installment_settled_early`, `installment_plan_open`).
+`installment_settled_early`, `installment_plan_cancelled`,
+`installment_plan_open`). Re-cancelling a terminal plan (completed,
+settled early, or already cancelled) returns it unchanged.
 
 Idempotency: period rows carry the deterministic entry ID and
 idempotency key `installment/<plan-id>/<seq>` (early-settle:
