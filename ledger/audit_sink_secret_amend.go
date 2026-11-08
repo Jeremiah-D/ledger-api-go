@@ -87,8 +87,8 @@ import (
 //     holder), so callers holding the *AuditSink rotate it directly —
 //     the one deliberate departure from LG-300–305's Ledger delegate
 //     shape, for a reason verified in the code (along LG-306).
-//   - Explicitly out of scope: URL (endpoint identity — changing the
-//     address is Stop + StartAuditSink), CursorFile (fixed at start),
+//   - Explicitly out of scope: URL (endpoint identity — LG-352
+//     owns its live revision, SetSinkURL), CursorFile (fixed at start),
 //     PollInterval (the run loop's idle poll rhythm, not a signature),
 //     and the four delivery knobs (LG-306 already owns them).
 //

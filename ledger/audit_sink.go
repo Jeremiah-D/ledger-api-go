@@ -307,7 +307,9 @@ func (s *AuditSink) run(ctx context.Context) {
 // dead-lettered one advance the cursor — the cursor must never stick
 // on poison. The delivery runs under the policy snapshotted at entry
 // (LG-306): a concurrent SetDeliveryPolicy governs only the next
-// delivery, never one already in flight.
+// delivery, never one already in flight. The target URL is part of
+// that snapshot (LG-352): a concurrent SetSinkURL likewise governs
+// only the next delivery, never one already in flight.
 func (s *AuditSink) deliver(ctx context.Context, ev OutboxEvent) bool {
 	snap := s.deliverySnapshot()
 	body, err := json.Marshal(ev)
@@ -323,7 +325,7 @@ func (s *AuditSink) deliver(ctx context.Context, ev OutboxEvent) bool {
 	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	backoff := snap.initialBackoff
 	for attempt := 1; ; attempt++ {
-		status, perr := s.post(ctx, snap.client, ev, body, sig)
+		status, perr := s.post(ctx, snap.client, snap.url, ev, body, sig)
 		if perr == nil && status >= 200 && status < 300 {
 			s.sent.Add(1)
 			return true
@@ -348,10 +350,11 @@ func (s *AuditSink) deliver(ctx context.Context, ev OutboxEvent) bool {
 }
 
 // post sends one signed delivery attempt with the given client (the
-// snapshot taken at deliver entry, LG-306). It returns the HTTP status
+// snapshot taken at deliver entry, LG-306) to the given URL (the
+// snapshot taken at deliver entry, LG-352). It returns the HTTP status
 // (0 on transport failure) and the transport error, if any.
-func (s *AuditSink) post(ctx context.Context, client *http.Client, ev OutboxEvent, body []byte, sig string) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.URL, bytes.NewReader(body))
+func (s *AuditSink) post(ctx context.Context, client *http.Client, url string, ev OutboxEvent, body []byte, sig string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}

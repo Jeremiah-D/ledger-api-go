@@ -89,8 +89,8 @@ import (
 //     holder), so callers holding the *AuditSink revise it directly
 //     — the one deliberate departure from LG-300–305's Ledger
 //     delegate shape, for a reason verified in the code.
-//   - Explicitly out of scope: URL (endpoint identity — changing the
-//     address is Stop + StartAuditSink), Secret (signing-key rotation
+//   - Explicitly out of scope: URL (endpoint identity — LG-352
+//     owns its live revision, SetSinkURL), Secret (signing-key rotation
 //     is a separate concern), CursorFile (cursor identity, fixed at
 //     start), and PollInterval (the run loop's idle poll rhythm, not
 //     a delivery knob).
@@ -209,13 +209,17 @@ func policyFromSinkTuning(t sinkDeliveryTuning) SinkDeliveryPolicy {
 // secret, snapshotted under cfgMu.RLock at deliver entry and thrown
 // away after the delivery. The client pointer is only ever read
 // through the snapshot, so an HTTPTimeout revision that rebuilds
-// s.client can never tear a delivery that already started.
+// s.client can never tear a delivery that already started. The
+// target URL joins the snapshot (LG-352): post reads snap.url, never
+// s.cfg.URL, so a SetSinkURL revision mid-delivery cannot tear a
+// delivery that already started either.
 type sinkDeliverySnapshot struct {
 	maxAttempts    int
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
 	secret         []byte
 	client         *http.Client
+	url            string
 }
 
 // deliverySnapshot snapshots the sink's live delivery policy. The
@@ -230,6 +234,7 @@ func (s *AuditSink) deliverySnapshot() sinkDeliverySnapshot {
 		maxBackoff:     s.cfg.MaxBackoff,
 		secret:         s.cfg.Secret,
 		client:         s.client,
+		url:            s.cfg.URL,
 	}
 }
 

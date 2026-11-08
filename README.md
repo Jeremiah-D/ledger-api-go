@@ -9048,6 +9048,22 @@ Delivery contract, stated honestly:
   dead letter. A restart restores the `LEDGER_AUDIT_SINK_SECRET` env
   value, so update the env var / secret store alongside the rotation
   for it to persist. There is no HTTP endpoint for the rotation.
+- **Runtime target retargeting.** The delivery target URL itself is
+  revisable in place via `(*AuditSink).SetSinkURL` /
+  `SetSinkURLCtx` (LG-352), without stopping the forwarder: the
+  cursor, the queue order, the counters, the delivery policy, and the
+  signing secret all stay put, a delivery already in flight keeps the
+  target it started with (including all its retries), and only the
+  next delivery reads the new URL. The call returns the pre-revision
+  URL; an illegal URL (empty, non-http(s), or hostless) is rejected
+  with `ErrInvalidSinkURL` and the live URL is untouched, and a
+  same-value revision is a no-op that writes no audit event. A real
+  revision lands one `sink_url_revised` audit event
+  (`previous_url`/`current_url`); the `Ctx` variant attributes the
+  operator. The HTTP client is not rebuilt — the URL is not client
+  state. A restart restores the `LEDGER_AUDIT_SINK_URL` env value, so
+  update the env var alongside the revision for it to persist. There
+  is no HTTP endpoint for the revision.
 
 `GET /metrics` exposes `ledger_audit_sink_sent_total`,
 `ledger_audit_sink_failed_attempts_total` (network errors and non-2xx
