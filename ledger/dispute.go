@@ -49,8 +49,9 @@ import (
 //     (see review.go) cannot be disputed: the money has not moved to
 //     the payee yet, so there is nothing to freeze or refund. The
 //     review workflow is the correct way to cancel it.
-//   - The freeze hold carries a long expiry (see defaultDisputeHoldTTL)
-//     so an open dispute keeps freezing the funds for the whole
+//   - The freeze hold carries a long expiry (the live
+//     dispute-hold TTL, default 120 days — see SetDisputeHoldTTL,
+//     LG-358) so an open dispute keeps freezing the funds for the whole
 //     chargeback window. It is exempt from the LG-312
 //     maximum-hold-duration cap (holdLockedUncapped): the 120-day
 //     freeze is a risk-control action, not an operator-chosen
@@ -91,11 +92,13 @@ var disputeReasonCodes = map[string]bool{
 	DisputeReasonFraud:        true,
 }
 
-// defaultDisputeHoldTTL is the expiry of the freeze hold a raised
-// dispute places on the payee's account: 120 days, the classic
-// chargeback filing window. Holds are always time-bound (see
-// ErrHoldMissingExpiry), and an open-ended freeze would strand the
-// payee's available funds forever.
+// defaultDisputeHoldTTL is the default expiry of the freeze hold a
+// raised dispute places on the payee's account: 120 days, the classic
+// chargeback filing window. The live value is Ledger.disputeHoldTTL,
+// revisable at runtime via SetDisputeHoldTTL (LG-358); this constant
+// is only the construction-time default. Holds are always time-bound
+// (see ErrHoldMissingExpiry), and an open-ended freeze would strand
+// the payee's available funds forever.
 const defaultDisputeHoldTTL = 120 * 24 * time.Hour
 
 // Dispute errors.
@@ -286,7 +289,7 @@ func (l *Ledger) RaiseDispute(d Dispute) (dispute Dispute, duplicate bool, err e
 		Account:     pt.To,
 		AmountCents: d.AmountCents,
 		Currency:    currency,
-		ExpiresAt:   now.Add(defaultDisputeHoldTTL),
+		ExpiresAt:   now.Add(l.disputeHoldTTL),
 		CreatedAt:   now,
 	}); err != nil {
 		return Dispute{}, false, err

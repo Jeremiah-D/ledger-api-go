@@ -3963,6 +3963,14 @@ Observability: every raise emits a `dispute_raised` audit event and a
 the outbox twin. `GET /metrics` exposes
 `ledger_disputes_raised_total` and `ledger_disputes_resolved_total`.
 
+The freeze horizon itself is revisable at runtime via
+`Ledger.SetDisputeHoldTTL` (LG-358, default 120 days; a non-positive
+TTL is rejected, a same-value revision is a no-op) — each real
+revision is audited as `dispute_hold_ttl_retuned` with the previous
+and current TTL, already-raised holds keep their original expiry, and
+a restart restores the default 120 days. The LG-312 cap exemption is
+unchanged: a cap shorter than the TTL never blocks a raise.
+
 #### Dispute representment (争议举证， payee's second-phase defense)
 
 A filed claim opens a **7-day evidence window** (configurable via

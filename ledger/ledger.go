@@ -1123,7 +1123,7 @@ type Ledger struct {
 	// unconfigured and WriteOff refuses. Structural config, like
 	// the ECL expense account — it never bumps the journal version
 	// and it survives disaster-recovery snapshots.
-	badDebtExpenseAccount  AccountID
+	badDebtExpenseAccount AccountID
 	// writeOffRecoveryConfig is the ledger-wide bad-debt recovery
 	// booking accounts (see writeoff_recovery.go, LG-219): the
 	// cash account debited and the recovery-income account
@@ -1135,8 +1135,8 @@ type Ledger struct {
 	// recovery rows do.
 	writeOffRecoveryConfig    WriteOffRecoveryConfig
 	writeOffRecoveryConfigSet bool
-	eclProvisionsCommitted atomic.Uint64
-	eclStageMigrations     atomic.Uint64
+	eclProvisionsCommitted    atomic.Uint64
+	eclStageMigrations        atomic.Uint64
 	// sweepKeys maps a sweep's idempotency key to its sweepRecord, so
 	// replays rebuild the full receipt (see sweep.go). Its own namespace,
 	// like holdKeys/captureKeys, expiring with the TTL.
@@ -1332,8 +1332,14 @@ type Ledger struct {
 	// stay conservatively frozen) but the dispute record itself must be
 	// re-derived from the dispute_raised / dispute_resolved audit
 	// events — the structured audit trail is the durable record.
-	disputes    map[string]Dispute
-	disputeKeys map[string]string
+	// disputeHoldTTL is the live freeze-hold TTL for newly raised
+	// disputes (default 120 days, see defaultDisputeHoldTTL),
+	// revisable at runtime via SetDisputeHoldTTL (LG-358); it does
+	// not round-trip through snapshots — a restore starts again at
+	// the default.
+	disputes       map[string]Dispute
+	disputeKeys    map[string]string
+	disputeHoldTTL time.Duration
 	// representments maps dispute IDs to the payee's evidence package
 	// (see representment.go): one optional representment per dispute,
 	// submitted inside the evidence window after the claim is filed and
@@ -1346,8 +1352,8 @@ type Ledger struct {
 	// through snapshots — a restore starts again at the default. Like
 	// dispute records, representments are operational state that does
 	// not round-trip through disaster-recovery snapshots.
-	representments           map[string]Representment
-	representmentWindow      time.Duration
+	representments            map[string]Representment
+	representmentWindow       time.Duration
 	representmentMaxDocuments int
 	// healthViolations counts balance-health violations found by the
 	// background watchdog (see health_watch.go): the number of
@@ -1361,9 +1367,9 @@ type Ledger struct {
 	// revisable at runtime via SetHealthWatchWindowDivisor (LG-356)
 	// and, like the other health-watch knobs, does not round-trip
 	// through snapshots — a restore starts again at the default.
-	healthViolations          uint64
-	healthCursor              atomic.Uint64
-	healthWatchWindowDivisor  int
+	healthViolations         uint64
+	healthCursor             atomic.Uint64
+	healthWatchWindowDivisor int
 	// fxRateStaleAlerts / fxRateExpiredAlerts count the edge-triggered
 	// "fx_rate_stale" / "fx_rate_expired" audit events from the
 	// background FX-rate watch (see fx_watch.go). In-memory only — they
@@ -1623,9 +1629,9 @@ type Ledger struct {
 	// including a fully pruned (empty) hot chain — instead of passing
 	// on a chain that no longer covers the ledger's history. Guarded
 	// by mu; monotonic.
-	chainPrunedTo   uint64
-	version         uint64        // bumped by every successful Post
-	idempotencyTTL  time.Duration // 0 = never expire idempotency keys
+	chainPrunedTo  uint64
+	version        uint64        // bumped by every successful Post
+	idempotencyTTL time.Duration // 0 = never expire idempotency keys
 	// maxHoldDuration caps how far in the future a new hold's
 	// ExpiresAt may lie (see SetMaxHoldDuration, LG-312): 0 =
 	// unlimited, the default. Guarded by mu; live-revised, never
@@ -1745,7 +1751,7 @@ func New(opts ...Option) *Ledger {
 		frozen:                  make(map[AccountID]bool),
 		frozenUntil:             make(map[AccountID]time.Time),
 		partialFrozen:           make(map[accountCurrency]int64),
-		partialFreezeExpiry:    make(map[accountCurrency]time.Time),
+		partialFreezeExpiry:     make(map[accountCurrency]time.Time),
 		closed:                  make(map[AccountID]AccountClosure),
 		suspended:               make(map[AccountID]AccountSuspension),
 		dormant:                 make(map[AccountID]DormancyRecord),
@@ -1904,7 +1910,7 @@ func New(opts ...Option) *Ledger {
 		// the construction-time default (24h); it is revised in
 		// place by SetForwardSettlementGracePeriod.
 		forwardGracePeriod: ForwardSettlementGracePeriod,
-		rateOverrides:        make(map[fxPair]*RateOverride),
+		rateOverrides:      make(map[fxPair]*RateOverride),
 		// LG-69 defaults: one-hour override lifetime, 10% deviation
 		// cap. Both are construction-time config (see
 		// WithRateOverrideTTL / WithRateOverrideMaxDeviationBps).
@@ -1917,9 +1923,10 @@ func New(opts ...Option) *Ledger {
 		dunningStates:               make(map[dunningKey]DunningState),
 		disputes:                    make(map[string]Dispute),
 		disputeKeys:                 make(map[string]string),
+		disputeHoldTTL:              defaultDisputeHoldTTL,
 		representments:              make(map[string]Representment),
 		representmentWindow:         defaultRepresentmentWindow,
-		representmentMaxDocuments:  defaultRepresentmentMaxDocuments,
+		representmentMaxDocuments:   defaultRepresentmentMaxDocuments,
 		healthWatchWindowDivisor:    defaultHealthWatchWindowDivisor,
 		journalRules:                make(map[string]JournalRule),
 		fixedAssets:                 make(map[string]FixedAsset),
