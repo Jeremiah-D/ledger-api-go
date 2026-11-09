@@ -1845,6 +1845,16 @@ positive and fit the mandate's `MaxAmountCents` cap; unknown,
 captured, released, and expired authorizations are rejected; the
 currency, expiry, and status are untouched, and a later capture
 settles the amended amount; audited as `preauth_amount_amended`).
+The same reservation's currency can be revised in place with
+`AmendPreAuthCurrency` (Go API: the new currency must be a
+three-letter uppercase ISO 4217 code and must equal the mandate's
+live currency — the mandate moves first via `AmendMandateCurrency`,
+then each of its pre-authorizations is brought in line; unknown,
+captured, released, and expired authorizations are rejected, an
+empty code is rejected rather than defaulted, and amending to the
+current currency is a no-op; the amount, expiry, and status are
+untouched, and a later capture settles in the new currency; audited
+as `preauth_currency_amended`).
 Idempotency keys live in their own namespace (authorize vs. capture),
 isolated from entry/transfer/hold keys and pruned with the same TTL.
 Every lifecycle move enters the structured audit chain and emits a
