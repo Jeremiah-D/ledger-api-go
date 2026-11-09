@@ -3921,6 +3921,26 @@ with the old and new amounts; like the hold itself, an amendment is
 off-journal and bumps neither the version nor the audit chain, and
 the amended amount rides the hold record through snapshots.
 
+#### Amending a hold's currency
+
+A hold whose currency turns out wrong should not have to be released
+and re-placed either. `AmendHoldCurrency` moves an active, unexpired
+hold's currency in place: the new currency must be a three-letter
+uppercase ISO 4217 code (an empty code is rejected rather than
+defaulted), the un-settled remainder must fit the new currency's
+available funds — balance in the new currency minus that currency's
+other reservations, the hold's own reservation sitting in the old
+currency and therefore never double-counted — and amending to the
+current currency is a no-op. Only the currency moves — account,
+amount, expiry, idempotency key, and the already-captured cents are
+untouched (settled cents stay in the old currency) — and `Capture`
+and `CapturePartial` afterwards settle the remainder in the new
+currency automatically. The move lands one
+`hold_currency_amended` audit event with the old and new currencies,
+the amount, and the captured position; like the hold itself, the
+amendment is off-journal, and the amended currency rides the hold
+record through snapshots.
+
 #### Maximum hold duration
 
 A hold's expiry is time-bound, but nothing used to bound *how far
