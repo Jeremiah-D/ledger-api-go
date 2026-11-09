@@ -1709,6 +1709,17 @@ stay journaled to the old payee, and the new payee governs the very
 next debit, because `DebitWithMandate` reads the live payee; the
 revision is audited as `mandate_payee_amended` and rides the mandate
 record through snapshots.
+`AmendMandatePayer` revises a live mandate's payer in place — the
+other half of the payee revision (LG-340 names it explicitly as the
+later item): active mandates only (suspended, cancelled, or expired
+mandates fail closed, lazy expiry included), and the new payer must be
+non-empty and differ from the payee, the same gates creation applies —
+without touching payee, cap, currency, frequency, or the validity
+window. Amending to the current payer is a no-op that writes no audit
+event. Past debits stay journaled from the old payer, and the new
+payer governs the very next debit, because `DebitWithMandate` reads the
+live payer; the revision is audited as `mandate_payer_amended` and
+rides the mandate record through snapshots.
 `AmendMandateValidFrom` revises a live mandate's validity start in
 place — the last window edge with no revision entry (the validity-end
 amendment names it explicitly as untouched): only active mandates
