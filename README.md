@@ -4371,6 +4371,27 @@ currency) and rides the deposit row through snapshots. A rollover
 child generated after the amendment inherits the amended
 principal.
 
+**Currency amendment (LG-372):** `AmendTermDepositCurrency`
+revises an active deposit's currency in place — a correction for
+a mistyped opening currency or a retired currency, without the
+early-withdrawal penalty or closure of withdrawing and re-opening.
+The new currency must be a three-letter uppercase ISO 4217 code
+(the same gate as opening; an empty code is rejected rather than
+defaulting), and the full principal must fit the new currency's
+available funds (balance minus holds, review reservations, other
+active term locks, and partial freezes in that currency) — the
+deposit's own lock sits in the old currency, so it is never
+double-counted. Only the currency changes — the principal, rate,
+tier ladder, tenor, maturity date, and rollover policy are
+untouched, booked daily rows keep their old currency, and future
+accruals book in the new currency from the next day. Amending to
+the current currency is a no-op that emits no audit event; a real
+revision is audited as `term_deposit_currency_amended` (previous
+and new currencies, principal) and rides the deposit row through
+snapshots. A rollover child generated after the amendment inherits
+the amended currency. No FX conversion is involved: no rate is
+applied and no amount is recomputed.
+
 ```bash
 curl -s -X POST localhost:8080/term-deposits \
   -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'
