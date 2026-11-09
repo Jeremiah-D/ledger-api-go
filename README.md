@@ -4353,6 +4353,24 @@ currency) and rides the deposit row through snapshots. Rollover
 children keep their own term snapshots — amending a child's term
 never rewrites its parent's row.
 
+**Principal amendment (LG-371):** `AmendTermDepositAmount`
+revises an active deposit's principal in place — a top-up that
+appends funds without opening a new term, or a draw-down that
+releases part of the liquidity without the early-withdrawal penalty
+or closure. The new principal must be positive; a top-up must fit
+the funds available excluding this deposit's own lock (balance
+minus holds, review reservations, other active term locks, and
+partial freezes), while a draw-down carries no funds gate. Only
+the principal changes — the currency, rate, tier ladder, tenor,
+maturity date, and rollover policy are untouched, booked daily
+rows are never repriced, and future accruals price the new
+principal from the next day. Amending to the current principal is
+a no-op that emits no audit event; a real revision is audited as
+`term_deposit_amount_amended` (previous and new principals,
+currency) and rides the deposit row through snapshots. A rollover
+child generated after the amendment inherits the amended
+principal.
+
 ```bash
 curl -s -X POST localhost:8080/term-deposits \
   -d '{"id":"td-1","account":"saver","amount_cents":400000,"term_days":30,"rate_bps":500,"idempotency_key":"k1"}'
