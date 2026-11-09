@@ -129,6 +129,11 @@ var (
 	// mandate and its ValidUntil has passed. It is a 422-class semantic
 	// rejection.
 	ErrMandateExpired = errors.New("ledger: mandate has expired")
+	// ErrMandateHasDebits is returned by AmendMandateValidFrom when
+	// the mandate already has posted debits: moving the validity
+	// start would restate the authorization history the debits were
+	// pulled under. It is a 422-class semantic rejection.
+	ErrMandateHasDebits = errors.New("ledger: mandate already has posted debits")
 	// ErrMandateAmountExceeded is returned by DebitWithMandate when the
 	// debit amount is above the mandate's per-debit cap. It is a
 	// 422-class semantic rejection.

@@ -1709,6 +1709,26 @@ stay journaled to the old payee, and the new payee governs the very
 next debit, because `DebitWithMandate` reads the live payee; the
 revision is audited as `mandate_payee_amended` and rides the mandate
 record through snapshots.
+`AmendMandateValidFrom` revises a live mandate's validity start in
+place — the last window edge with no revision entry (the validity-end
+amendment names it explicitly as untouched): only active mandates
+with zero posted debits may be amended (suspended, cancelled, or
+expired mandates fail closed, lazy expiry included, and a mandate
+with a posted debit fails with `ErrMandateHasDebits` — moving the
+start would restate the window that debit was pulled under), and the
+new start must be strictly before the live `ValidUntil`, the same
+gate creation applies, so a start at or after the live end fails
+with `ErrMandateInvalidWindow` (a zero start passes the gate and
+means effective since the beginning of time, exactly as at
+creation) — without touching payer, payee, cap, currency,
+frequency, `ValidUntil`, or status. Past debits stay journaled, and
+the new start gates the very next debit, because
+`DebitWithMandate` reads the live `ValidFrom`; a debit rejected
+under the old window books nothing, so it can simply be retried
+under the new window. Amending to the current start is a no-op that
+writes no audit event. The revision is audited as
+`mandate_valid_from_amended` (previous and new validity starts,
+currency, cap) and rides the mandate record through snapshots.
 `GET /mandates/{id}` reads a mandate with its effective status;
 `GET /mandates/{id}/debits` is the per-mandate reconciliation query —
 the debits in debit order, paged by `limit`/`cursor`. Repeating a debit
