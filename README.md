@@ -1080,6 +1080,36 @@ currencies, live settlement target, run sequence) and rides the
 schedule row through snapshots. (Payments fintech:
 recurring-transfer governance.)
 
+**Parties amendment (LG-364):**
+`AmendTransferSchedulePayer` / `AmendTransferSchedulePayee`
+revise a live plan's payer or payee in place, completing the
+single-field amendment family (LG-253..263 cover amount,
+interval, end time, fee, fee account, skip-fee, memo,
+business-day cadence, FX pair, next run time, and currency — the
+legs were the last mutable field with no revision entry). Only
+active or paused plans with zero fired runs may be amended
+(cancelled or completed plans, and plans with a fired run, fail
+closed with `ErrScheduleBadTransition` — a fired run's journaled
+legs must not be split from the plan's future legs); the new
+party reuses the creation gate, so an empty party fails with
+`ErrScheduleEmptyAccount` and a party equal to the live other leg
+fails with `ErrScheduleSameAccount` (including the cross-leg
+cases: new payer equal to the current payee, new payee equal to
+the current payer). Only the amended leg moves — amount,
+currency, fee fields, interval, next run time, end time, run
+sequence, and status are untouched — and the sweep snapshot is
+taken at fire time, so the new legs govern the next successful
+firing and a failed run's retry reads the amended legs (the failed
+run posted nothing, so the retry books exactly once, against the
+new accounts, under the same `"<schedule_id>/run/<seq>"` key).
+Amending to the current party is a no-op that emits no audit
+event; a real revision is audited as
+`transfer_schedule_payer_amended` /
+`transfer_schedule_payee_amended` (previous and new party,
+currency, run sequence — always zero) and rides the schedule row
+through snapshots. (Payments fintech: recurring-transfer
+governance.)
+
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
 default `24h`, max `8760h`) lists the nominal firing times inside the
