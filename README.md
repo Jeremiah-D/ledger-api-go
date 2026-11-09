@@ -1855,6 +1855,16 @@ empty code is rejected rather than defaulted, and amending to the
 current currency is a no-op; the amount, expiry, and status are
 untouched, and a later capture settles in the new currency; audited
 as `preauth_currency_amended`).
+The same reservation's deadline can be re-set to an exact instant
+with `AmendPreAuthExpiry` (Go API: `ExtendPreAuthExpiry` only
+lengthens — strictly later — while `AmendPreAuthExpiry` re-sets the
+deadline in either direction, shortening included; the new deadline
+must be in the future, unknown, captured, released, and expired
+authorizations are rejected, and amending to the current deadline
+is a no-op; the amount, currency, and status are untouched; audited
+as `preauth_expiry_amended`); the lazy predicate and the expire
+sweep read the live deadline, so a shortened authorization expires
+sooner and a lengthened one survives past its old deadline.
 Idempotency keys live in their own namespace (authorize vs. capture),
 isolated from entry/transfer/hold keys and pruned with the same TTL.
 Every lifecycle move enters the structured audit chain and emits a
