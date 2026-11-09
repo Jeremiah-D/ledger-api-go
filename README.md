@@ -1720,6 +1720,23 @@ event. Past debits stay journaled from the old payer, and the new
 payer governs the very next debit, because `DebitWithMandate` reads the
 live payer; the revision is audited as `mandate_payer_amended` and
 rides the mandate record through snapshots.
+`AmendMandateCurrency` revises a live mandate's settlement currency in
+place — active mandates only (suspended, cancelled, or expired mandates
+fail closed, lazy expiry included), and the new code must be a
+three-letter uppercase ISO 4217 code, the same gate creation applies; an
+empty code is refused rather than defaulted, and amending to the current
+currency is a no-op that writes no audit event — without touching payer,
+payee, cap, frequency, or the validity window. This is the remedy when a
+merchant changes settlement currency or an old currency is retired: the
+alternative was void-and-recreate, a fresh mandate ID that breaks the
+debit history. Past debits stay journaled in the currency they were
+booked in — entries carry their own currency, and the revision is not FX
+conversion, so no amount is recomputed and no posted entry is restated —
+while the new currency governs the very next debit, because
+`DebitWithMandate` reads the live currency; a pull in the old currency
+fails with `ErrMandateCurrencyMismatch`. The revision is audited as
+`mandate_currency_amended` (previous and new currencies, payer, payee)
+and rides the mandate record through snapshots.
 `AmendMandateValidFrom` revises a live mandate's validity start in
 place — the last window edge with no revision entry (the validity-end
 amendment names it explicitly as untouched): only active mandates
