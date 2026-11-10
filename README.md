@@ -5494,13 +5494,36 @@ The grace also anchors the auto-rollover window
 window, but `RollWindow` and `MaxRolls` are untouched. A restart
 (or a snapshot restore) restores the 24h default. No
 environment variable and no HTTP endpoint: forward tuning is
-in-process structural config. This is the payments-fintech leg
+in-process structural config. The value date itself is also
+revisable in place: `AmendForwardSettleAt` moves a booked
+contract's `SettleAt` to a new future instant — shortening it
+(the contract settles sooner and lapses sooner) or lengthening
+it (it survives past its old value date) — without re-pricing:
+the locked rate, counterparties, currency pair, notional and
+cap, FX side, and booking provenance are untouched, because a
+value-date revision is a reschedule, not a new agreement. An
+unknown id reports `ErrForwardNotFound`; a settled or cancelled
+contract reports `ErrForwardNotBooked`; a lapsed contract
+reports `ErrForwardExpired` (the lazy-expiry check runs first,
+so a lapsed contract is never revived by moving its value
+date); a zero, past, or current instant reports
+`ErrForwardSettleAtAmendInvalid` and leaves the live value date
+untouched; amending to the current value date is a no-op. The
+revision is off-journal (no version bump, no outbox event) but
+audited as `fx_forward_settle_at_amended` with
+`previous_settle_at` / `settle_at` (RFC3339 UTC); the `Ctx`
+variant attributes the operator, defaulting to `"system"`. The
+rollover window anchors on the live value date
+(`lastSettleable = SettleAt + grace`), so a revision moves the
+window with it, and the snapshot round trip carries the amended
+instant verbatim. This is the payments-fintech leg
 of FX: corporate treasury desks lock a conversion rate for a
 known future payment and the ledger settles it at the agreed
 price when the value date arrives.
 
 ```go
 l.SetForwardSettlementGracePeriod(48 * time.Hour) // widen the window during a settlement-system fault
+l.AmendForwardSettleAt("fwd-1", time.Now().Add(72*time.Hour)) // move the value date, keep the locked rate
 ```
 
 #### Rate-table snapshot versioning
