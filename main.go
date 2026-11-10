@@ -6518,6 +6518,62 @@ func (s *server) handleMT103Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msg))
 }
 
+// mt199ExportRequest is the JSON body of POST /exports/mt199: the
+// fields of ledger.MT199 — sender/receiver LT addresses, the :20:
+// transaction reference, the optional :21: related reference, and
+// the :79: narrative lines.
+type mt199ExportRequest struct {
+	SenderLT             string   `json:"sender_lt"`
+	ReceiverLT           string   `json:"receiver_lt"`
+	TransactionReference string   `json:"transaction_reference"`
+	RelatedReference     string   `json:"related_reference,omitempty"`
+	Narrative            []string `json:"narrative"`
+}
+
+// handleMT199Export implements POST /exports/mt199 (LG-380): a SWIFT
+// FIN MT199 free-format message (see ledger.ExportMT199). The JSON
+// body names the sender/receiver LT addresses, the :20: reference,
+// the optional :21: related reference, and the 1–50 :79: narrative
+// lines; the body is strictly decoded (unknown fields fail fast).
+// The export is pure rendering: no ledger lookup, no state gate, no
+// version bump, no audit event. Error mapping: a malformed body or
+// any invalid field is a 400, with the ledger sentinel errors passed
+// through as-is; there is no 404 or 422 on this endpoint.
+func (s *server) handleMT199Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT199Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt199ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	msg, err := ledger.ExportMT199(ledger.MT199{
+		SenderLT:             req.SenderLT,
+		ReceiverLT:           req.ReceiverLT,
+		TransactionReference: req.TransactionReference,
+		RelatedReference:     req.RelatedReference,
+		Narrative:            req.Narrative,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(msg))
+}
+
 // mt900910ExportRequest is the JSON body of POST /exports/mt900910:
 // the per-export options of ledger.MT900910PayoutOptions, with the
 // value date as an ISO date string.
@@ -11594,6 +11650,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt103", s.handleMT103Export)
 	mux.HandleFunc("POST /exports/mt900910", s.handleMT900910Export)
 	mux.HandleFunc("POST /exports/mt202", s.handleMT202Export)
+	mux.HandleFunc("POST /exports/mt199", s.handleMT199Export)
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)

@@ -6746,12 +6746,26 @@ HTTP: `POST /exports/mt900910`（LG-377）以 JSON 导出已结算付款的确�
 缺 `payout_id` / `receiver_lt` / 畸形 JSON → 400；响应
 `text/plain; charset=utf-8`，直接写 FIN 文本。
 
-### SWIFT FIN MT199 自由格式报文（库级解析 + 导出）
+### SWIFT FIN MT199 自由格式报文（HTTP 导出）
 
 无金额语义的自由格式通知用 SWIFT FIN `MT199`（free format message）
 渲染：查询、说明、通知均走正文，不下达指令、不确认结算。报文含
 block 1（发送方 LT 地址）、block 2（应用头 `I199`、接收方 LT 地址）、
 block 3（`{108:MUR}`）与 block 4 字段集 `:20:` / `:21:` / `:79:`。
+HTTP 导出：`POST /exports/mt199`，JSON 体含 `sender_lt` /
+`receiver_lt` / `transaction_reference`（`:20:`）/ 可选
+`related_reference`（`:21:`）/ `narrative`（`:79:`，1–50 行字符
+串数组，每行至多 35 字符）。响应 `text/plain`，200 直接写 FIN
+文本（block 1/2/3/4，MUR 即 `:20:`，block 5 省略）。纯渲染：无
+金额语义、无 ledger 查找、无状态门控、无 version bump、无审计事
+件；全部校验失败均为 400，无 404/422；重复导出字节相同。
+
+```json
+{"sender_lt": "DEUTDEFF", "receiver_lt": "CHASUS33",
+ "transaction_reference": "REF-2026-001",
+ "related_reference": "PAY-99",
+ "narrative": ["Please confirm receipt", "of the free format notice."]}
+```
 
 语义：
 - 与结构化报文正交：MT103（LG-183）与 MT202（LG-204）是指令（含
