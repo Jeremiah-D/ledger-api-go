@@ -97,6 +97,14 @@ const ExternalSystemOFX = "ofx"
 // internal account ID as before.
 const ExternalSystemCAMT053 = "camt053"
 
+// ExternalSystemCAMT054 is the well-known system name for the account
+// identifier camt.054 debit/credit notification exports name in
+// Ntfctn/Acct (see ExportCAMT054): the identifier the bank expects
+// for the account (usually the IBAN), which may differ from the
+// internal account ID. When an account has no mapping in this system,
+// exports name the internal account ID as before.
+const ExternalSystemCAMT054 = "camt054"
+
 // ExternalSystemMT940 is the well-known system name for the account
 // identifier MT940 statement exports name in :25: (see ExportMT940):
 // the identifier the bank expects for the account (usually the IBAN),

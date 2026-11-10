@@ -5737,6 +5737,63 @@ func (s *server) handleCAMT053Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handleCAMT054Export implements GET /exports/camt054 (LG-384): an
+// ISO 20022 camt.054.001.08 BankToCustomerDebitCreditNotification —
+// the per-entry sibling of the camt.053 end-of-day statement (see
+// ledger.ExportCAMT054). Query parameters: account (required),
+// msg_id (optional, defaults to the notification batch identifier
+// "camt054-<account>"), currency (optional ISO 4217 filter),
+// since/until (optional RFC 3339 bounds, half-open [Since, Until)).
+// The export is read-only: no version bump, no audit event. Error
+// mapping: missing/invalid parameters are 400; an unknown account
+// exports a valid empty notification (banks do send those).
+func (s *server) handleCAMT054Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT054Exports.Add(1)
+	q := r.URL.Query()
+	account := q.Get("account")
+	if account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account is required"})
+		return
+	}
+	var since, until time.Time
+	if v := q.Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since: " + err.Error()})
+			return
+		}
+		since = t
+	}
+	if v := q.Get("until"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid until: " + err.Error()})
+			return
+		}
+		until = t
+	}
+	doc, err := s.ledgerFor(r).ExportCAMT054(ledger.CAMT054ExportOptions{
+		Account:  ledger.AccountID(account),
+		MsgID:    q.Get("msg_id"),
+		Since:    since,
+		Until:    until,
+		Currency: q.Get("currency"),
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrEmptyAccountID) ||
+			errors.Is(err, ledger.ErrInvalidCAMT054Export) ||
+			errors.Is(err, ledger.ErrInvalidCurrency) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleSnapshotExport implements GET /exports/snapshot (LG-383): a
 // JSONL disaster-recovery snapshot export (see
 // ledger.ExportSnapshot, whose inverse is ledger.ImportSnapshot). The
@@ -11745,6 +11802,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /repairs/{id}/fix", s.handleRepairFix)
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
 	mux.HandleFunc("GET /exports/camt053", s.handleCAMT053Export)
+	mux.HandleFunc("GET /exports/camt054", s.handleCAMT054Export)
 	mux.HandleFunc("GET /exports/snapshot", s.handleSnapshotExport)
 	mux.HandleFunc("GET /exports/mt940", s.handleMT940Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)

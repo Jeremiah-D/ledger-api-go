@@ -7373,6 +7373,24 @@ Semantics:
   exporter is honest about the window, the parser is strict about
   importing only real statements.
 
+### camt.054 debit/credit notification export (Go: `ledger.ExportCAMT054`)
+
+The inverse of the camt.054 import (LG-164): it renders the account's
+effective journal rows as an ISO 20022 `camt.054.001.08`
+`BankToCustomerDebitCreditNotification` document — one `Ntfctn` block
+per entry, one `Ntry` each — for the bank, the auditor, or any camt.054
+reader. HTTP export: `GET /exports/camt054?account=…` (`msg_id`
+optional, defaults to the notification batch identifier
+`camt054-<account>`; `currency` and `since`/`until` optional, RFC 3339
+half-open window). Each `Ntfctn/Id` is the entry's stable identity
+(`camt054/<entryID>/1`, the import side's `camt054NotificationID`
+shape); direction, amounts, `EndToEndId`, and remittance text follow
+the camt.053 export's rules, and an unknown account exports a valid
+empty notification. Read-only like the camt.053 export: no version
+bump, no journal rows, no audit event; pending-review rows never
+appear. Go-only builder underneath: `ledger.ExportCAMT054` /
+`ledger.RenderCAMT054Notification`.
+
 ### NACHA ACH file generation (Go: `ledger.GenerateNACHAFile`)
 
 From payout instructions (or any caller-built entry list) the ledger
