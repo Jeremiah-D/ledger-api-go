@@ -6550,6 +6550,46 @@ func (s *server) handlePacs009Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePacs007Export implements GET /exports/pacs007 (LG-375): an
+// ISO 20022 pacs.007.001.02 FIToFIPaymentReversal for one settled
+// payout (see ledger.ExportPacs007). Query parameters: uetr
+// (required, the gpi UETR of the settled payout), reason (required,
+// one of DUPL/AM09/FRAD/CUST). The export is read-only: no version
+// bump, no audit event. Error mapping: a missing uetr or reason, or
+// a reason outside the admitted vocabulary, is a 400; an unknown
+// UETR is a 404; a payout that is not settled is a 422.
+func (s *server) handlePacs007Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs007Exports.Add(1)
+	uetr := r.URL.Query().Get("uetr")
+	if uetr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "uetr is required"})
+		return
+	}
+	reason := r.URL.Query().Get("reason")
+	if reason == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reason is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPacs007(uetr, reason)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrPacs007UnknownUETR):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrPacs007NotSettled):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrPacs007ReasonRequired),
+			errors.Is(err, ledger.ErrPacs007InvalidReason):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handlePacs003Export implements GET /exports/pacs003 (LG-201): an
 // ISO 20022 pacs.003.001.08 FIToFICstmrDrctDbt customer direct debit
 // for one posted transfer (see ledger.ExportPacs003). Query
@@ -11294,6 +11334,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
+	mux.HandleFunc("GET /exports/pacs007", s.handlePacs007Export)
 	mux.HandleFunc("GET /exports/pacs010", s.handlePacs010Export)
 	mux.HandleFunc("GET /exports/pacs003", s.handlePacs003Export)
 	mux.HandleFunc("GET /exports/pacs008", s.handlePacs008Export)

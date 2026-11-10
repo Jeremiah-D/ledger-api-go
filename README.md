@@ -6607,6 +6607,8 @@ Go: `ledger.ExportPacs004`。
 
 Go: `ledger.ExportPacs007`。
 
+HTTP: `GET /exports/pacs007?uetr=…&reason=DUPL`。
+
 ### `POST /exports/mt103` — SWIFT FIN MT103 跨境汇款导出
 
 已审批（approved）或已提交（submitted）的 payout 可以用 SWIFT FIN
