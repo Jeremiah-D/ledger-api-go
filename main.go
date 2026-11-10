@@ -5946,6 +5946,48 @@ func (s *server) handlePain010Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePain009Export implements GET /exports/pain009 (LG-376): an
+// ISO 20022 pain.009.001.02 mandate initiation request for one
+// registered mandate (see ledger.ExportPain009). Query parameters:
+// mandate (required), creditor_scheme_id (required, the SEPA
+// creditor identifier). The export is read-only: it changes no
+// mandate row, and the ledger layer emits one pain009_exported
+// audit event per export, so the handler adds none. Error mapping:
+// a missing mandate or creditor_scheme_id is a 400; an unknown
+// mandate is a 404; a suspended/cancelled/expired mandate, or a
+// mandate whose payer/payee lacks a registered IBAN, is a 422 —
+// the missing IBAN is a state gap in the account, not a malformed
+// parameter.
+func (s *server) handlePain009Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain009Exports.Add(1)
+	q := r.URL.Query()
+	mandateID := q.Get("mandate")
+	schemeID := q.Get("creditor_scheme_id")
+	if mandateID == "" || schemeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mandate and creditor_scheme_id are required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPain009(mandateID, schemeID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrMandateNotActive),
+			errors.Is(err, ledger.ErrMandateExpired),
+			errors.Is(err, ledger.ErrMissingAccountIBAN):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrMissingPain009CreditorScheme):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleGPITrack implements GET /gpi/track/{uetr} (LG-165): the gpi
 // tracking record of one cross-border payment — its UETR, linked
 // payout/transfer, current status, and full transition history. An
@@ -11326,6 +11368,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
 	mux.HandleFunc("GET /exports/pain010", s.handlePain010Export)
+	mux.HandleFunc("GET /exports/pain009", s.handlePain009Export)
 	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)
 	mux.HandleFunc("GET /exports/pacs028", s.handlePacs028Export)

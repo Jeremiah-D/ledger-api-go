@@ -6414,6 +6414,8 @@ Go: `ledger.ExportPain008`。
 
 Go: `ledger.ExportPain009`。
 
+HTTP: `GET /exports/pain009?mandate=…&creditor_scheme_id=…`。
+
 ### `GET /exports/pacs002` — ISO 20022 pacs.002 银行间状态报告导出
 
 gpi 跟踪的 FI-to-FI 视角：`pacs.002.001.03`（`FIToFIPaymentStatusReport`）
