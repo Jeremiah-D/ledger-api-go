@@ -7314,8 +7314,12 @@ nostro 账户的 breaks 为 `nostro_breaks`（无 nostro 账户时该节缺省�
 The inverse of the import above: it renders the account's effective
 journal rows as an ISO 20022 `camt.053.001.02`
 `BankToCustomerStatement` document — one `Stmt` block, one `Ntry` per
-entry — for the bank, the auditor, or any camt.053 reader. Go-only
-(like the NACHA builder below): `ledger.ExportCAMT053` /
+entry — for the bank, the auditor, or any camt.053 reader. HTTP
+export: `GET /exports/camt053?account=…&stmt_id=…` (`msg_id`
+optional, defaults to `stmt_id`; `currency` and `since`/`until`
+optional, RFC 3339 half-open window). An unknown account exports a
+valid empty statement (banks do send those); pending-review rows
+never appear. Go-only builder underneath: `ledger.ExportCAMT053` /
 `ledger.RenderCAMT053Statement`.
 
 ```go

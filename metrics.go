@@ -177,6 +177,10 @@ type Metrics struct {
 	// intraday account report export requests served, including
 	// rejected exports (see ledger.ExportCAMT052, LG-170).
 	CAMT052Exports atomic.Uint64
+	// CAMT053Exports counts GET /exports/camt053 ISO 20022 camt.053
+	// bank statement export requests served, including rejected
+	// exports (see ledger.ExportCAMT053, LG-381).
+	CAMT053Exports atomic.Uint64
 	// GPITrackQueries counts GET /gpi/track/{uetr} tracking-record
 	// queries served (see ledger.GetGPITrack, LG-165).
 	GPITrackQueries atomic.Uint64
@@ -1045,6 +1049,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /accounts/{id}/ubo UBO ownership declaration installs served, including rejected declarations.", m.UboSets.Load())
 	writeCounter(&sb, "ledger_camt052_exports_total",
 		"Total GET /exports/camt052 ISO 20022 camt.052 intraday account report exports served, including rejected exports.", m.CAMT052Exports.Load())
+	writeCounter(&sb, "ledger_camt053_exports_total",
+		"Total GET /exports/camt053 ISO 20022 camt.053 bank statement exports served, including rejected exports.", m.CAMT053Exports.Load())
 	writeCounter(&sb, "ledger_gpi_track_queries_total",
 		"Total GET /gpi/track/{uetr} gpi tracking-record queries served.", m.GPITrackQueries.Load())
 	writeCounter(&sb, "ledger_gpi_advances_total",

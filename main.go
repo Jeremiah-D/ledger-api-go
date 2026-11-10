@@ -5678,6 +5678,65 @@ func (s *server) handleCAMT052Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handleCAMT053Export implements GET /exports/camt053 (LG-381): an
+// ISO 20022 camt.053.001.02 BankToCustomerStatement — the end-of-day
+// sibling of the camt.052 intraday report (see
+// ledger.ExportCAMT053). Query parameters: account (required),
+// stmt_id (required), msg_id (optional, defaults to stmt_id),
+// currency (optional ISO 4217 filter), since/until (optional RFC 3339
+// bounds, half-open [Since, Until)). The export is read-only: no
+// version bump, no audit event. Error mapping: missing/invalid
+// parameters are 400; an unknown account exports a valid empty
+// statement (banks do send those).
+func (s *server) handleCAMT053Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT053Exports.Add(1)
+	q := r.URL.Query()
+	account := q.Get("account")
+	stmtID := q.Get("stmt_id")
+	if account == "" || stmtID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account and stmt_id are required"})
+		return
+	}
+	var since, until time.Time
+	if v := q.Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since: " + err.Error()})
+			return
+		}
+		since = t
+	}
+	if v := q.Get("until"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid until: " + err.Error()})
+			return
+		}
+		until = t
+	}
+	doc, err := s.ledgerFor(r).ExportCAMT053(ledger.CAMT053ExportOptions{
+		Account:  ledger.AccountID(account),
+		StmtID:   stmtID,
+		MsgID:    q.Get("msg_id"),
+		Since:    since,
+		Until:    until,
+		Currency: q.Get("currency"),
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrEmptyAccountID) ||
+			errors.Is(err, ledger.ErrInvalidCAMT053Export) ||
+			errors.Is(err, ledger.ErrInvalidCurrency) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleMT940Export implements GET /exports/mt940 (LG-379): a SWIFT
 // FIN MT940 customer statement message for one account (see
 // ledger.ExportMT940). Query parameters name the account and the
@@ -11660,6 +11719,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs008", s.handlePacs008Export)
 	mux.HandleFunc("POST /repairs/{id}/fix", s.handleRepairFix)
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
+	mux.HandleFunc("GET /exports/camt053", s.handleCAMT053Export)
 	mux.HandleFunc("GET /exports/mt940", s.handleMT940Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
