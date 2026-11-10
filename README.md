@@ -5516,7 +5516,21 @@ variant attributes the operator, defaulting to `"system"`. The
 rollover window anchors on the live value date
 (`lastSettleable = SettleAt + grace`), so a revision moves the
 window with it, and the snapshot round trip carries the amended
-instant verbatim. This is the payments-fintech leg
+instant verbatim. The notional is revisable the same way:
+`AmendForwardNotional` moves a booked contract's `NotionalCents`
+to a new positive size — resizing how much converts, never the
+agreed price: the locked rate, value date, counterparties,
+currency pair, cap, FX side, and booking provenance are
+untouched. A non-positive size reports
+`ErrForwardNotionalAmendInvalid`; a size over the opt-in cap
+reports `ErrForwardCapExceeded`; unknown/settled/cancelled/lapsed
+ids report the same errors as the value-date revision, and
+amending to the current notional is a no-op. The revision is
+off-journal but audited as `fx_forward_notional_amended` with
+`previous_notional_cents` / `notional_cents`; the `Ctx` variant
+attributes the operator, defaulting to `"system"`. Settlement
+converts the live notional at the locked rate, so the next sweep
+settles the new size. This is the payments-fintech leg
 of FX: corporate treasury desks lock a conversion rate for a
 known future payment and the ledger settles it at the agreed
 price when the value date arrives.
@@ -5524,6 +5538,7 @@ price when the value date arrives.
 ```go
 l.SetForwardSettlementGracePeriod(48 * time.Hour) // widen the window during a settlement-system fault
 l.AmendForwardSettleAt("fwd-1", time.Now().Add(72*time.Hour)) // move the value date, keep the locked rate
+l.AmendForwardNotional("fwd-1", 20000) // resize the conversion, keep the locked rate and value date
 ```
 
 #### Rate-table snapshot versioning
