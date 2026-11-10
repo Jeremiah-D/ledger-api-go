@@ -5737,6 +5737,31 @@ func (s *server) handleCAMT053Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handleSnapshotExport implements GET /exports/snapshot (LG-383): a
+// JSONL disaster-recovery snapshot export (see
+// ledger.ExportSnapshot, whose inverse is ledger.ImportSnapshot). The
+// endpoint takes no query parameters and streams the snapshot directly
+// to the ResponseWriter — it is never buffered first, because a
+// snapshot can be full-ledger size and the export holds the read lock
+// throughout, so buffering would widen the lock window. The export is
+// read-only: no version bump, no journal entry, no audit event. Error
+// mapping: there is no 400/404 — the endpoint takes no parameters and
+// performs no ledger lookup; a mid-export I/O error can only be
+// logged, because the status code cannot change once the first byte is
+// on the wire. Repeat exports are not byte-identical: the meta row
+// carries ExportedAt (time.Now), so two exports differ only in that
+// row while Version and MerkleRoot are identical.
+func (s *server) handleSnapshotExport(w http.ResponseWriter, r *http.Request) {
+	s.metrics.SnapshotExports.Add(1)
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if err := s.ledgerFor(r).ExportSnapshot(w); err != nil {
+		// The header and (part of) the body are already on the wire;
+		// the only honest channel left is the log.
+		log.Printf("ledger-api-go: GET /exports/snapshot: %v", err)
+	}
+}
+
 // handleMT940Export implements GET /exports/mt940 (LG-379): a SWIFT
 // FIN MT940 customer statement message for one account (see
 // ledger.ExportMT940). Query parameters name the account and the
@@ -11720,6 +11745,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /repairs/{id}/fix", s.handleRepairFix)
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
 	mux.HandleFunc("GET /exports/camt053", s.handleCAMT053Export)
+	mux.HandleFunc("GET /exports/snapshot", s.handleSnapshotExport)
 	mux.HandleFunc("GET /exports/mt940", s.handleMT940Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
