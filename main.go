@@ -6459,6 +6459,92 @@ func (s *server) handleMT103Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msg))
 }
 
+// mt900910ExportRequest is the JSON body of POST /exports/mt900910:
+// the per-export options of ledger.MT900910PayoutOptions, with the
+// value date as an ISO date string.
+type mt900910ExportRequest struct {
+	PayoutID               string   `json:"payout_id"`
+	MessageType            string   `json:"message_type,omitempty"`
+	ReceiverLT             string   `json:"receiver_lt"`
+	SenderLT               string   `json:"sender_lt,omitempty"`
+	RelatedReference       string   `json:"related_reference,omitempty"`
+	Account                string   `json:"account,omitempty"`
+	OrderingInstitutionBIC string   `json:"ordering_institution_bic,omitempty"`
+	SenderToReceiverInfo   []string `json:"sender_to_receiver_info,omitempty"`
+	ValueDate              string   `json:"value_date,omitempty"`
+}
+
+// handleMT900910Export implements POST /exports/mt900910 (LG-377): a
+// SWIFT FIN MT900/MT910 debit/credit confirmation for one settled
+// payout (see ledger.ExportMT900910ForPayout). The JSON body names
+// the payout and the export options; the body is strictly decoded
+// (unknown fields fail fast). The export is read-only: no version
+// bump, no ledger entry, no audit event, and repeat exports render
+// byte-identical output. Error mapping: a malformed body, a missing
+// payout_id or receiver_lt, an invalid message_type, or no sender
+// BIC anywhere is a 400; an unknown payout ID is a 404; a payout
+// that is not settled is a 422.
+func (s *server) handleMT900910Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT900910Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt900910ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	if req.PayoutID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "payout_id is required"})
+		return
+	}
+	if req.ReceiverLT == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "receiver_lt is required"})
+		return
+	}
+	opts := ledger.MT900910PayoutOptions{
+		MessageType:            req.MessageType,
+		ReceiverLT:             req.ReceiverLT,
+		SenderLT:               req.SenderLT,
+		RelatedReference:       req.RelatedReference,
+		Account:                req.Account,
+		OrderingInstitutionBIC: req.OrderingInstitutionBIC,
+		SenderToReceiverInfo:   req.SenderToReceiverInfo,
+	}
+	if req.ValueDate != "" {
+		vd, err := time.Parse("2006-01-02", req.ValueDate)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid value_date: want YYYY-MM-DD"})
+			return
+		}
+		opts.ValueDate = vd
+	}
+	msg, err := s.ledgerFor(r).ExportMT900910ForPayout(req.PayoutID, opts)
+	if err != nil {
+		status := http.StatusBadRequest
+		switch {
+		case errors.Is(err, ledger.ErrMT900910PayoutNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrMT900910BadStatus):
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(msg))
+}
+
 // accountingExportQuery parses the shared query parameters of the
 // accounting export endpoints: account, since/until (RFC 3339,
 // optional), currency (optional ISO 4217 filter), and repeated
@@ -11374,6 +11460,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs028", s.handlePacs028Export)
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("POST /exports/mt103", s.handleMT103Export)
+	mux.HandleFunc("POST /exports/mt900910", s.handleMT900910Export)
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)

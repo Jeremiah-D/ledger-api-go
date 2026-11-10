@@ -6724,6 +6724,22 @@ Go: `ledger.MT202` / `ledger.ParseMT202` / `ledger.ExportMT202`。
 Go: `ledger.MT900910` / `ledger.ParseMT900910` / `ledger.ExportMT900910` /
 `ledger.Ledger.ExportMT900910ForPayout`。
 
+HTTP: `POST /exports/mt900910`（LG-377）以 JSON 导出已结算付款的确认：
+
+```json
+{"payout_id": "po-1", "message_type": "900", "receiver_lt": "BANKDEFFXXXX"}
+```
+
+`message_type` 省略即 `"900"`（借记确认），`"910"` 为贷记确认；
+`sender_lt` / `related_reference` / `account` /
+`ordering_institution_bic` / `sender_to_receiver_info`（≤ 6 行）/
+`value_date`（YYYY-MM-DD）可选，未填时分别取 payee 账户登记 BIC、
+`NONREF`、payee 账户、结算时间戳。只读、确定性：重复导出字节相同，
+不改 payout 状态、不落账、不追加审计事件。错误映射：未知 payout
+→ 404，未 settled → 422，无 sender BIC / 非法 `message_type` /
+缺 `payout_id` / `receiver_lt` / 畸形 JSON → 400；响应
+`text/plain; charset=utf-8`，直接写 FIN 文本。
+
 ### SWIFT FIN MT199 自由格式报文（库级解析 + 导出）
 
 无金额语义的自由格式通知用 SWIFT FIN `MT199`（free format message）

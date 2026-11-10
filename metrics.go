@@ -123,6 +123,11 @@ type Metrics struct {
 	// customer credit transfer export requests served, including
 	// rejected exports (see ledger.ExportMT103, LG-183).
 	MT103Exports atomic.Uint64
+	// MT900910Exports counts POST /exports/mt900910 SWIFT FIN MT900/
+	// MT910 debit/credit confirmation export requests served,
+	// including rejected exports (see
+	// ledger.ExportMT900910ForPayout, LG-377).
+	MT900910Exports atomic.Uint64
 	// XeroExports counts GET /exports/accounting/xero Xero
 	// bank-statement CSV export requests served, including rejected
 	// exports (see ledger.ExportAccounting, LG-184).
@@ -1002,6 +1007,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/pacs004 ISO 20022 pacs.004 payment return exports served, including rejected exports.", m.Pacs004Exports.Load())
 	writeCounter(&sb, "ledger_mt103_exports_total",
 		"Total POST /exports/mt103 SWIFT FIN MT103 single customer credit transfer exports served, including rejected exports.", m.MT103Exports.Load())
+	writeCounter(&sb, "ledger_mt900910_exports_total",
+		"Total POST /exports/mt900910 SWIFT FIN MT900/MT910 debit/credit confirmation exports served, including rejected exports.", m.MT900910Exports.Load())
 	writeCounter(&sb, "ledger_xero_exports_total",
 		"Total GET /exports/accounting/xero Xero bank-statement CSV exports served, including rejected exports.", m.XeroExports.Load())
 	writeCounter(&sb, "ledger_quickbooks_exports_total",
