@@ -5678,6 +5678,65 @@ func (s *server) handleCAMT052Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handleMT940Export implements GET /exports/mt940 (LG-379): a SWIFT
+// FIN MT940 customer statement message for one account (see
+// ledger.ExportMT940). Query parameters name the account and the
+// statement window: account and currency are required, since/until are
+// optional RFC 3339 bounds (half-open [Since, Until)),
+// statement_id/sequence_id default to "1". The export is read-only:
+// no version bump, nothing booked, no audit event. Error mapping: a
+// missing account/currency, an invalid currency, an invalid since/until,
+// or an inverted window is a 400; an unknown account is not a 404 —
+// it exports a valid empty statement (zero balance, zero :61: lines).
+func (s *server) handleMT940Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT940Exports.Add(1)
+	q := r.URL.Query()
+	account := q.Get("account")
+	currency := q.Get("currency")
+	if account == "" || currency == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account and currency are required"})
+		return
+	}
+	var since, until time.Time
+	if v := q.Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since: " + err.Error()})
+			return
+		}
+		since = t
+	}
+	if v := q.Get("until"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid until: " + err.Error()})
+			return
+		}
+		until = t
+	}
+	doc, err := s.ledgerFor(r).ExportMT940(ledger.MT940ExportOptions{
+		Account:     ledger.AccountID(account),
+		Currency:    currency,
+		StatementID: q.Get("statement_id"),
+		SequenceID:  q.Get("sequence_id"),
+		Since:       since,
+		Until:       until,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrEmptyAccountID) ||
+			errors.Is(err, ledger.ErrInvalidMT940Export) ||
+			errors.Is(err, ledger.ErrInvalidCurrency) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(doc))
+}
+
 // pain001ReceiptRequest is one bank receipt in the POST
 // /exports/pain001/{msgid}/receipts body: the pain.002-style per-tx
 // status report. Unknown JSON fields fail fast, like every other POST
@@ -11544,6 +11603,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs008", s.handlePacs008Export)
 	mux.HandleFunc("POST /repairs/{id}/fix", s.handleRepairFix)
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
+	mux.HandleFunc("GET /exports/mt940", s.handleMT940Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
 	mux.HandleFunc("POST /rfp/{id}/accept", s.handleAcceptRfP)

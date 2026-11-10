@@ -7397,9 +7397,13 @@ The tag block a bank's statement downloader would produce — `:20:`
 (statement/sequence number), `:60F:` (opening balance), one `:61:`
 (+ optional `:86:` supplementary) per statement line, `:62F:`
 (closing balance), `:64:` (available balance) — from the account's
-effective journal rows. Go-only (like NACHA and camt.053 export): the
-operator builds the file and hands it to the bank's statement
-processor.
+effective journal rows. The same document is available over HTTP:
+`GET /exports/mt940?account=<id>&currency=USD&since=<RFC3339>&until=<RFC3339>&statement_id=2026-10&sequence_id=1`
+renders it — `account` and `currency` are required,
+`since`/`until` are optional half-open bounds, `statement_id` and
+`sequence_id` default to `"1"`. The endpoint is read-only (no version
+bump, nothing booked, no audit event) and an unknown account exports a
+valid empty statement — zero balance, zero `:61:` lines — never a 404.
 
 ```go
 doc, err := l.ExportMT940(ledger.MT940ExportOptions{

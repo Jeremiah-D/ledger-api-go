@@ -132,6 +132,10 @@ type Metrics struct {
 	// general financial institution transfer export requests served,
 	// including rejected exports (see ledger.ExportMT202, LG-378).
 	MT202Exports atomic.Uint64
+	// MT940Exports counts GET /exports/mt940 SWIFT FIN MT940 customer
+	// statement export requests served, including rejected exports
+	// (see ledger.ExportMT940, LG-379).
+	MT940Exports atomic.Uint64
 	// XeroExports counts GET /exports/accounting/xero Xero
 	// bank-statement CSV export requests served, including rejected
 	// exports (see ledger.ExportAccounting, LG-184).
@@ -1015,6 +1019,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/mt900910 SWIFT FIN MT900/MT910 debit/credit confirmation exports served, including rejected exports.", m.MT900910Exports.Load())
 	writeCounter(&sb, "ledger_mt202_exports_total",
 		"Total POST /exports/mt202 SWIFT FIN MT202 general financial institution transfer exports served, including rejected exports.", m.MT202Exports.Load())
+	writeCounter(&sb, "ledger_mt940_exports_total",
+		"Total GET /exports/mt940 SWIFT FIN MT940 customer statement exports served, including rejected exports.", m.MT940Exports.Load())
 	writeCounter(&sb, "ledger_xero_exports_total",
 		"Total GET /exports/accounting/xero Xero bank-statement CSV exports served, including rejected exports.", m.XeroExports.Load())
 	writeCounter(&sb, "ledger_quickbooks_exports_total",
