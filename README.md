@@ -6684,13 +6684,19 @@ LT 地址）、block 3（`{108:MUR}`）与 block 4 核心字段集 `:20:` /
   （`:20:` 才是业务键）；导出时 MUR 写 `:20:`（MT103 惯例）。
   block 5 省略（CHK 由 SWIFT 网络计算，不伪造）；block 1 的
   session/sequence 填零（发送方接口分配）。
-- 纯值对象、无 HTTP 端点：MT202 没有 payout（客户指令）可渲染、
-  也没有 gpi track 可查询，调用方直接给齐两行一值——故为库级
-  `ParseMT202` / `ExportMT202`（MT940 同款定位），无锁、无
-  version bump、无记账、无审计链追加；重复导出字节一致；解析
-  接受 CRLF。
+- HTTP 导出（LG-378）：`POST /exports/mt202` + JSON，调用方给齐
+  全部字段（`sender_lt` / `receiver_lt` / `transaction_reference`
+  （`:20:`）/ `related_reference`（`:21:`，必填）/ `value_date`
+  （`YYYY-MM-DD`，必填）/ `currency` / `amount_cents` /
+  `ordering_institution_bic` / `beneficiary_institution_bic`），
+  纯渲染、无 ledger 查找、无状态门控（无 404/422），字段非法一
+  律 400（ledger 哨兵错原样透出）；无锁、无 version bump、无记账、
+  无审计链追加；重复导出字节一致。库级 `ParseMT202` /
+  `ExportMT202` 仍在（MT940 同款定位），解析接受 CRLF。
 
 Go: `ledger.MT202` / `ledger.ParseMT202` / `ledger.ExportMT202`。
+
+HTTP: `POST /exports/mt202` + `{"sender_lt":"BANKUS33","receiver_lt":"BANKDEFF","transaction_reference":"MT202REF1","related_reference":"RELREF202","value_date":"2026-10-22","currency":"USD","amount_cents":250000,"ordering_institution_bic":"DEUTDEFF","beneficiary_institution_bic":"BNPAFRPP"}` → 200 text/plain FIN 文本。
 
 ### SWIFT FIN MT900/MT910 借记/贷记确认（库级解析 + 已结算导出）
 
