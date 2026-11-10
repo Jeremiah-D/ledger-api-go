@@ -5430,7 +5430,14 @@ on a no-expiry order; filled, cancelled, and expired orders are
 rejected; the currency pair, side, limit price, amount, fills, and
 state are untouched; audited as `fx_limit_order_expiry_amended`);
 the sweep reads the live deadline, so an amended order expires at
-its new deadline on the next sweep.
+its new deadline on the next sweep. A pending order's settlement
+legs can be revised in place with `AmendLimitOrderParties` (both
+new accounts must be non-empty and different; filled, cancelled,
+and expired orders are rejected; the currency pair, side, limit
+price, amount, fills, state, and expiry are untouched; audited as
+`fx_limit_order_parties_amended`); the sweep reads the live legs,
+so the next fill debits the new payer and credits the new payee,
+while fills already posted keep their original legs.
 A fill that would route into dual-control review is
 skipped for that sweep instead of freezing funds — the order stays
 pending for the operator. The book survives disaster-recovery
