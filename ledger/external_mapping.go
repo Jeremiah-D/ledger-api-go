@@ -113,6 +113,16 @@ const ExternalSystemCAMT054 = "camt054"
 // before.
 const ExternalSystemMT940 = "mt940"
 
+// ExternalSystemMT950 is the well-known system name for the account
+// identifier MT950 interbank statement exports name in :25: (see
+// ExportMT950): the identifier the correspondent bank expects for
+// the account (usually the account number at that bank), which may
+// differ from the internal account ID — and from the "mt940" mapping,
+// which names the account for the customer statement instead. When an
+// account has no mapping in this system, exports name the internal
+// account ID as before.
+const ExternalSystemMT950 = "mt950"
+
 // ExternalAccountMapping is one row of the external account mapping
 // (see the package doc above): the internal Account, the external System
 // that knows it by ExternalID, and an optional human Note (which system

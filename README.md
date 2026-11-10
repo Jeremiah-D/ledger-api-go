@@ -7490,6 +7490,34 @@ Semantics:
   credit-line concept, so the available balance is the honest
   closing balance.
 
+### SWIFT MT950 interbank statement export (Go: `ledger.ExportMT950`)
+
+The same accounting fact as MT940, addressed to a different
+recipient: MT940 is the customer statement (bank → customer), MT950
+is the interbank statement (bank → correspondent bank). The tag block
+mirrors MT940 — `:20:` (transaction reference), `:25:` (account
+identification), `:28C:` (statement/sequence number), `:60F:`
+(opening balance), one `:61:` (+ optional `:86:` supplementary) per
+statement line, `:62F:` (closing balance), `:64:` (available balance)
+— with two deliberate differences: there is no `:21:` related
+reference (MT950 has no such field), and the balances carry both
+`:64:` and `:65:` (forward available balance, which repeats the
+closing balance exactly — the ledger has no forward concept). A
+trailing `:86:` (information to account owner) renders only when the
+statement carries owner info; the ledger holds no account-owner
+record, so `ExportMT950` omits it rather than fabricating one. The
+same document is available over HTTP:
+`GET /exports/mt950?account=<id>&currency=USD&since=<RFC3339>&until=<RFC3339>&statement_id=2026-10&sequence_id=1`
+renders it — `account` and `currency` are required,
+`since`/`until` are optional half-open bounds, `statement_id` and
+`sequence_id` default to `"1"`. The endpoint is read-only (no version
+bump, nothing booked, no audit event) and an unknown account exports a
+valid empty statement — zero balance, zero `:61:` lines — never a 404.
+`:25:` names the external identifier mapped under the `mt950` system
+when one exists (usually the account number at the correspondent
+bank); a mapping declared under the `mt940` system does not apply
+here, since the two messages go to different recipients.
+
 ### `GET /accounts/{id}/statement` — JSON account statement
 
 A bank-style account statement for one account over the half-open
