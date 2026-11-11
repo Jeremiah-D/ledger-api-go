@@ -7490,6 +7490,50 @@ Semantics:
   credit-line concept, so the available balance is the honest
   closing balance.
 
+### SWIFT MT941 balance report export (Go: `ledger.ExportMT941`)
+
+The same accounting fact as MT940, reported as a balance snapshot
+rather than a statement: MT940 is the end-of-day customer statement
+(with `:61:` detail lines), MT942 is the intraday transaction
+report (with `:61:` lines and no balance tags), and MT941 is the
+intraday balance report a bank pulls several times a day for an
+account's balance snapshot without pulling the full detail. The tag
+block is `:20:` (transaction reference), `:25:` (account
+identification), `:28C:` (statement/sequence number), `:13D:`
+(report date/time, `YYMMDDHHMM` UTC — `Until` when given, else the
+wall clock at export time), `:60F:` (opening balance, folded from
+the pre-window rows and omitted when there are none), the `:90D:`/
+`:90C:` number-and-sum trailers (count and total per side for the
+window rows), `:62F:` (book balance), `:64:` (available balance)
+and `:65:` (forward available balance) — both repeating `:62F:`
+exactly, since the ledger has no intraday credit-line or forward
+concept — with an optional trailing `:86:` (information to account
+owner). There are deliberately no `:61:` lines: MT941 reports
+balances and summaries, not transactions. The same document is
+available over HTTP:
+`GET /exports/mt941?account=<id>&currency=USD&since=<RFC3339>&until=<RFC3339>&statement_id=2026-10&sequence_id=1`
+renders it — `account` and `currency` are required,
+`since`/`until` are optional half-open bounds, `statement_id` and
+`sequence_id` default to `"1"`. The endpoint is read-only (no version
+bump, nothing booked, no audit event) and an unknown account exports a
+valid empty report — zero balances, zero `:90D:`/`:90C:` trailers —
+never a 404. `:25:` names the external identifier mapped under the
+`mt941` system when one exists (usually the IBAN); mappings declared
+under the `mt940` or `mt942` systems do not apply here, since the
+three messages go to different recipients.
+
+Semantics:
+
+- **Reconciliation is structural** — the closing balance is computed
+  as opening + credits − debits, and `ledger.RenderMT941Statement`
+  re-derives it and fails loud if the two disagree: a report that
+  does not foot is never rendered. `:64:` and `:65:` must repeat
+  `:62F:` exactly, and the trailers must foot the window rows.
+- **Direction** — account-centric like MT940/camt.053: the account
+  as the debit leg reads `C` (money in), as the credit leg `D`
+  (money out); amounts are absolute (`1500,00` with a comma decimal
+  separator), the sign lives in the `C`/`D` mark.
+
 ### SWIFT MT942 interim transaction report export (Go: `ledger.ExportMT942`)
 
 The same accounting fact as MT940, reported in a different tense:

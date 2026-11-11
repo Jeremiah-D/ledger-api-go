@@ -133,6 +133,16 @@ const ExternalSystemMT950 = "mt950"
 // before.
 const ExternalSystemMT942 = "mt942"
 
+// ExternalSystemMT941 is the well-known system name for the account
+// identifier MT941 balance report exports name in :25: (see
+// ExportMT941): the identifier the bank expects for the account
+// (usually the IBAN), which may differ from the internal account ID
+// — and from the "mt940"/"mt942" mappings, which name the account
+// for the end-of-day statement and the intraday transaction report
+// instead. When an account has no mapping in this system, exports
+// name the internal account ID as before.
+const ExternalSystemMT941 = "mt941"
+
 // ExternalAccountMapping is one row of the external account mapping
 // (see the package doc above): the internal Account, the external System
 // that knows it by ExternalID, and an optional human Note (which system
