@@ -5541,6 +5541,33 @@ l.AmendForwardSettleAt("fwd-1", time.Now().Add(72*time.Hour)) // move the value 
 l.AmendForwardNotional("fwd-1", 20000) // resize the conversion, keep the locked rate and value date
 ```
 
+A booked or settled forward can be confirmed as a SWIFT FIN MT300
+message: `GET /exports/mt300?forward_id=<id>` renders the contract
+(see `ledger.ExportMT300`). Sequence A identifies the trade
+(`:15A:` `:20:` = the forward ID, `:22A:` always `NEWT`,
+`:22C:` = first 4 of the From identifier + first 2 of the To
+identifier + the last 4 digits of the forward ID, `:82A:`/`:87A:`
+the parties' registered BICs, falling back to `:82D:`/`:87D:`
+with the internal account ID when no BIC is registered); sequence
+B states the economics (`:15B:` `:30T:` = the booking date,
+`:30V:` = the value date, `:36:` = the locked rate as a decimal
+with a comma separator, half-up rounded at the 12th decimal,
+`:32B:` = the bought amount at that rate,
+`floor(NotionalCents*RateNum/RateDen)`, `:33B:` = the sold
+notional, `:57A:`/`:57D:` = the To account, where the bought
+currency lands). There is no `:21:` — there is no prior
+confirmation to reference. The confirmation is read-only: it
+bumps no version, books nothing, and appends no audit event, and
+repeat exports are byte-identical. A booked contract past its
+settlement grace period lapses first and reports expired; a
+manually cancelled contract reports not-booked (both 422), an
+unknown ID 404, and a contract that cannot be rendered as a valid
+MT300 (a `:20:` outside 16x, a `:22C:` component that does not
+fit, or a party identifier that is not a valid LT form — an
+account without a registered BIC needs an LT-form account ID)
+400. Only `NEWT` confirmations are issued: revisions and
+cancellations of a confirmation are a later round.
+
 #### Rate-table snapshot versioning
 
 Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,

@@ -148,6 +148,10 @@ type Metrics struct {
 	// balance report export requests served, including rejected
 	// exports (see ledger.ExportMT941, LG-387).
 	MT941Exports atomic.Uint64
+	// MT300Exports counts GET /exports/mt300 SWIFT FIN MT300 FX
+	// forward confirmation export requests served, including
+	// rejected exports (see ledger.ExportMT300, LG-388).
+	MT300Exports atomic.Uint64
 	// MT199Exports counts POST /exports/mt199 SWIFT FIN MT199
 	// free-format message export requests served, including rejected
 	// exports (see ledger.ExportMT199, LG-380).
@@ -1055,6 +1059,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/mt942 SWIFT FIN MT942 interim transaction report exports served, including rejected exports.", m.MT942Exports.Load())
 	writeCounter(&sb, "ledger_mt941_exports_total",
 		"Total GET /exports/mt941 SWIFT FIN MT941 balance report exports served, including rejected exports.", m.MT941Exports.Load())
+	writeCounter(&sb, "ledger_mt300_exports_total",
+		"Total GET /exports/mt300 SWIFT FIN MT300 FX forward confirmation exports served, including rejected exports.", m.MT300Exports.Load())
 	writeCounter(&sb, "ledger_mt199_exports_total",
 		"Total POST /exports/mt199 SWIFT FIN MT199 free-format message exports served, including rejected exports.", m.MT199Exports.Load())
 	writeCounter(&sb, "ledger_xero_exports_total",

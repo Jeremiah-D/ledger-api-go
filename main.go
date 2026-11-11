@@ -6068,6 +6068,43 @@ func (s *server) handleMT941Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT300Export implements GET /exports/mt300 (LG-388): a SWIFT
+// FIN MT300 FX forward confirmation message for one booked or
+// settled forward contract (see ledger.ExportMT300). Query
+// parameter: forward_id (required). The export is read-only: no
+// version bump, nothing booked, no audit event — a booked contract
+// past its settlement grace period lapses first (the ledger's
+// lazy-expiry check) and reports expired. Error mapping: a missing
+// forward_id is a 400; an unknown forward is a 404; a cancelled or
+// lapsed contract is a 422; a contract that cannot be rendered as
+// a valid MT300 (:20:/:22C: format, LT form) is a 400.
+func (s *server) handleMT300Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT300Exports.Add(1)
+	forwardID := r.URL.Query().Get("forward_id")
+	if forwardID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "forward_id is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportMT300(forwardID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrForwardNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrForwardNotBooked),
+			errors.Is(err, ledger.ErrForwardExpired):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrInvalidMT300Export):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(doc))
+}
+
 // pain001ReceiptRequest is one bank receipt in the POST
 // /exports/pain001/{msgid}/receipts body: the pain.002-style per-tx
 // status report. Unknown JSON fields fail fast, like every other POST
@@ -11998,6 +12035,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt950", s.handleMT950Export)
 	mux.HandleFunc("GET /exports/mt942", s.handleMT942Export)
 	mux.HandleFunc("GET /exports/mt941", s.handleMT941Export)
+	mux.HandleFunc("GET /exports/mt300", s.handleMT300Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
 	mux.HandleFunc("POST /rfp/{id}/accept", s.handleAcceptRfP)
