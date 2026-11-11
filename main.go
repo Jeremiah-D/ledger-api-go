@@ -5574,6 +5574,88 @@ func (s *server) handleOFXExport(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handleMT101Export implements GET /exports/mt101 (LG-391): a SWIFT
+// FIN MT101 customer request for transfer generated from the
+// journaled transfer principals (see ledger.ExportMT101) — the FIN
+// twin of the pain.001 export. Query parameters: debtor (required,
+// the single debit account), creditor (optional payee filter),
+// currency (optional ISO 4217 code), since / until (optional RFC
+// 3339 time bounds, half-open [since, until)), execute_on
+// (optional RFC 3339 timestamp or YYYY-MM-DD date, default the
+// export day UTC), charge_bearer (optional OUR/BEN/SHA, default
+// SHA). A malformed timestamp, an inverted window, an invalid
+// currency, a missing debtor, a bad charge bearer, zero matching
+// payments, or an unrenderable transfer ID is a 400, fail-fast; a
+// payment whose debtor or creditor has no registered IBAN fails
+// the whole export with a 400 (fail-closed, see
+// ledger.ErrMissingAccountIBAN — no forged identifiers). The body
+// is the FIN MT101 text. The export is read-only: it bumps no
+// version and books nothing, but every export emits an
+// mt101_exported audit event.
+func (s *server) handleMT101Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT101Exports.Add(1)
+	q := r.URL.Query()
+	debtor := q.Get("debtor")
+	if debtor == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "debtor is required"})
+		return
+	}
+	var since, until, executeOn time.Time
+	if raw := q.Get("since"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "since must be RFC 3339"})
+			return
+		}
+		since = t
+	}
+	if raw := q.Get("until"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "until must be RFC 3339"})
+			return
+		}
+		until = t
+	}
+	if raw := q.Get("execute_on"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			// A plain calendar date is the natural way to name an
+			// execution day; accept it too.
+			t, err = time.Parse("2006-01-02", raw)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "execute_on must be RFC 3339 or YYYY-MM-DD"})
+				return
+			}
+		}
+		executeOn = t
+	}
+	doc, err := s.ledgerFor(r).ExportMT101(ledger.MT101ExportOptions{
+		Debtor:       ledger.AccountID(debtor),
+		Creditor:     ledger.AccountID(q.Get("creditor")),
+		Currency:     q.Get("currency"),
+		Since:        since,
+		Until:        until,
+		ExecuteOn:    executeOn,
+		ChargeBearer: q.Get("charge_bearer"),
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrInvalidMT101Export),
+			errors.Is(err, ledger.ErrInvalidCurrency),
+			errors.Is(err, ledger.ErrInvalidPain001Range),
+			errors.Is(err, ledger.ErrMissingAccountIBAN):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(doc))
+}
+
 // handlePain001Export implements GET /exports/pain001: an ISO 20022
 // pain.001.001.03 customer credit transfer initiation generated from the
 // journaled transfer principals (see ledger.ExportPain001). Query
@@ -12084,6 +12166,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/ofx", s.handleOFXExport)
 	mux.HandleFunc("GET /exports/pain001", s.handlePain001Export)
+	mux.HandleFunc("GET /exports/mt101", s.handleMT101Export)
 	mux.HandleFunc("GET /exports/pain001/{msgid}/status", s.handlePain001Status)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)

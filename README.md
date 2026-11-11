@@ -6093,6 +6093,55 @@ A malformed timestamp, an inverted window, or an invalid currency is a
 `400`, fail-fast. `GET /metrics` counts exports as
 `ledger_pain001_exports_total`.
 
+### `GET /exports/mt101` — SWIFT FIN MT101 customer request-for-transfer export
+
+The same instruction in FIN form: `GET
+/exports/mt101?debtor=<account>&execute_on=2026-11-12` renders the
+registered transfer principals as a SWIFT Category 1 MT101
+"Request for Transfer" (see `ledger.ExportMT101`) — the FIN twin
+of the pain.001 export, for counterparties and scenarios that
+still accept the FIN form. Query parameters: `debtor` (required,
+the single debit account — sequence A `:50H:` holds one), `creditor`
+(optional payee filter), `currency` (optional ISO 4217 code),
+`since` / `until` (optional RFC 3339 time bounds, half-open
+`[since, until)`), `execute_on` (optional RFC 3339 timestamp or
+`YYYY-MM-DD` date, default the export day UTC), `charge_bearer`
+(optional `OUR`/`BEN`/`SHA`, default `SHA`).
+
+Sequence A identifies the instruction (`:15A:` `:20:` =
+`MT101-` + the first 10 hex characters of the SHA-256 of the
+window, the filters, the exported transfer IDs, and the execution
+date — 16 characters, deterministic, so the same execution day
+re-renders byte-identical — `:28D:` always `1/1`, `:50H:` =
+`/<debtor IBAN>` with no name line, since the ledger holds no legal
+holder name, `:52A:` the debtor's registered BIC when one exists,
+`:30:` the execution date); sequence B repeats per payment (`:15B:`
+`:21:` = the transfer ID, `:32B:` = the currency plus the amount,
+`:57A:` the creditor's registered BIC or `:57D:` with the To
+account ID when none is registered, `:59:` = `/<creditor IBAN>`,
+`:71A:` the charge bearer). There is no `:50a:` in sequence B, no
+`:33B:`/`:36:` (a single-currency transfer has no exchange leg),
+and no `:70:` (a transfer has no memo field). The filter
+vocabulary, the pending-review exclusion, and the fail-closed IBAN
+rule are shared with pain.001 — except that zero matching payments
+is an explicit refusal (`400`): an MT101 with no sequence B is not
+an instruction a bank can act on. The export is read-only and
+emits one structured audit event (`mt101_exported`, details
+`msg_id` / `tx_count` / `ctrl_sum_cents` / `currency`); it does
+not register into the pain.001 instruction lifecycle below — no
+pain.002 can answer an MT101, so instruction state tracking stays
+on the ISO side. A missing debtor, a bad charge bearer, a bad
+execution date, or zero matching payments is a `400`; a payment
+whose debtor or creditor has no registered IBAN is a `400` as
+well, fail-closed. `GET /metrics` counts exports as
+`ledger_mt101_exports_total`.
+
+Scope note, stated plainly: cross-border payment instructions
+completed the MT→MX migration on 2025-11-22, so the MT101 serves
+counterparties and scenarios that still accept the FIN form; it is
+not presented as the default channel for a new cross-border
+onboarding.
+
 ### pain.001 付款指令状态机（LG-99）
 
 每次 `GET /exports/pain001` 导出都会在账本内注册一条付款指令
