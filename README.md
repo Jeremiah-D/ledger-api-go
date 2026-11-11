@@ -6573,6 +6573,27 @@ curl -s -X POST localhost:8080/cancellations \
   -d '{"uetr":"9f2c8e1a-…","reason_code":"DUPL"}'
 # 201 {"uetr":"9f2c8e1a-…","status":"requested","msg_id":"9f2c8e1a-…/cxl/1",...}
 curl -s 'localhost:8080/exports/camt056?uetr=9f2c8e1a-…' -o cancel.xml
+
+### camt.055 客户支付撤销请求（`GET /exports/camt055`）
+
+camt.056 是行间（FI-to-FI）撤销，camt.055 是它的客户侧对应物：
+同一条 open 撤销记录的另一种报文形态——发起方（客户）向自己的
+银行请求撤销已发出的支付指令（`camt.055.001.01`
+`CustomerPaymentCancellationRequest`），`GET /exports/camt055?uetr=`
+渲染出真正发给银行的报文；对手方同样以 camt.029 决议
+（`POST /exports/camt029/apply`）。`Assgnmt/Id` 与 `CxlId` 均为
+确定性 `MsgId`（`<uetr>/cxl/<seq>`），`Assgnr` 为发起方标识
+（payee 账户注册 BIC，无则内部账户 ID），`Assgne` 为 payout 的
+`Destination`，`CreDtTm` 取请求的 `RequestedAt`；`Undrlyg/TxInf`
+以 payout ID（`OrgnlGrpInf/OrgnlMsgId` 与 `OrgnlInstrId`，原指令
+`pacs.008.001.02`）与 UETR 定位原指令，原因码进
+`CxlRsnInf/Rsn/Prtry`。`Case` 与 `CtrlData` 省略（规范可选、账本
+无此数据），`OrgnlEndToEndId` 省略（账本无独立 EndToEndId，不编造）。
+只读：读锁快照、无版本 bump、不记账、不追加审计链；重复导出字节
+相同。门与 camt.056 相同：仅 open（`requested`）撤销可导出，无
+open 撤销 → 404。计数器 `ledger_camt055_exports_total`。
+
+Go: `ledger.ExportCAMT055`。
 # 200 camt.056.001.02: <FIToFICxlReq>/.../<CxlId>9f2c8e1a-…/cxl/1</CxlId>/<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>
 curl -s -X POST localhost:8080/exports/camt029/apply \
   -H 'Content-Type: application/xml' --data-binary @bank-camt029.xml

@@ -7632,6 +7632,36 @@ func (s *server) handleCAMT056Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handleCAMT055Export implements GET /exports/camt055 (LG-389): the
+// ISO 20022 camt.055.001.01 customer payment cancellation request
+// document for the open cancellation of one tracked payment (see
+// ledger.ExportCAMT055) — the customer-side counterpart of the
+// FI-to-FI camt.056 (see handleCAMT056Export): same open record,
+// the message the originator sends to its bank. Query parameter:
+// uetr (required). Read-only. Error mapping: a missing uetr is a
+// 400; an unknown UETR or a UETR with no open (requested)
+// cancellation is a 404.
+func (s *server) handleCAMT055Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT055Exports.Add(1)
+	uetr := r.URL.Query().Get("uetr")
+	if uetr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "uetr is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportCAMT055(uetr)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrNoOpenCancellation) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleCAMT029Apply implements POST /exports/camt029/apply (LG-168):
 // applies a counterparty's ISO 20022 camt.029.001.03 FI-to-FI
 // cancellation status report to the open cancellation it resolves
@@ -12041,6 +12071,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /rfp/{id}/accept", s.handleAcceptRfP)
 	mux.HandleFunc("POST /rfp/{id}/reject", s.handleRejectRfP)
 	mux.HandleFunc("GET /exports/camt056", s.handleCAMT056Export)
+	mux.HandleFunc("GET /exports/camt055", s.handleCAMT055Export)
 	mux.HandleFunc("POST /exports/camt029/apply", s.handleCAMT029Apply)
 	mux.HandleFunc("GET /exports/camt029", s.handleCAMT029Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
