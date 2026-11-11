@@ -12,7 +12,8 @@ import (
 // time; after that only Pause/Resume/Cancel exist. Until now the only
 // way to change a cadence, the next run time, the end time, the report
 // parameters, or the delivery target was Cancel + recreate: a new
-// subscription whose RunSeq and bounded run history (maxReportRuns)
+// subscription whose RunSeq and bounded run history
+// (defaultMaxReportRuns, live-revisable via SetReportRunHistoryDepth)
 // start over, and whose ID still collides with the cancelled record.
 // This module is the orthogonal runtime path: an operator revises any
 // subset of a live subscription's fields in place, keeping its

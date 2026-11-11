@@ -546,7 +546,7 @@ func TestReportScheduleRunHistoryBounded(t *testing.T) {
 	s := validReportSchedule(t.TempDir())
 	rec := mustCreateReportSchedule(t, l, s)
 	l.mu.Lock()
-	for i := 0; i < maxReportRuns+25; i++ {
+	for i := 0; i < defaultMaxReportRuns+25; i++ {
 		l.recordReportRunLocked(l.reportSchedules[rec.ID], ReportRun{ScheduleID: rec.ID, RunSeq: uint64(i + 1), Status: "fired"})
 	}
 	l.mu.Unlock()
@@ -554,10 +554,10 @@ func TestReportScheduleRunHistoryBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListReportRuns: %v", err)
 	}
-	if len(hist) != maxReportRuns {
-		t.Fatalf("history = %d, want %d", len(hist), maxReportRuns)
+	if len(hist) != defaultMaxReportRuns {
+		t.Fatalf("history = %d, want %d", len(hist), defaultMaxReportRuns)
 	}
-	if hist[0].RunSeq != uint64(maxReportRuns+25) {
+	if hist[0].RunSeq != uint64(defaultMaxReportRuns+25) {
 		t.Fatalf("newest run seq = %d", hist[0].RunSeq)
 	}
 }

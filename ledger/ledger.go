@@ -1242,7 +1242,8 @@ type Ledger struct {
 	// reportSchedules is the registry of recurring report subscriptions
 	// (see report_schedule.go), keyed by schedule ID, with its own
 	// idempotency-key namespace (reportScheduleKeys), bounded run
-	// history (reportScheduleRuns, evicted past maxReportRuns), and
+	// history (reportScheduleRuns, evicted past the live
+	// reportRunHistoryDepth, LG-395), and
 	// per-schedule firing flags (reportScheduleFiring) so concurrent
 	// SweepReportsDue calls serialize per schedule. Report schedules
 	// are process-lifetime operational state and do not survive
@@ -1251,6 +1252,13 @@ type Ledger struct {
 	reportScheduleKeys   map[string]string
 	reportScheduleRuns   map[string][]ReportRun
 	reportScheduleFiring map[string]bool
+	// reportRunHistoryDepth is the live per-schedule run history
+	// depth (see SetReportRunHistoryDepth, LG-395): how many of the
+	// newest runs ListReportRuns keeps per subscription. It seeds
+	// from defaultMaxReportRuns (100) and does not round-trip
+	// through snapshots — report subscriptions are process-lifetime
+	// state, so a restore starts again at the default.
+	reportRunHistoryDepth int
 	// audit is the structured compliance audit log (see audit.go). Nil
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
@@ -1964,6 +1972,11 @@ func New(opts ...Option) *Ledger {
 		preauthCaptureKeys: make(map[string]PreAuthCaptureReceipt),
 		pruneInterval:      defaultKeyPruneInterval,
 	}
+	// LG-395: the run-history depth seeds from the default (100)
+	// after the literal — the literal's value column is one space
+	// narrower than this key needs, and re-aligning the whole
+	// literal for one field would be pure format churn.
+	l.reportRunHistoryDepth = defaultMaxReportRuns
 	for _, opt := range opts {
 		opt(l)
 	}

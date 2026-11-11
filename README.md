@@ -1171,7 +1171,12 @@ current UTC month, LG-71). Missed runs are skipped (counted as
 `skipped_runs`) rather than caught up, runs are recorded
 (`report_generated` / `report_run_failed` audit events), and schedules
 support pause/resume/cancel with the same lifecycle states as transfer
-schedules. Run history is bounded to the newest 100 runs per schedule.
+schedules. Run history is bounded to the newest 100 runs per
+schedule by default, revisable live in place via
+`ledger.SetReportRunHistoryDepth` (audited as
+`report_runs_retuned`): tightening trims every subscription's
+stored history immediately, widening only affects later runs, and
+a restart restores the 100-run default.
 Report subscriptions are process-lifetime operational state: they do not
 survive disaster-recovery snapshots (recreate them after a restore).
 

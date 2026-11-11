@@ -315,9 +315,11 @@ type ReportRun struct {
 	SkippedRuns int64 `json:"skipped_runs,omitempty"`
 }
 
-// maxReportRuns bounds the per-schedule run history: the newest runs
-// stay, the oldest are evicted. Mirrors maxScheduleRuns (LG-41).
-const maxReportRuns = 100
+// defaultMaxReportRuns is the default per-schedule run history
+// depth: the newest runs stay, the oldest are evicted. It seeds the
+// live depth (see SetReportRunHistoryDepth, LG-395). Mirrors
+// maxScheduleRuns (LG-41).
+const defaultMaxReportRuns = 100
 
 // ReportSweeper is the background worker that generates due report
 // schedules on a ticker: the in-process version of polling
@@ -613,14 +615,11 @@ func (l *Ledger) ListReportRuns(id string, limit int) ([]ReportRun, error) {
 	return out, nil
 }
 
-// recordReportRunLocked appends a run to the schedule's bounded history.
+// recordReportRunLocked appends a run to the schedule's bounded history,
+// evicting the oldest past the live depth (LG-395).
 // Callers must hold the write lock.
 func (l *Ledger) recordReportRunLocked(sched *ReportSchedule, run ReportRun) {
-	runs := append(l.reportScheduleRuns[sched.ID], run)
-	if len(runs) > maxReportRuns {
-		runs = runs[len(runs)-maxReportRuns:]
-	}
-	l.reportScheduleRuns[sched.ID] = runs
+	l.reportScheduleRuns[sched.ID] = l.trimReportRunHistoryLocked(append(l.reportScheduleRuns[sched.ID], run))
 }
 
 // SweepReportsDue generates every active report schedule whose NextRunAt
