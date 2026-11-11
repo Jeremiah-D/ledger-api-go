@@ -7490,6 +7490,53 @@ Semantics:
   credit-line concept, so the available balance is the honest
   closing balance.
 
+### SWIFT MT942 interim transaction report export (Go: `ledger.ExportMT942`)
+
+The same accounting fact as MT940, reported in a different tense:
+MT940 is the end-of-day customer statement, MT942 is the intraday
+transaction report a bank pulls several times a day for the
+transactions since the last statement, without waiting for the day
+to close. The tag block mirrors MT940 — `:20:` (transaction
+reference), `:25:` (account identification), `:28C:`
+(statement/sequence number), one `:61:` (+ optional `:86:`
+supplementary) per transaction line — with two deliberate
+differences: there are no balance tags at all (`:60F:`/`:62F:`/`:64:`
+are absent — an interim report carries transactions, not balances),
+and the `:90D:`/`:90C:` number-and-sum trailers foot the `:61:`
+lines (count and total per side) so the receiver can verify the
+report without a balance to check against. An optional `:34F:`
+(floor limit indicator: currency + `D`/`C` mark + amount) renders
+when the export carries a floor limit; `:13D:` (report date/time,
+`YYMMDDHHMM` UTC) is `Until` when given, else the wall clock at
+export time. The same document is available over HTTP:
+`GET /exports/mt942?account=<id>&currency=USD&since=<RFC3339>&until=<RFC3339>&statement_id=2026-10&sequence_id=1`
+renders it — `account` and `currency` are required,
+`since`/`until` are optional half-open bounds, `statement_id` and
+`sequence_id` default to `"1"`. The endpoint is read-only (no version
+bump, nothing booked, no audit event) and an unknown account exports a
+valid empty report — zero `:61:` lines, zero `:90D:`/`:90C:`
+trailers — never a 404. `:25:` names the external identifier mapped
+under the `mt942` system when one exists (usually the IBAN); a
+mapping declared under the `mt940` system does not apply here, since
+the two messages go to different recipients.
+
+Semantics:
+
+- **Pre-window rows are dropped, never folded** — unlike MT940,
+  which folds them into the `:60F:` opening balance: an interim
+  report has no balance to foot, so a row before `Since` is simply
+  outside the report and appears nowhere, neither in the lines nor
+  in the trailers.
+- **Reconciliation is structural** — the `:90D:`/`:90C:` trailers
+  are computed from the `:61:` lines, and
+  `ledger.RenderMT942Statement` re-derives them and fails loud if
+  the two disagree: a report whose trailer does not foot its lines
+  is never rendered.
+- **Direction** — account-centric like MT940/camt.053: the account
+  as the debit leg reads `C` (money in), as the credit leg `D`
+  (money out); amounts are absolute (`1500,00` with a comma decimal
+  separator), the sign lives in the `C`/`D` mark.
+
 ### SWIFT MT950 interbank statement export (Go: `ledger.ExportMT950`)
 
 The same accounting fact as MT940, addressed to a different

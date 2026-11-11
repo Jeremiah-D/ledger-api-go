@@ -5940,6 +5940,70 @@ func (s *server) handleMT950Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT942Export implements GET /exports/mt942 (LG-386): a SWIFT
+// FIN MT942 interim transaction report message for one account (see
+// ledger.ExportMT942). MT942 is MT940's intraday counterpart — the
+// same accounting fact as the end-of-day statement, reported
+// intraday: no balance tags (:60F:/:62F:/:64: are absent), the :61:
+// lines carry the window's transactions, and the :90D:/:90C:
+// trailers foot them. Query parameters name the account and the
+// report window: account and currency are required, since/until are
+// optional RFC 3339 bounds (half-open [Since, Until)),
+// statement_id/sequence_id default to "1". The export is read-only:
+// no version bump, nothing booked, no audit event. Error mapping: a
+// missing account/currency, an invalid currency, an invalid since/until,
+// or an inverted window is a 400; an unknown account is not a 404 —
+// it exports a valid empty report (zero :61: lines, zero :90D:/:90C:
+// trailers).
+func (s *server) handleMT942Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT942Exports.Add(1)
+	q := r.URL.Query()
+	account := q.Get("account")
+	currency := q.Get("currency")
+	if account == "" || currency == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account and currency are required"})
+		return
+	}
+	var since, until time.Time
+	if v := q.Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since: " + err.Error()})
+			return
+		}
+		since = t
+	}
+	if v := q.Get("until"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid until: " + err.Error()})
+			return
+		}
+		until = t
+	}
+	doc, err := s.ledgerFor(r).ExportMT942(ledger.MT942ExportOptions{
+		Account:     ledger.AccountID(account),
+		Currency:    currency,
+		StatementID: q.Get("statement_id"),
+		SequenceID:  q.Get("sequence_id"),
+		Since:       since,
+		Until:       until,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrEmptyAccountID) ||
+			errors.Is(err, ledger.ErrInvalidMT942Export) ||
+			errors.Is(err, ledger.ErrInvalidCurrency) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(doc))
+}
+
 // pain001ReceiptRequest is one bank receipt in the POST
 // /exports/pain001/{msgid}/receipts body: the pain.002-style per-tx
 // status report. Unknown JSON fields fail fast, like every other POST
@@ -11868,6 +11932,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/snapshot", s.handleSnapshotExport)
 	mux.HandleFunc("GET /exports/mt940", s.handleMT940Export)
 	mux.HandleFunc("GET /exports/mt950", s.handleMT950Export)
+	mux.HandleFunc("GET /exports/mt942", s.handleMT942Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
 	mux.HandleFunc("POST /rfp/{id}/accept", s.handleAcceptRfP)
