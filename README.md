@@ -5596,6 +5596,46 @@ expired and a cancelled one not-booked (both 422), an unknown ID
 404, and an illegal scope, an invalid custodian BIC, or a contract
 that cannot be rendered as a valid MT304 400.
 
+A term deposit can be confirmed as a SWIFT FIN MT320 fixed
+loan/deposit confirmation: `GET
+/exports/mt320?deposit_id=<id>&counterparty_bic=<bic>` renders the
+deposit (see `ledger.ExportMT320`). Where MT300 confirms an FX
+forward and MT304 instructs a custodian to settle one, MT320
+confirms the ledger's other standing contract — a term deposit is
+a bilateral loan in substance, the depositor lending principal to
+the receiving institution at a fixed rate for a fixed tenor.
+Sequence A identifies the contract (`:15A:` `:20:` = the deposit
+ID, `:22A:` always `NEWT`, `:22B:` always `CONF`, `:22C:` = the
+16-character common reference — first 4 of the depositor
+identifier + first 2 of the counterparty BIC + the last 4 digits
+of the deposit ID + first 4 of the counterparty BIC + first 2 of
+the depositor identifier, `:82a:` the depositor, `:87a:` the
+counterparty, always `:87A:`); sequence B states the economics
+(`:15B:` `:17R:` always `L` — the depositor is the lender — `:30T:`
+= the opening date, `:30V:` = the opening date, a deposit starts
+earning on the day it opens, `:30P:` = the maturity date, all
+three 8-digit `YYYYMMDD`, `:32B:` = the principal, `:34E:` = the
+total contracted interest, `TermDays` x one day's interest on an
+ACT/365 basis, `:37G:` = the flat rate, `:14D:` always `ACT/365`);
+sequence C names the bank receiving the principal from Party A
+(`:15C:` `:57A:` = the counterparty BIC) and sequence D the bank
+receiving principal-plus-interest from Party B (`:15D:` `:57A:` /
+`:57D:` = the depositor). There is no `:21:`, no `:94A:` /
+`:21N:` / `:83a:` / `:77D:` / `:32H:` / `:30X:` / `:30F:` /
+`:38J:`, and no sequence F/G/H/I. The counterparty BIC is
+caller-given on every export — the ledger holds no bank-identity
+registry — and lands in block 2
+(`{2:I320<counterpartyLT>U3003}`) as well as in the routing. The
+business-day-only accrual gate changes only the day-by-day booking
+rhythm, never the contracted `:34E:` total. A tiered-rate deposit
+has no single `:37G:` to state and is refused (400); an
+early-withdrawn deposit is 422, an unknown ID 404, and a missing
+`deposit_id` / `counterparty_bic`, an invalid counterparty BIC, or
+a deposit that cannot be rendered as a valid MT320 400. Like
+MT300, the export is read-only and repeat exports are
+byte-identical; active and matured deposits both confirm. `GET
+/metrics` counts exports as `ledger_mt320_exports_total`.
+
 #### Rate-table snapshot versioning
 
 Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,

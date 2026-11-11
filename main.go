@@ -6237,6 +6237,53 @@ func (s *server) handleMT304Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT320Export implements GET /exports/mt320 (LG-392): a SWIFT
+// FIN MT320 fixed loan/deposit confirmation for one active or
+// matured term deposit (see ledger.ExportMT320). Query parameters:
+// deposit_id (required), counterparty_bic (required, the
+// deposit-receiving institution's BIC — the ledger holds no
+// bank-identity registry, so the caller names the counterparty on
+// every export). The export is read-only: no version bump, nothing
+// booked, no audit event. Error mapping: a missing deposit_id or
+// counterparty_bic is a 400; an unknown deposit is a 404; an
+// early-withdrawn deposit is a 422; an invalid counterparty BIC, a
+// tiered-rate deposit, or a deposit that cannot be rendered as a
+// valid MT320 (:20:/:22C: format, LT form) is a 400.
+func (s *server) handleMT320Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT320Exports.Add(1)
+	q := r.URL.Query()
+	depositID := q.Get("deposit_id")
+	if depositID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "deposit_id is required"})
+		return
+	}
+	counterpartyBIC := q.Get("counterparty_bic")
+	if counterpartyBIC == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "counterparty_bic is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportMT320(ledger.MT320ExportOptions{
+		DepositID:       depositID,
+		CounterpartyBIC: counterpartyBIC,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrTermDepositNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrTermDepositNotActive):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrInvalidMT320Export):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(doc))
+}
+
 // pain001ReceiptRequest is one bank receipt in the POST
 // /exports/pain001/{msgid}/receipts body: the pain.002-style per-tx
 // status report. Unknown JSON fields fail fast, like every other POST
@@ -12200,6 +12247,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt941", s.handleMT941Export)
 	mux.HandleFunc("GET /exports/mt300", s.handleMT300Export)
 	mux.HandleFunc("GET /exports/mt304", s.handleMT304Export)
+	mux.HandleFunc("GET /exports/mt320", s.handleMT320Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
 	mux.HandleFunc("POST /rfp/{id}/accept", s.handleAcceptRfP)
