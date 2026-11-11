@@ -5568,6 +5568,34 @@ account without a registered BIC needs an LT-form account ID)
 400. Only `NEWT` confirmations are issued: revisions and
 cancellations of a confirmation are a later round.
 
+The same contract can be instructed to a custodian as a SWIFT FIN
+MT304 third-party FX deal instruction: `GET
+/exports/mt304?forward_id=<id>&custodian_bic=<bic>&scope=ADVI|INST`
+renders the contract (see `ledger.ExportMT304`). Where MT300 is
+the bilateral confirmation between the trade's two parties, MT304
+is what a fund manager sends the custodian bank so the custodian
+settles the deal on the fund's behalf — the same trade, the
+instruction face. Sequence A identifies the instruction (`:15A:`
+`:20:` = the forward ID, `:22A:` always `NEWT`, `:94A:` = the
+scope, `ADVI` by default or `INST`, `:83a:` the fund and `:82a:`
+the fund manager — both the From account, since the ledger holds
+no separate fund/manager identity and invents no manager BIC —
+`:87a:` the executing broker, the To account); sequence B states
+the economics (`:15B:` `:30T:` = the booking date, `:30V:` = the
+value date, `:36:` = the locked rate, `:32B:` = the bought amount
+at that rate, `:53a:` the delivery bank, `:33B:` = the sold
+notional, `:57a:` the receiving bank — both banks the To account).
+There is no `:22C:` (the current MT304 table carries no such
+field), no `:21:`, and no sequence C/D/E (no UTI, execution-venue,
+or accounting data). The custodian BIC is caller-given on every
+export — the ledger holds no custodian registry — and lands in
+block 2 (`{2:I304<custodianLT>U3003}`) as well as in the
+instruction's routing. Like MT300, the export is read-only and
+repeat exports are byte-identical; a lapsed contract reports
+expired and a cancelled one not-booked (both 422), an unknown ID
+404, and an illegal scope, an invalid custodian BIC, or a contract
+that cannot be rendered as a valid MT304 400.
+
 #### Rate-table snapshot versioning
 
 Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,
