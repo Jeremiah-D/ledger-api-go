@@ -6182,6 +6182,40 @@ counterparties and scenarios that still accept the FIN form; it is
 not presented as the default channel for a new cross-border
 onboarding.
 
+A transfer schedule can be pre-announced to its servicing bank as
+a SWIFT FIN MT210 notice to receive: `GET
+/exports/mt210?schedule_id=<id>&servicing_bic=<bic>` renders the
+next run (see `ledger.ExportMT210`). Where MT300/MT304/MT320
+confirm contracts that already exist, MT210 covers the other side
+of the timeline — a payment that is due to arrive. The direction
+is account owner to account bank: the sender is the To account
+(the beneficiary), the receiver the servicing bank named by the
+caller, so the bank can prepare liquidity and reconciliation
+before the money lands. The notice states `:20:` = the schedule
+ID, `:25:` = the account to be credited (the To account's
+registered IBAN, falling back to the account ID), `:30:` = the
+next run date (6-digit `YYMMDD`), then the repeating sequence
+once, for the next run only: `:21:` = the run transfer ID
+(`<ID>/run/<seq>`), `:32B:` = the principal to be received,
+`:52A:` the ordering institution when the From account has a
+registered BIC, otherwise `:50D:` the ordering customer named by
+account ID — never both. There is no `:56a:` and no `:72:` (the
+repeating sequence stops at `:56a:`, and the schedule's memo rides
+the journal entry, not the notice). `:32B:` is the principal only:
+a per-run fee is a separate fee leg and never reduces the amount
+the beneficiary is told to expect. An FX schedule cannot be
+notified — the receivable amount is only known when the rate is
+looked up at fire time (400). Only an active schedule notifies: a
+paused, cancelled, completed, or exhausted schedule is 422, an
+unknown ID 404, and a missing `schedule_id` / `servicing_bic`, an
+invalid servicing BIC, or a schedule that cannot be rendered as a
+valid MT210 400. One MT210 notifies one run: `:30:` is shared
+across the whole message, so a multi-run notice would mix value
+dates. Like MT300, the export is read-only and repeat exports are
+byte-identical until a run fires (then `RunSeq` advances and
+`:21:` / `:30:` move with it). `GET /metrics` counts exports as
+`ledger_mt210_exports_total`.
+
 ### pain.001 付款指令状态机（LG-99）
 
 每次 `GET /exports/pain001` 导出都会在账本内注册一条付款指令
