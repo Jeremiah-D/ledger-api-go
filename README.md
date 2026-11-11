@@ -7379,7 +7379,12 @@ Semantics, stated so operators can trust them:
 - **Matching** — a journaled row is a candidate for a statement line
   when it is effective (pending-review rows are excluded, like the
   exporter), carries the same currency, has equal `|amount|`, and its
-  `CreatedAt` falls within ±24h of `DTPOSTED`. Exactly one candidate is
+  `CreatedAt` falls within the match window of `DTPOSTED` (default
+  ±24h, revisable live in place via
+  `ledger.SetStatementMatchWindow` — audited as
+  `statement_match_window_revised` — so the HTTP import, which
+  always imports with empty options, follows the revised default;
+  an explicit per-import window still wins). Exactly one candidate is
   `matched`; several is `mismatched`; none is `unmatched`.
 - **Idempotency** — the ledger keeps every import report keyed by the
   document's SHA-256. Re-importing the same document returns the
@@ -7457,7 +7462,10 @@ is a `400`. Each notification is then triple-matched with
 - a candidate **matches** when its amount equals the notification's
   (exact cents, no conversion), its currency equals, and its
   creation is within the match window (default ±24h, configurable
-  per import) of the notification's booking date;
+  per import — and revisable live in place via
+  `ledger.SetStatementMatchWindow`, audited as
+  `statement_match_window_revised`, which governs every import
+  that leaves the window unset) of the notification's booking date;
 - several outstanding items under one `EndToEndId` is
   `mismatched` with reason `amount_mismatch`, `currency_mismatch`,
   or `date_out_of_window`; no candidate is `unmatched`.

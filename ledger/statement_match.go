@@ -222,10 +222,9 @@ func (l *Ledger) MatchStatement(account AccountID, lines []StatementLine, opts S
 // already hold l.mu (the write lock) — e.g. SettlePayout, which matches
 // the settlement evidence atomically inside its own state transition.
 func (l *Ledger) matchStatementLocked(account AccountID, lines []StatementLine, opts StatementMatchOptions) (*StatementMatchReport, error) {
-	window := opts.MatchWindow
-	if window <= 0 {
-		window = DefaultOFXMatchWindow
-	}
+	// The live default (LG-394): an explicit opts.MatchWindow
+	// always wins; an unset one reads the revised default.
+	window := l.effectiveStatementMatchWindowLocked(opts.MatchWindow)
 	tolerance := opts.AmountToleranceCents
 	if tolerance < 0 {
 		tolerance = 0

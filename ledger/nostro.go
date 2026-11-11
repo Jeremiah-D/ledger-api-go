@@ -299,10 +299,9 @@ func (l *Ledger) matchNostroLocked(account AccountID, now time.Time, opts Nostro
 	if tolerance < 0 {
 		tolerance = 0
 	}
-	window := opts.MatchWindow
-	if window <= 0 {
-		window = DefaultOFXMatchWindow
-	}
+	// The live default (LG-394): an explicit opts.MatchWindow
+	// always wins; an unset one reads the revised default.
+	window := l.effectiveStatementMatchWindowLocked(opts.MatchWindow)
 
 	// Expected side: the recorded correspondent lines, deterministic
 	// order.

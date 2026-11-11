@@ -60,6 +60,62 @@ NEWFILEUID:NONE
 `
 }
 
+// TestOFXImportEndpointUsesLiveMatchWindow pins that the HTTP
+// importer — which calls ImportOFX with empty options — reads the
+// live default window (LG-394): a statement line 48h from the
+// journaled row is unmatched under the 24h default and matched
+// once the operator widens the live default to 72h.
+func TestOFXImportEndpointUsesLiveMatchWindow(t *testing.T) {
+	posted := time.Now().UTC().Add(48 * time.Hour).Format("20060102150405")
+	importBody := func(doc string) string {
+		raw, err := json.Marshal(map[string]string{"account": "cash", "ofx": doc})
+		if err != nil {
+			t.Fatalf("marshal import body: %v", err)
+		}
+		return string(raw)
+	}
+	run := func(t *testing.T, window time.Duration) map[string]any {
+		t.Helper()
+		l := ledger.New()
+		if window != 0 {
+			if err := l.SetStatementMatchWindow(window); err != nil {
+				t.Fatalf("SetStatementMatchWindow(%v): %v", window, err)
+			}
+		}
+		srv := httptest.NewServer(newRouter(l))
+		defer srv.Close()
+		code, _ := postJSON(t, srv.URL+"/entries",
+			`{"debit_account":"cash","credit_account":"equity","amount_cents":15000,"currency":"USD","memo":"seed","idempotency_key":"ofx-live-win-e1"}`)
+		if code != http.StatusCreated {
+			t.Fatalf("post e1: status=%d", code)
+		}
+		code, body := postJSON(t, srv.URL+"/ofx/import", importBody(ofxImportDoc(posted)))
+		if code != http.StatusOK {
+			t.Fatalf("POST /ofx/import: status=%d body=%v", code, body)
+		}
+		return body
+	}
+
+	// Default 24h window: the 150.00 line is 48h from the row.
+	body := run(t, 0)
+	if n, _ := body["matched"].(float64); n != 0 {
+		t.Errorf("default window: matched = %v, want 0", body["matched"])
+	}
+	if n, _ := body["unmatched"].(float64); n != 2 {
+		t.Errorf("default window: unmatched = %v, want 2", body["unmatched"])
+	}
+
+	// Live default widened to 72h: the same empty-options import
+	// now matches the 150.00 line.
+	body = run(t, 72*time.Hour)
+	if n, _ := body["matched"].(float64); n != 1 {
+		t.Errorf("72h live window: matched = %v, want 1", body["matched"])
+	}
+	if n, _ := body["unmatched"].(float64); n != 1 {
+		t.Errorf("72h live window: unmatched = %v, want 1", body["unmatched"])
+	}
+}
+
 func TestOFXImportEndpoint(t *testing.T) {
 	srv := httptest.NewServer(newRouter(ledger.New()))
 	defer srv.Close()

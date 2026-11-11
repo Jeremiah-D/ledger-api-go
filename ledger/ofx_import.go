@@ -563,15 +563,16 @@ func (l *Ledger) ImportOFX(account AccountID, data []byte, opts OFXImportOptions
 			return nil, fmt.Errorf("%w: statement names account %q, import targets %q", ErrInvalidOFX, t.Account, account)
 		}
 	}
-	window := opts.MatchWindow
-	if window <= 0 {
-		window = DefaultOFXMatchWindow
-	}
 	sum := sha256.Sum256(data)
 	key := hex.EncodeToString(sum[:])
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// The live default (LG-394): an explicit opts.MatchWindow
+	// always wins; an unset one reads the revised default under
+	// the lock, so a revision governs the next line matched.
+	window := l.effectiveStatementMatchWindowLocked(opts.MatchWindow)
 
 	if prev, ok := l.ofxImports[key]; ok {
 		dup := *prev

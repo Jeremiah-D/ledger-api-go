@@ -1502,6 +1502,13 @@ type Ledger struct {
 	// structured audit log ("statement_match" events) remains the
 	// durable record.
 	statementMatches map[string]*statementMatchRecord
+	// statementMatchWindow is the live default ± window around a
+	// statement line's booking date inside which a journaled row
+	// counts as a match candidate when the caller left MatchWindow
+	// unset (see SetStatementMatchWindow, LG-394). It seeds from
+	// DefaultOFXMatchWindow (24h) and does not round-trip through
+	// snapshots — a restore starts again at the default.
+	statementMatchWindow time.Duration
 	// painTransfers is the ISO 20022 pain.001 export registry (see
 	// pain001.go): transfer ID -> transfer principal for every
 	// same-currency transfer (plain and split chunks), in booking order
@@ -1934,6 +1941,7 @@ func New(opts ...Option) *Ledger {
 		ofxImports:                  make(map[string]*OFXImportReport),
 		camt053Imports:              make(map[string]*CAMT053ImportReport),
 		statementMatches:            make(map[string]*statementMatchRecord),
+		statementMatchWindow:         DefaultOFXMatchWindow,
 		painTransfers:               make(map[string]PainTransfer),
 		painInstructions:            make(map[string]*PainInstruction),
 		accountIBANs:                make(map[AccountID]AccountIBAN),

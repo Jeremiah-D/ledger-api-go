@@ -442,15 +442,16 @@ func (l *Ledger) ImportCAMT054(account AccountID, data []byte, opts CAMT054Impor
 			return nil, fmt.Errorf("%w: notification names account %q, import targets %q", ErrInvalidCAMT054, n.Account, account)
 		}
 	}
-	window := opts.MatchWindow
-	if window <= 0 {
-		window = DefaultCAMT054MatchWindow
-	}
 	sum := sha256.Sum256(data)
 	key := hex.EncodeToString(sum[:])
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// The live default (LG-394): an explicit opts.MatchWindow
+	// always wins; an unset one reads the revised default under
+	// the lock, so a revision governs the next notification matched.
+	window := l.effectiveStatementMatchWindowLocked(opts.MatchWindow)
 
 	if prev, ok := l.camt054Imports[key]; ok {
 		dup := *prev
