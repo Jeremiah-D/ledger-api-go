@@ -6331,6 +6331,63 @@ func (s *server) handleMT320Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT321Export implements GET /exports/mt321 (LG-396): a SWIFT
+// FIN/ISO 15022 MT321 third-party loan/deposit settlement
+// instruction for one active or matured term deposit (see
+// ledger.ExportMT321). Query parameters: deposit_id (required),
+// custodian_bic (required, the fund custodian's BIC — the
+// instruction's receiver; the ledger holds no bank-identity
+// registry, so the caller names the custodian on every export),
+// counterparty_bic (required, the deposit-receiving institution's
+// BIC — the institution the principal is paid to). The export is
+// read-only: no version bump, nothing booked, no audit event.
+// Error mapping: a missing deposit_id, custodian_bic, or
+// counterparty_bic is a 400; an unknown deposit is a 404; an
+// early-withdrawn deposit is a 422; an invalid custodian or
+// counterparty BIC, a tiered-rate deposit, or a deposit that
+// cannot be rendered as a valid MT321 (:20C:/:22H: format, LT
+// form) is a 400.
+func (s *server) handleMT321Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT321Exports.Add(1)
+	q := r.URL.Query()
+	depositID := q.Get("deposit_id")
+	if depositID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "deposit_id is required"})
+		return
+	}
+	custodianBIC := q.Get("custodian_bic")
+	if custodianBIC == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "custodian_bic is required"})
+		return
+	}
+	counterpartyBIC := q.Get("counterparty_bic")
+	if counterpartyBIC == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "counterparty_bic is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportMT321(ledger.MT321ExportOptions{
+		DepositID:       depositID,
+		CustodianBIC:    custodianBIC,
+		CounterpartyBIC: counterpartyBIC,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrTermDepositNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrTermDepositNotActive):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrInvalidMT321Export):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(doc))
+}
+
 // pain001ReceiptRequest is one bank receipt in the POST
 // /exports/pain001/{msgid}/receipts body: the pain.002-style per-tx
 // status report. Unknown JSON fields fail fast, like every other POST
@@ -12295,6 +12352,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt300", s.handleMT300Export)
 	mux.HandleFunc("GET /exports/mt304", s.handleMT304Export)
 	mux.HandleFunc("GET /exports/mt320", s.handleMT320Export)
+	mux.HandleFunc("GET /exports/mt321", s.handleMT321Export)
 	mux.HandleFunc("GET /exports/mt210", s.handleMT210Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)

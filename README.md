@@ -5641,6 +5641,58 @@ MT300, the export is read-only and repeat exports are
 byte-identical; active and matured deposits both confirm. `GET
 /metrics` counts exports as `ledger_mt320_exports_total`.
 
+Where MT320 confirms a term deposit, MT321 instructs the fund's
+custodian to settle one: `GET
+/exports/mt321?deposit_id=<id>&custodian_bic=<bic>&counterparty_bic=<bic>`
+renders the deposit as a SWIFT FIN / ISO 15022 MT321 third-party
+loan/deposit settlement instruction (see `ledger.ExportMT321`).
+It is the deposit-side counterpart of MT304 — the same "fund
+manager → custodian" direction, a fixed term loan/deposit instead
+of an FX deal — and the repo's first ISO 15022 syntax export: the
+message is built from `16R` blocks and qualified generic fields
+(`:4!c//…`), not the FIN `:15A:` sequence structure. Sequence
+GENL identifies the instruction (`:20C::SEME//` = the deposit ID,
+`:20C::LDCR//` = the MT320 `:22C:` common reference re-derived
+from the same deposit and counterparty, so the custodian can match
+this instruction against the MT320 confirmation, `:23G:` always
+`NEWM`, `:22H::TLDE//` always `CONF` — an instruction to settle a
+first confirmation); sequence TRADDET states the economics
+(`:20C::CONU//` = the deposit ID, the contract number — the ledger
+holds no separate message or contract number, so SEME and CONU
+take the same value with different meanings, `:22H::DPLO//`
+always `LEND` — the depositor is the lender — `:22H::MICO//`
+always `A009`, Actual/365 (fixed), the same day-count as MT320's
+`:14D:ACT/365`, `:98A::TRAD//` = `:98A::VALU//` = the opening
+date, `:98A::MATU//` = the maturity date, all three 8-digit
+`YYYYMMDD`, `:19A::PRIN//` = the principal, `:19A::SETT//` = the
+amount to settle now — the principal alone, interest settles
+separately at maturity — `:92A::INTR//` = the flat rate,
+`:95a::LDCO//` = the counterparty BIC, always the P option,
+`:95a::INVE//` = the investor, i.e. the fund, i.e. the depositor
+(P option with a registered BIC, else the Q option name-and-address
+line with the account ID), `:97A::SAFE//` = the safekeeping
+account — the registered IBAN when one exists, else the account
+ID); sequence SETT states how the principal moves
+(`:22H::PRIT//` always `APFM` — settlement instructions for
+amounts payable by the investor, the fund pays the principal to
+the counterparty — `:95a::ACCW//` = the counterparty BIC, always
+the P option, the payee bank, `:95a::CDEA//` = the cash delivery
+agent, the depositor side, P option with a registered BIC else Q).
+There is no `:99B:` / `:13a:` / `:20C::POOL/PREV/RELA` /
+`:19A::CINT:/NINT:/RODI:` / `:99B::DAAC:` / `:95a::EXBO:` /
+`:97A::CASH:` / `:70C:`. The custodian and counterparty BICs are
+caller-given on every export — the ledger holds no bank-identity
+registry — the custodian landing in block 2
+(`{2:I321<custodianLT>U3003}`). A tiered-rate deposit has no
+single `:92A::INTR:` to state and is refused (400); an
+early-withdrawn deposit is 422, an unknown ID 404, and a missing
+`deposit_id` / `custodian_bic` / `counterparty_bic`, an invalid
+custodian or counterparty BIC, or a deposit that cannot be
+rendered as a valid MT321 400. Like MT320, the export is
+read-only and repeat exports are byte-identical; active and
+matured deposits both instruct. `GET /metrics` counts exports as
+`ledger_mt321_exports_total`.
+
 #### Rate-table snapshot versioning
 
 Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,
