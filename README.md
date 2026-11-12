@@ -1117,7 +1117,9 @@ governance.)
 
 A plan can be rehearsed before the sweeper touches it: `GET
 /transfer-schedules/{id}/preview?horizon=<duration>` (e.g. `?horizon=72h`;
-default `24h`, max `8760h`) lists the nominal firing times inside the
+default `24h`, max `8760h` by default, revisable live in place via
+`ledger.SetSchedulePreviewMaxHorizon` (audited as
+`schedule_preview_horizon_retuned`)) lists the nominal firing times inside the
 horizon — same recurrence arithmetic the sweeper uses (fixed `interval`
 cadence from `next_run_at`, `ends_at` truncation, no backfill of missed
 runs; paused/cancelled/completed plans preview zero firings) — and
@@ -1136,6 +1138,10 @@ bounded to 10000 by default, revisable live in place via
 `ledger.SetSchedulePreviewMaxFirings` (audited as
 `schedule_preview_firings_retuned`): tightening or loosening takes
 effect on the next preview, and a restart restores the 10000 default.
+The horizon cap is likewise live: `8760h` by default, revisable in
+place via `ledger.SetSchedulePreviewMaxHorizon` (audited as
+`schedule_preview_horizon_retuned`), and a restart restores the
+`8760h` default.
 
 ### Scheduled reports (`Ledger.CreateReportSchedule`)
 

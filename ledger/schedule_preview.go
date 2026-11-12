@@ -44,14 +44,19 @@ import (
 
 var (
 	// ErrScheduleBadHorizon is returned when a preview horizon is not
-	// positive or exceeds maxSchedulePreviewHorizon.
-	ErrScheduleBadHorizon = errors.New("ledger: preview horizon must be positive and at most 8760h")
+	// positive or exceeds the live preview-horizon cap (see
+	// SetSchedulePreviewMaxHorizon, LG-399). The cap is live, so the
+	// message carries no fixed number — PreviewSchedule wraps it
+	// with the cap in force.
+	ErrScheduleBadHorizon = errors.New("ledger: preview horizon must be positive and at most the live preview horizon cap")
 )
 
-// maxSchedulePreviewHorizon caps a preview window at one year: beyond
-// that the advisory value collapses (state will have changed long before
-// the last firing) and the nominal-time list would just burn CPU.
-const maxSchedulePreviewHorizon = 8760 * time.Hour
+// defaultMaxSchedulePreviewHorizon is the default preview-horizon
+// cap: it caps a preview window at one year — beyond that the
+// advisory value collapses (state will have changed long before the
+// last firing) and the nominal-time list would just burn CPU. It
+// seeds the live cap (see SetSchedulePreviewMaxHorizon, LG-399).
+const defaultMaxSchedulePreviewHorizon = 8760 * time.Hour
 
 // defaultMaxPreviewFirings is the default per-preview firing count:
 // it bounds the nominal-time list against pathological cadences (a
@@ -186,10 +191,17 @@ func previewFiringTimes(s TransferSchedule, now, horizonEnd time.Time, maxFiring
 // mutated. A paused, cancelled or completed schedule returns zero
 // firings.
 func (l *Ledger) PreviewSchedule(id string, horizon time.Duration) (SchedulePreview, error) {
-	if horizon <= 0 || horizon > maxSchedulePreviewHorizon {
-		return SchedulePreview{}, ErrScheduleBadHorizon
-	}
 	l.mu.RLock()
+	// LG-399: read the live horizon cap under the read lock the
+	// caller already holds — no new lock, and the value is fixed
+	// for this preview even if a concurrent revision lands
+	// mid-preview. The bounds check moves inside the lock so it
+	// reads the live value, not the construction-time default.
+	maxHorizon := l.schedulePreviewMaxHorizon
+	if horizon <= 0 || horizon > maxHorizon {
+		l.mu.RUnlock()
+		return SchedulePreview{}, fmt.Errorf("%w (max %s)", ErrScheduleBadHorizon, maxHorizon)
+	}
 	sched, ok := l.schedules[id]
 	if !ok {
 		l.mu.RUnlock()

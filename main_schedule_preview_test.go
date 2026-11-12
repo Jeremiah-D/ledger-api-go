@@ -84,3 +84,72 @@ func TestSchedulePreviewHTTP(t *testing.T) {
 		t.Errorf("runs = %d, want 0 (preview records nothing)", len(runs))
 	}
 }
+
+// TestSchedulePreviewHTTPFollowsLiveHorizonCap pins that the HTTP
+// preview bound tracks the live horizon cap (LG-399): loosening
+// the cap via the Go API opens the window for the next HTTP
+// preview, and tightening it closes the window again — the handler
+// must not stay pinned to the construction-time 8760h.
+func TestSchedulePreviewHTTPFollowsLiveHorizonCap(t *testing.T) {
+	l := ledger.New()
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+
+	code, _ := postJSON(t, srv.URL+"/entries",
+		`{"debit_account":"alice","credit_account":"funding","amount_cents":100000}`)
+	if code != http.StatusCreated {
+		t.Fatalf("funding post: status=%d, want 201", code)
+	}
+	nextRun := time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339)
+	code, _ = postJSON(t, srv.URL+"/transfer-schedules", `{
+		"schedule_id": "rent",
+		"from_account": "alice",
+		"to_account": "bob",
+		"amount_cents": 5000,
+		"currency": "USD",
+		"interval": "24h",
+		"next_run_at": "`+nextRun+`"
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create schedule: status=%d, want 201", code)
+	}
+
+	// At the default 8760h cap, a 10000h horizon is refused.
+	code, _ = getJSON(t, srv.URL+"/transfer-schedules/rent/preview?horizon=10000h")
+	if code != http.StatusBadRequest {
+		t.Errorf("horizon=10000h at default cap: status=%d, want 400", code)
+	}
+
+	// Loosen to 17520h: the same horizon now previews (two
+	// firings inside 10000h at a 24h cadence from +30m).
+	if _, err := l.SetSchedulePreviewMaxHorizon(17520 * time.Hour); err != nil {
+		t.Fatalf("SetSchedulePreviewMaxHorizon(17520h): %v", err)
+	}
+	code, body := getJSON(t, srv.URL+"/transfer-schedules/rent/preview?horizon=10000h")
+	if code != http.StatusOK {
+		t.Fatalf("horizon=10000h after loosen: status=%d, want 200 (body=%v)", code, body)
+	}
+	if firings, ok := body["firings"].([]any); !ok || len(firings) != 417 {
+		t.Fatalf("firings = %v, want 417 rows", body["firings"])
+	}
+
+	// Tighten to 48h: the 10000h horizon is refused again, and
+	// even a 72h horizon is refused.
+	if _, err := l.SetSchedulePreviewMaxHorizon(48 * time.Hour); err != nil {
+		t.Fatalf("SetSchedulePreviewMaxHorizon(48h): %v", err)
+	}
+	for _, h := range []string{"10000h", "72h"} {
+		code, _ = getJSON(t, srv.URL+"/transfer-schedules/rent/preview?horizon="+h)
+		if code != http.StatusBadRequest {
+			t.Errorf("horizon=%s after tighten: status=%d, want 400", h, code)
+		}
+	}
+	// A 24h horizon still previews inside the tightened cap.
+	code, body = getJSON(t, srv.URL+"/transfer-schedules/rent/preview?horizon=24h")
+	if code != http.StatusOK {
+		t.Fatalf("horizon=24h after tighten: status=%d, want 200 (body=%v)", code, body)
+	}
+	if firings, ok := body["firings"].([]any); !ok || len(firings) != 1 {
+		t.Fatalf("firings = %v, want 1 row", body["firings"])
+	}
+}

@@ -38,7 +38,7 @@ import (
 //     zero cap would make every preview return zero firings, which
 //     is switching the preview surface off, not a meaningful cap
 //     (along LG-336). There is no upper bound: the horizon cap
-//     (maxSchedulePreviewHorizon) still bounds the window, and the
+//     (defaultMaxSchedulePreviewHorizon) still bounds the window, and the
 //     memory/CPU trade-off belongs to the operator (along LG-356).
 //   - Revising to the current cap is a no-op with no audit event.
 //     The revision is audited as schedule_preview_firings_retuned,

@@ -3131,7 +3131,8 @@ func (s *server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) 
 // handlePreviewTransferSchedule implements GET
 // /transfer-schedules/{id}/preview: a read-only dry-run preview of the
 // schedule's nominal firings inside ?horizon= (a Go duration string like
-// "24h"; default 24h, max 8760h), each with its admission verdict from
+// "24h"; default 24h, max is the live preview-horizon cap (8760h by
+// default, revisable via ledger.SetSchedulePreviewMaxHorizon, LG-399),
 // the full PostTransfer chain (see ledger.PreviewSchedule). Unknown
 // schedule IDs are 404; unparsable or out-of-range horizons are 400.
 // Nothing fires and nothing is recorded — the schedule's state and the
@@ -3143,9 +3144,14 @@ func (s *server) handlePreviewTransferSchedule(w http.ResponseWriter, r *http.Re
 	}
 	horizon := 24 * time.Hour
 	if raw := r.URL.Query().Get("horizon"); raw != "" {
+		// LG-399: the bound is the live horizon cap, not the
+		// construction-time 8760h — an operator who loosened it
+		// via SetSchedulePreviewMaxHorizon must see the same
+		// window here as through the Go API.
+		maxHorizon := s.ledgerFor(r).SchedulePreviewMaxHorizon()
 		d, err := time.ParseDuration(raw)
-		if err != nil || d <= 0 || d > 8760*time.Hour {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid horizon: must be a positive Go duration like \"24h\", at most 8760h"})
+		if err != nil || d <= 0 || d > maxHorizon {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid horizon: must be a positive Go duration like \"24h\", at most %s", maxHorizon)})
 			return
 		}
 		horizon = d

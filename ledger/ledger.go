@@ -1274,6 +1274,13 @@ type Ledger struct {
 	// round-trip through snapshots — preview is read-only, so a
 	// restore starts again at the default.
 	schedulePreviewMaxFirings int
+	// schedulePreviewMaxHorizon is the live preview-horizon cap
+	// (see SetSchedulePreviewMaxHorizon, LG-399): the longest window
+	// PreviewSchedule accepts for one plan. It seeds from
+	// defaultMaxSchedulePreviewHorizon (8760h) and does not
+	// round-trip through snapshots — preview is read-only, so a
+	// restore starts again at the default.
+	schedulePreviewMaxHorizon time.Duration
 	// audit is the structured compliance audit log (see audit.go). Nil
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
@@ -1998,6 +2005,9 @@ func New(opts ...Option) *Ledger {
 	// LG-398: the per-preview firing cap seeds from its own
 	// default (10000) alongside the run-history depth.
 	l.schedulePreviewMaxFirings = defaultMaxPreviewFirings
+	// LG-399: the preview-horizon cap seeds from its own default
+	// (8760h) alongside the firing cap.
+	l.schedulePreviewMaxHorizon = defaultMaxSchedulePreviewHorizon
 	for _, opt := range opts {
 		opt(l)
 	}

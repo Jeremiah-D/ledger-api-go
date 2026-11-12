@@ -236,7 +236,7 @@ func TestPreviewScheduleInactive(t *testing.T) {
 func TestPreviewScheduleHorizonBounds(t *testing.T) {
 	l := New()
 	fundAccount(t, l, "alice", 100000, "USD")
-	for _, h := range []time.Duration{0, -time.Hour, 8761 * time.Hour} {
+	for _, h := range []time.Duration{0, -time.Hour, defaultMaxSchedulePreviewHorizon + time.Hour} {
 		if _, err := l.PreviewSchedule("sched-1", h); !errors.Is(err, ErrScheduleBadHorizon) {
 			t.Errorf("horizon %v: err = %v, want ErrScheduleBadHorizon", h, err)
 		}
