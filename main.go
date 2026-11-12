@@ -5882,6 +5882,64 @@ func (s *server) handleCAMT054Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handleCAMT060Export implements GET /exports/camt060 (LG-400): an
+// ISO 20022 camt.060.001.03 AccountReportingRequest — the request side
+// of the camt.052/053/054 family (see ledger.ExportCAMT060): it asks
+// the account servicing institution to send a report for the account
+// (named by its registered IBAN) over the optional since/until window.
+// The export is read-only: no version bump, no audit event. Error
+// mapping: missing/invalid parameters are 400 (including a lone
+// until, which FrToDt cannot express); an unknown account is 404;
+// a known account with no registered IBAN is 422 (fail-closed, no
+// forged identifiers).
+func (s *server) handleCAMT060Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT060Exports.Add(1)
+	q := r.URL.Query()
+	account := q.Get("account")
+	if account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account is required"})
+		return
+	}
+	var since, until time.Time
+	if v := q.Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since: " + err.Error()})
+			return
+		}
+		since = t
+	}
+	if v := q.Get("until"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid until: " + err.Error()})
+			return
+		}
+		until = t
+	}
+	doc, err := s.ledgerFor(r).ExportCAMT060(ledger.CAMT060ExportOptions{
+		Account:  ledger.AccountID(account),
+		FromDate: since,
+		ToDate:   until,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrEmptyAccountID) ||
+			errors.Is(err, ledger.ErrInvalidCAMT060Export) {
+			status = http.StatusBadRequest
+		} else if errors.Is(err, ledger.ErrUnknownCAMT060Account) {
+			status = http.StatusNotFound
+		} else if errors.Is(err, ledger.ErrMissingAccountIBAN) {
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleSnapshotExport implements GET /exports/snapshot (LG-383): a
 // JSONL disaster-recovery snapshot export (see
 // ledger.ExportSnapshot, whose inverse is ledger.ImportSnapshot). The
@@ -12350,6 +12408,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/camt052", s.handleCAMT052Export)
 	mux.HandleFunc("GET /exports/camt053", s.handleCAMT053Export)
 	mux.HandleFunc("GET /exports/camt054", s.handleCAMT054Export)
+	mux.HandleFunc("GET /exports/camt060", s.handleCAMT060Export)
 	mux.HandleFunc("GET /exports/snapshot", s.handleSnapshotExport)
 	mux.HandleFunc("GET /exports/mt940", s.handleMT940Export)
 	mux.HandleFunc("GET /exports/mt950", s.handleMT950Export)

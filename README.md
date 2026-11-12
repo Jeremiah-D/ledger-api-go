@@ -7652,6 +7652,50 @@ Semantics:
   exporter is honest about the window, the parser is strict about
   importing only real statements.
 
+### camt.060 account reporting request export (Go: `ledger.ExportCAMT060`)
+
+The request side of the camt.052/053/054 family above (LG-400):
+where those exports *render* the reports the ledger already holds,
+this one *asks* the account servicing institution to send one — an
+ISO 20022 `camt.060.001.03` `AccountReportingRequest` naming the
+account by its registered IBAN and, when given, the reporting period
+(`since`/`until`, RFC 3339 half-open window). The bank answers with a
+camt.052, camt.053, or camt.054 according to the standing agreement;
+the request itself names no report type, so it never invents a
+preference the operator did not state. HTTP export: `GET
+/exports/camt060?account=…` (`since`/`until` optional). `GrpHdr`
+carries a deterministic `MsgId` (`camt060-<account>-<from>-<to>`,
+zero bounds as `0`) and the `RptgReq/Id` repeats it; `RptgPrd/FrToDt`
+appears only when a window is given.
+
+Semantics:
+
+- **Request vs report** — camt.053/052/054 are the reports
+  themselves; camt.060 is the ask that brings one back. It is not
+  parsed or imported (no camt.060 import), and no automatic
+  re-request scheduling is attached: the operator asks when they
+  want a report.
+- **Fail-closed identity** — the account is named by its registered
+  IBAN, never by the internal account ID. An account the ledger has
+  never seen (no journal entries, no IBAN registration) is a `404`;
+  a known account with no registered IBAN is a `422`. Missing or
+  invalid parameters are `400` — including a lone `until` with no
+  `since`, which `FrToDt` cannot express (`FrDtTm` is mandatory in
+  ISO `DatePeriodDetails`); the export refuses to invent a start
+  date. `GET /metrics` counts exports as
+  `ledger_camt060_exports_total`.
+- **Read-only** — read lock throughout, no version bump, no journal
+  rows, no audit event: a request is not an attestation. Repeat
+  exports are byte-identical modulo the wall-clock `CreDtTm` line;
+  the `MsgId` is the stable identifier.
+
+```bash
+curl -s 'localhost:8080/exports/camt060?account=alice&since=2026-10-22T09:00:00Z&until=2026-10-23T09:00:00Z' -o request.xml
+# 200 camt.060.001.03: <AcctRptgReq>/<RptgReq>/<Acct>/<Id><IBAN>DE89370400440532013000</IBAN>
+```
+
+Go: `ledger.ExportCAMT060` / `ledger.RenderCAMT060Request`.
+
 ### camt.054 debit/credit notification export (Go: `ledger.ExportCAMT054`)
 
 The inverse of the camt.054 import (LG-164): it renders the account's
