@@ -1267,6 +1267,13 @@ type Ledger struct {
 	// through snapshots — the schedules themselves survive a
 	// restore, the depth starts again at the default.
 	scheduleRunHistoryDepth int
+	// schedulePreviewMaxFirings is the live per-preview firing
+	// count (see SetSchedulePreviewMaxFirings, LG-398): how many
+	// nominal firings PreviewSchedule lists at most for one plan.
+	// It seeds from defaultMaxPreviewFirings (10000) and does not
+	// round-trip through snapshots — preview is read-only, so a
+	// restore starts again at the default.
+	schedulePreviewMaxFirings int
 	// audit is the structured compliance audit log (see audit.go). Nil
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
@@ -1988,6 +1995,9 @@ func New(opts ...Option) *Ledger {
 	// LG-397: the transfer-schedule run-history depth seeds from
 	// its own default (100) alongside the report side.
 	l.scheduleRunHistoryDepth = defaultMaxScheduleRuns
+	// LG-398: the per-preview firing cap seeds from its own
+	// default (10000) alongside the run-history depth.
+	l.schedulePreviewMaxFirings = defaultMaxPreviewFirings
 	for _, opt := range opts {
 		opt(l)
 	}

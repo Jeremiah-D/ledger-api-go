@@ -1131,7 +1131,11 @@ firings are evaluated in nominal order so an admitted run's movement is
 visible to the later ones. The preview is strictly read-only: no journal
 writes, no version bump, no audit events, no idempotency keys consumed,
 and the schedule's `next_run_at`/`run_seq`/status are never mutated —
-the sweeper never sees a preview run.
+the sweeper never sees a preview run. The per-preview firing count is
+bounded to 10000 by default, revisable live in place via
+`ledger.SetSchedulePreviewMaxFirings` (audited as
+`schedule_preview_firings_retuned`): tightening or loosening takes
+effect on the next preview, and a restart restores the 10000 default.
 
 ### Scheduled reports (`Ledger.CreateReportSchedule`)
 

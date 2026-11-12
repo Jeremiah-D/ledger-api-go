@@ -53,12 +53,14 @@ var (
 // the last firing) and the nominal-time list would just burn CPU.
 const maxSchedulePreviewHorizon = 8760 * time.Hour
 
-// maxPreviewFirings bounds the nominal-time list against pathological
-// cadences (a sub-second interval over a year-long horizon would
-// otherwise produce billions of firings). Real plans — payroll, rent,
+// defaultMaxPreviewFirings is the default per-preview firing count:
+// it bounds the nominal-time list against pathological cadences (a
+// sub-second interval over a year-long horizon would otherwise produce
+// billions of firings). It seeds the live cap (see
+// SetSchedulePreviewMaxFirings, LG-398). Real plans — payroll, rent,
 // loan servicing — never approach it; when it bites, the preview is
 // truncated and the caller sees the cap in the returned slice length.
-const maxPreviewFirings = 10000
+const defaultMaxPreviewFirings = 10000
 
 // SchedulePreviewFiring is one nominal run inside a preview: whether
 // the twin's admission chain would accept it, why not if it wouldn't,
@@ -151,11 +153,13 @@ func scheduleFailureCode(err error) string {
 // past and then advances with fireSchedule's exact skip formula —
 // now + (Interval - elapsed%Interval) — so the sequence shows the one
 // real run the next sweep would fire, followed by the future cadence,
-// never a backfill of the missed gap.
-func previewFiringTimes(s TransferSchedule, now, horizonEnd time.Time) []time.Time {
+// never a backfill of the missed gap. maxFirings is the live per-preview
+// cap (see SetSchedulePreviewMaxFirings, LG-398), passed in by the
+// caller so the free function stays lock-free.
+func previewFiringTimes(s TransferSchedule, now, horizonEnd time.Time, maxFirings int) []time.Time {
 	var out []time.Time
 	due := s.NextRunAt
-	for len(out) < maxPreviewFirings {
+	for len(out) < maxFirings {
 		if due.After(horizonEnd) {
 			break
 		}
@@ -192,6 +196,11 @@ func (l *Ledger) PreviewSchedule(id string, horizon time.Duration) (SchedulePrev
 		return SchedulePreview{}, ErrScheduleNotFound
 	}
 	schedCopy := *sched
+	// LG-398: read the live per-preview firing cap under the read
+	// lock the caller already holds — no new lock, and the value is
+	// fixed for this preview even if a concurrent revision lands
+	// mid-preview.
+	maxFirings := l.schedulePreviewMaxFirings
 	// One twin for the whole preview: firings evaluate sequentially so
 	// an admitted run's balance movement is visible to the later ones.
 	twin := l.cloneForDryRunLocked()
@@ -218,7 +227,7 @@ func (l *Ledger) PreviewSchedule(id string, horizon time.Duration) (SchedulePrev
 		return preview, nil
 	}
 
-	times := previewFiringTimes(schedCopy, now, now.Add(horizon))
+	times := previewFiringTimes(schedCopy, now, now.Add(horizon), maxFirings)
 	firings := make([]SchedulePreviewFiring, 0, len(times))
 	for i, due := range times {
 		seq := schedCopy.RunSeq + 1 + uint64(i)
