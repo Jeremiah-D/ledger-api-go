@@ -369,7 +369,7 @@ func TestScheduleRunHistoryBounded(t *testing.T) {
 	if _, _, err := l.CreateTransferSchedule(s); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	for i := 0; i < maxScheduleRuns+5; i++ {
+	for i := 0; i < defaultMaxScheduleRuns+5; i++ {
 		now = now.Add(time.Second)
 		runs := l.SweepDue(now)
 		if len(runs) != 1 {
@@ -380,8 +380,8 @@ func TestScheduleRunHistoryBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(runs) != maxScheduleRuns {
-		t.Errorf("history = %d runs, want capped at %d", len(runs), maxScheduleRuns)
+	if len(runs) != defaultMaxScheduleRuns {
+		t.Errorf("history = %d runs, want capped at %d", len(runs), defaultMaxScheduleRuns)
 	}
 	// Newest first.
 	if runs[0].RunSeq <= runs[len(runs)-1].RunSeq {

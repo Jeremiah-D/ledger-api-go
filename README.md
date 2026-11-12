@@ -747,7 +747,12 @@ cancelled/completed are terminal), run history (`GET
 `Reconcile` report counts active plans (`active_transfer_schedules`).
 Fired runs increment `ledger_scheduled_transfers_total`. Schedules are
 structural state: they survive disaster-recovery snapshots (run history
-does not). The sweeper interval only sets the scan cadence — how often
+does not). Run history is bounded to the newest 100 runs per plan by
+default, revisable live in place via
+`ledger.SetScheduleRunHistoryDepth` (audited as
+`schedule_runs_retuned`): tightening trims every plan's stored
+history immediately, widening only affects later runs, and a restart
+restores the 100-run default. The sweeper interval only sets the scan cadence — how often
 the schedule table is checked — while each plan's own `interval` sets
 how often that plan fires; the two are independent, and revising one
 never moves the other. An operator can retune the live sweeper interval

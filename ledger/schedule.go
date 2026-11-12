@@ -223,10 +223,11 @@ type ScheduleRun struct {
 	SkippedRuns int64 `json:"skipped_runs,omitempty"`
 }
 
-// maxScheduleRuns bounds the per-schedule run history: the newest runs
-// stay, the oldest are evicted. History is operational — it does not
-// survive snapshots.
-const maxScheduleRuns = 100
+// defaultMaxScheduleRuns is the default per-schedule run history
+// depth: the newest runs stay, the oldest are evicted. It seeds the
+// live depth (see SetScheduleRunHistoryDepth, LG-397). History is
+// operational — it does not survive snapshots.
+const defaultMaxScheduleRuns = 100
 
 // ScheduleSweeper is the background worker that fires due transfer
 // schedules on a ticker: the in-process version of polling SweepDue on a
@@ -579,11 +580,7 @@ func (l *Ledger) activeScheduleCountLocked() int {
 // recordScheduleRunLocked appends a run to the schedule's bounded history.
 // Callers must hold the write lock.
 func (l *Ledger) recordScheduleRunLocked(sched *TransferSchedule, run ScheduleRun) {
-	runs := append(l.scheduleRuns[sched.ID], run)
-	if len(runs) > maxScheduleRuns {
-		runs = runs[len(runs)-maxScheduleRuns:]
-	}
-	l.scheduleRuns[sched.ID] = runs
+	l.scheduleRuns[sched.ID] = l.trimScheduleRunHistoryLocked(append(l.scheduleRuns[sched.ID], run))
 }
 
 // SweepDue fires every active schedule whose NextRunAt is at or before

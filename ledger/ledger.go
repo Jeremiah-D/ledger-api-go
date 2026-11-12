@@ -1231,7 +1231,8 @@ type Ledger struct {
 	// schedule.go), keyed by schedule ID. scheduleKeys maps a schedule
 	// creation's idempotency key to its schedule ID — its own namespace,
 	// like mergeKeys. scheduleRuns holds each schedule's bounded run
-	// history (newest appended; evicted past maxScheduleRuns). All three
+	// history (newest appended; evicted past the live
+	// scheduleRunHistoryDepth, LG-397). All three
 	// are structural state and survive snapshots; the run history does
 	// not. scheduleFiring marks schedules with a sweep in flight so
 	// concurrent SweepDue calls serialize per schedule.
@@ -1259,6 +1260,13 @@ type Ledger struct {
 	// through snapshots — report subscriptions are process-lifetime
 	// state, so a restore starts again at the default.
 	reportRunHistoryDepth int
+	// scheduleRunHistoryDepth is the live per-schedule run history
+	// depth (see SetScheduleRunHistoryDepth, LG-397): how many of
+	// the newest runs ListScheduleRuns keeps per schedule. It seeds
+	// from defaultMaxScheduleRuns (100) and does not round-trip
+	// through snapshots — the schedules themselves survive a
+	// restore, the depth starts again at the default.
+	scheduleRunHistoryDepth int
 	// audit is the structured compliance audit log (see audit.go). Nil
 	// means disabled: operations skip event construction entirely and
 	// reads never touch it, so the read path is unaffected.
@@ -1977,6 +1985,9 @@ func New(opts ...Option) *Ledger {
 	// narrower than this key needs, and re-aligning the whole
 	// literal for one field would be pure format churn.
 	l.reportRunHistoryDepth = defaultMaxReportRuns
+	// LG-397: the transfer-schedule run-history depth seeds from
+	// its own default (100) alongside the report side.
+	l.scheduleRunHistoryDepth = defaultMaxScheduleRuns
 	for _, opt := range opts {
 		opt(l)
 	}

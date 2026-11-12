@@ -318,7 +318,7 @@ type ReportRun struct {
 // defaultMaxReportRuns is the default per-schedule run history
 // depth: the newest runs stay, the oldest are evicted. It seeds the
 // live depth (see SetReportRunHistoryDepth, LG-395). Mirrors
-// maxScheduleRuns (LG-41).
+// defaultMaxScheduleRuns (LG-41, LG-397).
 const defaultMaxReportRuns = 100
 
 // ReportSweeper is the background worker that generates due report
