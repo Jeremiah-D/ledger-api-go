@@ -64,6 +64,10 @@ type Metrics struct {
 	Pacs008Exports atomic.Uint64
 	// Pain001Exports counts GET /exports/pain001 requests served.
 	Pain001Exports atomic.Uint64
+	// Pain007Exports counts GET /exports/pain007 ISO 20022 pain.007
+	// customer payment cancellation request export requests served,
+	// including rejected exports (see ledger.ExportPain007, LG-401).
+	Pain007Exports atomic.Uint64
 	// Pain001StatusQueries counts GET /exports/pain001/{msgid}/status
 	// requests served (LG-99).
 	Pain001StatusQueries atomic.Uint64
@@ -1046,6 +1050,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /camt054/import camt.054 debit/credit notification imports served, including duplicates and rejected payloads.", m.CAMT054Imports.Load())
 	writeCounter(&sb, "ledger_pain001_exports_total",
 		"Total GET /exports/pain001 ISO 20022 pain.001 payment instruction exports served.", m.Pain001Exports.Load())
+	writeCounter(&sb, "ledger_pain007_exports_total",
+		"Total GET /exports/pain007 ISO 20022 pain.007 customer payment cancellation request exports served, including rejected exports.", m.Pain007Exports.Load())
 	writeCounter(&sb, "ledger_pain001_status_queries_total",
 		"Total GET /exports/pain001/{msgid}/status payment-instruction status queries served.", m.Pain001StatusQueries.Load())
 	writeCounter(&sb, "ledger_pain001_receipts_total",

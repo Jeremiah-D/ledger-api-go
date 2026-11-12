@@ -6205,6 +6205,51 @@ A malformed timestamp, an inverted window, or an invalid currency is a
 `400`, fail-fast. `GET /metrics` counts exports as
 `ledger_pain001_exports_total`.
 
+### `GET /exports/pain007` — ISO 20022 pain.007 customer payment cancellation request
+
+The customer-side counterpart of the pain.001 export above
+(LG-401): where pain.001 *orders* a payment, pain.007 *asks the bank
+to cancel* one already sent — a `pain.007.001.02`
+`CustomerPaymentCancellationRequest` for one registered transfer.
+Query parameters: `transfer_id` (required, the pain.001
+`EndToEndId`), `reason` (optional cancellation reason code:
+`DUPL`/`AM09`/`FRAD`/`CUST`, the admitted interbank vocabulary
+shared with the pacs.007 reversal export; empty omits the `Rsn`
+block, never defaulted). The request names the original instruction
+by `OrgnlEndToEndId` plus the `OrgnlTxRef` amount and debtor/creditor
+IBANs; when the ledger exported the original instruction, its
+deterministic `MsgId` is recovered from the pain.001 instruction
+registry as `OrgnlMsgId` (with `OrgnlMsgNmId`
+`pain.001.001.03` and the re-derived `OrgnlPmtInfId`) — and omitted,
+never invented, when the transfer was never exported. `GrpHdr/MsgId`
+is deterministic (`<transferID>/cxl`).
+
+Semantics:
+
+- **Request, not reversal** — the export changes no transfer state
+  and opens no record: whether the bank honours the request is
+  confirmed by a pain.002 / pacs.002 receipt, never by this document.
+  The in-ledger undo stays with `ReverseEntry` (LG-401's gate reuses
+  its `ErrAlreadyReversed`).
+- **Gates** — unknown transfer `404`; pending-review transfer `422`
+  (a frozen transfer never left the ledger, so there is nothing for
+  the bank to cancel — approve or reject the review first);
+  already-reversed transfer `409` (the money is already undone
+  in-ledger; a partial reversal does not block, the remainder is
+  still live); missing debtor/creditor IBAN `422`, fail-closed;
+  missing `transfer_id` or an invalid reason `400`. `GET /metrics`
+  counts exports as `ledger_pain007_exports_total`.
+- **Read-only** — read lock throughout, no version bump, no journal
+  rows, no audit event. Repeat exports are byte-identical modulo the
+  wall-clock `CreDtTm` line; the `MsgId` is the stable identifier.
+
+```bash
+curl -s 'localhost:8080/exports/pain007?transfer_id=pay-1&reason=CUST' -o cancel.xml
+# 200 pain.007.001.02: <CstmrPmtCxlReq>/<OrgnlPmtInfAndSts>/<TxInfAndSts>/<OrgnlEndToEndId>pay-1
+```
+
+Go: `ledger.ExportPain007` / `ledger.RenderPain007Request`.
+
 ### `GET /exports/mt101` — SWIFT FIN MT101 customer request-for-transfer export
 
 The same instruction in FIN form: `GET

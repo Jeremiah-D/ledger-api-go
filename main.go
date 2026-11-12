@@ -5715,6 +5715,51 @@ func (s *server) handlePain001Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePain007Export implements GET /exports/pain007 (LG-401): an
+// ISO 20022 pain.007.001.02 customer payment cancellation request for
+// one registered transfer (see ledger.ExportPain007) — the customer
+// asks the bank to cancel a payment already sent. Query parameters:
+// transfer_id (required), reason (optional cancellation reason code:
+// DUPL/AM09/FRAD/CUST; empty omits the Rsn block). The export is
+// read-only: it changes no transfer state and opens no record;
+// whether the bank honours the request is confirmed by a pain.002 /
+// pacs.002 receipt. Error mapping: missing transfer_id, an invalid
+// reason, or a malformed request is 400; an unknown transfer is 404;
+// an already-reversed transfer is 409; a pending-review transfer or
+// a missing debtor/creditor IBAN is 422 (fail-closed).
+func (s *server) handlePain007Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain007Exports.Add(1)
+	q := r.URL.Query()
+	transferID := q.Get("transfer_id")
+	if transferID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "transfer_id is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPain007(ledger.Pain007ExportOptions{
+		TransferID: transferID,
+		ReasonCode: q.Get("reason"),
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ledger.ErrInvalidPain007Export) ||
+			errors.Is(err, ledger.ErrInvalidPain007Reason) {
+			status = http.StatusBadRequest
+		} else if errors.Is(err, ledger.ErrUnknownPain007Transfer) {
+			status = http.StatusNotFound
+		} else if errors.Is(err, ledger.ErrAlreadyReversed) {
+			status = http.StatusConflict
+		} else if errors.Is(err, ledger.ErrPain007PendingReview) ||
+			errors.Is(err, ledger.ErrMissingAccountIBAN) {
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handleCAMT052Export implements GET /exports/camt052 (LG-170): an
 // ISO 20022 camt.052.001.02 BankToCustomerAccountReport — the intraday
 // sibling of the camt.053 end-of-day statement (see
@@ -12381,6 +12426,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/balance-at", s.handleBalanceAt)
 	mux.HandleFunc("GET /accounts/{id}/ofx", s.handleOFXExport)
 	mux.HandleFunc("GET /exports/pain001", s.handlePain001Export)
+	mux.HandleFunc("GET /exports/pain007", s.handlePain007Export)
 	mux.HandleFunc("GET /exports/mt101", s.handleMT101Export)
 	mux.HandleFunc("GET /exports/pain001/{msgid}/status", s.handlePain001Status)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
