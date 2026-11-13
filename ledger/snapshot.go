@@ -592,6 +592,12 @@ type snapshotConfigLine struct {
 	// re-import an already imported statement as new, so the registry
 	// round-trips like the idempotency indexes.
 	CAMT053ImportRegistry []CAMT053ImportRecord `json:"camt053_import_registry,omitempty"`
+	// CAMT052ImportRegistry carries the camt.052 intraday-report
+	// import registry (see ImportCAMT052 in camt052_import.go,
+	// LG-408): same shape and same round-trip invariant as the
+	// camt.053 registry; absent in snapshots written before camt.052
+	// import existed.
+	CAMT052ImportRegistry []CAMT052ImportRecord `json:"camt052_import_registry,omitempty"`
 	// TdInterestExpense carries the ledger-wide term-deposit
 	// interest-expense account (see SetTermDepositInterestExpense);
 	// absent in snapshots written before term deposits existed. A
@@ -748,7 +754,7 @@ type snapshotConfigLine struct {
 	// (SetUboControlThreshold requires 1..10000bp), so a missing
 	// threshold means "before UBO support" and keeps the default.
 	UboDeclarations []UboDeclaration `json:"ubo_declarations,omitempty"`
-	UboThresholdBP  int64             `json:"ubo_threshold_bp,omitempty"`
+	UboThresholdBP  int64            `json:"ubo_threshold_bp,omitempty"`
 	// Invoices carries the issued invoice register (see invoice.go,
 	// LG-148), sorted by invoice ID; absent in snapshots written
 	// before invoice support existed. The register is re-validated on
@@ -1359,6 +1365,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		Suspended:               l.suspendedCopyLocked(),
 		OFXImportRegistry:       l.ofxImportsLocked(),
 		CAMT053ImportRegistry:   l.camt053ImportsLocked(),
+		CAMT052ImportRegistry:   l.camt052ImportsLocked(),
 		TdInterestExpense:       l.tdInterestExpense,
 		PayoutClearingAccount:   l.payoutClearingAccount,
 		FedNowSettlementAccount: l.fedNowSettlementAccount,
@@ -2637,6 +2644,21 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			return bad("camt053 import record sha mismatch for %q", rec.DocumentSHA256)
 		}
 	}
+	// camt.052 import registry (LG-408): the same idempotency
+	// invariant as the camt.053 registry.
+	seenCAMT052Shas := make(map[string]bool, len(cfg.CAMT052ImportRegistry))
+	for _, rec := range cfg.CAMT052ImportRegistry {
+		if rec.DocumentSHA256 == "" {
+			return bad("camt052 import record with empty document_sha256")
+		}
+		if seenCAMT052Shas[rec.DocumentSHA256] {
+			return bad("duplicate camt052 import record for sha %q", rec.DocumentSHA256)
+		}
+		seenCAMT052Shas[rec.DocumentSHA256] = true
+		if rec.Report.DocumentSHA256 != rec.DocumentSHA256 {
+			return bad("camt052 import record sha mismatch for %q", rec.DocumentSHA256)
+		}
+	}
 	// Pain.001 export registry (see pain001.go): every record must name
 	// a non-empty transfer ID, non-empty payer/payee, a positive
 	// amount, and a valid currency — the registry is the payment
@@ -3705,6 +3727,13 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		rep := rec.Report
 		l.camt053Imports[rec.DocumentSHA256] = &rep
 	}
+	// The camt.052 import registry restores like the camt.053 one
+	// (LG-408): same idempotency, same restore invariant.
+	l.camt052Imports = make(map[string]*CAMT053ImportReport, len(cfg.CAMT052ImportRegistry))
+	for _, rec := range cfg.CAMT052ImportRegistry {
+		rep := rec.Report
+		l.camt052Imports[rec.DocumentSHA256] = &rep
+	}
 	// The pain.001 export registry restores like the idempotency
 	// indexes: a restore that dropped it would silently un-export
 	// pre-restore transfers. Validated above; installed verbatim.
@@ -4340,6 +4369,11 @@ func snapshotLedgersEqual(a, b *Ledger) bool {
 	// The camt.053 import registry round-trips like the OFX one
 	// (LG-103): same idempotency, same restore invariant.
 	if !reflect.DeepEqual(a.camt053Imports, b.camt053Imports) {
+		return false
+	}
+	// The camt.052 import registry round-trips like the camt.053 one
+	// (LG-408): same idempotency, same restore invariant.
+	if !reflect.DeepEqual(a.camt052Imports, b.camt052Imports) {
 		return false
 	}
 	// The external account mappings must round-trip exactly: a restore

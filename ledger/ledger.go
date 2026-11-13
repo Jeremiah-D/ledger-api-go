@@ -1521,6 +1521,12 @@ type Ledger struct {
 	// index — it survives snapshots, because a restore that dropped it
 	// would re-import the same statement as new.
 	camt053Imports map[string]*CAMT053ImportReport
+	// camt052Imports is the ISO 20022 camt.052 intraday report import
+	// registry (see camt052_import.go, LG-408): document SHA-256 (hex)
+	// -> import report, for duplicate-import idempotency. Structural
+	// state like the camt.053 index — it survives snapshots for the
+	// same reason.
+	camt052Imports map[string]*CAMT053ImportReport
 	// statementMatches is the statement-line match registry (see
 	// statement_match.go, LG-107): statement line ID
 	// ("ofx/<FITID>" / "camt053/<stmtID>/<seq>", see DraftEntry.ID) ->
@@ -1992,6 +1998,7 @@ func New(opts ...Option) *Ledger {
 		revalBaselines:              make(map[revalKey]revalBaseline),
 		ofxImports:                  make(map[string]*OFXImportReport),
 		camt053Imports:              make(map[string]*CAMT053ImportReport),
+		camt052Imports:              make(map[string]*CAMT053ImportReport),
 		statementMatches:            make(map[string]*statementMatchRecord),
 		statementMatchWindow:        DefaultOFXMatchWindow,
 		painTransfers:               make(map[string]PainTransfer),

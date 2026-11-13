@@ -86,7 +86,7 @@ func camt053IndicatorOf(d CAMT053Direction) (string, error) {
 // so the emitted document is what a bank expects to receive. The
 // import path (camt053.go) is untouched.
 type camt053xDocument struct {
-	XMLName     xml.Name           `xml:"urn:iso:std:iso:20022:tech:xsd:camt.053.001.02 Document"`
+	XMLName       xml.Name              `xml:"urn:iso:std:iso:20022:tech:xsd:camt.053.001.02 Document"`
 	BkToCstmrStmt camt053xBkToCstmrStmt `xml:"BkToCstmrStmt"`
 }
 
@@ -101,8 +101,8 @@ type camt053xGrpHdr struct {
 }
 
 type camt053xStmt struct {
-	ID      string        `xml:"Id"`
-	Acct    camt053xAcct  `xml:"Acct"`
+	ID      string         `xml:"Id"`
+	Acct    camt053xAcct   `xml:"Acct"`
 	Entries []camt053xNtry `xml:"Ntry"`
 }
 
@@ -111,6 +111,10 @@ type camt053xAcct struct {
 }
 
 type camt053xAcctID struct {
+	// IBAN carries the statement account when the bank names it by
+	// IBAN (LG-408: the camt.052 importer reads it); the camt.053
+	// exporter never sets it, so it stays omitted from exports.
+	IBAN string       `xml:"IBAN,omitempty"`
 	Othr camt053xOthr `xml:"Othr"`
 }
 
@@ -119,10 +123,13 @@ type camt053xOthr struct {
 }
 
 type camt053xNtry struct {
-	Amt       camt053xAmt  `xml:"Amt"`
-	CdtDbtInd string       `xml:"CdtDbtInd"`
-	BookgDt   camt053xDt   `xml:"BookgDt"`
-	NtryDtls  camt053xDtls `xml:"NtryDtls"`
+	Amt       camt053xAmt `xml:"Amt"`
+	CdtDbtInd string      `xml:"CdtDbtInd"`
+	BookgDt   camt053xDt  `xml:"BookgDt"`
+	// ValDt is the value-date fallback the camt.052 importer reads
+	// (LG-408); the exporter never sets it, so it stays omitted.
+	ValDt    *camt053xDt  `xml:"ValDt,omitempty"`
+	NtryDtls camt053xDtls `xml:"NtryDtls"`
 }
 
 type camt053xAmt struct {
@@ -131,6 +138,10 @@ type camt053xAmt struct {
 }
 
 type camt053xDt struct {
+	// Dt carries the date-only form (LG-408: banks report Bal and
+	// Ntry dates as plain dates); the exporter only ever sets DtTm,
+	// so Dt stays omitted from exports.
+	Dt   string `xml:"Dt,omitempty"`
 	DtTm string `xml:"DtTm"`
 }
 

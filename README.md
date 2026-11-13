@@ -7668,9 +7668,10 @@ camt.053 同规则），外加每币种两条余额快照：`OPBD`（窗口开�
 一刻的 booked balance）和 `CLBD`（窗口关闭前一刻）。
 
 语义：
-- 与 camt.053 导入/导出（LG-103/LG-158）正交：camt.053 是日终
-  statement 往返（导入解析 ↔ 导出渲染），camt.052 只回答"现在
-  账上多少钱"，不做 round-trip 解析。
+- 与 camt.053 导入/导出（LG-103/LG-158）同款往返：camt.053 是日终
+  statement 往返（导入解析 ↔ 导出渲染），camt.052 也是导入解析 ↔
+  导出渲染（LG-408）——只不过它回答的是日间切片"现在账上多少钱"，
+  而不是一整天的对账单。
 - 恒等式：`CLBD == OPBD + 窗口内分录净额`（每币种），测试钉死；
   自转账净零、负余额渲染为 `DBIT` + 绝对金额。
 - `account`/`rpt_id`/`since`/`until` 必填（RFC 3339），`currency`
@@ -7686,6 +7687,40 @@ curl -s 'localhost:8080/exports/camt052?account=ops&rpt_id=RPT-1&since=2026-10-2
 ```
 
 Go: `ledger.ExportCAMT052` / `ledger.RenderCAMT052Report`。
+
+### `POST /camt052/import` — ISO 20022 camt.052 日间账户报告导入勾对
+
+导出的逆操作（LG-408）：银行发来的 `camt.052.001.02`
+（`BankToCustomerAccountReport`）回盘解析为 `Ntry` 预发分录 +
+`OPBD`/`CLBD` 余额快照，逐笔与账本勾对后返回 pre-posting 报告。
+`POST /camt052/import`（JSON body
+`{"account": "<the report account>", "camt052": "<Document>...</Document>"}`）
+以 `ledger.ParseCAMT052` 解析（`BkToCstmrAcctRpt` + `Rpt` + `Bal` +
+`Ntry`，与 `RenderCAMT052Report` 互为逆操作；命名空间容忍）、
+以 `ledger.ImportCAMT052` 勾对：
+
+- **逐笔三态**：与 camt.053 导入共用 `matchStatementCandidatesLocked`
+  匹配器——恰一候选为 `matched`、多候选为 `mismatched`、无候选为
+  `unmatched`（默认 ±24h 窗口，`CAMT053ImportOptions.MatchWindow`
+  可调）；每笔附 `DraftEntry`（`camt053/<rptID>/<seq>`），供复核后
+  入账。
+- **余额随报告返回**：`balances` 字段原样带回报告里的全部 `OPBD`/
+  `CLBD` 快照（每币种一对）；每条 `CLBD` 与账本在同一时刻折出的
+  余额比对，不一致只进 `balance_mismatches` 报告、不 fail-closed——
+  import 只做证据、不动账。
+- 报告账户与目标账户不匹配、零 `Ntry` 文档、畸形文档均为 `400`；
+  同一文档重导返回原报告且 `duplicate=true`（SHA-256 登记，
+  快照往返保留，去重登记与 camt.053 同制）。
+- 只读：不记账、不动 journal、不 bump version——与 `ImportCAMT053`
+  同契约。计数器 `ledger_camt052_imports_total`。
+
+```bash
+curl -s -X POST localhost:8080/camt052/import \
+  -d '{"account":"ops","camt052":"<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:camt.052.001.02\">...</Document>"}'
+# 200 {"matched":1,"unmatched":1,"balances":[{"Type":"OPBD",...},{"Type":"CLBD",...}],...}
+```
+
+Go: `ledger.ParseCAMT052` / `ledger.ImportCAMT052`。
 
 ### `POST /ofx/import` — OFX 2.x statement import to pre-posting drafts
 
@@ -7847,7 +7882,7 @@ account their money with us:
 ```go
 l.RegisterNostroAccount("nostro-usd", "CHASE", ledger.NostroKindNostro)
 // 期望行：camt.053 入站行经 ledger.NewStatementLineFromCAMT053 归一化，
-// 或手写 StatementLine（camt.052 在本账本中无入站解析器）
+// 或手写 StatementLine（camt.052 行亦可经 POST /camt052/import 回盘勾对，LG-408）
 l.RecordNostroExpectations("nostro-usd", lines)
 rep, _ := l.MatchNostro("nostro-usd", time.Now().UTC(), ledger.NostroMatchOptions{})
 ```
@@ -10771,6 +10806,9 @@ curl -s localhost:8080/metrics
 - `ledger_camt052_exports_total` — `GET /exports/camt052` ISO 20022
   camt.052 intraday account report exports served, including rejected
   exports.
+- `ledger_camt052_imports_total` — `POST /camt052/import` ISO 20022
+  camt.052 intraday account report pre-posting imports served,
+  including duplicates and rejected payloads.
 - `ledger_pacs002_exports_total` — `GET /exports/pacs002` ISO 20022
   pacs.002 FI-to-FI payment status report exports served, including
   rejected exports.

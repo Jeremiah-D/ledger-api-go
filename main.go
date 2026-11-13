@@ -8551,6 +8551,46 @@ func (s *server) handleCAMT053Import(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
+// camt052ImportRequest is the POST /camt052/import body: the ledger
+// account the report belongs to, and the raw camt.052 XML document.
+type camt052ImportRequest struct {
+	Account ledger.AccountID `json:"account"`
+	CAMT052 string           `json:"camt052"`
+}
+
+// handleCAMT052Import implements POST /camt052/import (LG-408): it
+// parses an ISO 20022 camt.052 intraday account report and returns a
+// pre-posting (draft) reconciliation report (see
+// ledger.ImportCAMT052). Nothing is posted, no version is bumped: the
+// response tells the operator what the report claims, what the ledger
+// already has, and which CLBD balances disagree with the books.
+// Re-importing the same document returns the original report with
+// duplicate=true. A missing account, an empty document, a malformed
+// document, a report with no Ntry entries, or a report naming a
+// different account is a 400. There is no special auth, like the
+// /camt053/import endpoint.
+func (s *server) handleCAMT052Import(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT052Imports.Add(1)
+	var req camt052ImportRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.Account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account is required"})
+		return
+	}
+	if strings.TrimSpace(req.CAMT052) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "camt052 document is required"})
+		return
+	}
+	report, err := s.ledgerFor(r).ImportCAMT052(req.Account, []byte(req.CAMT052), ledger.CAMT053ImportOptions{})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // fedNowPacs008Request is the POST /fednow/pacs008 body: the raw
 // pacs.008 (FIToFICstmrCdtTrf) XML document as text.
 type fedNowPacs008Request struct {
@@ -12777,6 +12817,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /gpi/link", s.handleGPILink)
 	mux.HandleFunc("GET /accounts/{id}/statement", s.handleStatement)
 	mux.HandleFunc("POST /ofx/import", s.handleOFXImport)
+	mux.HandleFunc("POST /camt052/import", s.handleCAMT052Import)
 	mux.HandleFunc("POST /camt053/import", s.handleCAMT053Import)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)

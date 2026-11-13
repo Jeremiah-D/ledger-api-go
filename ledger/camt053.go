@@ -107,7 +107,7 @@ const (
 // outcome.
 type CAMT053ImportItem struct {
 	Transaction CAMT053Transaction `json:"transaction"`
-	Draft       DraftEntry        `json:"draft"`
+	Draft       DraftEntry         `json:"draft"`
 	Status      CAMT053MatchStatus `json:"status"`
 	// MatchedEntryID names the journaled row when Status is matched.
 	MatchedEntryID string `json:"matched_entry_id,omitempty"`
@@ -118,15 +118,23 @@ type CAMT053ImportItem struct {
 
 // CAMT053ImportReport is the full pre-posting report for one imported
 // statement. Duplicate is true when the report is a replay of an
-// earlier import of the same document (see ImportCAMT053).
+// earlier import of the same document (see ImportCAMT053). Balances
+// and BalanceMismatches are set only by ImportCAMT052 (LG-408): the
+// OPBD/CLBD snapshots the intraday report carried, and the CLBD rows
+// that disagreed with the ledger — a camt.053 import leaves both nil.
 type CAMT053ImportReport struct {
-	DocumentSHA256 string             `json:"document_sha256"`
-	Account        AccountID         `json:"account"`
+	DocumentSHA256 string              `json:"document_sha256"`
+	Account        AccountID           `json:"account"`
 	Items          []CAMT053ImportItem `json:"items"`
-	Matched        int                `json:"matched"`
-	Mismatched     int                `json:"mismatched"`
-	Unmatched      int                `json:"unmatched"`
-	Duplicate      bool               `json:"duplicate"`
+	Matched        int                 `json:"matched"`
+	Mismatched     int                 `json:"mismatched"`
+	Unmatched      int                 `json:"unmatched"`
+	Duplicate      bool                `json:"duplicate"`
+	Balances       []CAMT052Balance    `json:"balances,omitempty"`
+	// BalanceMismatches names the CLBD balances that disagreed with
+	// the ledger at import time (LG-408). Reported only, never
+	// fail-closed: the import is evidence, not a booking.
+	BalanceMismatches []CAMT052BalanceMismatch `json:"balance_mismatches,omitempty"`
 }
 
 // CAMT053ImportOptions tunes ImportCAMT053. MatchWindow is the ± window
@@ -146,7 +154,7 @@ type CAMT053ImportOptions struct {
 // parser tolerant of the many optional blocks (Bal, Chrgs, …) real
 // statements carry.
 type camt053Document struct {
-	XMLName     xml.Name           `xml:"Document"`
+	XMLName       xml.Name             `xml:"Document"`
 	BkToCstmrStmt camt053BkToCstmrStmt `xml:"BkToCstmrStmt"`
 }
 
@@ -160,9 +168,9 @@ type camt053GrpHdr struct {
 }
 
 type camt053Stmt struct {
-	ID      string         `xml:"Id"`
-	Acct    camt053Acct    `xml:"Acct"`
-	Entries []camt053Ntry  `xml:"Ntry"`
+	ID      string        `xml:"Id"`
+	Acct    camt053Acct   `xml:"Acct"`
+	Entries []camt053Ntry `xml:"Ntry"`
 }
 
 type camt053Acct struct {
@@ -171,7 +179,7 @@ type camt053Acct struct {
 
 type camt053AcctID struct {
 	IBAN string      `xml:"IBAN"`
-	Othr camt053Othr  `xml:"Othr"`
+	Othr camt053Othr `xml:"Othr"`
 }
 
 type camt053Othr struct {
@@ -560,6 +568,6 @@ func (l *Ledger) camt053ImportsLocked() []CAMT053ImportRecord {
 // produced for it. Restoring it preserves duplicate-import idempotency
 // across disaster recovery.
 type CAMT053ImportRecord struct {
-	DocumentSHA256 string             `json:"document_sha256"`
+	DocumentSHA256 string              `json:"document_sha256"`
 	Report         CAMT053ImportReport `json:"report"`
 }
