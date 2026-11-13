@@ -6362,6 +6362,39 @@ camt.057 400. Repeat exports are byte-identical modulo the
 `MsgId` / `XpctdValDt` move with it). `GET /metrics` counts
 exports as `ledger_camt057_exports_total`.
 
+A camt.057 notice can be withdrawn with its cancellation advice:
+`GET /exports/camt058?schedule_id=<id>&servicing_bic=<bic>&reason=<text>`
+renders the next run as a camt.058.001.08
+`NotificationToReceiveCancellationAdvice` (see
+`ledger.ExportCAMT058`), the twin of the camt.057 above — same
+source (the same schedule, the same next run), same direction
+(account owner to account bank: the To account is the
+beneficiary, the servicing bank named by the caller is the
+receiver), one run per advice. The document carries `GrpHdr` with
+a deterministic `MsgId` (`camt058-<schedule>-<runSeq>`) and a
+wall-clock `CreDtTm`, and `OrgnlNtfctn` carrying only the original
+notification's identifiers: `OrgnlMsgId` and `OrgnlNtfctnId` are
+both the camt.057 deterministic `MsgId`
+(`camt057-<schedule>-<runSeq>`) for the same schedule and run —
+no amount is restated, so an FX schedule is revocable here, the
+opposite of camt.057. `CxlRsn` carries the operator's free-form
+reason (`Rsn` / `Prtry`) only when one is given; an empty reason
+omits the block entirely, never a defaulted code. The status gate
+is deliberately the opposite of camt.057's active-only gate: a
+paused, cancelled, completed, or exhausted schedule exports with
+200, while an active schedule with a live next run is 422 — the
+money is still coming, so withdrawing the notice would be a false
+statement. An unknown ID is 404, and a missing `schedule_id` /
+`servicing_bic`, an invalid servicing BIC, or a schedule that
+cannot be rendered as a valid camt.058 is 400. The operator flow
+for correcting a notice is pause the plan, cancel the old notice
+with this advice, resume the plan, and re-issue a new notice; the
+advice itself cancels no plan and the ledger records neither
+whether camt.057 was sent nor when. Repeat exports are
+byte-identical modulo the `CreDtTm` line until a run fires (then
+`RunSeq` advances and both `MsgId`s move with it). `GET /metrics`
+counts exports as `ledger_camt058_exports_total`.
+
 ### pain.001 付款指令状态机（LG-99）
 
 每次 `GET /exports/pain001` 导出都会在账本内注册一条付款指令
