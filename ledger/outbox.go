@@ -164,6 +164,11 @@ const (
 	// event, so downstream consumers can subscribe to bank-side
 	// settlement progress without polling.
 	OutboxPain001StatusChanged = "pain001_status_changed"
+	// pain.008 instruction lifecycle (see pain008_status.go, LG-406):
+	// every instruction-level or per-entry status move emits one
+	// event, so downstream consumers can subscribe to bank-side
+	// collection progress without polling.
+	OutboxPain008StatusChanged = "pain008_status_changed"
 	// KYC/尽调 lifecycle (see kyc.go, LG-147): the compliance team sets
 	// an account's KYC status, and the expiry sweep stops lapsed
 	// accounts. Downstream consumers can subscribe to know when a

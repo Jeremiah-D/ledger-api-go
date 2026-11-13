@@ -681,6 +681,15 @@ type snapshotConfigLine struct {
 	// trail's from/to chain would restart — so the registry
 	// round-trips like the idempotency indexes.
 	PainInstructions []PainInstruction `json:"pain_instructions,omitempty"`
+	// Pain008Instructions carries the pain.008 direct-debit
+	// instruction lifecycle registry (see pain008_status.go), sorted
+	// by MsgId; absent in snapshots written before the pain.008
+	// status tracker existed. A restore that dropped it would lose
+	// every instruction's bank verdict position — the ledger would
+	// re-register old instructions as freshly exported and the audit
+	// trail's from/to chain would restart — so the registry
+	// round-trips like the pain.001 registry.
+	Pain008Instructions []Pain008Instruction `json:"pain008_instructions,omitempty"`
 	// VirtualAccounts carries the van -> parent mappings (see
 	// RegisterVirtualAccount in virtual_account.go), sorted by VAN, and
 	// VirtualAccountVersion the mapping mutation counter; absent in
@@ -1364,6 +1373,7 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		PainTransfers:           l.painTransfersLocked(),
 		AccountIBANs:            l.accountIBANsLocked(),
 		PainInstructions:        l.painInstructionsLocked(),
+		Pain008Instructions:     l.pain008InstructionsLocked(),
 		VirtualAccounts:         l.virtualAccountsLocked(),
 		VirtualAccountVersion:   l.virtualAccountVersion,
 		// FTPCurves carries the per-currency FTP rate curves with
@@ -2694,6 +2704,48 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 			}
 		}
 	}
+	// The pain.008 direct-debit instruction lifecycle registry (see
+	// pain008_status.go): validated like the pain.001 registry — every
+	// record must name a non-empty MsgId and mandate, a known
+	// lifecycle state, non-negative totals, and a per-entry table of
+	// unique entry IDs in known states.
+	seenPain008MsgIDs := make(map[string]bool, len(cfg.Pain008Instructions))
+	for _, ins := range cfg.Pain008Instructions {
+		if ins.MsgID == "" {
+			return bad("pain.008 instruction record with empty msg_id")
+		}
+		if seenPain008MsgIDs[ins.MsgID] {
+			return bad("duplicate pain.008 instruction record for %q", ins.MsgID)
+		}
+		seenPain008MsgIDs[ins.MsgID] = true
+		if !pain008ValidState(ins.State) {
+			return bad("pain.008 instruction %q with unknown state %q", ins.MsgID, ins.State)
+		}
+		if ins.TxCount < 0 || ins.CtrlSum < 0 {
+			return bad("pain.008 instruction %q with negative tx_count/ctrl_sum", ins.MsgID)
+		}
+		seenEntryIDs := make(map[string]bool, len(ins.Txs))
+		for _, tx := range ins.Txs {
+			if tx.EntryID == "" {
+				return bad("pain.008 instruction %q with empty entry_id", ins.MsgID)
+			}
+			if seenEntryIDs[tx.EntryID] {
+				return bad("pain.008 instruction %q with duplicate entry_id %q", ins.MsgID, tx.EntryID)
+			}
+			seenEntryIDs[tx.EntryID] = true
+			if !pain008ValidState(tx.State) {
+				return bad("pain.008 instruction %q entry %q with unknown state %q", ins.MsgID, tx.EntryID, tx.State)
+			}
+			if tx.AmountCents < 0 {
+				return bad("pain.008 instruction %q entry %q with negative amount", ins.MsgID, tx.EntryID)
+			}
+			if tx.Currency != "" {
+				if _, err := normalizeCurrency(tx.Currency); err != nil {
+					return bad("pain.008 instruction %q entry %q with invalid currency %q", ins.MsgID, tx.EntryID, tx.Currency)
+				}
+			}
+		}
+	}
 	// IBAN registry (see SetAccountIBAN in pain001.go): every record
 	// must name an account and carry a valid IBAN and BIC — a corrupt
 	// snapshot must not install an identifier the export would then
@@ -3682,6 +3734,19 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 		rec.Txs = make([]Pain001TxState, len(ins.Txs))
 		copy(rec.Txs, ins.Txs)
 		l.painInstructions[ins.MsgID] = &rec
+	}
+	// The pain.008 direct-debit instruction lifecycle registry restores
+	// like the pain.001 registry: validated above, installed verbatim
+	// with the per-entry states as the snapshot carried them, so a
+	// restored ledger keeps every instruction's bank verdict position.
+	// Snapshots written before the pain.008 status tracker existed
+	// carry no records, which restores as an empty registry.
+	l.pain008Instructions = make(map[string]*Pain008Instruction, len(cfg.Pain008Instructions))
+	for _, ins := range cfg.Pain008Instructions {
+		rec := ins
+		rec.Txs = make([]Pain008TxState, len(ins.Txs))
+		copy(rec.Txs, ins.Txs)
+		l.pain008Instructions[ins.MsgID] = &rec
 	}
 	// The VAN mappings restore like the frozen-account list: validated
 	// above, installed verbatim, with the mapping version counter so a

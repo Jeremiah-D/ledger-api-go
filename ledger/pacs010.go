@@ -50,10 +50,13 @@ import (
 // the camt054Matches registry and reports per collection whether the
 // bank confirmed it (notified) or it is still outstanding (pending).
 //
-// pain.002 status reports answer pain.001 messages only: a report
-// naming a pacs.010 MsgId (the "pacs010-" namespace) is refused by
-// ErrPain002ForeignMsgID — the same rule that has always kept
-// pain.008 MsgIds out of the pain.002 path, now stated explicitly.
+// pain.002 status reports answer pain.001 messages and, since LG-406,
+// pain.008 messages: a report naming a pacs.010 MsgId (the
+// "pacs010-" namespace) is refused by ErrPain002ForeignMsgID — the
+// same rule that has always kept pacs.010 MsgIds out of the pain.002
+// path, now stated explicitly. (pain.008 MsgIds used to be refused the
+// same way; LG-406 gave them their own answer path under the
+// pain.008.001.02 message name, so only pacs.010 stays out.)
 //
 // Fail-closed, like the pain.008 export: the mandate must exist and be
 // effectively active (unknown/suspended/cancelled/expired mandates

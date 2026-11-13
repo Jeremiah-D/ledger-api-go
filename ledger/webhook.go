@@ -1118,3 +1118,32 @@ func (l *Ledger) emitOutboxPain001StatusLocked(msgID, txID, from, to, reason, ac
 	}
 	l.emitOutboxLocked(OutboxEvent{Type: OutboxPain001StatusChanged, Details: details})
 }
+
+// emitOutboxPain008StatusLocked emits a pain008_status_changed domain
+// event for one pain.008 status move — instruction-level (entryID
+// empty) or per-entry (the bank's accepted/rejected verdict on one
+// collection). Callers must hold l.mu with the write lock. Mirrors
+// emitOutboxPain001StatusLocked.
+func (l *Ledger) emitOutboxPain008StatusLocked(msgID, entryID, from, to, reasonCode, reason, actor string) {
+	if l.outbox == nil {
+		return
+	}
+	details := map[string]any{
+		"msg_id": msgID,
+		"from":   from,
+		"to":     to,
+	}
+	if entryID != "" {
+		details["entry_id"] = entryID
+	}
+	if reasonCode != "" {
+		details["reason_code"] = reasonCode
+	}
+	if reason != "" {
+		details["reason"] = reason
+	}
+	if actor != "" {
+		details["actor"] = actor
+	}
+	l.emitOutboxLocked(OutboxEvent{Type: OutboxPain008StatusChanged, Details: details})
+}

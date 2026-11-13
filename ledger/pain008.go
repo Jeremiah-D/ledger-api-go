@@ -20,9 +20,11 @@ import (
 // pain.001 moves money to the creditor (CdtTrfTxInf, the payer is the
 // debtor); pain.008 pulls money from the debtor (DrctDbtTxInf, the
 // payer is the debtor). pain.002 status reports (see pain002.go) answer
-// pain.001 messages only — a pain.002 naming a pain.008 MsgId is
-// refused by ErrPain002UnexpectedMsgName, so the .008 lifecycle never
-// collides with the .001 one.
+// pain.001 messages and, since LG-406, pain.008 messages too — a
+// report naming a pain.008 MsgId is applied by
+// ApplyPain002ToPain008 (see pain008_status.go), while a pacs.010
+// MsgId is still refused by ErrPain002ForeignMsgID, so the .008
+// lifecycle never collides with the .001 one.
 //
 // Sequence types (SeqTp) are derived per collection from the mandate's
 // own debit history — the ledger is the system of record for the
@@ -186,7 +188,12 @@ func pain008MsgID(mandateID, schemeID string, opts Pain008ExportOptions, entryID
 // Reconcile, it still emits one structured audit event
 // ("pain008_exported", details msg_id/tx_count/ctrl_sum_cents/
 // mandate_id) so the compliance trail records every generated
-// instruction.
+// instruction. Registration of the instruction's lifecycle record
+// (see registerPain008InstructionLocked in pain008_status.go) is the
+// export's only mutation and its observable by-product: it happens
+// after the read-only render, under the write lock, and a duplicate
+// export re-derives the same MsgId and returns the existing record —
+// registration never changes the rendered document.
 func (l *Ledger) ExportPain008(mandateID string, opts Pain008ExportOptions) ([]byte, error) {
 	if strings.TrimSpace(opts.CreditorSchemeID) == "" {
 		return nil, ErrMissingPain008CreditorScheme
@@ -276,6 +283,15 @@ func (l *Ledger) ExportPain008(mandateID string, opts Pain008ExportOptions) ([]b
 		},
 	})
 	l.mu.RUnlock()
+	// Register the instruction's lifecycle record (see
+	// registerPain008InstructionLocked in pain008_status.go): the write
+	// lock is taken here, after the read-only render, because the
+	// record write is the export's only mutation. Registration is
+	// idempotent in MsgId — a duplicate export re-derives the same
+	// MsgId and returns the existing record.
+	l.mu.Lock()
+	l.registerPain008InstructionLocked(msgID, mandateID, collections, txCount, ctrlSum, m.Currency)
+	l.mu.Unlock()
 	return doc, nil
 }
 

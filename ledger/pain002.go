@@ -9,7 +9,7 @@ import (
 )
 
 // ISO 20022 pain.002.001.03 customer payment status report parsing
-// (LG-162).
+// (LG-162, extended to pain.008 by LG-406).
 //
 // This is the inbound half of the pain.001 lifecycle: ExportPain001
 // (see pain001.go) renders the payment instruction the ledger sends to
@@ -21,6 +21,17 @@ import (
 //	ACCP  AcceptedCustomerProfile     — accepted, settlement pending.
 //	RJCT  Rejected                    — refused, with a reason code.
 //	PDNG  Pending                     — the bank has not decided yet.
+//
+// The same report answers pain.008 direct-debit instructions
+// (LG-406): a report whose OrgnlMsgNmId is "pain.008.001.02" names a
+// pain.008 MsgId (the "pain008-…" namespace) and, per transaction, the
+// journal entry ID the ledger exported as EndToEndId. The two families
+// share the parser and the TxSts vocabulary but never share a
+// lifecycle: ApplyPain002Report advances pain.001 instructions,
+// ApplyPain002ToPain008 (see pain008_status.go) advances pain.008
+// ones, and the OrgnlMsgNmId/OrgnlMsgId pairing is enforced here so a
+// mis-addressed report fails loud instead of applying a verdict to
+// the wrong family.
 //
 // Status mapping into the pain.001 state machine (see
 // pain001_status.go): ACSC/ACCP become "accepted", RJCT becomes
@@ -54,20 +65,23 @@ var (
 	// OrgnlEndToEndId. Fail-loud: a half-readable bank file must not
 	// partially apply.
 	ErrInvalidPain002 = errors.New("ledger: invalid pain.002 status report")
-	// ErrPain002UnexpectedMsgName is returned when OrgnlMsgNmId is not
-	// "pain.001.001.03": the report answers a different message type
-	// (e.g. a pain.008 direct debit), and applying it to a pain.001
-	// instruction would misattribute the bank's verdict.
-	ErrPain002UnexpectedMsgName = errors.New("ledger: pain.002 report is not for a pain.001 message")
+	// ErrPain002UnexpectedMsgName is returned when OrgnlMsgNmId is
+	// neither "pain.001.001.03" nor "pain.008.001.02": the report
+	// answers a different message type (e.g. a pacs.010 direct debit),
+	// and applying it to a pain.001 or pain.008 instruction would
+	// misattribute the bank's verdict.
+	ErrPain002UnexpectedMsgName = errors.New("ledger: pain.002 report is not for a pain.001 or pain.008 message")
 	// ErrPain002ForeignMsgID is returned when OrgnlMsgId belongs to
-	// another message family — a pain.008 ("pain008-…") or pacs.010
-	// ("pacs010-…") MsgId: pain.002 answers pain.001 customer credit
-	// transfers only. A status report for another family's message is a
-	// category error, not a pain.001 verdict — the same rule that has
-	// always kept pain.008 MsgIds out of the pain.002 path, now stated
-	// explicitly so a mis-addressed pacs.010 report fails loud instead
-	// of parsing as a pain.001 answer (see pacs010.go, LG-190).
-	ErrPain002ForeignMsgID = errors.New("ledger: pain.002 report answers a non-pain.001 message")
+	// another message family than the one OrgnlMsgNmId names — a
+	// pacs.010 ("pacs010-…") MsgId under either name, a pain.008
+	// ("pain008-…") MsgId under the pain.001 name, or a non-pain.008
+	// MsgId under the pain.008 name. A status report for another
+	// family's message is a category error, not a verdict — the same
+	// rule that has always kept pacs.010 MsgIds out of the pain.002
+	// path, now stated explicitly so a mis-addressed report fails loud
+	// instead of parsing as an answer to the wrong family (see
+	// pacs010.go, LG-190, and pain008_status.go, LG-406).
+	ErrPain002ForeignMsgID = errors.New("ledger: pain.002 report answers a message of another family")
 	// ErrInvalidPain002TxSts is returned when a transaction carries a
 	// TxSts outside the pain.002 vocabulary
 	// (ACSC/ACCP/RJCT/PDNG): unknown statuses are refused, not
@@ -75,10 +89,16 @@ var (
 	ErrInvalidPain002TxSts = errors.New("ledger: invalid pain.002 transaction status: want ACSC, ACCP, RJCT or PDNG")
 )
 
-// pain002ExpectedMsgName is the only OrgnlMsgNmId this parser accepts:
-// the report must answer the pain.001.001.03 export this ledger
-// produces (see ExportPain001).
+// pain002ExpectedMsgName is the OrgnlMsgNmId a report answering a
+// pain.001.001.03 export carries (see ExportPain001).
 const pain002ExpectedMsgName = "pain.001.001.03"
+
+// pain002ExpectedMsgNamePain008 is the second OrgnlMsgNmId this parser
+// accepts (LG-406): a report answering a pain.008.001.02 direct debit
+// instruction (see ExportPain008). The name and the MsgId namespace
+// are paired — a pain.008-named report must carry a "pain008-…"
+// OrgnlMsgId, and a pain.001-named report must not.
+const pain002ExpectedMsgNamePain008 = "pain.008.001.02"
 
 // pain.002 transaction statuses (the TxSts vocabulary).
 const (
@@ -171,8 +191,9 @@ func pain002ValidTxSts(s string) bool {
 
 // ParsePain002 parses a bank-returned ISO 20022 pain.002.001.03 customer
 // payment status report. It validates the document shape — well-formed
-// XML, the CstmrPmtStsRpt root, OrgnlMsgNmId == "pain.001.001.03", a
-// non-empty OrgnlMsgId, and every transaction carrying a non-empty
+// XML, the CstmrPmtStsRpt root, OrgnlMsgNmId == "pain.001.001.03" or
+// "pain.008.001.02" (LG-406), a non-empty OrgnlMsgId in the namespace
+// that name requires, and every transaction carrying a non-empty
 // OrgnlEndToEndId plus a TxSts in the ACSC/ACCP/RJCT/PDNG vocabulary —
 // and refuses anything else fail-loud: a half-readable bank file must
 // not partially apply. Namespaces are ignored and unknown elements
@@ -191,14 +212,28 @@ func ParsePain002(data []byte) (*Pain002Report, error) {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPain002, err)
 	}
 	grp := doc.Report.OrgnlGrpInf
-	if strings.TrimSpace(grp.OrgnlMsgNmID) != pain002ExpectedMsgName {
+	msgNmID := strings.TrimSpace(grp.OrgnlMsgNmID)
+	isPain001 := msgNmID == pain002ExpectedMsgName
+	isPain008 := msgNmID == pain002ExpectedMsgNamePain008
+	if !isPain001 && !isPain008 {
 		return nil, fmt.Errorf("%w: got %q", ErrPain002UnexpectedMsgName, grp.OrgnlMsgNmID)
 	}
 	orgnlMsgID := strings.TrimSpace(grp.OrgnlMsgID)
 	if orgnlMsgID == "" {
 		return nil, fmt.Errorf("%w: missing OrgnlMsgId", ErrInvalidPain002)
 	}
-	if strings.HasPrefix(orgnlMsgID, "pain008-") || strings.HasPrefix(orgnlMsgID, "pacs010-") {
+	// The name and the MsgId namespace are paired: a pacs.010 MsgId
+	// is foreign under either name, a pain.008 MsgId is foreign under
+	// the pain.001 name, and a non-pain.008 MsgId is foreign under
+	// the pain.008 name. A mis-addressed report fails loud here so
+	// it can never apply a verdict to the wrong family.
+	if strings.HasPrefix(orgnlMsgID, "pacs010-") {
+		return nil, fmt.Errorf("%w: %q", ErrPain002ForeignMsgID, orgnlMsgID)
+	}
+	if isPain001 && strings.HasPrefix(orgnlMsgID, "pain008-") {
+		return nil, fmt.Errorf("%w: %q", ErrPain002ForeignMsgID, orgnlMsgID)
+	}
+	if isPain008 && !strings.HasPrefix(orgnlMsgID, "pain008-") {
 		return nil, fmt.Errorf("%w: %q", ErrPain002ForeignMsgID, orgnlMsgID)
 	}
 	report := &Pain002Report{

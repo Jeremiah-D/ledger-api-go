@@ -1553,6 +1553,14 @@ type Ledger struct {
 	// that dropped it would lose every instruction's receipt/settlement
 	// position and the audit trail's from/to chain would restart.
 	painInstructions map[string]*PainInstruction
+	// pain008Instructions is the pain.008 direct-debit instruction
+	// lifecycle registry (see pain008_status.go): deterministic export
+	// MsgId -> the instruction's lifecycle record. Structural state
+	// like the pain.001 registry — it survives snapshots, because a
+	// restore that dropped it would lose every instruction's bank
+	// verdict position and the audit trail's from/to chain would
+	// restart.
+	pain008Instructions map[string]*Pain008Instruction
 	// accountIBANs is the opt-in IBAN registry (see SetAccountIBAN in
 	// pain001.go): the debtor/creditor identifiers pain.001 payment
 	// instructions name. Structural config like the account tags — it
@@ -1988,6 +1996,7 @@ func New(opts ...Option) *Ledger {
 		statementMatchWindow:        DefaultOFXMatchWindow,
 		painTransfers:               make(map[string]PainTransfer),
 		painInstructions:            make(map[string]*PainInstruction),
+		pain008Instructions:         make(map[string]*Pain008Instruction),
 		accountIBANs:                make(map[AccountID]AccountIBAN),
 		externalMappings:            make(map[externalMappingKey]ExternalAccountMapping),
 		virtualAccounts:             make(map[AccountID]AccountID),

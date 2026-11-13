@@ -6481,7 +6481,10 @@ pain.001 付款指令，把每笔 `TxInfAndSts` 的银行 verdict 推进转账�
 | `PDNG` | Pending（银行未定论） | 跳过，保持 `exported`，不记事件 |
 
 语义：
-- 解析 fail-loud：XML 非法、`OrgnlMsgNmId` 非 `pain.001.001.03`、`TxSts` 非法 → 400，整份拒绝。
+- 解析 fail-loud：XML 非法、`OrgnlMsgNmId` 既非 `pain.001.001.03` 又非
+  `pain.008.001.02`（LG-406）、`TxSts` 非法 → 400，整份拒绝。`pain.008.001.02`
+  的回盘走 `POST /exports/pain008/apply`（见 pain.008 节），同一解析器、同一
+  TxSts 词汇表，pacs.010 前缀仍拒。
 - 应用复用 `RecordPain001Receipts`：整批先校验后应用、重放幂等（same-state no-op）、每笔转移记哈希链 `pain001_status` 审计事件 + outbox。
 - 全 `PDNG` 的回盘是显式 no-op：返回指令不变，不记事件——pending 是信息，不是 verdict。
 - 刻意**不**驱动 `PayoutInstruction`：`SettlePayout`/`FailPayout` 需要银行对账单行证据并记账冲销，是操作员 attestation，read-only 的回盘不能代行；`GrpSts` 仅作参考，与逐笔 verdict 不一致时以逐笔为准。
@@ -6796,9 +6799,10 @@ retune of the sweeper interval, no restart)。
 `pain.008.001.02`（`CstmrDrctDbtInitn`）是债权人发起的直接扣款——
 merchant 凭 debtor 的授权（mandate）从 debtor 银行扣款。`ExportPain008`
 把一条 mandate（代扣协议，LG-125）下已记账的扣款渲染成发给银行的
-pain.008 指令文件；与 pain.001 正交（借记 vs 贷记），与 pain.002 正交
-（pain.002 只回答 pain.001，`OrgnlMsgNmId` 非 `pain.001.001.03` 的回盘
-会被拒绝）。
+pain.008 指令文件；与 pain.001 正交（借记 vs 贷记）。pain.002 回答
+pain.001 与 pain.008（LG-406），不回答 pacs.010：`OrgnlMsgNmId` 既非
+`pain.001.001.03` 又非 `pain.008.001.02` 的回盘会被拒绝，命名
+pacs.010 `MsgId` 的回盘亦然。
 
 SeqTp（sequence type）按 mandate 自身扣款历史自动判定——账本是
 mandate 使用情况的 system of record：
@@ -6834,6 +6838,33 @@ curl -s 'localhost:8080/exports/pain008?mandate=m-sub&creditor_scheme_id=DE98ZZZ
 
 Go: `ledger.ExportPain008`。
 
+#### `POST /exports/pain008/apply` — pain.002 回盘接纳 pain.008 指令 verdict
+
+银行对 pain.008 直接扣款指令的裁决经 pain.002 回盘落盘
+（LG-406）：回盘的 `OrgnlMsgNmId` 为 `pain.008.001.02`、
+`OrgnlMsgId` 为指令 `MsgId`（`pain008-…`），每笔
+`OrgnlEndToEndId` 即 journal entry ID，直接 join 指令登记。
+
+- 逐笔 `ACSC`/`ACCP` → `accepted`，`RJCT` → `rejected`（银行原因码
+  与原文 verbatim 进 `pain008_status` 审计事件），`PDNG` 跳过（扣款
+  仍 `exported`，银行未裁决不发明状态）；全 `PDNG` 报告显式 no-op；
+  同一报告重放幂等，无重复审计事件。
+- 逐笔状态变迁追加 hash-chained 审计事件 `pain008_status`
+  （details 含 `msg_id`/`entry_id`/`verdict`/`reason_code`）+ domain
+  outbox 事件 `pain008_status_changed`。
+- verdict 永不移动资金、永不改 journal entry、永不推进 payout 状态机
+  （银行证据而已；`SettlePayout`/`FailPayout` 仍须操作员凭银行对账单确认）。
+- 错误映射：报文不可解析 400、未知 `MsgId` 404、未知 entry ID 或非法
+  变迁 422；pacs.010 前缀回盘仍拒。计数器
+  `ledger_pain008_applies_total`。
+
+```bash
+curl -s -X POST localhost:8080/exports/pain008/apply --data-binary @status-report.xml
+# 200 {"msg_id":"pain008-…","state":"accepted","txs":[{"entry_id":"d-1","state":"accepted"},…]}
+```
+
+Go: `ledger.ApplyPain002ToPain008`、`ledger.Pain008Instruction`。
+
 ### `pain.009` — ISO 20022 pain.009 直接扣款授权发起导出
 
 已登记的 mandate 可以用 ISO 20022 `pain.009.001.02`
@@ -6866,7 +6897,7 @@ HTTP: `GET /exports/pain009?mandate=…&creditor_scheme_id=…`。
 
 gpi 跟踪的 FI-to-FI 视角：`pacs.002.001.03`（`FIToFIPaymentStatusReport`）
 是银行间状态报告——与客户级的 pain.002（LG-162）正交：pain.002 回答
-pain.001 给客户看，pacs.002 报告底层 FI-to-FI 转账的结算状态给代理行链路。
+pain.001 与 pain.008 给客户看，pacs.002 报告底层 FI-to-FI 转账的结算状态给代理行链路。
 `ExportPacs002` 把一条 gpi 跟踪记录（LG-165）渲染成 pacs.002 报文：
 
 状态映射（gpi 镜像，不做新 verdict）：
@@ -7402,8 +7433,10 @@ ID，绝不编造 BIC。
 与 camt.054 借记通知的对账勾稽：`GET /mandates/{id}/pacs010/reconcile`
 把本窗口的已记账集合按 `EndToEndId` 与已导入的 camt.054 借记/贷记通知
 逐笔勾稽，逐笔报告 `notified`（银行已确认）/`pending`（仍在途），并给
-出通知的 `ntfctn_id` 与三元匹配状态。pain.002 只回答 pain.001：命名
-pacs.010 `MsgId` 的 pain.002 报文被 `ErrPain002ForeignMsgID` 显式拒绝（pain.008 同理，沿 LG-166 惯例）。
+出通知的 `ntfctn_id` 与三元匹配状态。pain.002 回答 pain.001 与
+pain.008，不回答 pacs.010：命名 pacs.010 `MsgId` 的 pain.002 报文被
+`ErrPain002ForeignMsgID` 显式拒绝（pain.008 自 LG-406 起走自己的回盘
+路径，见上）。
 
 ```bash
 curl -s 'localhost:8080/exports/pacs010?mandate=m-2026-042' -o fidbt.xml

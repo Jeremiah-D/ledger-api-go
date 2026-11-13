@@ -184,13 +184,13 @@ func TestParsePain002InvalidTxSts(t *testing.T) {
 	}
 }
 
-// A report answering a non-pain.001 message is refused: applying it
-// would misattribute the bank's verdict.
+// A report answering a non-pain.001/pain.008 message is refused:
+// applying it would misattribute the bank's verdict.
 func TestParsePain002UnexpectedMsgName(t *testing.T) {
 	l, _ := pain002TestLedger(t)
 	msgID := mustExportPain001MsgID(t, l, Pain001ExportOptions{})
 
-	doc := pain002TestDocNm(t, msgID, "pain.008.001.02", pain002TxFrag("ps1", "ACSC", "", ""))
+	doc := pain002TestDocNm(t, msgID, "pain.009.001.02", pain002TxFrag("ps1", "ACSC", "", ""))
 	if _, err := ParsePain002(doc); !errors.Is(err, ErrPain002UnexpectedMsgName) {
 		t.Errorf("ParsePain002 err = %v, want ErrPain002UnexpectedMsgName", err)
 	}
