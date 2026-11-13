@@ -52,9 +52,16 @@ func TestClosePeriodPreflightClean(t *testing.T) {
 
 // TestClosePeriodPreflightBlockers: all four blocker kinds are detected
 // with their stable codes and IDs.
+//
+// The fixture anchors "now" to the current day (noon UTC) instead of a
+// fixed calendar date: the booked FX forward settles 30 days out, and
+// BookForward rejects a settle date in the past, so a fixed anchor
+// rots the moment the settle date passes. The period ID is derived
+// from the same anchor.
 func TestClosePeriodPreflightBlockers(t *testing.T) {
 	l := New(WithReviewThreshold(1)) // every transfer routes to review
-	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(24 * time.Hour).Add(12 * time.Hour)
+	period := now.Format("2006-01")
 
 	// 1. Pending dual-control review.
 	tr := Transfer{ID: "xfer-1", From: "ar-clearing", To: "cust", AmountCents: 10000,
@@ -86,7 +93,7 @@ func TestClosePeriodPreflightBlockers(t *testing.T) {
 	}
 	l.EscalateDunning(now)
 
-	rep, err := l.ClosePeriodPreflight(now, "2026-10")
+	rep, err := l.ClosePeriodPreflight(now, period)
 	if err != nil {
 		t.Fatalf("ClosePeriodPreflight: %v", err)
 	}
