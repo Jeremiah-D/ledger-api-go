@@ -6777,6 +6777,61 @@ func (s *server) handlePain002Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
+// handlePain012Apply implements POST /exports/pain012/apply (LG-405):
+// applies a bank's ISO 20022 pain.012.001.03 mandate acceptance
+// report to the mandates it answers. The body is the raw pain.012
+// XML; each UndrlygAccptncDtls verdict is recorded in the
+// mandateAcceptances registry (see ledger.ApplyPain012Report):
+// Accptd true becomes accepted, Accptd false becomes rejected with
+// the bank's reason code verbatim in the audit event. The mandate
+// row never moves — a rejection does not cancel or suspend anything;
+// the operator still decides through CancelMandate. Re-applying a
+// report is idempotent. Error mapping: a malformed report is a 400;
+// an unknown mandate is a 404; an illegal verdict (a detail with no
+// Accptd) is a 422. The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
+func (s *server) handlePain012Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain012Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	report, err := ledger.ParsePain012(body)
+	if err != nil {
+		if errors.Is(err, ledger.ErrInvalidPain012Verdict) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	receipt, err := s.ledgerFor(r).ApplyPain012Report(report, ledger.ActorFromContext(actx))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrInvalidPain012Verdict):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain012/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.012 report failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, receipt)
+}
+
 // handlePain002Export implements GET /exports/pain002 (LG-205): an
 // ISO 20022 pain.002.001.10 customer payment status report for one
 // pain.001 instruction (see ledger.ExportPain002). Query parameter:
@@ -12572,6 +12627,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
+	mux.HandleFunc("POST /exports/pain012/apply", s.handlePain012Apply)
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
 	mux.HandleFunc("GET /exports/pain010", s.handlePain010Export)
 	mux.HandleFunc("GET /exports/pain011", s.handlePain011Export)

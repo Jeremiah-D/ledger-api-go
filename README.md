@@ -6601,7 +6601,7 @@ pain.011.001.03（`MndtCxlReq`），向债务人银行请求撤销授权——
 - **“请求撤销”与“内部取消”的分野**：本项只生成对外请求，
   导出本身不取消任何授权——授权在账本内仍保持原状态，直至
   操作员另行调用 `CancelMandate`；银行确认与否由 pain.012 回执
-  确认（本项不做 pain.012）。顺序是先导出请求、银行确认、再内
+  确认（见下节 LG-405）。顺序是先导出请求、银行确认、再内
   部取消。
 - 与 pain.009/010 的两处分野：其一，**suspended 授权可撤销**——
   暂停中的授权在银行侧仍然存在，仍须通知撤销，active-only 门
@@ -6616,6 +6616,44 @@ pain.011.001.03（`MndtCxlReq`），向债务人银行请求撤销授权——
   请求重导出除 `CreDtTm` 外字节相同。`400` 缺参数/缺 scheme；
   `404` 未知授权；`422` 已取消/已过期。计数器
   `ledger_pain011_exports_total`。
+
+### pain.012 授权接受报告回盘解析与应用（LG-405）
+
+`POST /exports/pain012/apply` 消费银行发回的 ISO 20022
+pain.012.001.03（`MndtAccptncRpt`）：银行对 pain.009/010/011
+请求的接受或拒绝回执。每条授权一条 verdict——`Accptd` 真为
+accepted、假为 rejected，银行原因码与原文（`RjctRsn/Cd` 或
+`Prtry` + `AddtlRjctRsnInf`）verbatim 记入回执与审计事件，不
+解释、不翻译、不编造原因码允许值表。
+
+- 版本核对：pain.012.001.02 并非注册版本——精确短语检索无此
+  文档；注册表只有 V01（2009 年，`MandateAcceptanceReportV01`）
+  与 V03（2013 年 Payments Mandates MDR，
+  `MandateAcceptanceReportV03`；Nordea MIG pain.012.001.03），
+  故本解析取 .001.03。报文形：`GrpHdr`（MsgId）+
+  `UndrlygAccptncDtls` [1..n]，每条载 `OrgnlMsgInf`
+  （MsgId/MsgNmId）、`AccptncRslt`（`Accptd` [1..1]、
+  `RjctRsn` [0..1]、`AddtlRjctRsnInf` [0..n]）与 `OrgnlMndt`
+  （`OrgnlMndtId` [1..1]，或完整授权臂 `OrgnlMndt/MndtId`）。
+- **“请求与回执”的分野**：本项只消费银行回执，不生成请求、
+  不改授权。`OrgnlMsgNmId` 只接受 pain.009.001.02 /
+  pain.010.001.02 / pain.011.001.03 三者，且 `OrgnlMsgId`
+  前缀须与之对应（pain009-/pain010-/pain011-），前缀与报文
+  名不匹配、未知授权与空 verdict 一律 fail-closed。
+- 应用：先整批校验再应用；同一报告 MsgId 重放幂等 no-op，
+  返回原回执（`replayed: true`），不重复记审计事件。每条
+  verdict 记入 `mandateAcceptances`（mandate ID → 最近一次
+  回盘：report MsgId、原报文名、verdict、原因、actor、时间），
+  并追加 hash-chained 审计事件 `pain012_mandate_accepted` /
+  `pain012_mandate_rejected`（msg_id/mandate_id/orgnl_msg_nm_id/
+  verdict/reason_code）。
+- **回执不改状态机**：RJCT 不自动取消/暂停授权，授权在账本
+  内保持原状态，直至操作员另行调用 `CancelMandate` 决策；
+  pain.012 无 PDNG 语义，verdict 只有 accepted/rejected 二值。
+- `400` 报文不可解析/原报文名不在允许表/前缀不匹配；`404`
+  未知授权；`422` verdict 非法（缺 `Accptd`）。计数器
+  `ledger_pain012_applies_total`。
+
 
 ### CSV 批量付款文件导入（LG-208）
 

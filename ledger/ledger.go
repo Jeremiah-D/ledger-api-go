@@ -1619,6 +1619,20 @@ type Ledger struct {
 	// does not bump the journal version and does not round-trip
 	// through snapshots.
 	mandateRetryPolicies map[string]MandateRetryPolicy
+	// mandateAcceptances is the latest bank acceptance report per
+	// mandate (see pain012.go, LG-405): mandate ID -> the most recent
+	// pain.012 verdict (report MsgId, original message name, verdict,
+	// bank reason verbatim, actor, time). It records the bank's
+	// answer only; it never moves the mandate row — a rejection does
+	// not cancel or suspend anything. In-memory operational state
+	// like mandateRetryPolicies: it does not bump the journal version
+	// and does not round-trip through snapshots.
+	// pain012AppliedReports is the pain.012 report idempotency
+	// namespace: report GrpHdr MsgId -> the receipt returned, so
+	// re-applying a report is a no-op returning the original receipt
+	// without a second audit event. Same operational-state treatment.
+	mandateAcceptances    map[string]MandateAcceptance
+	pain012AppliedReports map[string]Pain012Receipt
 	// mandateRetries is the pending automatic-retry registry, by debit
 	// ID: retries scheduled by failed debits, fired by
 	// SweepMandateRetries. mandateRetryFiring serializes concurrent
@@ -1971,7 +1985,7 @@ func New(opts ...Option) *Ledger {
 		ofxImports:                  make(map[string]*OFXImportReport),
 		camt053Imports:              make(map[string]*CAMT053ImportReport),
 		statementMatches:            make(map[string]*statementMatchRecord),
-		statementMatchWindow:         DefaultOFXMatchWindow,
+		statementMatchWindow:        DefaultOFXMatchWindow,
 		painTransfers:               make(map[string]PainTransfer),
 		painInstructions:            make(map[string]*PainInstruction),
 		accountIBANs:                make(map[AccountID]AccountIBAN),
@@ -1980,11 +1994,13 @@ func New(opts ...Option) *Ledger {
 		// LG-125: the direct-debit mandate registry and its
 		// mandate -> debit-entry index start empty; mandates are
 		// created through CreateMandate and restored from snapshots.
-		mandates:             make(map[string]Mandate),
-		mandateDebits:        make(map[string][]string),
-		mandateRetryPolicies: make(map[string]MandateRetryPolicy),
-		mandateRetries:       make(map[string]*MandateRetry),
-		mandateRetryFiring:   make(map[string]bool),
+		mandates:              make(map[string]Mandate),
+		mandateDebits:         make(map[string][]string),
+		mandateRetryPolicies:  make(map[string]MandateRetryPolicy),
+		mandateAcceptances:    make(map[string]MandateAcceptance),
+		pain012AppliedReports: make(map[string]Pain012Receipt),
+		mandateRetries:        make(map[string]*MandateRetry),
+		mandateRetryFiring:    make(map[string]bool),
 		// LG-192: the mandate pre-authorization registry starts empty;
 		// pre-authorizations are created through AuthorizePreAuth and
 		// never survive a restart (like holds).
