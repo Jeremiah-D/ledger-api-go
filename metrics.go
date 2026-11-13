@@ -85,6 +85,10 @@ type Metrics struct {
 	// customer payment status report export requests served,
 	// including rejected exports (LG-205).
 	Pain002Exports atomic.Uint64
+	// Pain011Exports counts GET /exports/pain011 ISO 20022 pain.011
+	// mandate cancellation request export requests served, including
+	// rejected exports (LG-402).
+	Pain011Exports atomic.Uint64
 	// Pain010Exports counts GET /exports/pain010 ISO 20022 pain.010
 	// mandate amendment request export requests served, including
 	// rejected exports (LG-207).
@@ -1062,6 +1066,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/pain002/apply ISO 20022 pain.002 status-report apply requests served, including rejected reports.", m.Pain002Applies.Load())
 	writeCounter(&sb, "ledger_pain002_exports_total",
 		"Total GET /exports/pain002 ISO 20022 pain.002 customer payment status report export requests served, including rejected exports.", m.Pain002Exports.Load())
+	writeCounter(&sb, "ledger_pain011_exports_total",
+		"Total GET /exports/pain011 ISO 20022 pain.011 mandate cancellation request export requests served, including rejected exports.", m.Pain011Exports.Load())
 	writeCounter(&sb, "ledger_pain010_exports_total",
 		"Total GET /exports/pain010 ISO 20022 pain.010 mandate amendment request export requests served, including rejected exports.", m.Pain010Exports.Load())
 	writeCounter(&sb, "ledger_pain009_exports_total",

@@ -6519,6 +6519,42 @@ pain.010.001.02（`MndtAmdmntReq`），向债务人银行申请修改授权—�
   `404` 未知授权；`422` 授权未激活。计数器
   `ledger_pain010_exports_total`。
 
+### pain.011 授权撤销请求导出（LG-402）
+
+`GET /exports/pain011?mandate=<id>&creditor_scheme_id=<scheme>&reason=<可选>`
+是 mandate 生命周期的收尾：为一笔已注册 mandate 生成 ISO 20022
+pain.011.001.03（`MndtCxlReq`），向债务人银行请求撤销授权——
+此后不再按该授权扣款。
+
+- 版本核对：pain.011.001.02 并非注册版本——注册表只有 .001.01
+  （2009 年 Payments Mandate MDR，`MandateCancellationRequestV01`）
+  与 .001.03（2013 年 Payments Mandates MDR，
+  `MandateCancellationRequestV03`；Nordea 亦只有 .01/.03 两版
+  MIG），故本导出取 .001.03。报文形按 LG-402 规格取简化的
+  `Mndt{OrgnlMndt, CxlRsn}` 渲染（`OrgnlMndt` 载原授权号 +
+  债权人 scheme ID；`CxlRsn` 仅在 reason 给定时写，`Rsn/Prtry`
+  承载自由文本原因，不编造原因码允许值表），而非 V03 完整的
+  `UndrlygCxlDtls` + 全套 Cdtr/Dbtr 块——银行侧校验如需完整形，
+  留待后轮升级。
+- **“请求撤销”与“内部取消”的分野**：本项只生成对外请求，
+  导出本身不取消任何授权——授权在账本内仍保持原状态，直至
+  操作员另行调用 `CancelMandate`；银行确认与否由 pain.012 回执
+  确认（本项不做 pain.012）。顺序是先导出请求、银行确认、再内
+  部取消。
+- 与 pain.009/010 的两处分野：其一，**suspended 授权可撤销**——
+  暂停中的授权在银行侧仍然存在，仍须通知撤销，active-only 门
+  会把最需要撤销的授权挡在门外；其二，**IBAN 非必需**——撤销
+  请求只标识授权本身（MndtId + CdtrSchmeId），报文定义不载账
+  户，缺 IBAN 的授权仍可撤销。
+- 只读导出：不 bump 版本、不落账、不改 mandate 行；仅记一条
+  `pain011_exported` 审计事件（msg_id/mandate_id/creditor_scheme_id/
+  reason_code）。已取消的授权拒绝（`ErrMandateNotActive`），已
+  过期的拒绝（`ErrMandateExpired`）。
+- `GrpHdr MsgId` 确定性：`pain011-<mandate>-<scheme>`，同一撤销
+  请求重导出除 `CreDtTm` 外字节相同。`400` 缺参数/缺 scheme；
+  `404` 未知授权；`422` 已取消/已过期。计数器
+  `ledger_pain011_exports_total`。
+
 ### CSV 批量付款文件导入（LG-208）
 
 企业批量付款的文件通道：`ImportPaymentCSV` 解析一笔付款文件的 CSV
