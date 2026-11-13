@@ -7020,6 +7020,44 @@ func (s *server) handlePain011Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePain013Export implements GET /exports/pain013 (LG-407): an
+// ISO 20022 pain.013.001.07 creditor payment activation request for
+// one issued request for payment (see ledger.ExportPain013). Query
+// parameter: rfp_id (required). The export is read-only: it changes
+// no RfP row — exporting is a request, not an acceptance, and the
+// debtor still answers through AcceptRfP/RejectRfP. Error mapping:
+// a missing rfp_id is a 400; an unknown RfP is a 404; a paid,
+// rejected, or expired RfP, or a party without a registered IBAN or
+// agent BIC, is a 422 — the missing IBAN/BIC is a state gap in the
+// account, not a malformed parameter.
+func (s *server) handlePain013Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain013Exports.Add(1)
+	q := r.URL.Query()
+	rfpID := q.Get("rfp_id")
+	if rfpID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rfp_id is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPain013(rfpID)
+	if err != nil {
+		status := http.StatusUnprocessableEntity
+		switch {
+		case errors.Is(err, ledger.ErrRfPNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrRfPNotIssued),
+			errors.Is(err, ledger.ErrRfPExpired),
+			errors.Is(err, ledger.ErrMissingAccountIBAN),
+			errors.Is(err, ledger.ErrMissingPain013AgentBIC):
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handlePain009Export implements GET /exports/pain009 (LG-376): an
 // ISO 20022 pain.009.001.02 mandate initiation request for one
 // registered mandate (see ledger.ExportPain009). Query parameters:
@@ -12692,6 +12730,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
 	mux.HandleFunc("GET /exports/pain010", s.handlePain010Export)
 	mux.HandleFunc("GET /exports/pain011", s.handlePain011Export)
+	mux.HandleFunc("GET /exports/pain013", s.handlePain013Export)
 	mux.HandleFunc("GET /exports/pain009", s.handlePain009Export)
 	mux.HandleFunc("GET /exports/pain008", s.handlePain008Export)
 	mux.HandleFunc("GET /exports/pacs002", s.handlePacs002Export)

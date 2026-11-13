@@ -6658,6 +6658,61 @@ accepted、假为 rejected，银行原因码与原文（`RjctRsn/Cd` 或
   `ledger_pain012_applies_total`。
 
 
+### pain.013 债权人付款激活请求导出（LG-407）
+
+`GET /exports/pain013?rfp_id=<id>` 把一条已发出的 Request
+for Payment（RfP，LG-171）渲染成银行可收的 ISO 20022
+pain.013.001.07（`CdtrPmtActvtnReq`）——FedNow/RTP 的收款
+请求报文。债权人（merchant）请债务人（customer）付款，债务
+人逐笔接受或拒绝；本项只生成请求，不移动资金。
+
+- 版本核对：注册表有 pain.013.001.05 与 .001.07；.07 为
+  FedNow/RTP 版（`CreditorPaymentActivationRequestV07`），
+  三源一致：moov-io rtp20022 `gen/pain_013_001_07` 绑定、IBM
+  TCH pain.013.001.05/.001.07 mapper 文档、TCH RTP Customer
+  Display Requirements（pain.013.001.07 即 Request for
+  Payment）。故本导出取 .001.07。
+- 结构核对（以 moov-io .07 绑定为准，另以全 XSD 的 .05 绑定
+  交叉核对）：`GrpHdr`（MsgId/CreDtTm/NbOfTxs/InitgPty）+
+  `PmtInf`（PaymentInstruction31：PmtInfId、PmtMtd TRF、
+  ReqdExctnDt、XpryDt、Dbtr、DbtrAcct、DbtrAgt、CdtTrfTx，皆
+  [1..1]）+ `CdtTrfTx`（CreditTransferTransaction35：PmtId、
+  Amt、ChrgBr SLEV、CdtrAgt、Cdtr、CdtrAcct，皆 [1..1]）。
+  注意嵌套关系——**Cdtr/CdtrAcct 与 Amt 不在 PmtInf 直属，
+  而在 CdtTrfTx 内**（Amt 作 `Amt/InstdAmt` 携 Ccy 属性）；
+  XpryDt 与 Dbtr/DbtrAcct 才是 PmtInf 直属；ReqdExctnDt 与
+  XpryDt 皆为 DateAndDateTime2Choice（取 `<Dt>`/`<DtTm>` 子
+  元素，非裸日期）。EndToEndId 在 `CdtTrfTx/PmtId` 内，取 RfP
+  ID。
+- 两处有意的省略，皆已在 ledger/pain013.go 头部写明原因：
+  其一，CdtTrfTx 内不写 PmtTpInf——账本不持有任何 scheme
+  service level / local instrument / category purpose，编造
+  一枚（如 SDVA）等于伪造 scheme 数据，全 XSD 的 .05 绑定
+  亦将其标为 [0..1]；其二，账户与代理取 base-XSD 形
+  `<Id><IBAN>` 与 `<FinInstnId><BIC>`（moov 的 RTP profile
+  把二者剪裁为仅 Othr / 仅 ClrSysMmbId，账本沿 pain008/009
+  前例取 base 形）。银行侧 profile 如需 PmtTpInf，留待后轮
+  补。
+- 字段映射：MsgId 确定性 `pain013-<rfp id>`；EndToEndId =
+  RfP ID；Cdtr/Dbtr 取 RfP 的 Creditor/Debtor 账户名，
+  CdtrAcct/DbtrAcct 取其注册 IBAN，CdtrAgt/DbtrAgt 取其注册
+  BIC；Amt/Currency 取 AmountCents/Currency；
+  ReqdExctnDt 取 RfP 创建日的 `<Dt>`（取创建日而非墙钟，
+  使重导出除 CreDtTm 外字节相同）；XpryDt 取 ExpiresAt
+  全量时间戳 `<DtTm>`。
+- 状态门只认 issued：paid/rejected 拒（`ErrRfPNotIssued`），
+  已过期拒（`ErrRfPExpired`，含懒过期与已扫过期）；两方
+  缺 IBAN 拒（`ErrMissingAccountIBAN`），缺 BIC 拒（新哨兵
+  `ErrMissingPain013AgentBIC`）——V07 的 DbtrAgt/CdtrAgt
+  皆 [1..1]，无 BIC 的代理块无法诚实渲染，宁缺勿造。
+- **“请求”与“回应”的分野**：本项只生成请求，付款方回应
+  由 pain.014 承载、留待后轮；导出 ≠ 接受，RfP 导出后仍为
+  issued，接受仍走 `AcceptRfP`。
+- 只读导出：不 bump 版本、不落账、不改 RfP 行；仅记一条
+  `pain013_exported` 审计事件（msg_id/rfp_id）。`400` 缺
+  rfp_id；`404` 未知 RfP；`422` 已付/已拒/已过期/缺 IBAN/
+  缺 BIC。计数器 `ledger_pain013_exports_total`。
+
 ### CSV 批量付款文件导入（LG-208）
 
 企业批量付款的文件通道：`ImportPaymentCSV` 解析一笔付款文件的 CSV
