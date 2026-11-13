@@ -6393,6 +6393,58 @@ func (s *server) handleMT210Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleCAMT057Export implements GET /exports/camt057 (LG-403): an
+// ISO 20022 camt.057.001.06 notification to receive for the next
+// run of one active transfer schedule (see ledger.ExportCAMT057).
+// It is the MX twin of GET /exports/mt210: same source, same
+// direction (account owner → account bank), same limits — one
+// next run only, the fee never deducted, an FX schedule never
+// notified. Query parameters: schedule_id (required),
+// servicing_bic (required, the BIC of the bank holding the account
+// to be credited — the ledger holds no bank-identity registry, so
+// the caller names the servicing bank on every export). The
+// export is read-only: no version bump, nothing booked, no audit
+// event. Error mapping: a missing schedule_id or servicing_bic is
+// a 400; an unknown schedule is a 404; a paused, cancelled,
+// completed, or exhausted schedule is a 422; an invalid servicing
+// BIC, an FX schedule, or a schedule that cannot be rendered as a
+// valid camt.057 (MsgId / account over its Max35/Max34 bound) is
+// a 400.
+func (s *server) handleCAMT057Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT057Exports.Add(1)
+	q := r.URL.Query()
+	scheduleID := q.Get("schedule_id")
+	if scheduleID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "schedule_id is required"})
+		return
+	}
+	servicingBIC := q.Get("servicing_bic")
+	if servicingBIC == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "servicing_bic is required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportCAMT057(ledger.CAMT057ExportOptions{
+		ScheduleID:   scheduleID,
+		ServicingBIC: servicingBIC,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrScheduleNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrCAMT057ScheduleNotActive):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrInvalidCAMT057Export):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(doc))
+}
+
 // handleMT320Export implements GET /exports/mt320 (LG-392): a SWIFT
 // FIN MT320 fixed loan/deposit confirmation for one active or
 // matured term deposit (see ledger.ExportMT320). Query parameters:
@@ -12503,6 +12555,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt320", s.handleMT320Export)
 	mux.HandleFunc("GET /exports/mt321", s.handleMT321Export)
 	mux.HandleFunc("GET /exports/mt210", s.handleMT210Export)
+	mux.HandleFunc("GET /exports/camt057", s.handleCAMT057Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
 	mux.HandleFunc("POST /rfp", s.handleCreateRfP)
 	mux.HandleFunc("POST /rfp/{id}/accept", s.handleAcceptRfP)

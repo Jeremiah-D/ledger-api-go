@@ -238,6 +238,10 @@ type Metrics struct {
 	// account reporting request export requests served, including
 	// rejected exports (see ledger.ExportCAMT060, LG-400).
 	CAMT060Exports atomic.Uint64
+	// CAMT057Exports counts GET /exports/camt057 ISO 20022 camt.057
+	// notification to receive export requests served, including
+	// rejected exports (see ledger.ExportCAMT057, LG-403).
+	CAMT057Exports atomic.Uint64
 	// SnapshotExports counts GET /exports/snapshot JSONL
 	// disaster-recovery snapshot export requests served (see
 	// ledger.ExportSnapshot, LG-383).
@@ -1140,6 +1144,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/camt054 ISO 20022 camt.054 debit/credit notification exports served, including rejected exports.", m.CAMT054Exports.Load())
 	writeCounter(&sb, "ledger_camt060_exports_total",
 		"Total GET /exports/camt060 ISO 20022 camt.060 account reporting request exports served, including rejected exports.", m.CAMT060Exports.Load())
+	writeCounter(&sb, "ledger_camt057_exports_total",
+		"Total GET /exports/camt057 ISO 20022 camt.057 notification to receive exports served, including rejected exports.", m.CAMT057Exports.Load())
 	writeCounter(&sb, "ledger_snapshot_exports_total",
 		"Total GET /exports/snapshot JSONL disaster-recovery snapshot exports served.", m.SnapshotExports.Load())
 	writeCounter(&sb, "ledger_gpi_track_queries_total",
