@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -12,11 +13,11 @@ import (
 	"github.com/Jeremiah-D/ledger-api-go/ledger"
 )
 
-// camt057HTTPSetup registers BICs on both legs (alice DEUTDEFF,
-// bob NWBKGB2L) and creates one daily schedule: 10000 cents USD,
-// next run 2026-11-12 09:00 UTC, a 250-cent per-run fee on its
-// own leg. The schedule ID is short enough that the deterministic
-// MsgId ("camt057-sched-1-0") stays within the Max35Text bound.
+// camt057HTTPSetup registers BICs on both legs (alice DEUTDEFF, bob
+// NWBKGB2L) and creates one daily schedule: 10000 cents USD, next
+// run 2026-11-12 09:00 UTC, a 250-cent per-run fee on its own leg —
+// the mt210HTTPSetup twin, so the MT210 and camt.057 notices
+// cross-check on the same schedule.
 func camt057HTTPSetup(t *testing.T) (*ledger.Ledger, ledger.TransferSchedule) {
 	t.Helper()
 	l := ledger.New()
@@ -39,9 +40,17 @@ func camt057HTTPSetup(t *testing.T) (*ledger.Ledger, ledger.TransferSchedule) {
 	return l, sched
 }
 
+// Note on repeat exports: GrpHdr/CreDtTm is a second-resolution wall
+// clock, so two exports a second apart differ in that one line
+// only — the document is byte-identical modulo CreDtTm (the
+// camt.060 HTTP-test precedent, which strips CreDtTm and pins
+// MsgId). Falsifying CreDtTm to force byte-identity would mislabel
+// when the document was created.
+var camt057CreDtTm = regexp.MustCompile(`<CreDtTm>[^<]*</CreDtTm>`)
+
 // Full camt.057 notice flow through HTTP: create the schedule,
-// export the notice, and verify the XML body, the byte-identical
-// repeat, and the metrics counter.
+// export the notice, and verify the XML body, the repeat export,
+// and the metrics counter.
 func TestHTTPCAMT057Export(t *testing.T) {
 	l, sched := camt057HTTPSetup(t)
 	srv := httptest.NewServer(newRouter(l))
@@ -72,9 +81,10 @@ func TestHTTPCAMT057Export(t *testing.T) {
 		t.Errorf("content-type = %q, want application/xml; charset=utf-8", ct)
 	}
 	for _, want := range []string{
-		`<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.057.001.06">`,
+		`xmlns="urn:iso:std:iso:20022:tech:xsd:camt.057.001.07"`,
 		"<NtfctnToRcv>",
 		"<MsgId>camt057-sched-1-0</MsgId>",
+		"<Id>camt057-sched-1-0</Id>",
 		"<IBAN>GB29NWBK60161331926819</IBAN>",
 		"<BICFI>CITIUS33</BICFI>",
 		`<TtlAmt Ccy="USD">100.00</TtlAmt>`,
@@ -91,12 +101,10 @@ func TestHTTPCAMT057Export(t *testing.T) {
 		t.Errorf("export must not deduct the fee from the amount, body:\n%s", body)
 	}
 
-	// Repeat export is byte-identical: every field but CreDtTm
-	// is pinned to the stored schedule and its RunSeq, and the
-	// two calls land in the same second.
+	// Repeat export is identical apart from the wall-clock CreDtTm line.
 	_, _, body2 := getText(t, srv.URL+"/exports/camt057?"+q.Encode())
-	if body2 != body {
-		t.Errorf("repeat export differs:\nfirst:\n%s\nsecond:\n%s", body, body2)
+	if camt057CreDtTm.ReplaceAllString(body, "<CreDtTm/>") != camt057CreDtTm.ReplaceAllString(body2, "<CreDtTm/>") {
+		t.Errorf("repeat export differs beyond CreDtTm:\nfirst:\n%s\nsecond:\n%s", body, body2)
 	}
 
 	// The metrics counter counts the export (1 export + 1 repeat
@@ -110,14 +118,22 @@ func TestHTTPCAMT057Export(t *testing.T) {
 	}
 }
 
-// Error mapping for GET /exports/camt057: a missing schedule_id
-// or servicing_bic is a 400, an unknown schedule a 404, a paused
-// schedule a 422, an invalid servicing BIC a 400 — and rejected
-// requests still count in the metrics.
+// Error mapping for GET /exports/camt057: a missing schedule_id or
+// servicing_bic is a 400, an unknown schedule a 404, a paused
+// schedule a 422, an invalid servicing BIC or an FX schedule a 400
+// — and rejected requests still count in the metrics.
 func TestHTTPCAMT057ExportErrors(t *testing.T) {
 	l, sched := camt057HTTPSetup(t)
 	if _, err := l.PauseTransferSchedule(sched.ID); err != nil {
 		t.Fatalf("PauseTransferSchedule: %v", err)
+	}
+	if _, _, err := l.CreateTransferSchedule(ledger.TransferSchedule{
+		ID: "sched-fx", From: "alice", To: "bob",
+		AmountCents: 10000, Currency: "USD", ToCurrency: "EUR",
+		FXAccount: "desk-fx", Interval: 24 * time.Hour,
+		NextRunAt: time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("CreateTransferSchedule FX: %v", err)
 	}
 	srv := httptest.NewServer(newRouter(l))
 	defer srv.Close()
@@ -158,8 +174,14 @@ func TestHTTPCAMT057ExportErrors(t *testing.T) {
 	if code := getCode(t, srv.URL+"/exports/camt057?"+q.Encode()); code != http.StatusBadRequest {
 		t.Errorf("bad servicing BIC: status=%d, want 400", code)
 	}
+	// FX schedule.
+	q.Set("schedule_id", "sched-fx")
+	q.Set("servicing_bic", "CITIUS33")
+	if code := getCode(t, srv.URL+"/exports/camt057?"+q.Encode()); code != http.StatusBadRequest {
+		t.Errorf("FX schedule: status=%d, want 400", code)
+	}
 
-	// Rejected requests still count: 5 errors above.
+	// Rejected requests still count: 6 errors above.
 	resp, err := http.Get(srv.URL + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
@@ -169,7 +191,7 @@ func TestHTTPCAMT057ExportErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read /metrics: %v", err)
 	}
-	if !strings.Contains(string(mbody), "ledger_camt057_exports_total 5") {
-		t.Errorf("metrics missing ledger_camt057_exports_total 5")
+	if !strings.Contains(string(mbody), "ledger_camt057_exports_total 6") {
+		t.Errorf("metrics missing ledger_camt057_exports_total 6")
 	}
 }

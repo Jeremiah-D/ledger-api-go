@@ -6333,40 +6333,34 @@ byte-identical until a run fires (then `RunSeq` advances and
 `:21:` / `:30:` move with it). `GET /metrics` counts exports as
 `ledger_mt210_exports_total`.
 
-The same notice is available in MX form as an ISO 20022
-camt.057.001.06 notification to receive: `GET
+The same notice exists in ISO 20022 syntax: `GET
 /exports/camt057?schedule_id=<id>&servicing_bic=<bic>` renders
-the next run (see `ledger.ExportCAMT057`). It is the MT210's twin,
-not a variant of camt.054: same source (one transfer schedule's
-next run), same direction (account owner → account bank, "there
-will be money coming into my account"), FIN and MX being two
-syntaxes for one pre-advice — whereas camt.054 is the bank
-telling the customer money has already landed, in the opposite
-direction and after the fact. The document is `Document >
-NtfctnToRcv > GrpHdr` (`MsgId` deterministic,
-`camt057-<schedule>-<runSeq>`, `CreDtTm` wall-clock creation
-time) + `Ntfctn` (`Id` = `MsgId`, `Acct` = the account to be
-credited — registered IBAN, else the account ID — `AcctSvcr` =
-the servicing bank named by the caller, `TtlAmt` = the principal,
-`XpctdValDt` = the next run date, `Dbtr` = the From party —
-`Agt` with its registered BIC, otherwise `Pty` named by account
-ID — and exactly one `Itm` for the next run, whose `Id` is the
-run transfer ID and whose `Amt` repeats the principal). The
-notification-level amount is `TtlAmt` per the camt.057 message
-definition — `Ntfctn` carries no direct `Amt` child; `Amt` lives
-inside each `Itm` — and `Itm` is mandatory, so a notice always
-carries its one run. One camt.057 notifies one run only; the
-per-run fee is a separate leg and never reduces the notified
-amount; an FX schedule cannot be notified — the receivable amount
-is only known when the rate is looked up at fire time (400). Only
-an active schedule notifies: a paused, cancelled, completed, or
-exhausted schedule is 422, an unknown ID 404, and a missing
-`schedule_id` / `servicing_bic`, an invalid servicing BIC, or a
-schedule that cannot be rendered as a valid camt.057 400. Like
-MT210, the export is read-only and repeat exports are
-byte-identical until a run fires (then `RunSeq` advances and
-`MsgId` / `Itm/Id` / `XpctdValDt` move with it). `GET /metrics`
-counts exports as `ledger_camt057_exports_total`.
+the next run as a camt.057.001.07 `NotificationToReceive` (see
+`ledger.ExportCAMT057`), the MX twin of the MT210 above — same
+source (the same schedule, the same next run), same direction
+(account owner to account bank: the To account is the
+beneficiary, the servicing bank named by the caller is the
+receiver), same limits: one run per notice, the per-run fee is a
+separate leg and never reduces the amount, and an FX schedule
+cannot be notified (400) because the receivable amount is only
+known when the rate is looked up at fire time. The document
+carries `GrpHdr` with a deterministic `MsgId`
+(`camt057-<schedule>-<runSeq>`) and a wall-clock `CreDtTm`, and
+one `Ntfctn` with `Id` repeating the `MsgId`, `Acct` naming the
+account to be credited (the To account's registered IBAN,
+falling back to the account ID), `AcctSvcr` naming the servicing
+bank, `TtlAmt` the principal, `XpctdValDt` the next run date,
+`Dbtr` the From party (its registered BIC as an agent, else the
+account ID as a party name), and a single mandatory `Itm` with
+the run transfer ID (`<ID>/run/<seq>`), the same amount, and the
+same value date. Only an active schedule notifies: a paused,
+cancelled, completed, or exhausted schedule is 422, an unknown
+ID 404, and a missing `schedule_id` / `servicing_bic`, an invalid
+servicing BIC, or a schedule that cannot be rendered as a valid
+camt.057 400. Repeat exports are byte-identical modulo the
+`CreDtTm` line until a run fires (then `RunSeq` advances and
+`MsgId` / `XpctdValDt` move with it). `GET /metrics` counts
+exports as `ledger_camt057_exports_total`.
 
 ### pain.001 付款指令状态机（LG-99）
 

@@ -6394,22 +6394,20 @@ func (s *server) handleMT210Export(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCAMT057Export implements GET /exports/camt057 (LG-403): an
-// ISO 20022 camt.057.001.06 notification to receive for the next
-// run of one active transfer schedule (see ledger.ExportCAMT057).
-// It is the MX twin of GET /exports/mt210: same source, same
-// direction (account owner → account bank), same limits — one
-// next run only, the fee never deducted, an FX schedule never
-// notified. Query parameters: schedule_id (required),
-// servicing_bic (required, the BIC of the bank holding the account
-// to be credited — the ledger holds no bank-identity registry, so
-// the caller names the servicing bank on every export). The
-// export is read-only: no version bump, nothing booked, no audit
+// ISO 20022 camt.057.001.07 notification to receive for the next run
+// of one active transfer schedule (see ledger.ExportCAMT057) — the
+// MX twin of the MT210 above: same source, same direction (account
+// owner to account bank), same limits (one run, fees never netted,
+// FX schedules never notified). Query parameters: schedule_id
+// (required), servicing_bic (required, the BIC of the bank holding
+// the account to be credited — the ledger holds no bank-identity
+// registry, so the caller names the servicing bank on every
+// export). The export is read-only: no version bump, no audit
 // event. Error mapping: a missing schedule_id or servicing_bic is
 // a 400; an unknown schedule is a 404; a paused, cancelled,
 // completed, or exhausted schedule is a 422; an invalid servicing
 // BIC, an FX schedule, or a schedule that cannot be rendered as a
-// valid camt.057 (MsgId / account over its Max35/Max34 bound) is
-// a 400.
+// valid camt.057 is a 400.
 func (s *server) handleCAMT057Export(w http.ResponseWriter, r *http.Request) {
 	s.metrics.CAMT057Exports.Add(1)
 	q := r.URL.Query()
