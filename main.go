@@ -6777,6 +6777,68 @@ func (s *server) handlePain002Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
+// handlePacs002Apply implements POST /exports/pacs002/apply (LG-409):
+// applies a correspondent bank's ISO 20022 pacs.002.001.03 FI-to-FI
+// payment status report to the gpi track it names. The body is the raw
+// pacs.002 XML; the report's OrgnlUETR selects the track and its
+// OrgnlMsgId must be that track's payout's `<payout>/pacs008` MsgId
+// (see ledger.ApplyPacs002Report): ACSP/ACSC/ACCP advance the track,
+// RJCT rejects it with the bank's reason code in the audit event.
+// Re-applying a report is idempotent. Error mapping: a malformed
+// report or a foreign MsgId is a 400; an unknown UETR is a 404; an
+// illegal TxSts, an illegal transition, or an RJCT without a reason is
+// a 422 (the report is well-formed but the state machine cannot apply
+// it). The operator identity comes from the x-ledger-actor header,
+// like the other operator actions.
+func (s *server) handlePacs002Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs002Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	report, err := ledger.ParsePacs002(body)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ledger.ErrInvalidPacs002TxSts) {
+			// A well-formed report carrying a TxSts outside the
+			// gpi vocabulary: the state machine cannot apply it.
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	track, err := s.ledgerFor(r).ApplyPacs002Report(report, ledger.ActorFromContext(actx))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrPacs002ForeignMsgID):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrGPIUnknownUETR):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrInvalidPacs002TxSts),
+			errors.Is(err, ledger.ErrGPIInvalidStatus),
+			errors.Is(err, ledger.ErrGPIInvalidTransition),
+			errors.Is(err, ledger.ErrGPIReasonRequired):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /exports/pacs002/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pacs.002 report failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, track)
+}
+
 // handlePain008Apply implements POST /exports/pain008/apply (LG-406):
 // applies a bank's ISO 20022 pain.002.001.03 customer payment status
 // report answering a pain.008.001.02 direct debit instruction. The body
@@ -12765,6 +12827,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
+	mux.HandleFunc("POST /exports/pacs002/apply", s.handlePacs002Apply)
 	mux.HandleFunc("POST /exports/pain008/apply", s.handlePain008Apply)
 	mux.HandleFunc("POST /exports/pain012/apply", s.handlePain012Apply)
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)

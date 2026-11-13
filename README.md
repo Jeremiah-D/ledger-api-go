@@ -6987,6 +6987,31 @@ curl -s 'localhost:8080/exports/pacs002?uetr=9f2c8e1a-…' -o status.xml
 
 Go: `ledger.ExportPacs002`。
 
+### `POST /exports/pacs002/apply` — pacs.002 回盘推进 gpi 跟踪
+
+代理行对 pacs.008 指令的裁决经 pacs.002 回盘落盘（LG-409）：回盘的
+`OrgnlMsgNmId` 为 `pacs.008.001.02`、`OrgnlMsgId` 为该 payout 的
+pacs.008 导出 `MsgId`（`<payout>/pacs008`），`TxInfAndSts/OrgnlUETR`
+join gpi 跟踪记录，`TxSts` 推进其状态机。导出与回盘的分野：本项只
+消费代理行回执，不生成报告、不驱动 payout。
+
+- `ACSP`/`ACSC`/`ACCP` 各推进一级（`tracked → ACSP → ACSC → ACCP`，
+  可跳级、不可倒退）；`RJCT` 须带原因码（`StsRsnInf/Rsn/Prtry` 原文
+  进 `gpi_status` 审计事件），无原因拒；同一报告重放幂等，无重复审
+  计事件；终态 `ACCP`/`RJCT` 后再收 verdict 拒。
+- verdict 永不移动资金、永不改 payout 状态机（银行证据而已；
+  `SettlePayout`/`FailPayout` 仍须操作员凭银行对账单确认）。
+- 错误映射：报文不可解析 400、未知 UETR 404、外来 `MsgId` 400、
+  非法 `TxSts`/非法变迁/`RJCT` 无原因 422。计数器
+  `ledger_pacs002_applies_total`。
+
+```bash
+curl -s -X POST localhost:8080/exports/pacs002/apply --data-binary @status-report.xml
+# 200 {"uetr":"…","payout_id":"po-1","status":"ACSC",…}
+```
+
+Go: `ledger.ParsePacs002`、`ledger.ApplyPacs002Report`。
+
 ### `GET /exports/pacs028` — ISO 20022 pacs.028 银行间状态请求导出
 
 pacs.002 的反向：`pacs.028.001.03`（`FIToFIPaymentStatusRequest`）是
@@ -10812,6 +10837,9 @@ curl -s localhost:8080/metrics
 - `ledger_pacs002_exports_total` — `GET /exports/pacs002` ISO 20022
   pacs.002 FI-to-FI payment status report exports served, including
   rejected exports.
+- `ledger_pacs002_applies_total` — `POST /exports/pacs002/apply`
+  ISO 20022 pacs.002 FI-to-FI payment status report applies served,
+  including rejected reports.
 - `ledger_pacs028_exports_total` — `GET /exports/pacs028` ISO 20022
   pacs.028 FI-to-FI payment status request exports served, including
   rejected exports.
