@@ -131,19 +131,19 @@ type Pacs004Return struct {
 type Pacs004ReturnResult struct {
 	// Applied reports whether this call booked the reversal. False
 	// on both the duplicate no-op path and the error paths.
-	Applied bool
+	Applied bool `json:"applied"`
 	// Duplicate reports whether the return was already applied under
 	// the same MsgId: a no-op success, not an error.
-	Duplicate bool
+	Duplicate bool `json:"duplicate"`
 	// PayoutID is the payout the return addressed.
-	PayoutID string
+	PayoutID string `json:"payout_id,omitempty"`
 	// ReversalEntryID is the booked reversal journal row
 	// ("payout/<id>/return"), set on the applied and duplicate paths.
-	ReversalEntryID string
+	ReversalEntryID string `json:"reversal_entry_id,omitempty"`
 	// RepairID is set on the parked fail-closed paths (unknown
 	// original, amount mismatch): the repair-queue record holding
 	// the return for operator resolution.
-	RepairID string
+	RepairID string `json:"repair_id,omitempty"`
 }
 
 // pacs004InboundDocument is the wire shape ParsePacs004 accepts.

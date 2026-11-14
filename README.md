@@ -6557,6 +6557,14 @@ curl -s 'localhost:8080/exports/pain002?msgid=<msgid>' -H 'Accept: application/x
 - repair queue 中的退汇记录是可见性停车，不是可重提指令：其 Maker
   恒为空，CreatePayout 门永远过不了——重提一个被停车的退汇绝不能凭空
   造出一笔付款；操作员在账外与银行解决，记录随 repair TTL 过期。
+- HTTP 入口 `POST /exports/pacs004/apply`（LG-413）：请求体为原始
+  pacs.004 XML，`x-ledger-actor` 记操作员身份；`200` 回
+  `Pacs004ReturnResult`（`applied`/`duplicate`/`payout_id`/
+  `reversal_entry_id`）。错误映射：解析拒 `400`；未知原付款 `404`
+  （repair_id 随错误体返回）；未结算、已退汇、金额不符 `422`
+  （金额不符同样带 repair_id，未结算与已退汇无 repair 记录可给）。
+  同一 MsgId 重放为 `200` no-op 成功。计数器
+  `ledger_pacs004_applies_total`。
 
 ### pain.010 授权修改导出（LG-207）
 
@@ -7189,7 +7197,9 @@ curl -s 'localhost:8080/exports/pacs004?uetr=9f2c8e1a-…&reason=DUPL' -o return
 # 200 pacs.004.001.02: <PmtRtr>/.../<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>/.../<Prtry>DUPL</Prtry>
 ```
 
-Go: `ledger.ExportPacs004`。
+Go: `ledger.ExportPacs004`。入站回盘（银行发回的退汇）走
+`POST /exports/pacs004/apply`（LG-413），见上文“pacs.004 退汇入站处理
+（LG-206）”节。
 
 ### `pacs.007` — ISO 20022 pacs.007 已结算付款撤销导出
 
