@@ -7620,6 +7620,46 @@ curl -s 'localhost:8080/exports/pacs009?transfer=tx-2026-1042&sttlm_mtd=COVE&chr
 Go: `ledger.ExportPacs009(transferID, ledger.Pacs009Options{SettlementMethod,
 ChargesBearer})`。
 
+### `POST /exports/pacs009/apply` — ISO 20022 pacs.009 银行间大额贷记转账入站
+
+出站是我方发往代理行的 FI-to-FI 贷记（上节），入站是消费对方银行
+发来的 FI-to-FI 贷记：对方银行的 `pacs.009.001.06`
+（`FinancialInstitutionCreditTransfer`）到达本账本时，
+`POST /exports/pacs009/apply` 以原始 XML 为 body 解析并记入账回执
+（LG-418）。`ParsePacs009` 复用出站 wire struct 反向解析：
+`GrpHdr/MsgId` 必填、`NbOfTxs` 须为 1（单 `CdtTrfTxInf`）、
+`SttlmMtd` 须在 `INDA/INGA/COVE/CLRG` 闭集内、`ChrgsBr` 须在
+`DEBT/CRED/SHAR/SLEV` 闭集内（与出站同一闭集）、`IntrBkSttlmAmt`
+正数、`CdtrAgt`（`FinInstnId/Othr/Id` = 账户 ID）必填。
+
+关联与记账（沿 LG-163 pacs.008 入账回执形态）：`EndToEndId`（再
+`InstrId`）按 transfer/payout 幂等键关联既有指令——关联上者金额
+币种须与原指令一致、`CdtrAgt` 须是原指令的账户之一；无关联者按
+`CdtrAgt` 账户独立记贷方 receipt 分录（`CdtrAgt` 须是本账本内已
+知账户）。回执分录借记 `CdtrAgt` 账户、贷记 pacs.009 结算账户
+（`ledger.SetPacs009SettlementAccount` 配置，未配置时 fail-closed），
+分录 ID 确定性 `pacs009/<endtoendid>`。只记资金分录与状态，不碰
+FX：关联的原指令若为跨币种 transfer（主分录只记了 payer 侧对
+FX 清算账户的腿）直接拒。pacs.009 无 UETR，关联不用 UETR、不推进
+gpi track。
+
+Fail-closed：解析拒绝（400：报文不合规、缺 `MsgId` /
+`EndToEndId` / `CdtrAgt`、`NbOfTxs` 不为 1、金额非正、币种非法、
+结算日格式错误、结算方式/费用承担方不在闭集）与未知 `CdtrAgt`
+账户（404）、金额/币种/`CdtrAgt` 与原指令不符（422）均进 repair
+queue（错误体带 `repair_id`）；跨币种原指令、未配置结算账户、
+同一 `MsgId` 重用于另一笔转账（均为 422）不进 repair queue。
+同一 `GrpHdr/MsgId` 重放回原收据（`duplicate` 置位），不重复记
+账、不补审计事件；成功记账发 `pacs009_receipt_applied` 审计事件，
+`ledger_pacs009_applies_total` 计数（含被拒的）。
+
+```bash
+curl -s -X POST localhost:8080/exports/pacs009/apply -H 'Content-Type: application/xml' --data-binary @ficdt-in.xml
+# 200 {"applied":true,"entry_id":"pacs009/e2e-1","association":{"kind":"transfer","id":"tx-1",...},"transfer":{"msg_id":"m-1","end_to_end_id":"e2e-1","amount_cents":2500,...},"duplicate":false}
+```
+
+Go: `ledger.ParsePacs009(xml)`，`ledger.ApplyPacs009(transfer, actor)`。
+
 ### `GET /exports/pacs010` — ISO 20022 pacs.010 银行间直接扣款导出
 
 pain.008（LG-166）把已记账的 mandate 扣款集合渲染为债权人发往其银行的
@@ -11089,6 +11129,9 @@ curl -s localhost:8080/metrics
 - `ledger_pacs009_exports_total` — `GET /exports/pacs009` ISO 20022
   pacs.009 FI-to-FI credit transfer exports served, including rejected
   exports.
+- `ledger_pacs009_applies_total` — `POST /exports/pacs009/apply` ISO
+  20022 pacs.009 FI-to-FI credit transfer applies served, including
+  rejected transfers.
 - `ledger_pacs010_exports_total` — `GET /exports/pacs010` ISO 20022
   pacs.010 FI-to-FI direct debit exports served, including rejected
   exports.

@@ -614,6 +614,11 @@ type snapshotConfigLine struct {
 	// absent in snapshots written before it existed, for the same
 	// fail-closed reason as PayoutClearingAccount.
 	FedNowSettlementAccount AccountID `json:"fednow_settlement_account,omitempty"`
+	// Pacs009SettlementAccount carries the ledger-wide pacs.009
+	// settlement account (see SetPacs009SettlementAccount, LG-418);
+	// absent in snapshots written before it existed, for the same
+	// fail-closed reason as FedNowSettlementAccount.
+	Pacs009SettlementAccount AccountID `json:"pacs009_settlement_account,omitempty"`
 	// CreditInterestIncome carries the ledger-wide credit-line
 	// interest-income account (see SetCreditInterestIncome); absent in
 	// snapshots written before credit lines existed, for the same
@@ -1359,30 +1364,31 @@ func (l *Ledger) exportConfigLocked(enc *json.Encoder) error {
 		// LG-125: the mandate registry and its debit index round-trip,
 		// so a restored ledger keeps the exact standing pull
 		// authorizations the original ran on.
-		Mandates:                l.mandatesSnapshotLocked(),
-		MandateDebits:           l.mandateDebitsSnapshotLocked(),
-		ClosedAccounts:          l.closedCopyLocked(),
-		Suspended:               l.suspendedCopyLocked(),
-		OFXImportRegistry:       l.ofxImportsLocked(),
-		CAMT053ImportRegistry:   l.camt053ImportsLocked(),
-		CAMT052ImportRegistry:   l.camt052ImportsLocked(),
-		TdInterestExpense:       l.tdInterestExpense,
-		PayoutClearingAccount:   l.payoutClearingAccount,
-		FedNowSettlementAccount: l.fedNowSettlementAccount,
-		CreditInterestIncome:    l.creditInterestIncome,
-		CreditLines:             l.creditLinesLocked(),
-		CollateralPledges:       l.collateralPledgesLocked(),
-		CollateralRequirements:  l.collateralReqsLocked(),
-		ECLExpenseAccount:       l.eclExpenseAccount,
-		ECLAllowanceAccount:     l.eclAllowanceAccount,
-		BadDebtExpenseAccount:   l.badDebtExpenseAccount,
-		ECLExposures:            l.eclExposureRecordsLocked(),
-		PainTransfers:           l.painTransfersLocked(),
-		AccountIBANs:            l.accountIBANsLocked(),
-		PainInstructions:        l.painInstructionsLocked(),
-		Pain008Instructions:     l.pain008InstructionsLocked(),
-		VirtualAccounts:         l.virtualAccountsLocked(),
-		VirtualAccountVersion:   l.virtualAccountVersion,
+		Mandates:                 l.mandatesSnapshotLocked(),
+		MandateDebits:            l.mandateDebitsSnapshotLocked(),
+		ClosedAccounts:           l.closedCopyLocked(),
+		Suspended:                l.suspendedCopyLocked(),
+		OFXImportRegistry:        l.ofxImportsLocked(),
+		CAMT053ImportRegistry:    l.camt053ImportsLocked(),
+		CAMT052ImportRegistry:    l.camt052ImportsLocked(),
+		TdInterestExpense:        l.tdInterestExpense,
+		PayoutClearingAccount:    l.payoutClearingAccount,
+		FedNowSettlementAccount:  l.fedNowSettlementAccount,
+		Pacs009SettlementAccount: l.pacs009SettlementAccount,
+		CreditInterestIncome:     l.creditInterestIncome,
+		CreditLines:              l.creditLinesLocked(),
+		CollateralPledges:        l.collateralPledgesLocked(),
+		CollateralRequirements:   l.collateralReqsLocked(),
+		ECLExpenseAccount:        l.eclExpenseAccount,
+		ECLAllowanceAccount:      l.eclAllowanceAccount,
+		BadDebtExpenseAccount:    l.badDebtExpenseAccount,
+		ECLExposures:             l.eclExposureRecordsLocked(),
+		PainTransfers:            l.painTransfersLocked(),
+		AccountIBANs:             l.accountIBANsLocked(),
+		PainInstructions:         l.painInstructionsLocked(),
+		Pain008Instructions:      l.pain008InstructionsLocked(),
+		VirtualAccounts:          l.virtualAccountsLocked(),
+		VirtualAccountVersion:    l.virtualAccountVersion,
 		// FTPCurves carries the per-currency FTP rate curves with
 		// their versions (see SetFtpCurve); FTPAccounts carries the
 		// internal counterparties (see WithFtpAccounts). Absent in
@@ -3495,6 +3501,7 @@ func (l *Ledger) applySnapshotConfigLocked(cfg *snapshotConfigLine) error {
 	l.tdInterestExpense = cfg.TdInterestExpense
 	l.payoutClearingAccount = cfg.PayoutClearingAccount
 	l.fedNowSettlementAccount = cfg.FedNowSettlementAccount
+	l.pacs009SettlementAccount = cfg.Pacs009SettlementAccount
 	l.creditInterestIncome = cfg.CreditInterestIncome
 	l.creditLines = make(map[creditLineKey]CreditLine, len(cfg.CreditLines))
 	for _, cl := range cfg.CreditLines {

@@ -1078,6 +1078,13 @@ type Ledger struct {
 	fedNowSettlementAccount AccountID
 	fedNowPostings          uint64
 	fedNowRejections        map[string]uint64
+	// pacs009SettlementAccount is the ledger-wide pacs.009 settlement
+	// account — the credit leg of every pacs.009 receipt posting (see
+	// pacs009_inbound.go, LG-418): empty means unconfigured and
+	// ApplyPacs009 is fail-closed. Structural config — the account
+	// round-trips through disaster-recovery snapshots like the
+	// FedNow settlement account.
+	pacs009SettlementAccount AccountID
 	// pacs008Exports counts successful pacs.008.001.08 outbound
 	// exports (see pacs008_export.go, LG-176): the ledger-side source
 	// of the ledger_pacs008_exports_total metric. Counted at export

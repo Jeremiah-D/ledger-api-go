@@ -7085,6 +7085,87 @@ func (s *server) handlePain014Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handlePacs009Apply implements POST /exports/pacs009/apply (LG-418):
+// applies a correspondent bank's ISO 20022 pacs.009.001.06 FI-to-FI
+// credit transfer to the ledger — the inbound half of the pacs.009
+// lifecycle, the mirror of the outbound export (GET /exports/pacs009,
+// LG-172). The body is the raw pacs.009 XML; the transfer's
+// EndToEndId (then InstrId) associates it with the original transfer
+// or payout idempotency key (see ledger.ApplyPacs009): an associated
+// transfer books its receipt against the original (amount and
+// currency must match, the CdtrAgt must be one of the original's
+// accounts), an unassociated one books a standalone receipt against
+// the CdtrAgt account, and the receipt debits the CdtrAgt account
+// and credits the pacs.009 settlement account. Re-applying a
+// transfer is idempotent: the GrpHdr MsgId is the replay key, so a
+// replay returns the original receipt with duplicate set. A document
+// the ledger cannot parse — malformed XML, a NbOfTxs other than 1, a
+// SttlmMtd or ChrgsBr outside the admitted vocabularies — is parked
+// in the repair queue and answered 400 with the repair-queue record
+// ID; an unknown CdtrAgt account is parked and answered 404 with
+// the repair ID, and an amount, currency, or creditor mismatch
+// against the associated original is parked and answered 422 with
+// the repair ID. A cross-currency original, an unconfigured
+// settlement account, or a MsgId reused for a different transfer is
+// a 422 with no repair record. The actor is resolved before parsing
+// so a parse refusal can be parked under the operator's identity.
+// The operator identity comes from the x-ledger-actor header, like
+// the other operator actions.
+func (s *server) handlePacs009Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs009Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	t, err := ledger.ParsePacs009(body)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if repairID, parkErr := l.ParkPacs009Unparsed(actor); parkErr == nil {
+			errBody["repair_id"] = repairID
+		} else {
+			log.Printf("ledger-api-go: POST /exports/pacs009/apply: repair parking failed: %v", parkErr)
+		}
+		writeJSON(w, http.StatusBadRequest, errBody)
+		return
+	}
+	res, err := l.ApplyPacs009(t, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrPacs009UnknownCreditorAccount):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrPacs009AmountMismatch),
+			errors.Is(err, ledger.ErrPacs009CurrencyMismatch),
+			errors.Is(err, ledger.ErrPacs009CreditorMismatch),
+			errors.Is(err, ledger.ErrPacs009MsgIDConflict),
+			errors.Is(err, ledger.ErrPacs009FXTransfer),
+			errors.Is(err, ledger.ErrPacs009SettlementAccountNotConfigured):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/pacs009/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pacs.009 credit transfer failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handlePain008Apply implements POST /exports/pain008/apply (LG-406):
 // applies a bank's ISO 20022 pain.002.001.03 customer payment status
 // report answering a pain.008.001.02 direct debit instruction. The body
@@ -13236,6 +13317,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pacs007/apply", s.handlePacs007Apply)
 	mux.HandleFunc("POST /exports/pacs004/apply", s.handlePacs004Apply)
 	mux.HandleFunc("POST /exports/pacs003/apply", s.handlePacs003Apply)
+	mux.HandleFunc("POST /exports/pacs009/apply", s.handlePacs009Apply)
 	mux.HandleFunc("POST /exports/pacs028/answer", s.handlePacs028Answer)
 	mux.HandleFunc("POST /exports/pain008/apply", s.handlePain008Apply)
 	mux.HandleFunc("POST /exports/pain014/apply", s.handlePain014Apply)
