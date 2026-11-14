@@ -903,6 +903,13 @@ type Ledger struct {
 	// the hash-chained pain014_response_applied audit events are
 	// the durable record.
 	pain014Responses map[string]pain014AppliedRecord
+	// camt026Reports maps a camt.026 Assgnmt Id to its applied
+	// report record (see camt026_inbound.go, LG-417): the replay
+	// guard for unable-to-apply reports, so a re-sent report
+	// returns the stored result instead of re-recording. In-memory
+	// only, like RfPs: the hash-chained camt026_unable_to_apply
+	// audit events are the durable record.
+	camt026Reports map[string]CAMT026ApplyResult
 	// holdKeys maps a hold's idempotency key to its hold ID, and
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the
@@ -1896,7 +1903,10 @@ func New(opts ...Option) *Ledger {
 		rfps: make(map[string]RfP),
 		// LG-416: the pain.014 replay registry starts empty; records
 		// land as debtor responses apply.
-		pain014Responses:   make(map[string]pain014AppliedRecord),
+		pain014Responses: make(map[string]pain014AppliedRecord),
+		// LG-417: the camt.026 report registry starts empty; records
+		// land as unable-to-apply reports apply.
+		camt026Reports:     make(map[string]CAMT026ApplyResult),
 		captureKeys:        make(map[string]CaptureReceipt),
 		partialCaptureKeys: make(map[string]PartialCaptureReceipt),
 		termDeposits:       make(map[string]TermDeposit),

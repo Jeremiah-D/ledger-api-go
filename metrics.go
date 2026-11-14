@@ -164,6 +164,10 @@ type Metrics struct {
 	// camt.056 cancellation request apply requests served, including
 	// rejected requests (see ledger.ApplyCAMT056Request, LG-414).
 	CAMT056Applies atomic.Uint64
+	// CAMT026Applies counts POST /exports/camt026/apply ISO 20022
+	// camt.026 unable-to-apply report apply requests served,
+	// including rejected reports (see ledger.ApplyCAMT026, LG-417).
+	CAMT026Applies atomic.Uint64
 	// CAMT029Exports counts GET /exports/camt029 ISO 20022 camt.029
 	// cancellation status report export requests served, including
 	// rejected exports (see ledger.ExportCAMT029Resolution, LG-174).
@@ -1157,6 +1161,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/camt029/apply ISO 20022 camt.029 cancellation status report apply requests served, including rejected reports.", m.CAMT029Applies.Load())
 	writeCounter(&sb, "ledger_camt056_applies_total",
 		"Total POST /exports/camt056/apply ISO 20022 camt.056 cancellation request apply requests served, including rejected requests.", m.CAMT056Applies.Load())
+	writeCounter(&sb, "ledger_camt026_applies_total",
+		"Total POST /exports/camt026/apply ISO 20022 camt.026 unable-to-apply report apply requests served, including rejected reports.", m.CAMT026Applies.Load())
 	writeCounter(&sb, "ledger_camt029_exports_total",
 		"Total GET /exports/camt029 ISO 20022 camt.029 cancellation status report exports served, including rejected exports.", m.CAMT029Exports.Load())
 	writeCounter(&sb, "ledger_pacs004_exports_total",

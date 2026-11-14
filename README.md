@@ -7132,6 +7132,23 @@ Go: `ledger.ParsePacs028`、`ledger.AnswerPacs028`。
   `422`；同一 MsgId 重放为 `200` no-op；其后对手方 camt.029 决议
   沿既有路径解决。审计事件为入站 op `camt056_request_applied`，
   与出站 `cancellation_requested` 区分。
+- 入站 `POST /exports/camt026/apply`（LG-417）：对手方发来的
+  camt.026.001.07（`UblToApply`）“无法执行/无法核对”报告是调查
+  家族的终端状态——`Undrlyg`（`Initn`/`IntrBk`/`StmtNtry` 三臂择
+  一）以 UETR 或 EndToEndId 关联原指令（payout/transfer/RfP，
+  两引用须一致），`Justfn`（`AnyInf`/`MssngOrIncrrctInf`/
+  `PssblDplctInstr` 三臂择一）说明无法执行的原因，原因码
+  （首个 `MssngInf`/`IncrrctInf` `Cd`）原文进审计与结果。只记
+  状态、不动资金：无分录、不碰冻结/透支/限额/期间门、不改原指令
+  金额与终态；已终态（已撤销/已结算/gpi 已 `ACCP`/`RJCT`、已入
+  账 transfer、已付/已拒/已过期 RfP）的指令记审计后 no-op
+  （`terminal: true`），永不复活。解析拒（非 `.001.07`、无
+  `Undrlyg` 臂、无引用、无 `Justfn`）`400`；未知引用或两引用
+  不一致 `404`（拒绝本身记 `camt026_unable_to_apply_rejected`
+  审计、不写状态、不阻塞后来的有效报告）；同一 `MsgId` 重放为
+  `200` no-op（`duplicate: true`），复用于不同报告 `422`。
+  审计事件为入站 op `camt026_unable_to_apply`。计数器
+  `ledger_camt026_applies_total`。
 - 计数器 `ledger_camt056_exports_total` /
   `ledger_camt056_applies_total` /
   `ledger_camt029_applies_total` /
