@@ -910,6 +910,14 @@ type Ledger struct {
 	// only, like RfPs: the hash-chained camt026_unable_to_apply
 	// audit events are the durable record.
 	camt026Reports map[string]CAMT026ApplyResult
+	// camt055Applied maps a camt.055 CxlId to the cancellation
+	// record its first application opened (see
+	// camt055_inbound.go, LG-419): the replay guard for customer
+	// cancellation requests, so a re-sent request returns the
+	// stored record instead of opening a second attempt.
+	// In-memory only, like payoutCancellations: the hash-chained
+	// cancellation_requested audit events are the durable record.
+	camt055Applied map[string]PayoutCancellation
 	// holdKeys maps a hold's idempotency key to its hold ID, and
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the
@@ -1913,7 +1921,10 @@ func New(opts ...Option) *Ledger {
 		pain014Responses: make(map[string]pain014AppliedRecord),
 		// LG-417: the camt.026 report registry starts empty; records
 		// land as unable-to-apply reports apply.
-		camt026Reports:     make(map[string]CAMT026ApplyResult),
+		camt026Reports: make(map[string]CAMT026ApplyResult),
+		// LG-419: the camt.055 CxlId registry starts empty; records
+		// land as customer cancellation requests apply.
+		camt055Applied:     make(map[string]PayoutCancellation),
 		captureKeys:        make(map[string]CaptureReceipt),
 		partialCaptureKeys: make(map[string]PartialCaptureReceipt),
 		termDeposits:       make(map[string]TermDeposit),

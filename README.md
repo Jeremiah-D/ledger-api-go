@@ -7184,11 +7184,26 @@ camt.056 是行间（FI-to-FI）撤销，camt.055 是它的客户侧对应物：
 无此数据），`OrgnlEndToEndId` 省略（账本无独立 EndToEndId，不编造）。
 只读：读锁快照、无版本 bump、不记账、不追加审计链；重复导出字节
 相同。门与 camt.056 相同：仅 open（`requested`）撤销可导出，无
-open 撤销 → 404。入站的对手方 camt.056 请求走
-`POST /exports/camt056/apply`（LG-414），camt.055 本身只渲染我方
-请求的客户侧形态。计数器 `ledger_camt055_exports_total`。
+open 撤销 → 404。入站是相反方向：客户的撤销请求走
+`POST /exports/camt055/apply`（LG-419），`ParseCAMT055` +
+`ApplyCAMT055` 消费对方发来的 `CustomerPaymentCancellationRequest`
+——出站是我方客户侧发起撤销、入站是消费客户的撤销请求。入站以
+`OrgnlUETR`（`OrgnlInstrId` 备用，两引用须一致）经 gpi track
+关联 payout，`OrgnlGrpInf` 须指向同一 payout，`CxlId` 为重放键、
+原因码必填，复用 `RequestPayoutCancellation` 开同一条
+`PayoutCancellation`（`requested`、`<uetr>/cxl/<seq>`、审计
+`cancellation_requested`、已开撤销 no-op、已确认拒重复、已拒绝
+可新开一期）；未知 UETR、已结算、终态、未发出 payout、空原因码
+沿既有 fail-closed 闭集，拒进 repair queue（错误体带
+`repair_id`）。只开撤销、不销账：资金动作仍走 camt.029 决议
+（`POST /exports/camt029/apply`）或银行回盘。计数器
+`ledger_camt055_exports_total`、`ledger_camt055_applies_total`。
 
-Go: `ledger.ExportCAMT055`。
+Go: `ledger.ExportCAMT055`、`ledger.ParseCAMT055`、`ledger.ApplyCAMT055`。
+curl -s -X POST localhost:8080/exports/camt055/apply \
+  -H 'Content-Type: application/xml' -H 'x-ledger-actor: night-ops' \
+  --data-binary @customer-camt055.xml
+# 200 {"uetr":"9f2c8e1a-…","status":"requested","msg_id":"9f2c8e1a-…/cxl/1",...}
 # 200 camt.056.001.02: <FIToFICxlReq>/.../<CxlId>9f2c8e1a-…/cxl/1</CxlId>/<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>
 curl -s -X POST localhost:8080/exports/camt029/apply \
   -H 'Content-Type: application/xml' --data-binary @bank-camt029.xml
