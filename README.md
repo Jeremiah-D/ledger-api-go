@@ -7658,7 +7658,40 @@ curl -s 'localhost:8080/exports/pacs003?transfer=tx-2026-1042&dbtr_agt=BANKDEBB&
 # 200 pacs.003.001.08: <FIToFICstmrDrctDbt>/.../<MsgId>tx-2026-1042/drctdbt</MsgId>/.../<MndtId>MNDT-2026-001</MndtId>
 ```
 
-Go: `ledger.ExportPacs003(transferID, ledger.Pacs003Options{DebtorAgent, CreditorAgent, MandateID, MandateSignatureDate, DebtorName, CreditorName, CreditorSchemeID})`。
+Go: `ledger.ExportPacs003(transferID, ledger.Pacs003Options{DebtorAgent, CreditorAgent, MandateID, MandateSignatureDate, DebtorName, CreditorName, CreditorSchemeID})`；入站解析与应用为 `ledger.ParsePacs003` / `ledger.ApplyPacs003`。
+
+### `POST /exports/pacs003/apply` — ISO 20022 pacs.003 银行间客户直接扣款入站
+
+上节是债权人银行侧的出站指令，本节是它的债务人银行侧镜像：收到
+对方银行发来的 `pacs.003.001.08`（`FIToFICstmrDrctDbt`）直接扣款
+指令后，核验 mandate 并记账。`ledger.ParsePacs003` 复用出站的 wire
+struct 方向反读（`GrpHdr` + 一个 `DrctDbtTxInf`：`PmtId` /
+`InstdAmt` / `DrctDbtTx/MndtRltdInf/MndtId` / `Cdtr` / `Dbtr` /
+两 agent）；`ledger.ApplyPacs003` 把指令交给 `DebitWithMandate`
+记账，分录取自 mandate 本身（借记 payee、贷记 payer），`EndToEndId`
+同时是分录 ID 与幂等键。
+
+集合日期：pacs.003.001.08 没有 `ReqdColltnDt` 元素（那是 pain.008
+`PmtInf` 的）；对方银行要求结算的日子是 `GrpHdr/IntrBkSttlmDt`，
+解析后作为记账时间戳——mandate 有效期窗口与频率窗口都在这一天
+求值。不写 `IntrBkSttlmDt` 的指令按收到当日记账；写错格式的日期
+是解析拒绝，不猜。
+
+Fail-closed：解析拒绝（400：报文不合规、缺 `MsgId` /
+`EndToEndId` / `MndtId`、金额非正、币种非法、签名日或结算日格
+式错误）；未知 mandate（404，绝不自动建 mandate）；非 active
+mandate、集合日越出 `[ValidFrom, ValidUntil)`、金额超
+`MaxAmountCents`、币种与 mandate 不符、同一频率窗口已用（均为
+422）。重复 `MsgId` 重发回原收据（`duplicate` 置位），不重复记
+账、不补审计事件；成功记账发 `pacs003_debit_applied` 审计事件，
+`ledger_pacs003_applies_total` 计数（含被拒的）。
+
+```bash
+curl -s -X POST localhost:8080/exports/pacs003/apply -H 'Content-Type: application/xml' --data-binary @drctdbt-in.xml
+# 200 {"mandate_id":"m-sub","entry":{"id":"e2e-1","debit_account":"merchant","credit_account":"cust","amount_cents":1200,...},"duplicate":false}
+```
+
+Go: `ledger.ParsePacs003(xml)`，`ledger.ApplyPacs003(debit, actor)`。
 
 ### `GET /exports/pacs008` — ISO 20022 pacs.008 即时客户贷记出站报文导出
 

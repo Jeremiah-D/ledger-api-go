@@ -158,6 +158,14 @@ type pacs003GrpHdr struct {
 	CreDtTm  string       `xml:"CreDtTm"`
 	NbOfTxs  string       `xml:"NbOfTxs"`
 	InitgPty pacs003Agent `xml:"InitgPty"`
+	// IntrBkSttlmDt is the interbank settlement date (YYYY-MM-DD):
+	// the day the debtor bank is asked to settle the pull. The
+	// outbound export never sets it — a posted transfer's booking
+	// date is already fixed — it exists so the inbound reader
+	// (ParsePacs003, LG-415) can read the requested collection date
+	// off the same wire structs. See pacs003_inbound.go for why the
+	// settlement date, not a ReqdColltnDt element, carries it.
+	IntrBkSttlmDt *string `xml:"IntrBkSttlmDt,omitempty"`
 }
 
 type pacs003TxInf struct {

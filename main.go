@@ -6963,6 +6963,70 @@ func (s *server) handlePacs004Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handlePacs003Apply implements POST /exports/pacs003/apply (LG-415):
+// applies a creditor bank's ISO 20022 pacs.003.001.08 FI-to-FI
+// customer direct debit instruction to the mandate it names — the
+// debtor's-bank side of the direct debit, the mirror of the
+// creditor's-bank export (GET /exports/pacs003, LG-201). The body is
+// the raw pacs.003 XML; the instruction's MndtId selects the mandate
+// and its GrpHdr/IntrBkSttlmDt — the requested collection date, the
+// pacs.003 settlement date (there is no ReqdColltnDt element on
+// pacs.003; that lives on pain.008) — is the booking date when the
+// document states one (see ledger.ApplyPacs003): a covered
+// instruction books one mandate debit
+// (debit the payee, credit the payer, memo stamped
+// "mandate_of:<mandate ID>") and emits the `pacs003_debit_applied`
+// audit event. Re-applying an instruction is idempotent: the
+// EndToEndId is the idempotency key, so a replay returns the
+// original receipt with duplicate set. Error mapping: a malformed
+// instruction is a 400; an unknown mandate is a 404; a non-active
+// mandate, a collection date outside the mandate window, an amount
+// over the mandate cap, a currency mismatch, or an already-used
+// frequency window is a 422 (the instruction is well-formed but the
+// authorization does not cover it). The operator identity comes from
+// the x-ledger-actor header, like the other operator actions.
+func (s *server) handlePacs003Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs003Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	debit, err := ledger.ParsePacs003(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	receipt, err := s.ledgerFor(r).ApplyPacs003(debit, ledger.ActorFromContext(actx))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrMandateNotActive),
+			errors.Is(err, ledger.ErrMandateExpired),
+			errors.Is(err, ledger.ErrMandateAmountExceeded),
+			errors.Is(err, ledger.ErrMandateCurrencyMismatch),
+			errors.Is(err, ledger.ErrMandateFrequencyExceeded):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /exports/pacs003/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pacs.003 direct debit failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, receipt)
+}
+
 // handlePain008Apply implements POST /exports/pain008/apply (LG-406):
 // applies a bank's ISO 20022 pain.002.001.03 customer payment status
 // report answering a pain.008.001.02 direct debit instruction. The body
@@ -13061,6 +13125,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pacs002/apply", s.handlePacs002Apply)
 	mux.HandleFunc("POST /exports/pacs007/apply", s.handlePacs007Apply)
 	mux.HandleFunc("POST /exports/pacs004/apply", s.handlePacs004Apply)
+	mux.HandleFunc("POST /exports/pacs003/apply", s.handlePacs003Apply)
 	mux.HandleFunc("POST /exports/pacs028/answer", s.handlePacs028Answer)
 	mux.HandleFunc("POST /exports/pain008/apply", s.handlePain008Apply)
 	mux.HandleFunc("POST /exports/pain012/apply", s.handlePain012Apply)
