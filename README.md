@@ -7189,6 +7189,53 @@ Go: `ledger.ExportPacs007`。
 
 HTTP: `GET /exports/pacs007?uetr=…&reason=DUPL`。
 
+### `POST /exports/pacs007/apply` — pacs.007 撤销回盘应用
+
+对方银行发来的 pacs.007 撤销报文（`FIToFIPmtRvsl`）可以用
+`POST /exports/pacs007/apply` 消费并应用：已结算的 payout
+移入新终态 `reversed`，同时记一笔确定性冲销分录
+（debit payout-clearing / credit payee，
+`"payout/<id>/reversal"`）并追加 `pacs007_reversal_applied`
+审计事件。
+
+导出与回盘的分野：导出（`GET /exports/pacs007`）是**我方发起
+撤销请求**——只读，不驱动 payout；回盘是**消费对方银行的
+撤销报文**——状态变更 + 记账。两者共享原因码闭集
+（`DUPL`/`AM09`/`FRAD`/`CUST`）与 wire struct，但效应正交。
+
+语义：
+- join 键是 `OrgnlUETR`：直通 gpi track 再到 payout；
+  `OrgnlMsgId` 须为该 payout 的 ID（LG-409 的配对门），
+  `OrgnlMsgNmId` 只接受 `pacs.008.001.02`；对不上的一律 400。
+- 全额撤销 only：`RvsdIntrBkSttlmAmt` 与 `OrgnlTxRef` 金额/币种
+  须等于已结算 payout；部分撤销、币种不符进 repair queue
+  （`repair_id` 随 422 错误体返回），不猜测、不强制。
+- 幂等：同一 `GrpHdr/MsgId` 重放为 no-op 成功（`duplicate` 置
+  位、无重复分录）；另一 MsgId 对已撤销 payout 拒（422）。
+- gpi track 不动：pacs.007 是 payout 级撤销、不是结算进度
+  verdict，不走 `AdvanceGPI`（与 LG-409 分野）。
+- `400` 报文不可解析/外来 MsgId；`404` 未知 UETR；`422` 未结算
+  原指令/已撤销/金额不符。计数器
+  `ledger_pacs007_applies_total`。
+
+与 pacs.004 回盘（LG-206）正交：pacs.004 是**退汇**
+（settled → `returned`、分录 `"payout/<id>/return"`），
+pacs.007 是**撤销**（settled → `reversed`、分录
+`"payout/<id>/reversal"`）——不同终态、不同分录，不可混淆。
+已撤销的 payout 不能重新结算、不能取消（camt.056 默认分支
+fail-closed 拒绝）。
+
+Go: `ledger.ParsePacs007`、`ledger.ApplyPacs007Reversal`。
+
+HTTP: `POST /exports/pacs007/apply`（请求体为原始 pacs.007 XML）。
+
+```bash
+curl -s -X POST localhost:8080/exports/pacs007/apply \
+  -H 'Content-Type: application/xml' -H 'x-ledger-actor: ops' \
+  --data-binary @reversal.xml
+# 200 {"applied":true,"payout_id":"po-…","reversal_entry_id":"payout/po-…/reversal"}
+```
+
 ### `POST /exports/mt103` — SWIFT FIN MT103 跨境汇款导出
 
 已审批（approved）或已提交（submitted）的 payout 可以用 SWIFT FIN

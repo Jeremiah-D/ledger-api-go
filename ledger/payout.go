@@ -86,6 +86,15 @@ const (
 	// neither settle again nor be cancelled (camt.056's default
 	// branch refuses it fail-closed).
 	PayoutReturned = "returned"
+	// PayoutReversed is set by ApplyPacs007Reversal (LG-411) when
+	// the bank reports a settled payout reversed via pacs.007: the
+	// settled payment itself is undone, so the instruction is
+	// terminal — it can neither settle again nor be cancelled
+	// (camt.056's default branch refuses it fail-closed, like a
+	// return). It is deliberately distinct from PayoutReturned: a
+	// return is the beneficiary sending the money back, a reversal
+	// undoes the instruction — the two must never be confused.
+	PayoutReversed = "reversed"
 )
 
 // Validation and state errors returned by the payout APIs.
@@ -186,6 +195,14 @@ type PayoutInstruction struct {
 	// ApplyPacs004Return (LG-206) when a settled payout's funds
 	// come back. Empty until the payout is returned.
 	ReturnEntryID string `json:"return_entry_id,omitempty"`
+	// ReversalEntryID is the pacs.007 reversal row (debit clearing
+	// / credit payee, "payout/<id>/reversal") booked by
+	// ApplyPacs007Reversal (LG-411) when a settled payout is
+	// reversed. Empty until the payout is reversed. It is
+	// deliberately distinct from ReturnEntryID: a pacs.004 return
+	// and a pacs.007 reversal are different terminal events with
+	// different rows.
+	ReversalEntryID string `json:"reversal_entry_id,omitempty"`
 	// StatementLineID is the bank statement line that evidenced the
 	// settlement (see SettlePayout).
 	StatementLineID string `json:"statement_line_id,omitempty"`

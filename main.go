@@ -6839,6 +6839,70 @@ func (s *server) handlePacs002Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, track)
 }
 
+// handlePacs007Apply implements POST /exports/pacs007/apply (LG-411):
+// applies a correspondent bank's ISO 20022 pacs.007.001.02 FI-to-FI
+// payment reversal to the settled payout it names. The body is the
+// raw pacs.007 XML; the reversal's OrgnlUETR selects the gpi track
+// and its OrgnlMsgId must be that track's payout's ID (see
+// ledger.ApplyPacs007Reversal): a full reversal moves the payout
+// settled -> reversed, books the deterministic "payout/<id>/reversal"
+// row, and emits the `pacs007_reversal_applied` audit event, while
+// the gpi track is left untouched. Re-applying a reversal is
+// idempotent. Error mapping: a malformed reversal, a foreign MsgId,
+// or a reversal answering another message family is a 400; an
+// unknown UETR is a 404; an unsettled original, an already-reversed
+// payout, or an amount mismatch is a 422 (the reversal is
+// well-formed but the payout cannot be reversed). Parked reversals
+// (unknown UETR, amount mismatch) carry their repair-queue record ID
+// in the error body. The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
+func (s *server) handlePacs007Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs007Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	rvsl, err := ledger.ParsePacs007(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.ledgerFor(r).ApplyPacs007Reversal(rvsl, ledger.ActorFromContext(actx))
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrPacs007ForeignMsgID),
+			errors.Is(err, ledger.ErrPacs007UnexpectedMsgName):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		case errors.Is(err, ledger.ErrGPIUnknownUETR):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrPacs007OriginalNotSettled),
+			errors.Is(err, ledger.ErrPacs007AlreadyReversed),
+			errors.Is(err, ledger.ErrPacs007AmountMismatch):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/pacs007/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pacs.007 reversal failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handlePain008Apply implements POST /exports/pain008/apply (LG-406):
 // applies a bank's ISO 20022 pain.002.001.03 customer payment status
 // report answering a pain.008.001.02 direct debit instruction. The body
@@ -12828,6 +12892,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
 	mux.HandleFunc("POST /exports/pacs002/apply", s.handlePacs002Apply)
+	mux.HandleFunc("POST /exports/pacs007/apply", s.handlePacs007Apply)
 	mux.HandleFunc("POST /exports/pain008/apply", s.handlePain008Apply)
 	mux.HandleFunc("POST /exports/pain012/apply", s.handlePain012Apply)
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
