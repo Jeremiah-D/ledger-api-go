@@ -129,6 +129,11 @@ type Metrics struct {
 	// FI-to-FI payment status request export requests served,
 	// including rejected exports (see ledger.ExportPacs028, LG-195).
 	Pacs028Exports atomic.Uint64
+	// Pacs028Answers counts POST /exports/pacs028/answer ISO 20022
+	// pacs.028 FI-to-FI payment status request answer requests
+	// served, including rejected requests (see
+	// ledger.AnswerPacs028, LG-412).
+	Pacs028Answers atomic.Uint64
 	// CAMT056Exports counts GET /exports/camt056 ISO 20022 camt.056
 	// FI-to-FI cancellation request export requests served, including
 	// rejected exports (see ledger.ExportCancellationRequest,
@@ -1120,6 +1125,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/pacs002 ISO 20022 pacs.002 FI-to-FI payment status report exports served, including rejected exports.", m.Pacs002Exports.Load())
 	writeCounter(&sb, "ledger_pacs028_exports_total",
 		"Total GET /exports/pacs028 ISO 20022 pacs.028 FI-to-FI payment status request exports served, including rejected exports.", m.Pacs028Exports.Load())
+	writeCounter(&sb, "ledger_pacs028_answers_total",
+		"Total POST /exports/pacs028/answer ISO 20022 pacs.028 FI-to-FI payment status request answers served, including rejected requests.", m.Pacs028Answers.Load())
 	writeCounter(&sb, "ledger_camt056_exports_total",
 		"Total GET /exports/camt056 ISO 20022 camt.056 FI-to-FI cancellation request exports served, including rejected exports.", m.CAMT056Exports.Load())
 	writeCounter(&sb, "ledger_camt055_exports_total",

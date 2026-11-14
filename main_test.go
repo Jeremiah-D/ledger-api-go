@@ -470,8 +470,8 @@ func TestSetMaxBodyBytes(t *testing.T) {
 		if got := strings.Count(string(src), "http.MaxBytesReader(w, r.Body, s.maxBodyBytes)"); got != 0 {
 			t.Errorf("found %d direct s.maxBodyBytes reads at MaxBytesReader sites, want 0", got)
 		}
-		if got := strings.Count(string(src), "http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())"); got != 32 {
-			t.Errorf("found %d MaxBytesReader sites using the getter, want 32", got)
+		if got := strings.Count(string(src), "http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())"); got != 33 {
+			t.Errorf("found %d MaxBytesReader sites using the getter, want 33", got)
 		}
 	})
 

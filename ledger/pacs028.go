@@ -39,8 +39,9 @@ import (
 // is refused with ErrPacs028RequesterRequired, because a request
 // without an identified requester has nobody to answer to.
 //
-// Deliberately out of scope: answering the request. This module only
-// builds the outbound question; an inbound pacs.002 report is applied
+// The answer half — a correspondent bank's inbound pacs.028
+// request parsed and answered with the pacs.002 report — lives in
+// pacs028_answer.go (LG-412): an inbound pacs.002 report is applied
 // through the existing pain.002/gpi mirror path, not here.
 
 // pacs.028 export errors.

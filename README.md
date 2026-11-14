@@ -7039,6 +7039,36 @@ curl -s 'localhost:8080/exports/pacs028?uetr=9f2c8e1a-…&requester=ledger-ops' 
 
 Go: `ledger.ExportPacs028`。
 
+### `POST /exports/pacs028/answer` — ISO 20022 pacs.028 银行间状态请求答复
+
+问与答的分野：`GET /exports/pacs028` 是**我方**向代理行链路提问
+（出站请求），`POST /exports/pacs028/answer` 是**消费对方银行
+的提问**并以 pacs.002 作答（入站答复）。对方银行发来
+`pacs.028.001.03`（`FIToFIPmtStsReq`），`ParsePacs028` 解析、
+`AnswerPacs028` 按 `OrgnlUETR` 定位 gpi 跟踪记录、再以
+`ExportPacs002` 把该记录当前状态渲染为 `pacs.002.001.03`
+（`FIToFIPmtStsRpt`）原样返回。
+
+语义：
+- `OrgnlMsgNmId` 只接受 `pacs.008.001.02`（与 pacs.002 回盘同门），
+  `OrgnlMsgId` 须为该 UETR 跟踪记录的 payout ID（按我方导出约定，
+  不编造）；请求方 `Reqstr/Id` 非空，无 identified 请求方即无人可答。
+- 答复即“读 track、渲染 pacs.002”：不推进 gpi、不记账、不追加审计
+  事件、不 bump 版本（答复行为本身不是 operator attestation）。
+- 同一请求重复答复的 `MsgId`（`<uetr>/<seq>`，seq 为已记变迁数）
+  与 `TxSts` 均来自 track 快照；只有 pacs.002 报文的 `CreDtTm`
+  是 wall-clock 时间戳。
+- 错误映射：报文不可解析/外来 `MsgId`/空请求方/错误
+  `OrgnlMsgNmId` 400、未知 UETR 404。计数器
+  `ledger_pacs028_answers_total`。
+
+```bash
+curl -s -X POST localhost:8080/exports/pacs028/answer --data-binary @status-request.xml
+# 200 pacs.002.001.03: <FIToFIPmtStsRpt>/.../<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>/.../<TxSts>ACSC</TxSts>
+```
+
+Go: `ledger.ParsePacs028`、`ledger.AnswerPacs028`。
+
 ### camt.056 支付撤销 + camt.029 决议（`POST /cancellations`）
 
 已发出但未结算的 payout 可用 ISO 20022 `camt.056.001.02`
@@ -10890,6 +10920,9 @@ curl -s localhost:8080/metrics
 - `ledger_pacs028_exports_total` — `GET /exports/pacs028` ISO 20022
   pacs.028 FI-to-FI payment status request exports served, including
   rejected exports.
+- `ledger_pacs028_answers_total` — `POST /exports/pacs028/answer`
+  ISO 20022 pacs.028 FI-to-FI payment status request answers served,
+  including rejected requests.
 - `ledger_camt056_exports_total` — `GET /exports/camt056` ISO 20022
   camt.056 FI-to-FI cancellation request exports served, including
   rejected exports.

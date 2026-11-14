@@ -7576,6 +7576,56 @@ func (s *server) handlePacs028Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePacs028Answer implements POST /exports/pacs028/answer
+// (LG-412): answers a correspondent bank's ISO 20022 pacs.028.001.03
+// FI-to-FI payment status request with the pacs.002.001.03 report for
+// the gpi track the request names (see ledger.AnswerPacs028). The body
+// is the raw pacs.028 XML; the request's OrgnlUETR selects the track
+// and its OrgnlMsgId must be that track's payout ID. The answer is
+// read-only — the track is not advanced, nothing is booked, no audit
+// event is appended — and the pacs.002 XML is written verbatim with a
+// 200. Error mapping, along handlePacs002Apply: an unparseable
+// request, a foreign MsgId, an empty requester, or a wrong
+// OrgnlMsgNmId is a 400; an unknown UETR is a 404.
+func (s *server) handlePacs028Answer(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs028Answers.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	req, err := ledger.ParsePacs028(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	doc, err := s.ledgerFor(r).AnswerPacs028(req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrGPIUnknownUETR):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrPacs028ForeignMsgID),
+			errors.Is(err, ledger.ErrPacs028RequesterRequired),
+			errors.Is(err, ledger.ErrPacs028UnexpectedMsgName),
+			errors.Is(err, ledger.ErrInvalidPacs028):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /exports/pacs028/answer: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "answering pacs.028 request failed"})
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handlePacs004Export implements GET /exports/pacs004 (LG-169): an
 // ISO 20022 pacs.004.001.02 PaymentReturn for one settled payout (see
 // ledger.ExportPacs004). Query parameters: uetr (required), reason
@@ -12893,6 +12943,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
 	mux.HandleFunc("POST /exports/pacs002/apply", s.handlePacs002Apply)
 	mux.HandleFunc("POST /exports/pacs007/apply", s.handlePacs007Apply)
+	mux.HandleFunc("POST /exports/pacs028/answer", s.handlePacs028Answer)
 	mux.HandleFunc("POST /exports/pain008/apply", s.handlePain008Apply)
 	mux.HandleFunc("POST /exports/pain012/apply", s.handlePain012Apply)
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
