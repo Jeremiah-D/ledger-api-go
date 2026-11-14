@@ -896,6 +896,13 @@ type Ledger struct {
 	// rfpSeq backs server-generated RfP IDs.
 	rfps   map[string]RfP
 	rfpSeq uint64
+	// pain014Responses maps a pain.014 GrpHdr MsgId to its applied
+	// response record (see pain014_inbound.go, LG-416): the replay
+	// guard for debtor responses, so a re-sent response returns the
+	// stored RfP instead of re-booking. In-memory only, like RfPs:
+	// the hash-chained pain014_response_applied audit events are
+	// the durable record.
+	pain014Responses map[string]pain014AppliedRecord
 	// holdKeys maps a hold's idempotency key to its hold ID, and
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the
@@ -1886,7 +1893,10 @@ func New(opts ...Option) *Ledger {
 		holdKeys:             make(map[string]string),
 		// LG-171: the RfP registry starts empty; records are issued by
 		// CreateRfP.
-		rfps:               make(map[string]RfP),
+		rfps: make(map[string]RfP),
+		// LG-416: the pain.014 replay registry starts empty; records
+		// land as debtor responses apply.
+		pain014Responses:   make(map[string]pain014AppliedRecord),
 		captureKeys:        make(map[string]CaptureReceipt),
 		partialCaptureKeys: make(map[string]PartialCaptureReceipt),
 		termDeposits:       make(map[string]TermDeposit),

@@ -7027,6 +7027,64 @@ func (s *server) handlePacs003Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, receipt)
 }
 
+// handlePain014Apply implements POST /exports/pain014/apply (LG-416):
+// applies a debtor bank's ISO 20022 pain.014.001.07 creditor payment
+// activation request status report answering a pain.013 request for
+// payment (see ledger.ApplyPain014Response): an ACCP verdict pays the
+// RfP through AcceptRfP, an RJCT verdict rejects it through
+// RejectRfP. The body is the raw pain.014 XML; the report's
+// OrgnlEndToEndId selects the RfP and its TxSts is the verdict.
+// Re-applying a response is idempotent: the GrpHdr MsgId is the
+// replay key, so a replay returns the stored RfP. Error mapping: a
+// malformed report, or a report that does not answer a pain.013
+// message, is a 400; an unknown EndToEndId is a 404; a paid,
+// rejected, or expired RfP, a stated amount or currency that differs
+// from the registered request, or a MsgId reused for a different
+// response is a 422 (the report is well-formed but the request cannot
+// be answered this way). The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
+func (s *server) handlePain014Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain014Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	resp, err := ledger.ParsePain014(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.ledgerFor(r).ApplyPain014Response(resp, ledger.ActorFromContext(actx))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrRfPNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrRfPNotIssued),
+			errors.Is(err, ledger.ErrRfPExpired),
+			errors.Is(err, ledger.ErrPain014AmountMismatch),
+			errors.Is(err, ledger.ErrPain014CurrencyMismatch),
+			errors.Is(err, ledger.ErrPain014MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain014/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.014 response failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // handlePain008Apply implements POST /exports/pain008/apply (LG-406):
 // applies a bank's ISO 20022 pain.002.001.03 customer payment status
 // report answering a pain.008.001.02 direct debit instruction. The body
@@ -13128,6 +13186,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pacs003/apply", s.handlePacs003Apply)
 	mux.HandleFunc("POST /exports/pacs028/answer", s.handlePacs028Answer)
 	mux.HandleFunc("POST /exports/pain008/apply", s.handlePain008Apply)
+	mux.HandleFunc("POST /exports/pain014/apply", s.handlePain014Apply)
 	mux.HandleFunc("POST /exports/pain012/apply", s.handlePain012Apply)
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
 	mux.HandleFunc("GET /exports/pain010", s.handlePain010Export)

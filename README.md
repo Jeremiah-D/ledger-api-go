@@ -6714,8 +6714,22 @@ pain.013.001.07（`CdtrPmtActvtnReq`）——FedNow/RTP 的收款
   `ErrMissingPain013AgentBIC`）——V07 的 DbtrAgt/CdtrAgt
   皆 [1..1]，无 BIC 的代理块无法诚实渲染，宁缺勿造。
 - **“请求”与“回应”的分野**：本项只生成请求，付款方回应
-  由 pain.014 承载、留待后轮；导出 ≠ 接受，RfP 导出后仍为
+  由 pain.014 承载（LG-416，见下条）；导出 ≠ 接受，RfP 导出后仍为
   issued，接受仍走 `AcceptRfP`。
+- 入站 `POST /exports/pain014/apply`（LG-416）：债务人发来的
+  pain.014.001.07（`CdtrPmtActvtnReqStsRpt`）是出站请求的镜像——
+  `OrgnlEndToEndId` 关联已登记 RfP（即 pain.013 的 EndToEndId），
+  `TxSts` 为 verdict：`ACCP` 走 `AcceptRfP` 发款（issued→paid，
+  全 Post gate）、`RJCT` 走 `RejectRfP`（issued→rejected）；其余
+  TxSts（PDNG/ACSP 等）与非 pain.013.001.07 的 `OrgnlMsgNmId`
+  皆为解析拒（`400`）。`OrgnlTxRef/Amt` 与 `PmtCondSts/AccptdAmt`
+  若声明，金额/币种须与原请求一致，否则 `422`（LG-163 金额门）；
+  未知 EndToEndId `404`；已付/已拒/已过期 `422`。同一 `MsgId`
+  重放为 `200` no-op（不二次记账、不重复审计）；`MsgId` 复用于
+  不同回应 `422`。审计事件为入站 op `pain014_response_applied`
+  （msg_id/rfp_id/response/transfer_id），与 `rfp_accepted` /
+  `rfp_paid` / `rfp_rejected` 区分。计数器
+  `ledger_pain014_applies_total`。
 - 只读导出：不 bump 版本、不落账、不改 RfP 行；仅记一条
   `pain013_exported` 审计事件（msg_id/rfp_id）。`400` 缺
   rfp_id；`404` 未知 RfP；`422` 已付/已拒/已过期/缺 IBAN/
