@@ -8632,6 +8632,63 @@ func (s *server) handleCAMT029Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c)
 }
 
+// handleCAMT056Apply implements POST /exports/camt056/apply (LG-414):
+// applies a counterparty bank's ISO 20022 camt.056.001.08 FI-to-FI
+// cancellation request to the tracked payment it names (see
+// ledger.ApplyCAMT056Request): the bank asks to recall an
+// issued-but-unsettled payout. The body is the raw camt.056 XML;
+// the request's OrgnlUETR selects the payment and its CxlRsn reason
+// code is recorded. An open cancellation is returned unchanged (a
+// re-sent request is an idempotent no-op); the counterparty's later
+// camt.029 report resolves it through the existing
+// ApplyCAMT029Report path. Error mapping: a malformed request is a
+// 400; an unknown UETR is a 404; a settled or terminal track, an
+// already-cancelled payout, an unissued payout, or a missing reason
+// code is a 422 (the request is well-formed but the payment cannot
+// be recalled). The operator identity comes from the x-ledger-actor
+// header, like the other operator actions.
+func (s *server) handleCAMT056Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT056Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	req, err := ledger.ParseCAMT056(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	c, err := s.ledgerFor(r).ApplyCAMT056Request(req, ledger.ActorFromContext(actx))
+	if err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrCancellationUnknownUETR):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrCancellationSettled),
+			errors.Is(err, ledger.ErrCancellationTerminal),
+			errors.Is(err, ledger.ErrCancellationAlreadyCancelled),
+			errors.Is(err, ledger.ErrCancellationNotIssued),
+			errors.Is(err, ledger.ErrCancellationReasonRequired):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /exports/camt056/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying camt.056 request failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
 // handleCAMT029Export implements GET /exports/camt029 (LG-174): the
 // ISO 20022 camt.029.001.03 FI-to-FI cancellation status report for
 // the resolved cancellation of one tracked payment (see
@@ -13051,6 +13108,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/camt056", s.handleCAMT056Export)
 	mux.HandleFunc("GET /exports/camt055", s.handleCAMT055Export)
 	mux.HandleFunc("POST /exports/camt029/apply", s.handleCAMT029Apply)
+	mux.HandleFunc("POST /exports/camt056/apply", s.handleCAMT056Apply)
 	mux.HandleFunc("GET /exports/camt029", s.handleCAMT029Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
 	mux.HandleFunc("POST /gpi/track/{uetr}/advance", s.handleGPIAdvance)

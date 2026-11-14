@@ -113,6 +113,13 @@ var (
 	// outside the ACCR/RJCR vocabulary. Fail-loud: a half-readable
 	// bank file must not partially apply.
 	ErrInvalidCAMT029 = errors.New("ledger: invalid camt.029 cancellation status report")
+	// ErrInvalidCAMT056 is returned by ParseCAMT056 when a document
+	// is not a parseable camt.056.001.08 cancellation request: a
+	// wrong schema version, malformed XML, a missing FIToFICxlReq,
+	// an empty OrgnlUETR, or an empty cancellation reason code.
+	// Fail-loud, the ParseCAMT029 convention: a half-readable bank
+	// file must not partially apply.
+	ErrInvalidCAMT056 = errors.New("ledger: invalid camt.056 cancellation request")
 )
 
 // PayoutCancellation is the cancellation record of one tracked
@@ -372,6 +379,185 @@ func (l *Ledger) ExportCancellationRequest(uetr string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %v", ErrNoOpenCancellation, err)
 	}
 	return append([]byte(xml.Header), body...), nil
+}
+
+// CAMT056Request is the parsed counterparty cancellation request:
+// the request's own MsgId, the assigning counterparty, the UETR
+// and message it recalls, and the bank's reason code.
+type CAMT056Request struct {
+	MsgID        string `json:"msg_id"`
+	Assgnr       string `json:"assignor,omitempty"`
+	UETR         string `json:"uetr"`
+	OrgnlMsgID   string `json:"orgnl_msg_id,omitempty"`
+	OrgnlMsgNmID string `json:"orgnl_msg_nm_id,omitempty"`
+	ReasonCode   string `json:"reason_code"`
+}
+
+// camt056InboundDocument is the wire shape ParseCAMT056 accepts:
+// camt.056.001.08 FIToFICxlReq. The FIToFICxlReq subtree is shared
+// with the outbound camt056Document; only the Document namespace
+// differs (.001.08 inbound, .001.02 outbound), so a document in the
+// wrong version fails the unmarshal — the version gate is the
+// namespace, not a string check.
+type camt056InboundDocument struct {
+	XMLName xml.Name  `xml:"urn:iso:std:iso:20022:tech:xsd:camt.056.001.08 Document"`
+	Request camt056Req `xml:"FIToFICxlReq"`
+}
+
+// ParseCAMT056 parses a counterparty-sent ISO 20022
+// camt.056.001.08 FIToFICancellationRequest. It validates the
+// document shape — the .001.08 namespace, well-formed XML, a
+// FIToFICxlReq block with a non-empty OrgnlUETR, and a non-empty
+// cancellation reason code — and refuses anything else fail-loud:
+// a half-readable bank file must not partially apply. A missing
+// Assgnmt/Id is tolerated: the replay guard is the open-record
+// no-op in ApplyCAMT056Request, not the counterparty's MsgId.
+func ParseCAMT056(data []byte) (*CAMT056Request, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, fmt.Errorf("%w: empty document", ErrInvalidCAMT056)
+	}
+	var doc camt056InboundDocument
+	if err := xml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidCAMT056, err)
+	}
+	tx := doc.Request.Undrlyg.TxInf
+	uetr := strings.TrimSpace(tx.OrgnlUETR)
+	if uetr == "" {
+		return nil, fmt.Errorf("%w: missing OrgnlUETR", ErrInvalidCAMT056)
+	}
+	reason := ""
+	if tx.CxlRsn.Rsn != nil {
+		reason = strings.TrimSpace(tx.CxlRsn.Rsn.Prtry)
+	}
+	if reason == "" {
+		return nil, fmt.Errorf("%w: missing cancellation reason", ErrInvalidCAMT056)
+	}
+	return &CAMT056Request{
+		MsgID:        strings.TrimSpace(doc.Request.Assgnmt.ID),
+		Assgnr:       strings.TrimSpace(doc.Request.Assgnmt.Assgnr.Nm),
+		UETR:         uetr,
+		OrgnlMsgID:   strings.TrimSpace(tx.OrgnlGrpInf.OrgnlMsgID),
+		OrgnlMsgNmID: strings.TrimSpace(tx.OrgnlGrpInf.OrgnlMsgNmID),
+		ReasonCode:   reason,
+	}, nil
+}
+
+// ApplyCAMT056Request applies a parsed counterparty camt.056.001.08
+// cancellation request: the inbound half of the camt.056 flow, the
+// mirror of the operator-driven RequestPayoutCancellation. The
+// counterparty asks to recall an issued-but-unsettled payout; the
+// ledger opens a cancellation record for it, and the counterparty's
+// later camt.029 report resolves it through the existing
+// ApplyCAMT029Report path.
+//
+// Fail-closed, the RequestPayoutCancellation gates: unknown UETR,
+// settled (ACCP) or terminal (RJCT) gpi track, already-cancelled
+// payout, unissued (draft/approved) or failed payout, and an empty
+// reason code are all refused. Applying while a cancellation is
+// already open is an idempotent no-op returning the open record
+// (the RequestPayoutCancellation open no-op convention): a re-sent
+// request under the same MsgId and a crossing request converge here.
+// A confirmed cancellation refuses re-request; a rejected one admits
+// a fresh attempt with a new sequence number.
+//
+// RequestedBy names the counterparty — the Assgnr of the inbound
+// document, not the operator who applied it — so the record says who
+// asked. RequestedAt is the receipt time. The audit event is the
+// inbound op `camt056_request_applied`, distinct from the outbound
+// `cancellation_requested`, so the audit trail tells the two
+// directions apart. The record is in-memory only; the audit event is
+// the durable record.
+func (l *Ledger) ApplyCAMT056Request(req *CAMT056Request, actor string) (PayoutCancellation, error) {
+	if req == nil {
+		return PayoutCancellation{}, fmt.Errorf("%w: nil request", ErrInvalidCAMT056)
+	}
+	reasonCode := strings.TrimSpace(req.ReasonCode)
+	if reasonCode == "" {
+		return PayoutCancellation{}, ErrCancellationReasonRequired
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t, ok := l.gpiTracks[req.UETR]
+	if !ok {
+		return PayoutCancellation{}, fmt.Errorf("%w: %q", ErrCancellationUnknownUETR, req.UETR)
+	}
+	if existing, open := l.payoutCancellations[req.UETR]; open {
+		switch existing.Status {
+		case CancellationRequested:
+			// Idempotent replay: the request is already open,
+			// return it unchanged — no duplicate audit event.
+			return copyCancellation(existing), nil
+		case CancellationConfirmed:
+			return PayoutCancellation{}, fmt.Errorf("%w: %q", ErrCancellationAlreadyCancelled, req.UETR)
+		case CancellationRejected:
+			// The counterparty refused; the payment is still
+			// unsettled, so a fresh inbound request opens a new
+			// attempt. Falls through to create a fresh record
+			// below.
+		}
+	}
+	switch t.Status {
+	case GPIStatusACCP:
+		return PayoutCancellation{}, fmt.Errorf("%w: %q", ErrCancellationSettled, req.UETR)
+	case GPIStatusRJCT:
+		return PayoutCancellation{}, fmt.Errorf("%w: %q", ErrCancellationTerminal, req.UETR)
+	}
+	p, ok := l.payouts[t.PayoutID]
+	if !ok {
+		// Unreachable: tracks open only from CreatePayout, and
+		// payouts are never deleted. Fail loud rather than
+		// cancelling a ghost instruction.
+		return PayoutCancellation{}, fmt.Errorf("%w: payout %q", ErrPayoutNotFound, t.PayoutID)
+	}
+	switch p.Status {
+	case PayoutSubmitted:
+		// The only state with money in flight.
+	case PayoutSettled:
+		return PayoutCancellation{}, fmt.Errorf("%w: %q", ErrCancellationSettled, req.UETR)
+	case PayoutCancelled:
+		return PayoutCancellation{}, fmt.Errorf("%w: %q", ErrCancellationAlreadyCancelled, req.UETR)
+	case PayoutFailed:
+		return PayoutCancellation{}, fmt.Errorf("%w: %q", ErrCancellationTerminal, req.UETR)
+	default:
+		// draft / approved: the instruction never left the
+		// ledger — CancelPayout, not camt.056, is the path.
+		return PayoutCancellation{}, fmt.Errorf("%w: %q", ErrCancellationNotIssued, req.UETR)
+	}
+	requestedBy := strings.TrimSpace(req.Assgnr)
+	if requestedBy == "" {
+		requestedBy = actor
+	}
+	l.cancellationSeqs[req.UETR]++
+	seq := l.cancellationSeqs[req.UETR]
+	now := time.Now().UTC()
+	rec := &PayoutCancellation{
+		UETR:        req.UETR,
+		PayoutID:    p.ID,
+		Seq:         seq,
+		Status:      CancellationRequested,
+		ReasonCode:  reasonCode,
+		MsgID:       cancellationMsgID(req.UETR, seq),
+		RequestedAt: now,
+		RequestedBy: requestedBy,
+	}
+	l.payoutCancellations[req.UETR] = rec
+	l.emitAudit(AuditEvent{
+		Op:            "camt056_request_applied",
+		Actor:         actor,
+		TraceID:       req.UETR,
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Accounts:      []AccountID{p.PayeeAccount},
+		Details: map[string]any{
+			"uetr":           req.UETR,
+			"payout_id":      p.ID,
+			"seq":            seq,
+			"reason_code":    reasonCode,
+			"msg_id":         rec.MsgID,
+			"inbound_msg_id": req.MsgID,
+		},
+	})
+	return copyCancellation(rec), nil
 }
 
 // camt.029 wire structs: Document/FIToFICxlStsRpt. Namespaces are

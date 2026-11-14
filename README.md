@@ -7110,7 +7110,16 @@ Go: `ledger.ParsePacs028`、`ledger.AnswerPacs028`。
   冲突决议 422；无 open 请求的决议 404（有请求才有决议）。
 - 记录为内存态（payout/gpi 惯例）：持久记录是哈希链
   `cancellation_requested` / `cancellation_resolved` 审计事件。
+- 入站 `POST /exports/camt056/apply`（LG-414）：对手方发来的
+  camt.056.001.08 撤销请求是出站的镜像——同一条 open 撤销记录，
+  `RequestedBy` 记对手方（`Assgnmt/Assgnr`），与我方主动请求的
+  operator 身份区分；`200` 回记录。解析拒（非 `.001.08`、缺 UETR、
+  空原因码）`400`；未知 UETR `404`；已结算/终态/已撤销/未发出
+  `422`；同一 MsgId 重放为 `200` no-op；其后对手方 camt.029 决议
+  沿既有路径解决。审计事件为入站 op `camt056_request_applied`，
+  与出站 `cancellation_requested` 区分。
 - 计数器 `ledger_camt056_exports_total` /
+  `ledger_camt056_applies_total` /
   `ledger_camt029_applies_total` /
   `ledger_camt029_exports_total`（出站 camt.029 决议导出）。
 - 出站 camt.029 决议导出：`GET /exports/camt029?cancellation=<uetr>`
@@ -7144,7 +7153,9 @@ camt.056 是行间（FI-to-FI）撤销，camt.055 是它的客户侧对应物：
 无此数据），`OrgnlEndToEndId` 省略（账本无独立 EndToEndId，不编造）。
 只读：读锁快照、无版本 bump、不记账、不追加审计链；重复导出字节
 相同。门与 camt.056 相同：仅 open（`requested`）撤销可导出，无
-open 撤销 → 404。计数器 `ledger_camt055_exports_total`。
+open 撤销 → 404。入站的对手方 camt.056 请求走
+`POST /exports/camt056/apply`（LG-414），camt.055 本身只渲染我方
+请求的客户侧形态。计数器 `ledger_camt055_exports_total`。
 
 Go: `ledger.ExportCAMT055`。
 # 200 camt.056.001.02: <FIToFICxlReq>/.../<CxlId>9f2c8e1a-…/cxl/1</CxlId>/<OrgnlUETR>9f2c8e1a-…</OrgnlUETR>
