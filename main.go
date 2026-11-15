@@ -9348,6 +9348,98 @@ func (s *server) handlePain009Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handlePain007Apply implements POST /exports/pain007/apply (LG-424):
+// applies a counterparty customer's ISO 20022 pain.007.001.02
+// customer payment cancellation request to the ledger — the inbound
+// half of the pain.007 lifecycle, the mirror of the outbound export
+// (GET /exports/pain007, LG-401). The body is the raw pain.007 XML;
+// its OrgnlEndToEndId names the original transfer, its OrgnlTxRef
+// amount must equal that transfer's amount, and its CxlStsRsnInf
+// reason must be one of DUPL/AM09/FRAD/CUST when stated. Applying
+// reverses the transfer's principal journal entry through
+// ReverseEntryWithMetadata, keyed on the request's GrpHdr MsgId, so
+// a re-sent request is an idempotent no-op returning the stored
+// reversal — and a transfer the operator already reversed is a
+// no-op the same way. A full reversal is the only semantics: the
+// OrgnlTxRef amount is the original amount, not a cancellation
+// amount, so there is no partial cancellation. Error mapping: a
+// malformed document is a 400; an unknown original transfer is a
+// 404; an amount that does not match the original is a 422; a
+// pending-review original or an already-reversed one (partial
+// outstanding) is a 409; frozen/closed/suspended accounts are a
+// 403; the reversal's other risk gates (overdraft, daily limit,
+// velocity, period) are a 422. Fail-closed refusals — parse and
+// apply alike — park in the repair queue when the document names
+// a request, and the error body carries the repair record ID. The
+// operator identity comes from the x-ledger-actor header, like the
+// other operator actions.
+func (s *server) handlePain007Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain007Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParsePain007(body)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if repairID, parkErr := l.ParkPain007Unparsed(body, actor); parkErr != nil {
+			log.Printf("ledger-api-go: POST /exports/pain007/apply: repair parking failed: %v", parkErr)
+		} else if repairID != "" {
+			errBody["repair_id"] = repairID
+		}
+		writeJSON(w, http.StatusBadRequest, errBody)
+		return
+	}
+	res, err := l.ApplyPain007(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrPain007UnknownOriginal):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrPain007AmountMismatch):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidPain007):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		case errors.Is(err, ledger.ErrAlreadyReversed),
+			errors.Is(err, ledger.ErrReversalOfPendingReview):
+			writeJSON(w, http.StatusConflict, errBody)
+		case errors.Is(err, ledger.ErrAccountClosed),
+			errors.Is(err, ledger.ErrAccountFrozen),
+			errors.Is(err, ledger.ErrAccountSuspended):
+			writeJSON(w, http.StatusForbidden, errBody)
+		case errors.Is(err, ledger.ErrAccountOverdraft),
+			errors.Is(err, ledger.ErrCreditLimitExceeded),
+			errors.Is(err, ledger.ErrInsufficientCollateral),
+			errors.Is(err, ledger.ErrDailyLimitExceeded),
+			errors.Is(err, ledger.ErrVelocityLimitExceeded),
+			errors.Is(err, ledger.ErrBudgetExceeded),
+			errors.Is(err, ledger.ErrPeriodClosed):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain007/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.007 cancellation request failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleCAMT029Export implements GET /exports/camt029 (LG-174): the
 // ISO 20022 camt.029.001.03 FI-to-FI cancellation status report for
 // the resolved cancellation of one tracked payment (see
@@ -13777,6 +13869,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/camt057/apply", s.handleCamt057Apply)
 	mux.HandleFunc("POST /exports/camt058/apply", s.handleCamt058Apply)
 	mux.HandleFunc("POST /exports/pain009/apply", s.handlePain009Apply)
+	mux.HandleFunc("POST /exports/pain007/apply", s.handlePain007Apply)
 	mux.HandleFunc("GET /exports/camt029", s.handleCAMT029Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
 	mux.HandleFunc("POST /gpi/track/{uetr}/advance", s.handleGPIAdvance)

@@ -6248,6 +6248,29 @@ curl -s 'localhost:8080/exports/pain007?transfer_id=pay-1&reason=CUST' -o cancel
 # 200 pain.007.001.02: <CstmrPmtCxlReq>/<OrgnlPmtInfAndSts>/<TxInfAndSts>/<OrgnlEndToEndId>pay-1
 ```
 
+Inbound (LG-424): `POST /exports/pain007/apply` consumes a
+counterparty customer's `pain.007.001.02` cancellation request —
+outbound is asking the bank to cancel, inbound is executing the
+cancellation: the request's `OrgnlEndToEndId` names the original
+transfer, its `OrgnlTxRef` amount must equal that transfer's
+amount (a mismatch fails closed into the repair queue — the
+request points at a different payment), and the stated reason
+must be one of `DUPL`/`AM09`/`FRAD`/`CUST`. Applying reverses the
+transfer's principal journal entry (`ReverseEntryWithMetadata`,
+idempotency key `pain007-apply:<GrpHdr MsgId>`), so a re-sent
+request is an idempotent no-op returning the stored reversal,
+and a transfer the operator already reversed is a no-op the same
+way. Unknown original transfer `404`, amount mismatch `422`,
+malformed document or illegal reason `400` — each parked in the
+repair queue with a `repair_id` in the error body, plus a
+`pain007_reversal_rejected` audit event; a fresh reversal emits
+`pain007_reversal_applied` (`msg_id`/`orgnl_end_to_end_id`/
+`reason_code`/`amount_cents`). No partial cancellation: the
+`OrgnlTxRef` amount is the original amount, never a cancellation
+amount. Whether the bank accepts the cancellation is still
+confirmed by a pain.002 / pacs.002 receipt, never by this
+application. Counter: `ledger_pain007_applies_total`.
+
 Go: `ledger.ExportPain007` / `ledger.RenderPain007Request`.
 
 ### `GET /exports/mt101` — SWIFT FIN MT101 customer request-for-transfer export
