@@ -6817,6 +6817,20 @@ pain.013.001.07（`CdtrPmtActvtnReq`）——FedNow/RTP 的收款
   （msg_id/rfp_id/response/transfer_id），与 `rfp_accepted` /
   `rfp_paid` / `rfp_rejected` 区分。计数器
   `ledger_pain014_applies_total`。
+- 入站 `POST /exports/pain013/apply`（LG-427）：对端债权人发来
+  的 pain.013.001.07 是出站请求的镜像——本账本以债务人银行侧
+  登记对方的请求：`EndToEndId` 为 RfP ID（自然键，无空白），
+  `CdtrAcct`/`DbtrAcct` 的 IBAN 须各指一个已注册 IBAN 的账户
+  （未知账户 `404` 进 repair queue，绝不自动开户），金额/币种
+  取 `Amt/InstdAmt`，`XpryDt` 为到期日；注册复用 `CreateRfP`，
+  全部字段门皆适用（同方拒、非正金额拒、到期不在未来拒，皆
+  `400` 进 repair queue）；同一 `MsgId` 重放为 `200` no-op
+  （不二次登记、不重复审计），`MsgId` 复用于不同请求 `422`。
+  登记 ≠ 接受：只登记 RfP（仍为 issued），不移动资金，接受仍
+  走 `AcceptRfP`，过期仍走 `ExpireRfPs`。审计事件为入站 op
+  `pain013_request_received`（msg_id/rfp_id/creditor/debtor/
+  amount_cents/currency/expires_at）。计数器
+  `ledger_pain013_applies_total`。
 - 只读导出：不 bump 版本、不落账、不改 RfP 行；仅记一条
   `pain013_exported` 审计事件（msg_id/rfp_id）。`400` 缺
   rfp_id；`404` 未知 RfP；`422` 已付/已拒/已过期/缺 IBAN/

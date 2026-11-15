@@ -9251,6 +9251,91 @@ func (s *server) handleCamt058Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handlePain013Apply implements POST /exports/pain013/apply (LG-427):
+// applies a counterparty creditor's ISO 20022 pain.013.001.07
+// creditor payment activation request to the ledger — the inbound
+// half of the pain.013 lifecycle, the mirror of the outbound export
+// (GET /exports/pain013, LG-407). The body is the raw pain.013 XML;
+// its EndToEndId is the RfP's ID (the wire's natural key), its
+// CdtrAcct and DbtrAcct IBANs must each name an account the ledger
+// already registered an IBAN for, its InstdAmt is the amount and
+// currency, and its XpryDt is the expiry. Registration reuses
+// CreateRfP, so the RfP row and the rfp_issued audit event are
+// exactly the operator-side ones, plus a pain013_request_received
+// audit event (see ledger.ApplyPain013). Only the RfP registers:
+// no journal rows, no version bump, no money moved — registration
+// is not acceptance, which still goes through AcceptRfP. A MsgId
+// replayed with the same terms is an idempotent no-op returning
+// the stored RfP; a MsgId reused for different terms is a
+// conflict. Error mapping: a malformed document is a 400; an
+// unknown debtor/creditor IBAN is a 404; a MsgId reused for
+// different terms is a 422; a same-party request, a non-positive
+// amount, or an expiry not in the future is a 400. Fail-closed
+// refusals — parse and apply alike — park in the repair queue
+// when the document names a request, and the error body carries
+// the repair record ID. The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
+func (s *server) handlePain013Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain013Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParsePain013(body)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if repairID, parkErr := l.ParkPain013Unparsed(body, actor); parkErr != nil {
+			log.Printf("ledger-api-go: POST /exports/pain013/apply: repair parking failed: %v", parkErr)
+		} else if repairID != "" {
+			errBody["repair_id"] = repairID
+		}
+		writeJSON(w, http.StatusBadRequest, errBody)
+		return
+	}
+	res, err := l.ApplyPain013(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrPain013UnknownAccount):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrPain013MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrRfPSameParty),
+			errors.Is(err, ledger.ErrRfPNonPositiveAmount),
+			errors.Is(err, ledger.ErrRfPExpiryNotFuture),
+			errors.Is(err, ledger.ErrRfPExpiryRequired),
+			errors.Is(err, ledger.ErrEmptyRfPID),
+			errors.Is(err, ledger.ErrRfPIDWhitespace),
+			errors.Is(err, ledger.ErrEmptyRfPCreditor),
+			errors.Is(err, ledger.ErrEmptyRfPDebtor),
+			errors.Is(err, ledger.ErrInvalidPain013),
+			errors.Is(err, ledger.ErrInvalidCurrency):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain013/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.013 request failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handlePain009Apply implements POST /exports/pain009/apply (LG-422):
 // applies a counterparty creditor's ISO 20022 pain.009.001.02
 // mandate initiation request to the ledger — the inbound half of
@@ -14004,6 +14089,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/camt055/apply", s.handleCamt055Apply)
 	mux.HandleFunc("POST /exports/camt057/apply", s.handleCamt057Apply)
 	mux.HandleFunc("POST /exports/camt058/apply", s.handleCamt058Apply)
+	mux.HandleFunc("POST /exports/pain013/apply", s.handlePain013Apply)
 	mux.HandleFunc("POST /exports/pain009/apply", s.handlePain009Apply)
 	mux.HandleFunc("POST /exports/pain007/apply", s.handlePain007Apply)
 	mux.HandleFunc("POST /exports/pain010/apply", s.handlePain010Apply)

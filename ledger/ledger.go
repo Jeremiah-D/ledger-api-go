@@ -959,6 +959,16 @@ type Ledger struct {
 	// the hash-chained pain011_cancellation_applied audit events
 	// are the durable record.
 	pain011Applied map[string]pain011AppliedRecord
+	// pain013Applied maps a pain.013 GrpHdr MsgId to the
+	// registration its first application made (see
+	// pain013_apply.go, LG-427): the replay guard for inbound
+	// creditor payment activation requests, so a re-sent request
+	// returns the stored RfP instead of registering twice — and
+	// a MsgId reused for different terms is refused instead of
+	// silently overwritten. In-memory only, like pain010Applied:
+	// the hash-chained pain013_request_received audit events are
+	// the durable record.
+	pain013Applied map[string]pain013AppliedRecord
 	// holdKeys maps a hold's idempotency key to its hold ID, and
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the
