@@ -939,6 +939,16 @@ type Ledger struct {
 	// camt057_notification_cancelled audit events are the
 	// durable record.
 	camt058Applied map[string]CAMT058ApplyResult
+	// pain010Applied maps a pain.010 GrpHdr MsgId to the
+	// amendment its first application applied (see
+	// pain010_inbound.go, LG-425): the replay guard for inbound
+	// mandate amendments, so a re-sent amendment returns the
+	// stored outcome instead of amending twice — and a MsgId
+	// reused for different terms is refused instead of silently
+	// overwritten. In-memory only, like camt055Applied: the
+	// hash-chained pain010_amendment_applied audit events are
+	// the durable record.
+	pain010Applied map[string]pain010AppliedRecord
 	// holdKeys maps a hold's idempotency key to its hold ID, and
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the

@@ -6657,6 +6657,19 @@ pain.010.001.02（`MndtAmdmntReq`），向债务人银行申请修改授权—�
   `404` 未知授权；`422` 授权未激活。计数器
   `ledger_pain010_exports_total`。
 
+入站（LG-425）：`POST /exports/pain010/apply` 消费对方债权人发来
+的 `pain.010.001.02`（`MndtAmdmntReq`）——出站是我方请求修改、入
+站是登记对方请求的修改：`OrgnlMndt` 指明授权，`AmdmntInf` 的修
+改项逐项走既有 amend 入口（债权人/债务人账户、上限、`MaxAmt` 的
+币种、频率），另记一条 `pain010_amendment_applied` 审计事件
+（msg_id/mandate_id/changed_fields）。`FrDt` 是修改生效日（必
+填），不是授权的有效期起止——报文不载有效期窗口修改，本项亦
+不改 `ValidFrom`/`ValidUntil`。同一 `MsgId` 同条款重放幂等
+no-op，不同条款拒（`422`）；未知授权 `404`，未激活授权 `422`
+（沿出站守门），缺生效日/零修改项/非法字段 `400`。先登记修改、
+再收银行回执（LG-405 pain.012 是银行对修改请求的裁决，不是修
+改本身）。计数器 `ledger_pain010_applies_total`。
+
 ### pain.011 授权撤销请求导出（LG-402）
 
 `GET /exports/pain011?mandate=<id>&creditor_scheme_id=<scheme>&reason=<可选>`

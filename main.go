@@ -9440,6 +9440,80 @@ func (s *server) handlePain007Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handlePain010Apply implements POST /exports/pain010/apply (LG-425):
+// applies a counterparty creditor's ISO 20022 pain.010.001.02
+// mandate amendment request to the ledger — the inbound half of
+// the pain.010 lifecycle, the mirror of the outbound export (GET
+// /exports/pain010, LG-207). The body is the raw pain.010 XML;
+// its OrgnlMndt names the mandate, its AmdmntInf carries the
+// changed fields (creditor/debtor IBANs, MaxAmt with its Ccy,
+// Frqcy) and the effective date FrDt. Each changed field routes
+// through the existing per-field amend entry — payee, payer, cap,
+// currency, frequency — so each move carries that entry's gates
+// and audit event, plus one pain010_amendment_applied event for
+// the request itself. The effective date is the takeover point,
+// not a mandate field: the wire carries no validity-window change.
+// A re-sent MsgId with the same terms is an idempotent no-op
+// returning the current mandate; a MsgId reused for different
+// terms is a conflict. Error mapping: a malformed document, an
+// empty amendment, a missing effective date, or an invalid field
+// is a 400; an unknown mandate or an unknown IBAN account is a
+// 404; a non-active mandate or a MsgId reused for different terms
+// is a 422. The operator identity comes from the x-ledger-actor
+// header, like the other operator actions.
+func (s *server) handlePain010Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain010Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParsePain010(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyPain010(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound),
+			errors.Is(err, ledger.ErrPain010UnknownAccount):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrMandateNotActive),
+			errors.Is(err, ledger.ErrMandateExpired),
+			errors.Is(err, ledger.ErrPain010MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidPain010),
+			errors.Is(err, ledger.ErrPain010NoAmendment),
+			errors.Is(err, ledger.ErrPain010EffectiveDateRequired),
+			errors.Is(err, ledger.ErrMandateNonPositiveMaxAmount),
+			errors.Is(err, ledger.ErrInvalidMandateFrequency),
+			errors.Is(err, ledger.ErrMandateSameParty),
+			errors.Is(err, ledger.ErrInvalidIBAN),
+			errors.Is(err, ledger.ErrInvalidCurrency):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain010/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.010 amendment request failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleCAMT029Export implements GET /exports/camt029 (LG-174): the
 // ISO 20022 camt.029.001.03 FI-to-FI cancellation status report for
 // the resolved cancellation of one tracked payment (see
@@ -13870,6 +13944,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/camt058/apply", s.handleCamt058Apply)
 	mux.HandleFunc("POST /exports/pain009/apply", s.handlePain009Apply)
 	mux.HandleFunc("POST /exports/pain007/apply", s.handlePain007Apply)
+	mux.HandleFunc("POST /exports/pain010/apply", s.handlePain010Apply)
 	mux.HandleFunc("GET /exports/camt029", s.handleCAMT029Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
 	mux.HandleFunc("POST /gpi/track/{uetr}/advance", s.handleGPIAdvance)

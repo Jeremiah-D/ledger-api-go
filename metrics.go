@@ -197,6 +197,11 @@ type Metrics struct {
 	// requests served, including rejected requests (see
 	// ledger.ApplyPain007, LG-424).
 	Pain007Applies atomic.Uint64
+	// Pain010Applies counts POST /exports/pain010/apply ISO 20022
+	// pain.010 mandate amendment request apply requests served,
+	// including rejected requests (see ledger.ApplyPain010,
+	// LG-425).
+	Pain010Applies atomic.Uint64
 	// CAMT029Exports counts GET /exports/camt029 ISO 20022 camt.029
 	// cancellation status report export requests served, including
 	// rejected exports (see ledger.ExportCAMT029Resolution, LG-174).
@@ -1208,6 +1213,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/pain009/apply ISO 20022 pain.009 mandate initiation request apply requests served, including rejected requests.", m.Pain009Applies.Load())
 	writeCounter(&sb, "ledger_pain007_applies_total",
 		"Total POST /exports/pain007/apply ISO 20022 pain.007 customer payment cancellation request apply requests served, including rejected requests.", m.Pain007Applies.Load())
+	writeCounter(&sb, "ledger_pain010_applies_total",
+		"Total POST /exports/pain010/apply ISO 20022 pain.010 mandate amendment request apply requests served, including rejected requests.", m.Pain010Applies.Load())
 	writeCounter(&sb, "ledger_camt029_exports_total",
 		"Total GET /exports/camt029 ISO 20022 camt.029 cancellation status report exports served, including rejected exports.", m.CAMT029Exports.Load())
 	writeCounter(&sb, "ledger_pacs004_exports_total",
