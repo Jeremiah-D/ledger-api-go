@@ -1685,6 +1685,11 @@ entry→entry links.
 Lifecycle: `active → suspended | cancelled | expired`
 (`POST /mandates/{id}/suspend`, `POST /mandates/{id}/cancel`; expiry is
 lazy by predicate plus `POST /mandates/expire` for observability).
+A suspended mandate resumes with `POST /mandates/{id}/resume` — suspended
+only, and a suspended mandate whose `valid_until` has passed is refused
+(the window is dead; resuming it would only have the next read report it
+expired), so the operator can bring a paused authorization back without
+rebuilding it under a new ID.
 `AmendMandateMaxAmount` revises a live mandate's per-debit cap in place
 — active mandates only (suspended, cancelled, or expired mandates fail
 closed, lazy expiry included), and a non-positive cap is rejected with

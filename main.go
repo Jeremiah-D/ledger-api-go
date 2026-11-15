@@ -2687,6 +2687,26 @@ func (s *server) handleSuspendMandate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, m)
 }
 
+// handleResumeMandate implements POST /mandates/{id}/resume: moves a
+// suspended mandate back to active (see ledger.ResumeMandate). 404 on
+// an unknown mandate; 422 when the mandate is not suspended or its
+// validity window has passed.
+func (s *server) handleResumeMandate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	m, err := s.ledgerFor(r).ResumeMandate(r.PathValue("id"))
+	if err != nil {
+		if writeMandateError(w, err) {
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
 // handleCancelMandate implements POST /mandates/{id}/cancel: terminally
 // cancels the mandate (see ledger.CancelMandate). 404 on an unknown
 // mandate; 422 when the mandate is not active/suspended or has expired.
@@ -14127,6 +14147,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /mandates/{id}/debits", s.handleListMandateDebits)
 	mux.HandleFunc("GET /mandates/{id}/pacs010/reconcile", s.handlePacs010Reconcile)
 	mux.HandleFunc("POST /mandates/{id}/suspend", s.handleSuspendMandate)
+	mux.HandleFunc("POST /mandates/{id}/resume", s.handleResumeMandate)
 	mux.HandleFunc("POST /mandates/{id}/cancel", s.handleCancelMandate)
 	// LG-192: mandate pre-authorizations — the auth/capture flow for
 	// direct debits. /mandates/preauth/expire is the pre-authorization

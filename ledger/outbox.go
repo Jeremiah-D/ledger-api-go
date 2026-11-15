@@ -117,12 +117,13 @@ const (
 	// Direct-debit mandate lifecycle (see mandate.go, LG-125): the
 	// mandate is structural config, but its lifecycle moves are domain
 	// facts downstream consumers track — creation, suspension,
-	// cancellation, expiry, and every authorized debit (the debit's
+	// resumption, cancellation, expiry, and every authorized debit (the debit's
 	// journal row emits the usual entry_posted event too).
 	OutboxMandateCreated   = "mandate_created"
 	OutboxMandateSuspended = "mandate_suspended"
 	OutboxMandateCancelled = "mandate_cancelled"
 	OutboxMandateExpired   = "mandate_expired"
+	OutboxMandateResumed   = "mandate_resumed"
 	OutboxMandateDebited   = "mandate_debited"
 	// OutboxMandateRetryExhausted fires when a mandate's automatic
 	// retry runs out of attempts (see mandate_retry.go, LG-127): the

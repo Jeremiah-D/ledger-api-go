@@ -18,7 +18,8 @@ import (
 // and bounds the authorization in time (ValidFrom/ValidUntil) and in
 // rate (Frequency: at most one debit per UTC day, week, or month).
 //
-// Lifecycle: active -> suspended | cancelled | expired. Suspension and
+// Lifecycle: active -> suspended | cancelled | expired, and
+// suspended -> active again via ResumeMandate. Suspension and
 // cancellation are operator actions (SuspendMandate, CancelMandate);
 // expiry is lazy by predicate (a mandate whose ValidUntil has passed
 // counts as expired on every read, like holds) plus an explicit
@@ -463,7 +464,7 @@ func (l *Ledger) ListMandates() []Mandate {
 }
 
 // SuspendMandate moves an active mandate to suspended: it authorizes no
-// further debits until cancelled or expired. Suspending a suspended,
+// further debits until resumed, cancelled, or expired. Suspending a suspended,
 // cancelled, or already-marked-expired mandate fails with
 // ErrMandateNotActive; a mandate whose ValidUntil has passed fails with
 // ErrMandateExpired — it is dead, not pausable. The transition is
@@ -497,6 +498,57 @@ func (l *Ledger) SuspendMandate(id string) (Mandate, error) {
 	})
 	l.emitOutboxLocked(OutboxEvent{
 		Type:     OutboxMandateSuspended,
+		Account:  m.Payer,
+		Currency: m.Currency,
+		Details:  map[string]any{"mandate_id": id},
+	})
+	return m, nil
+}
+
+// ResumeMandate moves a suspended mandate back to active: it authorizes
+// debits again, under the same ID, cap, and validity window — a
+// suspended mandate the operator wants back needs no rebuild, no new
+// MndtId, and no fresh pain.009. Only suspended mandates resume:
+// active, cancelled, or already-marked-expired mandates fail with
+// ErrMandateNotActive. A suspended mandate whose ValidUntil has passed
+// fails with ErrMandateExpired — the window is dead, and resuming it
+// would only have the next read report it expired. The sweep never
+// touches suspended rows (see ExpireMandates), so this gate is the
+// backstop that keeps an expired suspended mandate from coming back.
+// The transition is structural (no version bump) and audited as
+// "mandate_resumed".
+func (l *Ledger) ResumeMandate(id string) (Mandate, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	m, ok := l.mandates[id]
+	if !ok {
+		return Mandate{}, ErrMandateNotFound
+	}
+	now := time.Now()
+	if m.Status != MandateStatusSuspended {
+		return Mandate{}, fmt.Errorf("%w: status %q", ErrMandateNotActive, m.Status)
+	}
+	// mandateExpiredLocked only recognizes active rows, so a suspended
+	// mandate past its ValidUntil needs this explicit comparison: the
+	// sweep does not mark it, and only this gate stops the resume.
+	if !now.Before(m.ValidUntil) {
+		return Mandate{}, ErrMandateExpired
+	}
+	m.Status = MandateStatusActive
+	l.mandates[id] = m
+	l.emitAudit(AuditEvent{
+		Op:            "mandate_resumed",
+		Actor:         "ResumeMandate",
+		TraceID:       id,
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Accounts:      []AccountID{m.Payer, m.Payee},
+		Details: map[string]any{
+			"currency": m.Currency,
+		},
+	})
+	l.emitOutboxLocked(OutboxEvent{
+		Type:     OutboxMandateResumed,
 		Account:  m.Payer,
 		Currency: m.Currency,
 		Details:  map[string]any{"mandate_id": id},
