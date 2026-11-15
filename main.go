@@ -7027,6 +7027,98 @@ func (s *server) handlePacs003Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, receipt)
 }
 
+// pacs010ApplyItemResponse is one per-item outcome of POST
+// /exports/pacs010/apply, the FedNow pacs.008 item shape
+// (handleFedNowPacs008): the instruction's identity, the booked
+// entry on success, duplicate on replay, and the rejection reason
+// as a string when the item failed its mandate gates.
+type pacs010ApplyItemResponse struct {
+	EndToEndID  string `json:"end_to_end_id"`
+	MandateID   string `json:"mandate_id"`
+	AmountCents int64  `json:"amount_cents"`
+	Currency    string `json:"currency"`
+	EntryID     string `json:"entry_id,omitempty"`
+	Duplicate   bool   `json:"duplicate"`
+	Error       string `json:"error,omitempty"`
+}
+
+// handlePacs010Apply implements POST /exports/pacs010/apply (LG-423):
+// applies a creditor bank's ISO 20022 pacs.010.001.02
+// FinancialInstitutionDirectDebit to the mandates it names — the
+// debtor's-bank side of the interbank direct debit, the mirror of
+// the creditor's-bank export (GET /exports/pacs010, LG-190). The
+// body is the raw pacs.010 XML; each CdtInstr's MndtId selects the
+// mandate and its ReqdColltnDt is the booking date when the
+// document states one (see ledger.ApplyPacs010): a covered
+// instruction books one mandate debit (debit the payee, credit the
+// payer, memo stamped "mandate_of:<mandate ID>") and emits the
+// `pacs010_debit_applied` audit event. Processing is per-item, the
+// ProcessPacs008 shape: the whole document must parse before
+// anything applies, then one bad instruction is recorded in its
+// item's error (plus a `pacs010_debit_rejected` audit event) and
+// never blocks the others, so the endpoint always answers 200 with
+// the item list once the document parses. Re-applying a document is
+// idempotent: the EndToEndId is the idempotency key, so a replay
+// returns the original receipts with duplicate set. Error mapping: a
+// malformed document — bad XML, a settlement method outside the
+// INDA/INGA/COVE/CLRG vocabulary, a NbOfTxs or CtrlSum that
+// disagrees with the instructions — is a 400; the mandate gates
+// (unknown mandate, non-active mandate, a collection date outside
+// the mandate window, an amount over the mandate cap, a currency
+// mismatch, a used frequency window) are per-item errors in the 200
+// body, never a top-level status. This does not go through pain.002:
+// a pacs.010 MsgId is refused by pain.002 outright
+// (ErrPain002ForeignMsgID, LG-406), and the apply endpoint here is
+// itself the debtor bank's handling of the instruction. The operator
+// identity comes from the x-ledger-actor header, like the other
+// operator actions.
+func (s *server) handlePacs010Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pacs010Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	doc, err := ledger.ParsePacs010(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	results, err := s.ledgerFor(r).ApplyPacs010(doc, ledger.ActorFromContext(actx))
+	if err != nil {
+		log.Printf("ledger-api-go: POST /exports/pacs010/apply: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pacs.010 direct debit failed"})
+		return
+	}
+	items := make([]pacs010ApplyItemResponse, 0, len(results))
+	for _, res := range results {
+		item := pacs010ApplyItemResponse{
+			EndToEndID:  res.Instruction.EndToEndID,
+			MandateID:   res.Instruction.MandateID,
+			AmountCents: res.Instruction.AmountCents,
+			Currency:    res.Instruction.Currency,
+			Duplicate:   res.Duplicate,
+		}
+		if res.Err != nil {
+			item.Error = res.Err.Error()
+		} else {
+			item.EntryID = res.EntryID
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"msg_id": doc.MsgID, "results": items})
+}
+
 // handlePain014Apply implements POST /exports/pain014/apply (LG-416):
 // applies a debtor bank's ISO 20022 pain.014.001.07 creditor payment
 // activation request status report answering a pain.013 request for
@@ -13629,6 +13721,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pacs007/apply", s.handlePacs007Apply)
 	mux.HandleFunc("POST /exports/pacs004/apply", s.handlePacs004Apply)
 	mux.HandleFunc("POST /exports/pacs003/apply", s.handlePacs003Apply)
+	mux.HandleFunc("POST /exports/pacs010/apply", s.handlePacs010Apply)
 	mux.HandleFunc("POST /exports/pacs009/apply", s.handlePacs009Apply)
 	mux.HandleFunc("POST /exports/pacs028/answer", s.handlePacs028Answer)
 	mux.HandleFunc("POST /exports/pain008/apply", s.handlePain008Apply)

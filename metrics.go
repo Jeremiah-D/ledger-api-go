@@ -287,6 +287,10 @@ type Metrics struct {
 	// camt.054 reconciliation reports served, including rejected
 	// requests (see ledger.ReconcilePacs010, LG-190).
 	Pacs010Reconciles atomic.Uint64
+	// Pacs010Applies counts POST /exports/pacs010/apply ISO 20022
+	// pacs.010 direct-debit apply requests served, including
+	// rejected documents (see ledger.ApplyPacs010, LG-423).
+	Pacs010Applies atomic.Uint64
 	// UboSets counts POST /accounts/{id}/ubo UBO ownership
 	// declaration installs served, including rejected declarations
 	// (see ledger.SetUbo, LG-189).
@@ -1243,6 +1247,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/pacs003 ISO 20022 pacs.003 FI-to-FI customer direct debit exports served, including rejected exports.", m.Pacs003Exports.Load())
 	writeCounter(&sb, "ledger_pacs010_reconciles_total",
 		"Total GET /mandates/{id}/pacs010/reconcile camt.054 reconciliation reports served, including rejected requests.", m.Pacs010Reconciles.Load())
+	writeCounter(&sb, "ledger_pacs010_applies_total",
+		"Total POST /exports/pacs010/apply ISO 20022 pacs.010 FI-to-FI direct debit apply requests served, including rejected documents.", m.Pacs010Applies.Load())
 	writeCounter(&sb, "ledger_ubo_sets_total",
 		"Total POST /accounts/{id}/ubo UBO ownership declaration installs served, including rejected declarations.", m.UboSets.Load())
 	writeCounter(&sb, "ledger_camt052_exports_total",

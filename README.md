@@ -7773,6 +7773,49 @@ Go: `ledger.ExportPacs010(mandateID, ledger.Pacs010ExportOptions{SettlementMetho
 导出与对账均为只读（不 bump 版本、不写分录），但各 emits 一条审计事件
 （`pacs010_exported` / `pacs010_reconciled`）。
 
+### `POST /exports/pacs010/apply` — ISO 20022 pacs.010 银行间直接扣款入站
+
+上节是债权人银行侧的出站指令，本节是它的债务人银行侧镜像：收到
+对方债权人银行发来的 `pacs.010.001.02`（`FinancialInstitutionDirectDebit`）
+机构间直接扣款指令后，核验 mandate 并记账。`ledger.ParsePacs010`
+新建解析 struct（出站是 strings.Builder 渲染、无 wire struct 可反用）：
+`GrpHdr`（`MsgId` / `NbOfTxs` / `CtrlSum` / `SttlmInf/SttlmMtd`）+
+每个 `CdtInstr`：`PmtId` / `InstdAmt` / `ReqdColltnDt` /
+`Cdtr` / `Dbtr` 及各自账户与代理行、`DrctDbtTx/MndtRltdInf`
+（`MndtId` / `DtOfSgntr`）；`ledger.ApplyPacs010` 沿
+`ProcessPacs008` 的逐笔形态把整批指令交给 `DebitWithMandate`
+记账，分录取自 mandate 本身（借记 payee、贷记 payer），`EndToEndId`
+同时是分录 ID 与幂等键。
+
+集合日期：每笔的 `ReqdColltnDt` 是对方银行要求结算的日子，解析后
+作为记账时间戳——mandate 有效期窗口与频率窗口都在这一天求值。
+不写 `ReqdColltnDt` 的指令按收到当日记账；写错格式的日期是解析
+拒绝，不猜。`SttlmMtd` 须在 INDA/INGA/COVE/CLRG 词表内（未写按
+出站缺省 INDA）；`CtrlSum` 须与逐笔合计一致（缺失亦拒——无法核验
+的批次不凭信任应用），`NbOfTxs` 写了就须与指令数一致。
+
+Fail-closed：解析拒绝（400：报文不合规、缺 `MsgId` /
+`EndToEndId` / `MndtId`、金额非正、币种非法、签名日或集合日格
+式错误、结算方法在词表外、控制合计不符、无指令）；未知 mandate、
+非 active mandate、集合日越出 `[ValidFrom, ValidUntil)`、金额超
+`MaxAmountCents`、币种与 mandate 不符、同一频率窗口已用——均为逐
+笔错误，记在该笔结果的 `error` 里并附 `pacs010_debit_rejected`
+审计事件，不阻塞同批其余指令，整批仍答 200。重复 `MsgId` 重发
+回原收据（`duplicate` 置位），不重复记账、不补审计事件；成功记
+账发 `pacs010_debit_applied` 审计事件，`ledger_pacs010_applies_total`
+计数（含被拒的报文）。
+
+pacs.010 不走 pain.002：命名 pacs.010 `MsgId` 的 pain.002 报文被
+`ErrPain002ForeignMsgID` 显式拒绝（LG-406），本端点本身即债务人
+银行侧的扣款处理口。
+
+```bash
+curl -s -X POST localhost:8080/exports/pacs010/apply -H 'Content-Type: application/xml' --data-binary @fidbt-in.xml
+# 200 {"msg_id":"pacs010-in-1","results":[{"end_to_end_id":"e2e-1","mandate_id":"m-sub","amount_cents":1200,"currency":"USD","entry_id":"e2e-1","duplicate":false}]}
+```
+
+Go: `ledger.ParsePacs010(xml)`，`ledger.ApplyPacs010(doc, actor)`。
+
 ### `GET /exports/pacs003` — ISO 20022 pacs.003 银行间客户直接扣款导出
 
 pacs.010（LG-190）是机构间的直接扣款，本节是它的客户对应物：已过账
@@ -11213,6 +11256,9 @@ curl -s localhost:8080/metrics
 - `ledger_pacs010_reconciles_total` — `GET
   /mandates/{id}/pacs010/reconcile` camt.054 reconciliation reports
   served, including rejected requests.
+- `ledger_pacs010_applies_total` — `POST /exports/pacs010/apply` ISO
+  20022 pacs.010 FI-to-FI direct debit applies served, including
+  rejected documents.
 - `ledger_ubo_sets_total` — `POST /accounts/{id}/ubo` UBO ownership
   declaration installs served, including rejected declarations.
 - `ledger_ecl_exposure_requests_total` — `POST /ecl/exposures` requests
