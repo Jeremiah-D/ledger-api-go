@@ -8464,6 +8464,76 @@ func (s *server) handleMT103Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msg))
 }
 
+// mt192ExportRequest is the JSON body of POST /exports/mt192: the
+// per-export options of ledger.MT192ExportOptions, with the original
+// value date as an ISO date string.
+type mt192ExportRequest struct {
+	PayoutID          string `json:"payout_id"`
+	ReceiverLT        string `json:"receiver_lt"`
+	OriginalValueDate string `json:"original_value_date,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+}
+
+// handleMT192Export implements POST /exports/mt192 (LG-434): a SWIFT
+// FIN MT192 request for cancellation for one approved or submitted
+// payout (see ledger.ExportMT192). The JSON body names the payout,
+// the correspondent the original MT103 went to, and the optional
+// original value date and :79: reason; the body is strictly decoded
+// (unknown fields fail fast). The export is read-only: no version
+// bump, no audit event, and the payout keeps its status — the export
+// is the cancellation request, not the cancellation itself. Error
+// mapping: a malformed body or an invalid option value is a 400; an
+// unknown payout ID is a 404; a payout that is not approved or
+// submitted is a 422.
+func (s *server) handleMT192Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT192Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt192ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	opts := ledger.MT192ExportOptions{
+		PayoutID:   req.PayoutID,
+		ReceiverLT: req.ReceiverLT,
+		Reason:     req.Reason,
+	}
+	if req.OriginalValueDate != "" {
+		vd, err := time.Parse("2006-01-02", req.OriginalValueDate)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid original_value_date: want YYYY-MM-DD"})
+			return
+		}
+		opts.OriginalValueDate = vd
+	}
+	msg, err := s.ledgerFor(r).ExportMT192(opts)
+	if err != nil {
+		status := http.StatusBadRequest
+		switch {
+		case errors.Is(err, ledger.ErrMT103PayoutNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrMT192BadStatus):
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(msg))
+}
+
 // mt199ExportRequest is the JSON body of POST /exports/mt199: the
 // fields of ledger.MT199 — sender/receiver LT addresses, the :20:
 // transaction reference, the optional :21: related reference, and
@@ -14418,6 +14488,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs028", s.handlePacs028Export)
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("POST /exports/mt103", s.handleMT103Export)
+	mux.HandleFunc("POST /exports/mt192", s.handleMT192Export)
 	mux.HandleFunc("POST /exports/mt900910", s.handleMT900910Export)
 	mux.HandleFunc("POST /exports/mt202", s.handleMT202Export)
 	mux.HandleFunc("POST /exports/mt199", s.handleMT199Export)

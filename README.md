@@ -7665,6 +7665,52 @@ curl -s -X POST localhost:8080/exports/mt103 \
 
 Go: `ledger.ExportMT103` / `ledger.MT103ExportOptions`。
 
+### `POST /exports/mt192` — SWIFT FIN MT192 付款取消请求导出
+
+已审批（approved）或已提交（submitted）的 payout 可以用 SWIFT FIN
+`MT192`（request for cancellation）渲染付款取消请求：请代理行撤销
+已发出的那笔 MT103。报文含 block 1（基本头：发送方 LT 地址）、
+block 2（应用头 `I192`、接收方 LT 地址）、block 3
+（`{108:MUR}` 消息用户引用）与 block 4 字段集 `:20:` / `:21:` /
+`:11S:` / `:79:`（有 reason 时）。
+
+语义：
+- 与 MT103（LG-183）孪生：MT103 是发指令、本项是撤回同一指令——
+  `:21:` 即原 MT103 的 `:20:`（payout ID），`:11S:` 即 `103` +
+  原 MT103 `:32A:` 的值日（YYMMDD），把取消请求钉死到那一笔原指令。
+- 导出 ≠ 取消本身：payout 仍保持原状态，直到银行确认；银行是否
+  执行由其回执确认，本账本不解析 MT192 回执。已结算付款的取消走
+  pacs.007（LG-411）；MT192 只针对未结算的已发指令。
+- 生命周期 fail-closed：payout 必须是 approved 或 submitted——MT192
+  是结算**前**已发指令的撤销请求；draft（从未发出，无可撤销）、
+  failed、cancelled、settled 一律拒绝。已结算者撤销走 pacs.007。
+- 身份接线（不做 SWIFT 会员假设）：发送方 BIC 取自 payee 账户已
+  注册的 IBAN BIC（`SetAccountIBAN`，LG-150），无则拒绝，绝不猜测；
+  `receiver_lt` 必填——账本不记录 MT103 发往何处，调用方逐次给定
+  原 MT103 的接收行；BIC8/BIC11 自动补齐为 12 字符 LT 地址。
+- 字段纪律（MT103/nacha.go 惯例）：`:20:` 确定性派生——`MT192-` +
+  SHA-256（payout ID）前 10 位小写 hex，共 16 字符、16x 合法（沿
+  MT101 的 `:20:` 派生，LG-391）；`:79:` 仅 reason 给定时写，自由
+  文本原文、不编造原因码表（至多 35 行 × 35 `x` 字符）；花括号在
+  block-4 内容中另行拒绝，防 FIN 分帧破坏。
+- 值日缺省规则与 MT103 同款：显式 `original_value_date` 优先，
+  缺省按 submit → approval → creation 重算（原 MT103 `:32A:` 的值日）。
+- 只读：读锁快照、无 version bump、无记账、无审计链追加；重复导出
+  字节一致（全部字段钉死自存量 payout 与调用方给定选项，无墙钟）。
+- block 5 省略：CHK 由 SWIFT 网络在接收时计算，生成器不伪造校验和；
+  block 1 的 session/sequence 填零（由发送方 SWIFT 接口在发送时分配）。
+- `400` 请求体非法/选项值非法；`404` 未知 payout；`422` payout 未
+  approved/submitted。计数器 `ledger_mt192_exports_total`。
+
+```bash
+curl -s -X POST localhost:8080/exports/mt192 \
+  -H 'Content-Type: application/json' \
+  -d '{"payout_id":"po-1","receiver_lt":"BANKDEFF","original_value_date":"2026-11-10","reason":"Duplicate payment, please cancel"}' -o mt192.fin
+# 200 text/plain: {1:F01BANKUS33XXX0000000000} ... :20:MT192-... :21:po-1 :11S:103261110 :79:Duplicate payment, please cancel
+```
+
+Go: `ledger.ExportMT192` / `ledger.MT192ExportOptions`。
+
 ### SWIFT FIN MT202 银行间汇款（库级解析 + 导出）
 
 银行间资金划转用 SWIFT FIN `MT202`（general financial institution
