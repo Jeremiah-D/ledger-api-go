@@ -6705,6 +6705,15 @@ pain.011.001.03（`MndtCxlReq`），向债务人银行请求撤销授权——
   请求重导出除 `CreDtTm` 外字节相同。`400` 缺参数/缺 scheme；
   `404` 未知授权；`422` 已取消/已过期。计数器
   `ledger_pain011_exports_total`。
+- **入站方向（LG-426）**：`POST /exports/pain011/apply` 消费对方债权人发来的
+  pain.011.001.03（`MndtCxlReq`）：按 `OrgnlMndt/MndtId` 找到授权后经
+  `CancelMandate` 执行撤销——出站是“我方请求撤销”，入站是“执行对方的
+  撤销请求”；active 与 suspended 均可撤销，已取消授权同 MsgId 重放幂等
+  no-op（不重复记审计事件），未知授权 `404`、已过期 `422`。原因原文
+  （`CxlRsn/Rsn/Prtry`）verbatim 记入 `pain011_cancellation_applied`
+  审计事件（无原因则不记该字段），不翻译、不编造原因码允许值表。银行
+  对本次撤销的确认仍由 pain.012 回执承载（见下节 LG-405）。计数器
+  `ledger_pain011_applies_total`。
 
 ### pain.012 授权接受报告回盘解析与应用（LG-405）
 

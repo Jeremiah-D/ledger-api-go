@@ -9514,6 +9514,68 @@ func (s *server) handlePain010Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handlePain011Apply implements POST /exports/pain011/apply (LG-426):
+// applies a counterparty creditor's ISO 20022 pain.011.001.03
+// mandate cancellation request to the ledger — the inbound half of
+// the pain.011 lifecycle, the mirror of the outbound export (GET
+// /exports/pain011, LG-402). The body is the raw pain.011 XML;
+// its OrgnlMndt names the mandate, its optional CxlRsn carries the
+// reason verbatim. The mandate is cancelled through the existing
+// CancelMandate entry — active and suspended mandates can both be
+// cancelled, a suspended mandate still exists at the bank — plus
+// one pain011_cancellation_applied event for the request itself.
+// A re-sent MsgId with the same terms is an idempotent no-op
+// returning the current mandate; a MsgId reused for different
+// terms is a conflict. Error mapping: a malformed document is a
+// 400; an unknown mandate is a 404; a cancelled or expired
+// mandate or a MsgId reused for different terms is a 422. The
+// operator identity comes from the x-ledger-actor header, like
+// the other operator actions.
+func (s *server) handlePain011Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain011Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParsePain011(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyPain011(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrMandateNotActive),
+			errors.Is(err, ledger.ErrMandateExpired),
+			errors.Is(err, ledger.ErrPain011MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidPain011):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain011/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.011 cancellation request failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleCAMT029Export implements GET /exports/camt029 (LG-174): the
 // ISO 20022 camt.029.001.03 FI-to-FI cancellation status report for
 // the resolved cancellation of one tracked payment (see
@@ -13945,6 +14007,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain009/apply", s.handlePain009Apply)
 	mux.HandleFunc("POST /exports/pain007/apply", s.handlePain007Apply)
 	mux.HandleFunc("POST /exports/pain010/apply", s.handlePain010Apply)
+	mux.HandleFunc("POST /exports/pain011/apply", s.handlePain011Apply)
 	mux.HandleFunc("GET /exports/camt029", s.handleCAMT029Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
 	mux.HandleFunc("POST /gpi/track/{uetr}/advance", s.handleGPIAdvance)
