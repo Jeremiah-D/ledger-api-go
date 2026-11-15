@@ -6765,6 +6765,45 @@ pain.011.001.03（`MndtCxlReq`），向债务人银行请求撤销授权——
   对本次撤销的确认仍由 pain.012 回执承载（见下节 LG-405）。计数器
   `ledger_pain011_applies_total`。
 
+### pain.018 授权暂停请求导出（LG-432）
+
+`GET /exports/pain018?mandate=<id>&creditor_scheme_id=<scheme>&reason=<必填>`
+为一笔已注册 mandate 生成 ISO 20022 pain.018.001.03
+（`MndtSspnsnReq`），向债务人银行请求暂停授权——此后暂不按
+该授权扣款，但授权本身并未终结。
+
+- 版本与结构核对：pain.018.001.03（2013 年 Payments Mandates
+  MDR，`MandateSuspensionRequestV03`；docs.rs `iso-20022-pain`
+  crate `pain_018_001_03` 模块：`Document` 根字段
+  `mndt_sspnsn_req`，`MandateSuspensionRequestV03` = GrpHdr +
+  UndrlygSspnsnDtls）。报文形按 LG-432 规格取简化的
+  `MndtSspnsnReq{SspnsnReqId, OrgnlMndt, SspnsnRsn}` 渲染
+  （`OrgnlMndt` 载原授权号 + 债权人 scheme ID；`SspnsnReqId`
+  复用确定性 MsgId；`SspnsnRsn/Rsn/Prtry` 承载自由文本原因，
+  不编造原因码允许值表），而非 V03 完整的 `UndrlygSspnsnDtls`
+  + 全套 Cdtr/Dbtr 块——银行侧校验如需完整形，留待后轮升级。
+- **原因必填**：完整 V03 定义里 `MandateSuspension3.sspnsn_rsn`
+  是非 Option 的 `MandateSuspensionReason2` 字段，即 [1..1] 强制，
+  故缺 reason 时 handler `400`，不编造缺省码、也不渲染无原因
+  文档；导出恒含 `SspnsnRsn`。
+- **“请求暂停”与“内部暂停”的分野**：本项只生成对外请求，
+  导出本身不暂停任何授权——授权在账本内仍保持 active，直至
+  操作员另行调用 `SuspendMandate`；银行确认与否由 pain.012 回执
+  确认。顺序是先导出请求、银行确认、再内部暂停（恢复则由
+  LG-431 `ResumeMandate` 管）。
+- 与 pain.011 的分野：**active-only 门**——暂停请求针对活授权，
+  已 suspended 者再请求暂停是空话，故 suspended/已取消均拒绝
+  （`ErrMandateNotActive`），已过期拒绝（`ErrMandateExpired`）；
+  而 pain.011 允许 suspended 授权撤销。**IBAN 非必需**——与
+  pain.011 同，请求只标识授权本身，缺 IBAN 的授权仍可暂停。
+- 只读导出：不 bump 版本、不落账、不改 mandate 行；仅记一条
+  `pain018_exported` 审计事件（msg_id/mandate_id/creditor_scheme_id/
+  reason_code）。
+- `GrpHdr MsgId` 确定性：`pain018-<mandate>-<scheme>`，同一暂停
+  请求重导出除 `CreDtTm` 外字节相同。`400` 缺参数/缺 scheme/缺
+  reason；`404` 未知授权；`422` 已暂停/已取消/已过期。计数器
+  `ledger_pain018_exports_total`。
+
 ### pain.012 授权接受报告回盘解析与应用（LG-405）
 
 `POST /exports/pain012/apply` 消费银行发回的 ISO 20022

@@ -7745,6 +7745,49 @@ func (s *server) handlePain011Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePain018Export implements GET /exports/pain018 (LG-432): an
+// ISO 20022 pain.018.001.03 mandate suspension request for one
+// registered mandate (see ledger.ExportPain018). Query parameters:
+// mandate (required), creditor_scheme_id (required, the SEPA
+// creditor identifier), reason (required, the suspension reason,
+// rendered as SspnsnRsn/Rsn/Prtry — SspnsnRsn is [1..1] in the
+// full V03 definition, so a missing reason is a 400, never a
+// defaulted code). The export is read-only: it changes no mandate
+// row — exporting is a request, not a suspension, and only an
+// active mandate can be asked to pause: a suspended mandate is
+// already paused, so it is a 422, unlike pain.011 where a
+// suspended mandate can still be cancelled. Error mapping: a
+// missing mandate, creditor_scheme_id, or reason is a 400; an
+// unknown mandate is a 404; a suspended, cancelled, or expired
+// mandate is a 422.
+func (s *server) handlePain018Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain018Exports.Add(1)
+	q := r.URL.Query()
+	mandateID := q.Get("mandate")
+	schemeID := q.Get("creditor_scheme_id")
+	reason := q.Get("reason")
+	if mandateID == "" || schemeID == "" || reason == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mandate, creditor_scheme_id and reason are required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPain018(mandateID, schemeID, reason)
+	if err != nil {
+		status := http.StatusUnprocessableEntity
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrMissingPain018CreditorScheme),
+			errors.Is(err, ledger.ErrMissingPain018Reason):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handlePain013Export implements GET /exports/pain013 (LG-407): an
 // ISO 20022 pain.013.001.07 creditor payment activation request for
 // one issued request for payment (see ledger.ExportPain013). Query
@@ -14328,6 +14371,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
 	mux.HandleFunc("GET /exports/pain010", s.handlePain010Export)
 	mux.HandleFunc("GET /exports/pain011", s.handlePain011Export)
+	mux.HandleFunc("GET /exports/pain018", s.handlePain018Export)
 	mux.HandleFunc("GET /exports/pain013", s.handlePain013Export)
 	mux.HandleFunc("GET /exports/pain014", s.handlePain014Export)
 	mux.HandleFunc("GET /exports/pain009", s.handlePain009Export)
