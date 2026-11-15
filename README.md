@@ -7773,6 +7773,25 @@ curl -s -X POST localhost:8080/exports/mt192 \
 
 Go: `ledger.ExportMT192` / `ledger.MT192ExportOptions`。
 
+- **入站方向（LG-438）**：`POST /exports/mt192/apply` 消费对方代理行
+  发来的 SWIFT FIN MT192（`{1:F01…} {2:I192…} {3:{108:…}} {4: :20:
+  / :21: / :11S: / :79: }`）：`:21:`（原 MT103 `:20:` 即 payout
+  ID）找到 payout 后取其 UETR 调 `RequestPayoutCancellation` 执行
+  取消——出站是“我方请求取消”，入站是“执行对方的取消请求”；
+  与入站 camt.056（LG-414）共用同一取消入口，是同一入口的 FIN
+  路。`:11S:`（103 + 值日）须与 payout 的 MT103 值日一致（提交
+  时、再批准时、再创建时），不一致 `422`；`:79:` 全文 verbatim 作
+  reasonCode，缺失 `422`（camt.056 reason 必填门）。门控差异明示：
+  出站允 approved/submitted，入站只取消已发出的 submitted——
+  approved 走 `CancelPayout`（`CancellationNotIssued` 门）；已结算
+  走 pacs.007（LG-411）。解析沿 MT202 严格先例（块结构/字段序/
+  全字段校验、CRLF 容忍、块外字段拒、尾换行容忍，`:79:` 可跨行）。
+  审计沿用 `cancellation_requested`，另记一条
+  `mt192_request_applied` marker（msg_id 为 MT192 `:20:`）把
+  `:20:` 写进审计链。同 `:20:` 同 terms 复放幂等 no-op（不重复记
+  审计事件），同 `:20:` 异 terms `422`。未知 payout `422`（沿出站
+  错误）、报文非法 `400`。计数器 `ledger_mt192_applies_total`。
+
 ### SWIFT FIN MT202 银行间汇款（库级解析 + 导出）
 
 银行间资金划转用 SWIFT FIN `MT202`（general financial institution

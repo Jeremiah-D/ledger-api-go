@@ -8601,6 +8601,71 @@ func (s *server) handleMT192Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msg))
 }
 
+// handleMT192Apply implements POST /exports/mt192/apply (LG-438):
+// applies a correspondent bank's SWIFT FIN MT192 request for
+// cancellation to the ledger — the inbound half of the MT192
+// lifecycle, the mirror of the outbound export (POST /exports/mt192,
+// LG-434). The body is the raw MT192 FIN text; its :21: names the
+// payout (the original MT103's :20:), its :11S: must carry the
+// payout's MT103 value date, and its :79: narrative rides verbatim
+// as the cancellation reason. The cancellation runs through the
+// existing RequestPayoutCancellation entry — only an issued
+// submitted payout can be cancelled — plus one
+// mt192_request_applied event for the request itself. A re-sent
+// :20: with the same terms is an idempotent no-op returning the
+// current cancellation record; a :20: reused for different terms
+// is a conflict. Error mapping: a malformed FIN document is a 400;
+// an unknown payout, a value-date mismatch, a settled or terminal
+// payout, an already-cancelled payout, an unissued payout, a
+// missing reason, or a :20: reused for different terms is a 422.
+// The operator identity comes from the x-ledger-actor header, like
+// the other operator actions.
+func (s *server) handleMT192Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT192Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParseMT192(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT192(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT103PayoutNotFound),
+			errors.Is(err, ledger.ErrMT192ValueDateMismatch),
+			errors.Is(err, ledger.ErrMT192MsgIDConflict),
+			errors.Is(err, ledger.ErrCancellationSettled),
+			errors.Is(err, ledger.ErrCancellationTerminal),
+			errors.Is(err, ledger.ErrCancellationAlreadyCancelled),
+			errors.Is(err, ledger.ErrCancellationNotIssued),
+			errors.Is(err, ledger.ErrCancellationReasonRequired):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt192/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT192 cancellation request failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // mt199ExportRequest is the JSON body of POST /exports/mt199: the
 // fields of ledger.MT199 — sender/receiver LT addresses, the :20:
 // transaction reference, the optional :21: related reference, and
@@ -14681,6 +14746,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("POST /exports/mt103", s.handleMT103Export)
 	mux.HandleFunc("POST /exports/mt192", s.handleMT192Export)
+	mux.HandleFunc("POST /exports/mt192/apply", s.handleMT192Apply)
 	mux.HandleFunc("POST /exports/mt900910", s.handleMT900910Export)
 	mux.HandleFunc("POST /exports/mt202", s.handleMT202Export)
 	mux.HandleFunc("POST /exports/mt199", s.handleMT199Export)
