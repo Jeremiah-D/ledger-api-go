@@ -10160,6 +10160,69 @@ func (s *server) handlePain011Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handlePain017Apply implements POST /exports/pain017/apply (LG-437):
+// answers a counterparty creditor's ISO 20022 pain.017.001.03
+// mandate copy request against the ledger — the inbound half of
+// the pain.017 lifecycle, the mirror of the outbound export (GET
+// /exports/pain017, LG-433). The body is the raw pain.017 XML;
+// its OrgnlMndt names the mandate, its optional MndtSts carries
+// the requester's view of the mandate's status. The copy is
+// served through the existing GetMandate view — active, suspended,
+// cancelled, and expired mandates are all servable, with no state
+// gate — plus one pain017_copy_served event for the request
+// itself. A carried MndtSts must agree with the mandate's
+// effective status, or the request is refused as a stale view. A
+// re-sent MsgId with the same terms is an idempotent no-op
+// returning the current copy; a MsgId reused for different terms
+// is a conflict. Error mapping: a malformed document is a 400;
+// an unknown mandate is a 404; a stale status view or a MsgId
+// reused for different terms is a 422. The operator identity
+// comes from the x-ledger-actor header, like the other operator
+// actions.
+func (s *server) handlePain017Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain017Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParsePain017(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyPain017(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrPain017MsgIDConflict),
+			errors.Is(err, ledger.ErrPain017StaleStatusView):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidPain017):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain017/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.017 copy request failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handlePain018Apply implements POST /exports/pain018/apply (LG-436):
 // applies a counterparty creditor's ISO 20022 pain.018.001.03
 // mandate suspension request to the ledger — the inbound half of
@@ -14663,6 +14726,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/pain007/apply", s.handlePain007Apply)
 	mux.HandleFunc("POST /exports/pain010/apply", s.handlePain010Apply)
 	mux.HandleFunc("POST /exports/pain011/apply", s.handlePain011Apply)
+	mux.HandleFunc("POST /exports/pain017/apply", s.handlePain017Apply)
 	mux.HandleFunc("POST /exports/pain018/apply", s.handlePain018Apply)
 	mux.HandleFunc("GET /exports/camt029", s.handleCAMT029Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)

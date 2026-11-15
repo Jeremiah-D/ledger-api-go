@@ -6845,6 +6845,20 @@ pain.011.001.03（`MndtCxlReq`），向债务人银行请求撤销授权——
   重导出除 `CreDtTm` 外字节相同。`400` 缺参数/缺 scheme；
   `404` 未知授权；无 `422`。计数器
   `ledger_pain017_exports_total`。
+- **入站方向（LG-437）**：`POST /exports/pain017/apply` 答复对方
+  债权人发来的 pain.017.001.03（`MndtCpyReq`）：按
+  `OrgnlMndt/MndtId` 找到授权后经 `GetMandate` 视图原样奉上
+  副本——出站是“我方索取副本”，入站是“答复对方的索取请求”；
+  active/suspended/cancelled/expired 四态皆可答复，无状态门，
+  已取消授权的副本正是争议举证时最需要的。`MndtSts` 若给出须
+  与有效状态一致（ACTV/SUSP/CANC/EXPI 四码映射），不一致 `422`
+  ——请求方所持状态视图已过期，带争议状态答复副本不诚实；不带
+  `MndtSts` 则直接答复。只读：不改 mandate 行、不 bump 版本、
+  不落账，仅记一条 `pain017_copy_served` 审计事件（msg_id/
+  mandate_id/creditor_scheme_id/status）。同 MsgId 同 terms 复放
+  幂等 no-op（不重复记审计事件），同 MsgId 异 terms `422`。
+  未知授权 `404`、报文缺字段 `400`。计数器
+  `ledger_pain017_applies_total`。
 
 ### pain.018 授权暂停请求导出（LG-432）
 
