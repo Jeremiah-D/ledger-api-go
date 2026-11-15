@@ -6765,6 +6765,49 @@ pain.011.001.03（`MndtCxlReq`），向债务人银行请求撤销授权——
   对本次撤销的确认仍由 pain.012 回执承载（见下节 LG-405）。计数器
   `ledger_pain011_applies_total`。
 
+### pain.017 授权副本请求导出（LG-433）
+
+`GET /exports/pain017?mandate=<id>&creditor_scheme_id=<scheme>`
+为一笔已注册 mandate 生成 ISO 20022 pain.017.001.03
+（`MndtCpyReq`），向债务人银行索取银行侧持有的授权副本——
+对账、争议举证、授权迁移时，凭标准报文拿到对方的副本，而
+不只是读己方登记。
+
+- 版本与结构核对：pain.017.001.03（2013 年 Payments Mandates
+  MDR，`MandateCopyRequestV03`；docs.rs `iso-20022-pain`
+  crate `pain_017_001_03` 模块：`Document` 根字段
+  `mndt_cpy_req`，`MandateCopyRequestV03` = GrpHdr +
+  UndrlygCpyReqDtls [1..n]；`MandateCopy3` = OrgnlMsgInf [0..1]
+  + OrgnlMndt [1..1] + MndtSts [0..1]）。报文形取简化的
+  `MndtCpyReq{GrpHdr, UndrlygCpyReqDtls{OrgnlMndt, MndtSts}}`
+  渲染（`OrgnlMndt` 载原授权号 + 债权人 scheme ID，沿 pain.011
+  前例——完整 V03 在该 choice 后是全套 Mandate17 块或裸
+  OrgnlMndtId；`OrgnlMsgInf` 省略，账本不存原发起报文可引用），
+  而非 V03 完整的全套 Cdtr/Dbtr 块——银行侧校验如需完整形，
+  留待后轮升级。
+- **状态码核对**：`MndtSts/Cd` 取
+  ExternalMandateStatus1Code，核对后钉死——该码表恰好只有四
+  码，与账本四种有效状态一一对应：active → `ACTV`、suspended
+  → `SUSP`、cancelled → `CANC`、expired → `EXPI`。未编造映射，
+  也未把账本状态串原文写进报文。
+- **“请求副本”与“持有登记”的分野**：本项只向银行索取对方
+  持有的副本，`GetMandate` 读的是己方登记；导出的是副本请求，
+  不是副本本身——银行回传的副本不在本项消费（回传解析为后轮
+  另立项）。导出本身不改授权状态。
+- **无状态门**：与 pain.009/010/011/018 有意的分野——副本请求
+  是记录索取，不是生命周期移动，active/suspended/cancelled/
+  expired 四态皆可索取；已取消授权的副本正是争议举证时最需
+  要的。唯一门是存在性：未知授权 `404`、缺 scheme `400`。
+  **IBAN 非必需**——与 pain.011 同，请求只标识授权本身，缺
+  IBAN 的授权仍可导出。
+- 只读导出：不 bump 版本、不落账、不改 mandate 行；仅记一条
+  `pain017_exported` 审计事件（msg_id/mandate_id/
+  creditor_scheme_id），索取授权副本是合规敏感动作。
+- `GrpHdr MsgId` 确定性：`pain017-<mandate>-<scheme>`，同一请求
+  重导出除 `CreDtTm` 外字节相同。`400` 缺参数/缺 scheme；
+  `404` 未知授权；无 `422`。计数器
+  `ledger_pain017_exports_total`。
+
 ### pain.018 授权暂停请求导出（LG-432）
 
 `GET /exports/pain018?mandate=<id>&creditor_scheme_id=<scheme>&reason=<必填>`

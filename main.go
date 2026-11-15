@@ -7745,6 +7745,43 @@ func (s *server) handlePain011Export(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
+// handlePain017Export implements GET /exports/pain017 (LG-433): an
+// ISO 20022 pain.017.001.03 mandate copy request for one
+// registered mandate (see ledger.ExportPain017). Query parameters:
+// mandate (required), creditor_scheme_id (required, the SEPA
+// creditor identifier). The export is read-only: it changes no
+// mandate row — exporting is a request for the copy the bank
+// holds, not a lifecycle move, so there is deliberately no state
+// gate: active, suspended, cancelled, and expired mandates are
+// all exportable, and a cancelled mandate's copy is precisely the
+// evidence a dispute needs. Error mapping: a missing mandate or
+// creditor_scheme_id is a 400; an unknown mandate is a 404.
+func (s *server) handlePain017Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain017Exports.Add(1)
+	q := r.URL.Query()
+	mandateID := q.Get("mandate")
+	schemeID := q.Get("creditor_scheme_id")
+	if mandateID == "" || schemeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mandate and creditor_scheme_id are required"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportPain017(mandateID, schemeID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrMandateNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrMissingPain017CreditorScheme):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(doc)
+}
+
 // handlePain018Export implements GET /exports/pain018 (LG-432): an
 // ISO 20022 pain.018.001.03 mandate suspension request for one
 // registered mandate (see ledger.ExportPain018). Query parameters:
@@ -14371,6 +14408,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pain002", s.handlePain002Export)
 	mux.HandleFunc("GET /exports/pain010", s.handlePain010Export)
 	mux.HandleFunc("GET /exports/pain011", s.handlePain011Export)
+	mux.HandleFunc("GET /exports/pain017", s.handlePain017Export)
 	mux.HandleFunc("GET /exports/pain018", s.handlePain018Export)
 	mux.HandleFunc("GET /exports/pain013", s.handlePain013Export)
 	mux.HandleFunc("GET /exports/pain014", s.handlePain014Export)
