@@ -229,8 +229,18 @@ type pain014Report struct {
 }
 
 type pain014GrpHdr struct {
-	MsgID   string `xml:"MsgId"`
-	CreDtTm string `xml:"CreDtTm"`
+	MsgID    string          `xml:"MsgId"`
+	CreDtTm  string          `xml:"CreDtTm"`
+	InitgPty pain014InitgPty `xml:"InitgPty"`
+}
+
+// pain014InitgPty is GrpHdr/InitgPty (PartyIdentification135): the
+// party that initiated the report. The inbound parse reads it when
+// present and ignores its absence; the outbound export (LG-429)
+// renders the ledger as initiator, the pain.013 export
+// convention.
+type pain014InitgPty struct {
+	Nm string `xml:"Nm"`
 }
 
 type pain014OrgnlGrp struct {
@@ -247,7 +257,7 @@ type pain014OrgnlPmt struct {
 
 type pain014TxSts struct {
 	OrgnlEndToEndID string             `xml:"OrgnlEndToEndId"`
-	OrgnlUETR       string             `xml:"OrgnlUETR"`
+	OrgnlUETR       string             `xml:"OrgnlUETR,omitempty"`
 	TxSts           string             `xml:"TxSts"`
 	StsRsnInf       *pain014StsRsnInf  `xml:"StsRsnInf"`
 	PmtCondSts      *pain014PmtCondSts `xml:"PmtCondSts"`
@@ -256,18 +266,18 @@ type pain014TxSts struct {
 
 type pain014StsRsnInf struct {
 	Rsn      pain014Rsn `xml:"Rsn"`
-	AddtlInf string     `xml:"AddtlInf"`
+	AddtlInf string     `xml:"AddtlInf,omitempty"`
 }
 
 type pain014Rsn struct {
-	Cd    string `xml:"Cd"`
-	Prtry string `xml:"Prtry"`
+	Cd    string `xml:"Cd,omitempty"`
+	Prtry string `xml:"Prtry,omitempty"`
 }
 
 type pain014PmtCondSts struct {
 	AccptdAmt *pain014Amount `xml:"AccptdAmt"`
-	GrntedPmt string         `xml:"GrntedPmt"`
-	EarlyPmt  string         `xml:"EarlyPmt"`
+	GrntedPmt string         `xml:"GrntedPmt,omitempty"`
+	EarlyPmt  string         `xml:"EarlyPmt,omitempty"`
 }
 
 type pain014OrgnlTxRef struct {

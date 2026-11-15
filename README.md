@@ -6817,6 +6817,25 @@ pain.013.001.07（`CdtrPmtActvtnReq`）——FedNow/RTP 的收款
   （msg_id/rfp_id/response/transfer_id），与 `rfp_accepted` /
   `rfp_paid` / `rfp_rejected` 区分。计数器
   `ledger_pain014_applies_total`。
+- 出站 `GET /exports/pain014`（LG-429）：本账本作为债务人侧
+  发出回应——上条的出站镜像。`TxSts` 取自 RfP 状态：
+  paid→`ACCP`（`PmtCondSts/AccptdAmt` 为全额，无部分接受语
+  义）、rejected→`RJCT`；issued 拒（尚无 verdict 可报）、
+  expired 拒、未知 RfP `404`。`OrgnlMsgId` 取
+  `pain013-<rfp id>`、`OrgnlMsgNmId` 取常量
+  `pain.013.001.07`、`OrgnlPmtInfId` 取同一 MsgId、
+  `OrgnlEndToEndId` 取 RfP ID；`GrpHdr MsgId` 确定性
+  `pain014-<rfp id>`；`OrgnlTxRef/Amt` 取原请求金额与币种。
+  `reason_code` 查询参数仅 RJCT 时渲染为
+  `StsRsnInf/Rsn/Cd`（原文 verbatim，不解释不翻译、不编造
+  原因码表；空则不渲染该块），ACCP 时忽略不渲染。渲染复用
+  入站 wire struct 做 Marshal，往返 `ParsePain014` 一致。
+  只读导出：不改 RfP 状态、不 bump 版本；导出 ≠ 接受/拒
+  绝，状态仍由 `AcceptRfP`/`RejectRfP` 决定——顺序是先本
+  地接受/拒绝、再导出 verdict 告诉债权人。审计事件为出站
+  op `pain014_exported`（msg_id/rfp_id/tx_sts，RJCT 有原因
+  时加 reason_code）。计数器
+  `ledger_pain014_exports_total`。
 - 入站 `POST /exports/pain013/apply`（LG-427）：对端债权人发来
   的 pain.013.001.07 是出站请求的镜像——本账本以债务人银行侧
   登记对方的请求：`EndToEndId` 为 RfP ID（自然键，无空白），
