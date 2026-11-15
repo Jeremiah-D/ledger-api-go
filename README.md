@@ -6362,6 +6362,25 @@ camt.057 400. Repeat exports are byte-identical modulo the
 `MsgId` / `XpctdValDt` move with it). `GET /metrics` counts
 exports as `ledger_camt057_exports_total`.
 
+The inbound direction is the mirror: `POST /exports/camt057/apply`
+consumes a counterparty's camt.057.001.07 `NotificationToReceive`
+(see `ledger.ApplyCAMT057`) — outbound is this ledger pre-advising
+its own bank of a receipt, inbound is a counterparty pre-advising
+this ledger of money it will send. The body is the raw XML; the
+notification's `Acct` selects the account to be credited (a
+registered IBAN, else the `Othr/Id` account ID — never a fabricated
+BIC), its `GrpHdr MsgId` is the replay key, and its `TtlAmt` /
+`XpctdValDt` / `Dbtr` are recorded with the applying operator.
+Only the forecast registers: no journal rows, no version bump, no
+money moved — the registered receipt counts as the fifth
+intraday-liquidity source (`notified_inflow_cents`) on its expected
+value date and nowhere else, so it can never double-count against
+a later pacs.008/pacs.009 receipt of the same money. A malformed
+document is 400, an unknown `Acct` 404, a `MsgId` reused for a
+different notification 422; fail-closed refusals park in the
+repair queue and the error body carries the repair record ID.
+`GET /metrics` counts applies as `ledger_camt057_applies_total`.
+
 A camt.057 notice can be withdrawn with its cancellation advice:
 `GET /exports/camt058?schedule_id=<id>&servicing_bic=<bic>&reason=<text>`
 renders the next run as a camt.058.001.08

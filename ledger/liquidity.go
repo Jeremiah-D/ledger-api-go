@@ -9,7 +9,7 @@ import (
 // Intraday liquidity positions (LG-98).
 //
 // Per (account, currency), the intraday liquidity report forecasts one UTC
-// day's net cash position from four independent sources:
+// day's net cash position from five independent sources:
 //
 //  1. Booked flows: journaled entries whose CreatedAt falls on the day.
 //     The debit leg is an inflow, the credit leg an outflow — the package
@@ -32,6 +32,16 @@ import (
 //     detail is excluded from the forecast by design.
 //  4. Term deposits: active deposits whose MaturesAt falls on the day
 //     release principal plus the interest accrued so far as inflow.
+//  5. Notified inflows: counterparty camt.057 notifications to receive
+//     registered through ApplyCAMT057 (LG-420) — money a counterparty
+//     told us is coming, not yet booked. A notification counts as
+//     inflow on its expected value date (XpctdValDt, UTC day), on the
+//     credited account, in the notified currency. Cancelled
+//     notifications (LG-421) stop counting. A notification is a
+//     forecast only: it books nothing and moves no money, so it can
+//     never double-count against a later pacs.008/pacs.009 receipt of
+//     the same money — the receipt books on arrival, the notification
+//     only ever forecasted it.
 //
 // The report is strictly read-only: it takes the read lock, writes no
 // journal rows, bumps no version, emits no audit events, and mutates no
@@ -90,6 +100,11 @@ type LiquidityPosition struct {
 	// TermDepositInflowCents is the principal plus accrued interest of
 	// active term deposits maturing that day.
 	TermDepositInflowCents int64 `json:"term_deposit_inflow_cents"`
+	// NotifiedInflowCents is the amount of registered camt.057
+	// notifications to receive whose expected value date falls on
+	// the day (LG-420): counterparty-advised inflow, forecasted
+	// only — never booked, never double-counted with a receipt.
+	NotifiedInflowCents int64 `json:"notified_inflow_cents"`
 	// NetPositionCents is the forecasted net: total inflow minus total
 	// outflow, saturated (see satAddInt64).
 	NetPositionCents int64 `json:"net_position_cents"`
@@ -126,16 +141,17 @@ var (
 
 // liquidityFlowAcc accumulates one (account, currency)'s intraday flows.
 type liquidityFlowAcc struct {
-	bookedIn  int64
-	bookedOut int64
-	held      int64
-	schedIn   int64
-	schedOut  int64
-	tdIn      int64
+	bookedIn   int64
+	bookedOut  int64
+	held       int64
+	schedIn    int64
+	schedOut   int64
+	tdIn       int64
+	notifiedIn int64
 }
 
 // IntradayLiquidity returns the read-only intraday liquidity forecast for
-// the UTC day containing date. See the package doc for the four forecast
+// the UTC day containing date. See the package doc for the five forecast
 // sources and the read-only contract.
 func (l *Ledger) IntradayLiquidity(date time.Time) IntradayLiquidityReport {
 	l.mu.RLock()
@@ -211,6 +227,20 @@ func (l *Ledger) intradayLiquidityLocked(date time.Time) IntradayLiquidityReport
 		f.tdIn = satAddInt64(f.tdIn, release)
 	}
 
+	// 5. Notified inflows: registered camt.057 notifications to
+	// receive whose expected value date falls on the day. The
+	// date is stored as YYYY-MM-DD and parsed here — ApplyCAMT057
+	// validated it, so a parse failure can only mean a hand-built
+	// record, which is skipped rather than counted.
+	for _, r := range l.expectedReceipts {
+		vd, err := time.Parse("2006-01-02", r.ExpectedValueDate)
+		if err != nil || utcDay(vd) != day {
+			continue
+		}
+		f := get(r.Account, r.Currency)
+		f.notifiedIn = satAddInt64(f.notifiedIn, r.AmountCents)
+	}
+
 	// Threshold-configured pairs always appear, even with zero flows, so
 	// a floor on a quiet account still evaluates.
 	for k := range l.liquidityThresholds {
@@ -219,7 +249,7 @@ func (l *Ledger) intradayLiquidityLocked(date time.Time) IntradayLiquidityReport
 
 	positions := make([]LiquidityPosition, 0, len(acc))
 	for k, f := range acc {
-		inflow := satAddInt64(satAddInt64(f.bookedIn, f.schedIn), f.tdIn)
+		inflow := satAddInt64(satAddInt64(satAddInt64(f.bookedIn, f.schedIn), f.tdIn), f.notifiedIn)
 		outflow := satAddInt64(satAddInt64(f.bookedOut, f.held), f.schedOut)
 		net := satAddInt64(inflow, -outflow)
 		p := LiquidityPosition{
@@ -231,6 +261,7 @@ func (l *Ledger) intradayLiquidityLocked(date time.Time) IntradayLiquidityReport
 			ScheduledInflowCents:   f.schedIn,
 			ScheduledOutflowCents:  f.schedOut,
 			TermDepositInflowCents: f.tdIn,
+			NotifiedInflowCents:    f.notifiedIn,
 			NetPositionCents:       net,
 		}
 		if th, ok := l.liquidityThresholds[k]; ok {
