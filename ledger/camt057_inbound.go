@@ -161,6 +161,17 @@ type ExpectedReceipt struct {
 	Items             []ExpectedReceiptItem `json:"items,omitempty"`
 	Actor             string                `json:"actor"`
 	ReceivedAt        time.Time             `json:"received_at"`
+	// Cancelled is set by ApplyCAMT058 (LG-421) when a
+	// counterparty's camt.058 advice withdraws this
+	// notification: the record is kept for audit, but the
+	// forecast stops — a cancelled notification no longer counts
+	// in intraday liquidity (see liquidity.go). CancelMsgID is
+	// the advice's GrpHdr MsgId and CancelReason its verbatim
+	// CxlRsn/Rsn/Prtry.
+	Cancelled    bool      `json:"cancelled,omitempty"`
+	CancelledAt  time.Time `json:"cancelled_at,omitempty"`
+	CancelMsgID  string    `json:"cancel_msg_id,omitempty"`
+	CancelReason string    `json:"cancel_reason,omitempty"`
 }
 
 // CAMT057ApplyResult is the outcome of ApplyCAMT057.

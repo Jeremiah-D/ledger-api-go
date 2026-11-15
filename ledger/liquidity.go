@@ -231,8 +231,13 @@ func (l *Ledger) intradayLiquidityLocked(date time.Time) IntradayLiquidityReport
 	// receive whose expected value date falls on the day. The
 	// date is stored as YYYY-MM-DD and parsed here — ApplyCAMT057
 	// validated it, so a parse failure can only mean a hand-built
-	// record, which is skipped rather than counted.
+	// record, which is skipped rather than counted. Cancelled
+	// notifications (LG-421) are skipped: a withdrawn pre-advice
+	// no longer counts on its day or any later day.
 	for _, r := range l.expectedReceipts {
+		if r.Cancelled {
+			continue
+		}
 		vd, err := time.Parse("2006-01-02", r.ExpectedValueDate)
 		if err != nil || utcDay(vd) != day {
 			continue

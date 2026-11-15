@@ -6414,6 +6414,29 @@ byte-identical modulo the `CreDtTm` line until a run fires (then
 `RunSeq` advances and both `MsgId`s move with it). `GET /metrics`
 counts exports as `ledger_camt058_exports_total`.
 
+Inbound, a counterparty's advice is consumed the same way:
+`POST /exports/camt058/apply` takes a raw camt.058.001.08
+`NtfctnToRcvCxlAdvc` document — `GrpHdr MsgId` is the advice's
+replay key, `OrgnlNtfctn` names the camt.057 notification it
+withdraws (`OrgnlMsgId` and `OrgnlNtfctnId`, which must agree
+with the registered receipt both ways), and `CxlRsn/Rsn/Prtry`
+carries the reason verbatim into the audit event. The two
+directions are exact mirrors: outbound is our advice to
+disregard our own notice, inbound is consuming the
+counterparty's advice to disregard theirs. Applying an advice
+marks the stored receipt cancelled and keeps the record for
+audit — it only cancels the forecast, never the books: no
+journal rows, no version bump, no money moved, and the
+cancelled notification stops counting in intraday liquidity
+(`notified_inflow_cents`) on its day and every later day. A
+replayed advice MsgId, and a second advice on an
+already-cancelled notification, are both duplicate no-ops. A
+malformed document is 400, an unknown original notification
+404, a reused MsgId or a disagreeing `OrgnlNtfctnId` 422;
+fail-closed refusals park in the repair queue and the error body
+carries the repair record ID. `GET /metrics` counts applies as
+`ledger_camt058_applies_total`.
+
 ### pain.001 付款指令状态机（LG-99）
 
 每次 `GET /exports/pain001` 导出都会在账本内注册一条付款指令

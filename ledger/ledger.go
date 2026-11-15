@@ -928,6 +928,17 @@ type Ledger struct {
 	// camt057_notification_received audit events are the durable
 	// record.
 	expectedReceipts map[string]ExpectedReceipt
+	// camt058Applied maps a camt.058 advice GrpHdr MsgId to the
+	// apply result its first application returned (see
+	// camt058_inbound.go, LG-421): the replay guard for inbound
+	// cancellation advices, so a re-sent advice returns the
+	// stored result instead of cancelling twice — and so a
+	// second advice on an already-cancelled notification
+	// converges the same way. In-memory only, like
+	// camt055Applied: the hash-chained
+	// camt057_notification_cancelled audit events are the
+	// durable record.
+	camt058Applied map[string]CAMT058ApplyResult
 	// holdKeys maps a hold's idempotency key to its hold ID, and
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the
@@ -1937,7 +1948,10 @@ func New(opts ...Option) *Ledger {
 		camt055Applied: make(map[string]PayoutCancellation),
 		// LG-420: the camt.057 expected-receipt registry starts
 		// empty; records land as notifications to receive apply.
-		expectedReceipts:   make(map[string]ExpectedReceipt),
+		expectedReceipts: make(map[string]ExpectedReceipt),
+		// LG-421: the camt.058 advice registry starts empty;
+		// records land as cancellation advices apply.
+		camt058Applied:     make(map[string]CAMT058ApplyResult),
 		captureKeys:        make(map[string]CaptureReceipt),
 		partialCaptureKeys: make(map[string]PartialCaptureReceipt),
 		termDeposits:       make(map[string]TermDeposit),
