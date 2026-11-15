@@ -9159,6 +9159,103 @@ func (s *server) handleCamt058Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handlePain009Apply implements POST /exports/pain009/apply (LG-422):
+// applies a counterparty creditor's ISO 20022 pain.009.001.02
+// mandate initiation request to the ledger — the inbound half of
+// the pain.009 lifecycle, the mirror of the outbound export (GET
+// /exports/pain009, LG-199). The body is the raw pain.009 XML; the
+// request's MndtId is the mandate's identity, its DbtrAcct and
+// CdtrAcct IBANs must each name an account the ledger already
+// registered an IBAN for, and its ToDt is the mandate's end — an
+// authorization without an end is refused at creation. The wire
+// carries no per-debit cap and no frequency, so the operator
+// supplies them as local policy in the query parameters
+// (max_amount_cents, required, > 0; frequency, required, one of
+// per-day/per-week/per-month) — they are never invented from the
+// wire, and the mandate is booked in the ledger's default
+// currency, the wire carrying no currency either. Registration
+// reuses CreateMandate, so the mandate row, the mandate_created
+// audit event, and the MandateCreated outbox envelope are exactly
+// the operator-side ones, plus a pain009_mandate_registered audit
+// event (see ledger.ApplyPain009). Only the mandate registers:
+// no collection, no pain.008, no journal rows, no version bump,
+// no money moved. A MndtId replayed with the same terms is an
+// idempotent no-op returning the stored mandate; different terms
+// under the same MndtId are a conflict. Error mapping: a malformed
+// document is a 400; missing or invalid policy parameters are a
+// 400; an unknown debtor/creditor IBAN is a 404; a MndtId reused
+// for different terms is a 422. Fail-closed refusals — parse and
+// apply alike — park in the repair queue when the document names
+// a request, and the error body carries the repair record ID. The
+// operator identity comes from the x-ledger-actor header, like the
+// other operator actions.
+func (s *server) handlePain009Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain009Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParsePain009(body)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if repairID, parkErr := l.ParkPain009Unparsed(body, actor); parkErr != nil {
+			log.Printf("ledger-api-go: POST /exports/pain009/apply: repair parking failed: %v", parkErr)
+		} else if repairID != "" {
+			errBody["repair_id"] = repairID
+		}
+		writeJSON(w, http.StatusBadRequest, errBody)
+		return
+	}
+	q := r.URL.Query()
+	maxStr, freq := q.Get("max_amount_cents"), q.Get("frequency")
+	if maxStr == "" || freq == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max_amount_cents and frequency are required"})
+		return
+	}
+	maxAmount, err := strconv.ParseInt(maxStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max_amount_cents must be an integer: " + err.Error()})
+		return
+	}
+	res, err := l.ApplyPain009(req, ledger.Pain009Policy{MaxAmountCents: maxAmount, Frequency: freq}, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrPain009UnknownAccount):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrMandateIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrMandateNonPositiveMaxAmount),
+			errors.Is(err, ledger.ErrInvalidMandateFrequency),
+			errors.Is(err, ledger.ErrMandateInvalidWindow),
+			errors.Is(err, ledger.ErrMandateSameParty),
+			errors.Is(err, ledger.ErrInvalidPain009):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain009/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.009 mandate initiation request failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleCAMT029Export implements GET /exports/camt029 (LG-174): the
 // ISO 20022 camt.029.001.03 FI-to-FI cancellation status report for
 // the resolved cancellation of one tracked payment (see
@@ -13586,6 +13683,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/camt055/apply", s.handleCamt055Apply)
 	mux.HandleFunc("POST /exports/camt057/apply", s.handleCamt057Apply)
 	mux.HandleFunc("POST /exports/camt058/apply", s.handleCamt058Apply)
+	mux.HandleFunc("POST /exports/pain009/apply", s.handlePain009Apply)
 	mux.HandleFunc("GET /exports/camt029", s.handleCAMT029Export)
 	mux.HandleFunc("GET /gpi/track/{uetr}", s.handleGPITrack)
 	mux.HandleFunc("POST /gpi/track/{uetr}/advance", s.handleGPIAdvance)

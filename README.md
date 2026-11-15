@@ -7012,6 +7012,24 @@ Go: `ledger.ExportPain009`。
 
 HTTP: `GET /exports/pain009?mandate=…&creditor_scheme_id=…`。
 
+入站方向是其镜像：`POST /exports/pain009/apply` 消费对方债权人发来的
+pain.009.001.02（`MndtInitnReq`，见 `ledger.ApplyPain009`）——出站是我方
+作为债权人发起授权，入站是本账本作为债务人银行登记对方发起的授权。
+请求体为原始 XML；`MndtId` 为授权标识，`DbtrAcct`/`CdtrAcct` 的 IBAN
+须各对应本账本内已登记 IBAN 的账户（未知账户 fail-closed 进 repair
+queue，绝不自动开户），`ToDt` 必填（无结束日的授权创建时即拒）。
+报文不带金额与频率：每笔上限与频率由债务人银行的操作员以本地政策在
+查询参数里传入（`max_amount_cents`，必填、> 0；`frequency`，必填、
+per-day/per-week/per-month），绝不从报文编造；报文也不带币种，登记
+的授权记在账本默认币种下。登记复用 `CreateMandate`（`mandate_created`
+审计与 `MandateCreated` outbox 不变），另记一条
+`pain009_mandate_registered` 审计事件。同一 `MndtId` 相同条款重放为
+幂等 no-op，条款不同则拒 `ErrMandateIDConflict`；只登记授权，不收款、
+不扣款、不发 pain.008。报文畸形为 400、缺政策参数为 400、未知账户为
+404、`MndtId` 条款冲突为 422；fail-closed 的拒绝进 repair queue，
+错误体带 repair record ID。`GET /metrics` 计入站为
+`ledger_pain009_applies_total`。
+
 ### `GET /exports/pacs002` — ISO 20022 pacs.002 银行间状态报告导出
 
 gpi 跟踪的 FI-to-FI 视角：`pacs.002.001.03`（`FIToFIPaymentStatusReport`）
