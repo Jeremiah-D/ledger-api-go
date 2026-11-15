@@ -7367,6 +7367,121 @@ func (s *server) handlePain008Initiate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"msg_id": doc.MsgID, "duplicate": res.Duplicate, "results": items})
 }
 
+// pain001ApplyItemResponse is one per-transaction outcome of POST
+// /exports/pain001/apply: the booked entry on success, or the
+// rejection reason plus the repair record holding the transaction.
+type pain001ApplyItemResponse struct {
+	EndToEndID   string `json:"end_to_end_id"`
+	FromAccount  string `json:"from_account,omitempty"`
+	ToAccount    string `json:"to_account,omitempty"`
+	AmountCents  int64  `json:"amount_cents"`
+	Currency     string `json:"currency"`
+	EntryID      string `json:"entry_id,omitempty"`
+	Duplicate    bool   `json:"duplicate"`
+	ReviewStatus string `json:"review_status,omitempty"`
+	Error        string `json:"error,omitempty"`
+	RepairID     string `json:"repair_id,omitempty"`
+}
+
+// handlePain001Apply implements POST /exports/pain001/apply (LG-430):
+// applies a customer's ISO 20022 pain.001.001.03 customer credit
+// transfer initiation to the ledger — the inbound half of the
+// pain.001 lifecycle, the mirror of the outbound export (GET
+// /exports/pain001, LG-96). The body is the raw pain.001 XML; each
+// CdtTrfTxInf's DbtrAcct/CdtrAcct IBANs must each name an account
+// the ledger already registered an IBAN for, its ReqdExctnDt must
+// be today's UTC date, and its InstdAmt is the amount and currency.
+// A covered transaction books one credit transfer through
+// PostTransfer (debit the debtor, credit the creditor, memo empty)
+// and the booked transactions register the instruction's lifecycle
+// record under the wire MsgId, so the bank's pain.002 verdict can
+// later answer this file (POST /exports/pain001/{msgid}/receipts,
+// LG-99). Processing is per-transaction, the ProcessPacs008 shape:
+// the whole document must parse before anything applies, then one
+// bad transaction is recorded in its item's error (plus a
+// repair-queue record) and never blocks the others, so the endpoint
+// always answers 200 with the item list once the document parses.
+// Re-applying a document is idempotent: the GrpHdr MsgId is the
+// replay key, so a replay returns the original receipts with
+// duplicate set. Error mapping: a malformed document is a 400; a
+// MsgId reused for different terms, or one that already names an
+// exported instruction, is a 422. This is not the pain.002 answer
+// endpoint: POST /exports/pain001/{msgid}/receipts still consumes
+// bank receipts, and this endpoint still consumes pain.001
+// initiations — the two share only the /exports/pain001 prefix.
+// The operator identity comes from the x-ledger-actor header, like
+// the other operator actions.
+func (s *server) handlePain001Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.Pain001Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	doc, err := ledger.ParsePain001(body)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if repairID, parkErr := l.ParkPain001Unparsed(body, actor); parkErr != nil {
+			log.Printf("ledger-api-go: POST /exports/pain001/apply: repair parking failed: %v", parkErr)
+		} else if repairID != "" {
+			errBody["repair_id"] = repairID
+		}
+		writeJSON(w, http.StatusBadRequest, errBody)
+		return
+	}
+	res, err := l.ApplyPain001(doc, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrPain001MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidPain001):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/pain001/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying pain.001 initiation failed"})
+		}
+		return
+	}
+	items := make([]pain001ApplyItemResponse, 0, len(res.Items))
+	for _, item := range res.Items {
+		out := pain001ApplyItemResponse{
+			EndToEndID:   item.Instruction.EndToEndID,
+			FromAccount:  string(item.From),
+			ToAccount:    string(item.To),
+			AmountCents:  item.Instruction.AmountCents,
+			Currency:     item.Instruction.Currency,
+			Duplicate:    item.Duplicate,
+			ReviewStatus: item.ReviewStatus,
+		}
+		if item.Err != nil {
+			out.Error = item.Err.Error()
+		} else {
+			out.EntryID = item.EntryID
+		}
+		if item.RepairID != "" {
+			out.RepairID = item.RepairID
+		}
+		items = append(items, out)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"msg_id": doc.MsgID, "duplicate": res.Duplicate, "results": items})
+}
+
 // handlePain008Apply implements POST /exports/pain008/apply (LG-406):
 // applies a bank's ISO 20022 pain.002.001.03 customer payment status
 // report answering a pain.008.001.02 direct debit instruction. The body
@@ -14176,6 +14291,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pain001/{msgid}/status", s.handlePain001Status)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)
+	mux.HandleFunc("POST /exports/pain001/apply", s.handlePain001Apply)
 	mux.HandleFunc("POST /exports/pain002/apply", s.handlePain002Apply)
 	mux.HandleFunc("POST /exports/pacs002/apply", s.handlePacs002Apply)
 	mux.HandleFunc("POST /exports/pacs007/apply", s.handlePacs007Apply)

@@ -980,6 +980,17 @@ type Ledger struct {
 	// are the durable record, and the per-transaction
 	// idempotency keys are the second layer.
 	pain008Applied map[string]pain008AppliedRecord
+	// pain001Applied maps a pain.001 GrpHdr MsgId to the outcome
+	// its first application made (see pain001_inbound.go,
+	// LG-430): the replay guard for inbound customer credit
+	// transfer initiations, so a re-sent file returns the stored
+	// per-transaction receipts instead of booking twice — and a
+	// MsgId reused for different terms is refused instead of
+	// silently overwritten. In-memory only, like pain008Applied:
+	// the hash-chained pain001_initiation_applied audit events
+	// are the durable record, and the per-transaction
+	// idempotency keys are the second layer.
+	pain001Applied map[string]pain001AppliedRecord
 	// holdKeys maps a hold's idempotency key to its hold ID, and
 	// captureKeys maps a capture's idempotency key to its receipt. The
 	// two namespaces are independent of each other and of the

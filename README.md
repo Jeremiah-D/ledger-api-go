@@ -6205,6 +6205,51 @@ A malformed timestamp, an inverted window, or an invalid currency is a
 `400`, fail-fast. `GET /metrics` counts exports as
 `ledger_pain001_exports_total`.
 
+### `POST /exports/pain001/apply` — ISO 20022 pain.001 inbound initiation (LG-430)
+
+The inbound mirror of the export above: a `pain.001.001.03` customer
+credit transfer initiation a customer sends to this ledger, acting as
+the customer's bank. Where the export *renders* already-booked
+transfers for the bank, this endpoint *receives* the customer's file
+and books it — each `CdtTrfTxInf` becomes one transfer through
+`PostTransfer` (Go: `ledger.ParsePain001` + `ledger.ApplyPain001`).
+
+```bash
+curl -s -X POST localhost:8080/exports/pain001/apply \
+  -H 'Content-Type: application/xml' -H 'x-ledger-actor: ops' \
+  --data-binary @payments.xml
+```
+
+Semantics:
+
+- The wire `DbtrAcct` / `CdtrAcct` IBANs must each name an account the
+  ledger already registered an IBAN for (`ledger.SetAccountIBAN`) — an
+  unregistered IBAN parks that transaction in the repair queue; the
+  ledger never opens an account from a wire identifier.
+- `ReqdExctnDt` must be today's UTC date: the ledger has no
+  future-date execution scheduling, so a dated block's transactions
+  park in the repair queue instead of inventing a holding position.
+- Each transaction books through `PostTransfer`, so every gate applies
+  (idempotency replay, frozen/overdraft, daily limit, accounting
+  period, dual-control review). `EndToEndId` is the journal entry ID
+  and the idempotency key is `pain001-<MsgId>-<EndToEndId>`; re-applying
+  the same `MsgId` with the same terms returns the stored receipts
+  with `duplicate` set, and a `MsgId` reused for different terms — or
+  one that already names an exported instruction — is a `422`.
+- One bad transaction never blocks the others: the endpoint answers
+  `200` with per-transaction results once the document parses, each
+  failure carrying its reason and `repair_id`. A malformed document is
+  a `400` (parked in the repair queue when it still names a `MsgId`).
+- Registration is not execution: booking registers the instruction's
+  lifecycle record under the wire `MsgId`, so the transfers enter the
+  same receipts / settle lifecycle as exported instructions, and one
+  `pain001_initiation_applied` audit event records the batch.
+- Single-currency instructions only: `ToCurrency` stays empty, so a
+  cross-currency payment can never be booked as one pain.001
+  instruction — it still settles through the FX clearing account as
+  two legs. `GET /metrics` counts applies as
+  `ledger_pain001_applies_total`.
+
 ### `GET /exports/pain007` — ISO 20022 pain.007 customer payment cancellation request
 
 The customer-side counterpart of the pain.001 export above
