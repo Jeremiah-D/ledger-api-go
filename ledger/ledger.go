@@ -959,6 +959,16 @@ type Ledger struct {
 	// the hash-chained pain011_cancellation_applied audit events
 	// are the durable record.
 	pain011Applied map[string]pain011AppliedRecord
+	// pain018Applied maps a pain.018 GrpHdr MsgId to the
+	// suspension its first application applied (see
+	// pain018_inbound.go, LG-436): the replay guard for inbound
+	// mandate suspensions, so a re-sent suspension returns the
+	// stored outcome instead of suspending twice — and a MsgId
+	// reused for different terms is refused instead of silently
+	// overwritten. In-memory only, like pain011Applied: the
+	// hash-chained pain018_suspension_applied audit events are
+	// the durable record.
+	pain018Applied map[string]pain018AppliedRecord
 	// pain013Applied maps a pain.013 GrpHdr MsgId to the
 	// registration its first application made (see
 	// pain013_apply.go, LG-427): the replay guard for inbound

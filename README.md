@@ -6884,6 +6884,16 @@ pain.011.001.03（`MndtCxlReq`），向债务人银行请求撤销授权——
   请求重导出除 `CreDtTm` 外字节相同。`400` 缺参数/缺 scheme/缺
   reason；`404` 未知授权；`422` 已暂停/已取消/已过期。计数器
   `ledger_pain018_exports_total`。
+- **入站方向（LG-436）**：`POST /exports/pain018/apply` 消费对方债权人发来的
+  pain.018.001.03（`MndtSspnsnReq`）：按 `OrgnlMndt/MndtId` 找到授权后经
+  `SuspendMandate` 执行暂停——出站是“我方请求暂停”，入站是“执行对方的
+  暂停请求”；仅 active 授权可暂停，已暂停授权同 MsgId 重放幂等
+  no-op（不重复记审计事件），新 MsgId 再请求则走 `SuspendMandate` 门控
+  拒绝（`ErrMandateNotActive`）。原因原文（`SspnsnRsn/Rsn/Prtry`）
+  必填、verbatim 记入 `pain018_suspension_applied` 审计事件；`CdtrSchmeId`
+  只记审计 details、不与存储值校验（账本不存 scheme ID，无值可对）。
+  银行对本次暂停的确认仍由 pain.012 回执承载（见下节 LG-405）。计数器
+  `ledger_pain018_applies_total`。
 
 ### pain.012 授权接受报告回盘解析与应用（LG-405）
 
