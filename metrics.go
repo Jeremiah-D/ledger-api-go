@@ -137,6 +137,11 @@ type Metrics struct {
 	// direct-debit initiation export requests served (see
 	// ledger.ExportPain008, LG-166).
 	Pain008Exports atomic.Uint64
+	// Pain008Initiates counts POST /exports/pain008/initiate ISO
+	// 20022 pain.008 customer direct debit initiation apply
+	// requests served, including rejected requests (see
+	// ledger.ApplyPain008, LG-428).
+	Pain008Initiates atomic.Uint64
 	// Pacs002Exports counts GET /exports/pacs002 ISO 20022 pacs.002
 	// FI-to-FI payment status report export requests served,
 	// including rejected exports (see ledger.ExportPacs002, LG-167).
@@ -1197,6 +1202,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/pain009 ISO 20022 pain.009 mandate initiation request export requests served, including rejected exports.", m.Pain009Exports.Load())
 	writeCounter(&sb, "ledger_pain008_exports_total",
 		"Total GET /exports/pain008 ISO 20022 pain.008 direct-debit initiation exports served.", m.Pain008Exports.Load())
+	writeCounter(&sb, "ledger_pain008_initiates_total",
+		"Total POST /exports/pain008/initiate ISO 20022 pain.008 customer direct debit initiation apply requests served, including rejected requests.", m.Pain008Initiates.Load())
 	writeCounter(&sb, "ledger_pacs002_exports_total",
 		"Total GET /exports/pacs002 ISO 20022 pacs.002 FI-to-FI payment status report exports served, including rejected exports.", m.Pacs002Exports.Load())
 	writeCounter(&sb, "ledger_pacs028_exports_total",

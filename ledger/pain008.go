@@ -290,7 +290,7 @@ func (l *Ledger) ExportPain008(mandateID string, opts Pain008ExportOptions) ([]b
 	// idempotent in MsgId — a duplicate export re-derives the same
 	// MsgId and returns the existing record.
 	l.mu.Lock()
-	l.registerPain008InstructionLocked(msgID, mandateID, collections, txCount, ctrlSum, m.Currency)
+	l.registerPain008InstructionLocked(msgID, mandateID, collections, txCount, ctrlSum, m.Currency, "ExportPain008")
 	l.mu.Unlock()
 	return doc, nil
 }

@@ -7043,6 +7043,22 @@ curl -s -X POST localhost:8080/exports/pain008/apply --data-binary @status-repor
 
 Go: `ledger.ApplyPain002ToPain008`、`ledger.Pain008Instruction`。
 
+#### `POST /exports/pain008/initiate` — pain.008 入站：接收客户发起的直接扣款文件并记账
+
+出站是**我方渲染已记账扣款**（`GET /exports/pain008`），入站是**债权人银行侧接收客户发起文件并记账**（LG-428）：客户发来的 pain.008.001.02（`CstmrDrctDbtInitn`）经 `ParsePain008` 解析、`ApplyPain008` 逐笔应用，每笔经 `DebitWithMandate` 记账。只接**单 mandate 文件**（多 mandate 文件整批进 repair queue，不静默拆批）。
+
+- `CdtrSchmeId` 必填非空（SEPA 强制，账本不存 scheme 注册表故只验非空、原文记审计）；`ReqdColltnDt` 须为当日 UTC 日（账本无未来日代扣排期口，未来日进 repair queue）；wire `SeqTp` 须在 `FRST`/`RCUR`/`FNAL`/`OOFF` 词表内，记账用 SeqTp 由 `pain008SeqTp` 按 mandate 扣款历史导出（账本是 system of record），wire 值与导出值不符者该笔进 repair（不静默改写）；wire `DbtrAcct`/`CdtrAcct` IBAN 须等于 mandate payer/payee 的已注册 IBAN，不符者该笔进 repair。
+- 逐笔应用经 `DebitWithMandate`（`IdempotencyKey` 为 `pain008-<MsgId>-<EndToEndId>`，`CreatedAt` 为 `ReqdColltnDt` 当日 UTC，`Memo` 取 `RmtInf/Ustrd`），其全部 mandate 门适用（未知/非 active/过期/超额/币种不符/频率窗口），失败进 repair queue，不阻塞其余笔；成功登记 `Pain008Instruction`（以 wire `MsgId` 为键），使 LG-406 的 pain.002 回盘可回答本次入站文件（`OrgnlMsgId` 即 wire `MsgId`；回盘解析仍要求 `pain008-` 前缀，见 LG-406 家族分隔）。
+- 同一 `MsgId` 重放幂等回原收据（不重复记账）；`MsgId` 复用于不同条款、或已命名一条导出指令时为冲突（422）。审计 `pain008_initiation_applied`（details 含 `msg_id`/`mandate_id`/`tx_count`/`ctrl_sum_cents`/`creditor_scheme_id`），失败笔另记 repair 项。
+- 错误映射：报文不可解析 400（命名空间错、CtrlSum 不符等，具名文件进 repair queue）、多 mandate 文件或 `MsgId` 冲突 422、逐笔失败为 200 体内的逐笔错误 + `repair_id`。计数器 `ledger_pain008_initiates_total`。
+
+```bash
+curl -s -X POST localhost:8080/exports/pain008/initiate --data-binary @initiation.xml
+# 200 {"msg_id":"pain008-…","duplicate":false,"results":[{"end_to_end_id":"e-1","mandate_id":"m-sub","amount_cents":1000,"currency":"USD","entry_id":"e-1"},…]}
+```
+
+Go: `ledger.ParsePain008`、`ledger.ApplyPain008`。`POST /exports/pain008/apply` 仍为 pain.002 回盘口，不受影响。
+
 ### `pain.009` — ISO 20022 pain.009 直接扣款授权发起导出
 
 已登记的 mandate 可以用 ISO 20022 `pain.009.001.02`
@@ -11207,6 +11223,9 @@ curl -s localhost:8080/metrics
   replays of a debit key are not counted.
 - `ledger_pain008_exports_total` — `GET /exports/pain008` ISO 20022
   pain.008 direct-debit initiation exports served.
+- `ledger_pain008_initiates_total` — `POST /exports/pain008/initiate`
+  ISO 20022 pain.008 customer direct debit initiation apply requests
+  served, including rejected requests.
 - `ledger_camt052_exports_total` — `GET /exports/camt052` ISO 20022
   camt.052 intraday account report exports served, including rejected
   exports.

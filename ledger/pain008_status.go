@@ -251,13 +251,16 @@ func (l *Ledger) pain008InstructionsLocked() []Pain008Instruction {
 }
 
 // registerPain008InstructionLocked creates the lifecycle record for a
-// freshly rendered export and moves it registered -> exported. It is
-// idempotent in MsgId: a re-export of the same parameters and content
-// re-derives the same MsgId and returns the existing record with no
-// new audit event — the instruction was already registered, and
-// registering it again would invent a second birth the bank never saw.
-// Callers must hold the write lock.
-func (l *Ledger) registerPain008InstructionLocked(msgID, mandateID string, collections []pain008Collection, txCount int, ctrlSum int64, currency string) *Pain008Instruction {
+// freshly rendered export (or a freshly booked inbound initiation)
+// and moves it registered -> exported. It is idempotent in MsgId: a
+// re-export of the same parameters and content re-derives the same
+// MsgId and returns the existing record with no new audit event — the
+// instruction was already registered, and registering it again would
+// invent a second birth the bank never saw. The actor names the
+// registration's origin ("ExportPain008" for the export,
+// ApplyPain008's actor for an inbound file) and rides the
+// pain008_status audit event. Callers must hold the write lock.
+func (l *Ledger) registerPain008InstructionLocked(msgID, mandateID string, collections []pain008Collection, txCount int, ctrlSum int64, currency, actor string) *Pain008Instruction {
 	if rec, ok := l.pain008Instructions[msgID]; ok {
 		return rec
 	}
@@ -284,7 +287,7 @@ func (l *Ledger) registerPain008InstructionLocked(msgID, mandateID string, colle
 	// EntryID, so identical exports always serialize identically.
 	sort.Slice(rec.Txs, func(i, j int) bool { return rec.Txs[i].EntryID < rec.Txs[j].EntryID })
 	l.pain008Instructions[msgID] = rec
-	l.transitionPain008InstructionLocked(rec, Pain008StateExported, "ExportPain008")
+	l.transitionPain008InstructionLocked(rec, Pain008StateExported, actor)
 	return rec
 }
 
