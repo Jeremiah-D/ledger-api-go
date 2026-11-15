@@ -6406,6 +6406,44 @@ byte-identical until a run fires (then `RunSeq` advances and
 `:21:` / `:30:` move with it). `GET /metrics` counts exports as
 `ledger_mt210_exports_total`.
 
+A sent MT210 can be withdrawn with a SWIFT FIN MT292
+cancellation of notification to receive: `GET
+/exports/mt292?schedule_id=<id>&servicing_bic=<bic>&original_date=<YYYY-MM-DD>&reason=<text>`
+renders the next run's cancellation request (see
+`ledger.ExportMT292`). MT292 is MT210's twin — that one notifies,
+this one cancels the same notification — and the FIN twin of the
+camt.058 cancellation advice below: same source (the same
+schedule, the same next run), same direction (account owner to
+account bank), same state gate. The message carries `:20:` = a
+deterministic reference (`MT292-` plus the first 10 lowercase hex
+characters of the SHA-256 of the run transfer ID
+`<ID>/run/<seq>`, exactly 16 characters), `:21:` = the schedule
+ID (the original MT210's `:20:`), `:11S:` = `210` plus the
+original MT210's issue date (`YYMMDD`), and `:79:` only when a
+reason is given (verbatim free text). `original_date` is required
+and is never defaulted: the ledger records neither whether an
+MT210 was sent nor when, so the caller supplies the issue date
+from its own records — `NextRunAt` is the next run's date, not
+the notice's issue date, and is never substituted. An FX schedule
+can be cancelled — the MT292 carries no amount. Only a schedule
+whose notification premise is dead exports: paused, cancelled,
+completed, or an active schedule whose next run has passed its
+`EndsAt` is 200; a still-active schedule with a live next run is
+422; an unknown ID is 404; and a missing `schedule_id` /
+`servicing_bic` / `original_date`, an unparseable `original_date`,
+an invalid servicing BIC, or a schedule that cannot be rendered
+as a valid MT292 is 400. Operator flow for correcting a notice:
+pause the plan, export the MT292 to withdraw the old notice,
+resume the plan, and issue a new MT210. The export is the
+cancellation request, not the cancellation itself — the schedule
+keeps its status, and whether the bank honours the request is
+confirmed by its own reply, which this ledger does not parse.
+One MT292 cancels one run: the next run only. Like MT210, the
+export is read-only and repeat exports are byte-identical (`:20:`
+pinned to schedule plus `RunSeq`, `:11S:` pinned to the
+caller-supplied `original_date`). `GET /metrics` counts exports
+as `ledger_mt292_exports_total`.
+
 The same notice exists in ISO 20022 syntax: `GET
 /exports/camt057?schedule_id=<id>&servicing_bic=<bic>` renders
 the next run as a camt.057.001.07 `NotificationToReceive` (see

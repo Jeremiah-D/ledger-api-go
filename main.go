@@ -6413,6 +6413,73 @@ func (s *server) handleMT210Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT292Export implements GET /exports/mt292 (LG-435): a SWIFT
+// FIN MT292 cancellation of notification to receive for the next run
+// of one transfer schedule whose notification premise is dead (see
+// ledger.ExportMT292) — the FIN twin of the camt.058 cancellation
+// advice, and the withdrawal of the MT210 notice above. Query
+// parameters: schedule_id (required), servicing_bic (required, the
+// BIC of the bank holding the account to be credited — the receiving
+// line of the original MT210), original_date (required, YYYY-MM-DD:
+// the original MT210's issue date — the ledger records no MT210
+// issue date, so the caller supplies it; it is never defaulted from
+// NextRunAt), reason (optional, the :79: narrative, verbatim). The
+// export is read-only: no version bump, nothing booked, no audit
+// event, and the schedule keeps its status — the export is the
+// cancellation request, not the cancellation itself. Error mapping:
+// a missing schedule_id, servicing_bic, or original_date, or an
+// unparseable original_date, is a 400; an unknown schedule is a 404;
+// a still-active schedule with a live next run is a 422; an invalid
+// servicing BIC, a missing original date, or a schedule that cannot
+// be rendered as a valid MT292 (:21: format, LT form, :79: shape)
+// is a 400.
+func (s *server) handleMT292Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT292Exports.Add(1)
+	q := r.URL.Query()
+	scheduleID := q.Get("schedule_id")
+	if scheduleID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "schedule_id is required"})
+		return
+	}
+	servicingBIC := q.Get("servicing_bic")
+	if servicingBIC == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "servicing_bic is required"})
+		return
+	}
+	originalDateRaw := q.Get("original_date")
+	if originalDateRaw == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "original_date is required"})
+		return
+	}
+	originalDate, err := time.Parse("2006-01-02", originalDateRaw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid original_date: want YYYY-MM-DD"})
+		return
+	}
+	doc, err := s.ledgerFor(r).ExportMT292(ledger.MT292ExportOptions{
+		ScheduleID:   scheduleID,
+		ServicingBIC: servicingBIC,
+		OriginalDate: originalDate,
+		Reason:       q.Get("reason"),
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ledger.ErrScheduleNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, ledger.ErrMT292ScheduleStillActive):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, ledger.ErrInvalidMT292Export):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(doc))
+}
+
 // handleCAMT057Export implements GET /exports/camt057 (LG-403): an
 // ISO 20022 camt.057.001.07 notification to receive for the next run
 // of one active transfer schedule (see ledger.ExportCAMT057) — the
@@ -14514,6 +14581,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt320", s.handleMT320Export)
 	mux.HandleFunc("GET /exports/mt321", s.handleMT321Export)
 	mux.HandleFunc("GET /exports/mt210", s.handleMT210Export)
+	mux.HandleFunc("GET /exports/mt292", s.handleMT292Export)
 	mux.HandleFunc("GET /exports/camt057", s.handleCAMT057Export)
 	mux.HandleFunc("GET /exports/camt058", s.handleCAMT058Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)
