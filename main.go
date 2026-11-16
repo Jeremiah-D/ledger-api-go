@@ -8651,6 +8651,60 @@ func (s *server) handleMT103Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msg))
 }
 
+// handleMT103Apply implements POST /exports/mt103/apply (LG-441):
+// applies a correspondent's SWIFT FIN MT103 single customer credit
+// transfer to the ledger — the inbound half of the MT103 lifecycle,
+// the mirror of the outbound export (POST /exports/mt103, LG-183).
+// The body is the raw MT103 FIN text; its :50K: and :59: IBANs must
+// each name a registered account, its :32A: value date must be
+// today's UTC date, and the instruction books through PostTransfer.
+// A refused instruction parks in the repair queue and the response
+// carries its repair_id; a :52A:/:57A: BIC is recorded in the audit
+// details only, never routed. A re-sent :20: with the same terms is
+// an idempotent no-op returning the original receipt; a :20: reused
+// for different terms is a conflict. Error mapping: a malformed FIN
+// document is a 400; a :20: reused for different terms is a 422. The
+// operator identity comes from the x-ledger-actor header, like the
+// other operator actions.
+func (s *server) handleMT103Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT103Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParseMT103(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT103(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT103MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt103/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT103 instruction failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // mt192ExportRequest is the JSON body of POST /exports/mt192: the
 // per-export options of ledger.MT192ExportOptions, with the original
 // value date as an ISO date string.
@@ -14866,6 +14920,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pacs028", s.handlePacs028Export)
 	mux.HandleFunc("GET /exports/pacs004", s.handlePacs004Export)
 	mux.HandleFunc("POST /exports/mt103", s.handleMT103Export)
+	mux.HandleFunc("POST /exports/mt103/apply", s.handleMT103Apply)
 	mux.HandleFunc("POST /exports/mt192", s.handleMT192Export)
 	mux.HandleFunc("POST /exports/mt192/apply", s.handleMT192Apply)
 	mux.HandleFunc("POST /exports/mt900910", s.handleMT900910Export)

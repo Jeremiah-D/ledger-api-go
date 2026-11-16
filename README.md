@@ -7771,6 +7771,43 @@ curl -s -X POST localhost:8080/exports/mt103 \
 
 Go: `ledger.ExportMT103` / `ledger.MT103ExportOptions`。
 
+### `POST /exports/mt103/apply` — SWIFT FIN MT103 跨境汇款入站
+
+代理行发来的 SWIFT FIN `MT103`（single customer credit
+transfer）可以直接入账：报文含 block 1（基本头）、block 2（应用头
+`I103`）、block 3（`{108:MUR}`）与 block 4 字段集 `:20:` / `:23B:` /
+`:32A:` / `:50K:` / `:52A:` / `:57A:` / `:59:` / `:70:` / `:71A:`。
+这是出站导出的入站镜像（LG-183 导出、LG-441 入站），与 MX
+pain.001 入站（LG-430）同一形态：FIN 入站与 MX 入站共享同一 IBAN
+反查 + repair 形态。
+
+语义：
+- `:50K:`（付款方）与 `:59:`（受益方）账户行必须是已注册 IBAN：
+  按注册表反查到账本账户，未注册者整笔进 repair queue，绝不自动
+  开户；`:52A:`/`:57A:` BIC 只记进 `mt103_inbound_applied` 审计
+  details，不参与路由（账本无路由表）。
+- `:32A:` 值日必须是当日 UTC 日（pain.001 的 LG-430 规则）：未来日
+  （与过去日同理）进 repair queue，不做未来日执行排期。
+- 通过者调 `PostTransfer`（`Transfer{ID: :20:、IdempotencyKey:
+  "mt103-"+:20:}`），全部风控门适用——冻结/透支/每日限额/会计期间/
+  双人复核；拒者该笔进 repair queue。同一 `:20:` 重放幂等回原收据，
+  不同条款重用 `:20:` 拒绝（422）。
+- 解析严格（沿 ParseMT202，LG-204）：块结构/字段序/全字段校验、
+  CRLF 容忍、块外字段拒、尾换行容忍；`:23B:` 取 CRED/SPAY/SSTD/
+  SPRI、`:71A:` 取 OUR/BEN/SHA；`:50K:`/`:59:` 非 IBAN 账户行是报文
+  格式错误（400），不是未注册。
+- `400` 报文格式非法；`422` 同一 `:20:` 不同条款重用。计数器
+  `ledger_mt103_applies_total`。
+
+```bash
+curl -s -X POST localhost:8080/exports/mt103/apply \
+  -H 'Content-Type: text/plain' -H 'x-ledger-actor: ops' \
+  --data-binary @mt103-inbound.fin
+# 200 {"msg_id":"MT103-REF-01","from_account":"cust","to_account":"merchant","receipt":{...},"entry_id":"MT103-REF-01"}
+```
+
+Go: `ledger.ParseMT103` / `ledger.ApplyMT103`。
+
 ### `POST /exports/mt192` — SWIFT FIN MT192 付款取消请求导出
 
 已审批（approved）或已提交（submitted）的 payout 可以用 SWIFT FIN
