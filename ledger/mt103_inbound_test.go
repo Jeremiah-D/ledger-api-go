@@ -11,17 +11,17 @@ import (
 // the nine-field core set, so parse refusals can be driven per
 // field.
 type mt103Fields struct {
-	senderLT   string
-	receiverLT string
-	ref        string
-	bankOp     string
-	valueDate  string // YYMMDD
-	currency   string
-	amount     string // "<integer>,<2 fraction digits>"
-	orderingIBAN string
-	orderingName []string
-	orderingBIC  string
-	beneficiaryBIC string
+	senderLT        string
+	receiverLT      string
+	ref             string
+	bankOp          string
+	valueDate       string // YYMMDD
+	currency        string
+	amount          string // "<integer>,<2 fraction digits>"
+	orderingIBAN    string
+	orderingName    []string
+	orderingBIC     string
+	beneficiaryBIC  string
 	beneficiaryIBAN string
 	beneficiaryName []string
 	remit           []string

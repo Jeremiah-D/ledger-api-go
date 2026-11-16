@@ -400,7 +400,7 @@ func ParseMT103(text string) (MT103Inbound, error) {
 	if !strings.HasPrefix(mur, "{3:{108:") || !strings.HasSuffix(mur, "}}") {
 		return zero, fmt.Errorf("%w: malformed block 3: %q", ErrMT103Framing, mur)
 	}
-	if err := mt103SenderReference(mur[len("{3:{108:"):len(mur)-2]); err != nil {
+	if err := mt103SenderReference(mur[len("{3:{108:") : len(mur)-2]); err != nil {
 		return zero, err
 	}
 	if lines[3] != "{4:" {
