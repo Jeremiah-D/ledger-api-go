@@ -197,9 +197,14 @@ func TestSetSinkURLInFlightKeepsOldURL(t *testing.T) {
 	// The next delivery reads the new URL.
 	mustPostSink(t, l, "amend-sink-url-inflight-2")
 	waitForSink(t, 10*time.Second, "next delivery at the new URL", func() bool { return cap2.count() == 1 })
-	if sent, failed, dead := sink.Stats(); sent != 2 || failed != 5 || dead != 0 {
-		t.Fatalf("Stats = (%d, %d, %d), want (2, 5, 0)", sent, failed, dead)
-	}
+	// Stats() is the sink's own bookkeeping, incremented after the
+	// POST returns — the capture count above only proves the request
+	// arrived, so wait for the counter to land instead of reading
+	// it in the gap between arrival and bookkeeping.
+	waitForSink(t, 10*time.Second, "sink stats to record both deliveries", func() bool {
+		sent, failed, dead := sink.Stats()
+		return sent == 2 && failed == 5 && dead == 0
+	})
 }
 
 func TestSetSinkURLAuditEventFields(t *testing.T) {
