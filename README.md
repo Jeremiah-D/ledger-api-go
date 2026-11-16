@@ -5593,6 +5593,23 @@ account without a registered BIC needs an LT-form account ID)
 400. Only `NEWT` confirmations are issued: revisions and
 cancellations of a confirmation are a later round.
 
+The reverse direction — a counterparty's MT300 confirming the
+same trade back — is `POST /exports/mt300/apply` with the raw FIN
+text as the body (see `ledger.ParseMT300` / `ledger.ApplyMT300`).
+The `:22C:` common reference resolves the booked forward, and
+every economic term is checked exactly against it: the `:36:`
+rate against the locked rate (half-up rounded to 12 decimals),
+`:32B:` against `floor(NotionalCents*RateNum/RateDen)`, `:33B:`
+against the notional, and `:30V:` against the forward's value
+date. A match records the confirmation (`mt300_confirmation_matched`,
+details `msg_id` / `common_ref` / `forward_id`) and nothing else:
+it settles nothing, books no forward, and moves no lifecycle
+state. An unknown forward is a 422 — a confirmation never books
+a forward — and any terms mismatch refuses the whole confirmation
+(422, no partial confirmation). Only `NEWT` is accepted. A re-sent
+`:20:` with the same terms is an idempotent no-op; a `:20:` reused
+for different terms is a 422 conflict.
+
 The same contract can be instructed to a custodian as a SWIFT FIN
 MT304 third-party FX deal instruction: `GET
 /exports/mt304?forward_id=<id>&custodian_bic=<bic>&scope=ADVI|INST`

@@ -999,6 +999,26 @@ type Ledger struct {
 	// pain011Applied: the hash-chained mt101_transfer_booked
 	// audit events are the durable record.
 	mt101Applied map[string]mt101AppliedRecord
+	// mt300Applied maps a MT300 :20: reference to the
+	// confirmation its first application matched (see
+	// mt300_inbound.go, LG-440): the replay guard for inbound
+	// MT300 FX confirmations, so a re-sent confirmation returns
+	// the stored outcome instead of matching twice — and a :20:
+	// reused for different terms is refused instead of silently
+	// overwritten. In-memory only, like pain011Applied: the
+	// hash-chained mt300_confirmation_matched audit events are
+	// the durable record.
+	mt300Applied map[string]mt300AppliedRecord
+	// mt300Confirmed maps a forward ID to the counterparty
+	// confirmation that matched it (see mt300_inbound.go,
+	// LG-440): the read-only confirmation marker — a forward
+	// appears here once its booked terms have been matched by an
+	// inbound MT300, with no lifecycle effect: the contract
+	// stays booked (or settled) and SettleForward remains the
+	// only settlement entry. In-memory only, like mt300Applied:
+	// the hash-chained mt300_confirmation_matched audit events
+	// are the durable record.
+	mt300Confirmed map[string]mt300ConfirmationRecord
 	// pain013Applied maps a pain.013 GrpHdr MsgId to the
 	// registration its first application made (see
 	// pain013_apply.go, LG-427): the replay guard for inbound
