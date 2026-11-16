@@ -7914,6 +7914,10 @@ Go: `ledger.MT202` / `ledger.ParseMT202` / `ledger.ExportMT202`。
 
 HTTP: `POST /exports/mt202` + `{"sender_lt":"BANKUS33","receiver_lt":"BANKDEFF","transaction_reference":"MT202REF1","related_reference":"RELREF202","value_date":"2026-10-22","currency":"USD","amount_cents":250000,"ordering_institution_bic":"DEUTDEFF","beneficiary_institution_bic":"BNPAFRPP"}` → 200 text/plain FIN 文本。
 
+- 入站执行（LG-442）：`POST /exports/mt202/apply` + 原始 FIN 文本，把对方行发来的 MT202 记进账本——`:52A:` / `:58A:` 的 BIC 在 nostro 登记表里按 Correspondent 字符串精确反查（运营方须把 Correspondent 登记为该 BIC 字符串），`:52A:` 侧只借记 kind 为 nostro 的账户、`:58A:` 侧只贷记 kind 为 vostro 的账户，任一 BIC 未登记或 kind 不符整笔进 repair 队列（不自动开户、不猜账户）；`:32A:` 值日须为当日 UTC（LG-430 规则，未来/过去日期进 repair）；同 `:20:` 同 terms 复放幂等 no-op（返回原 receipt、`duplicate` 置位）、异 terms `422`；`:21:` 只记审计 details、不参与路由；成功记一条 `mt202_inbound_applied` 审计事件（msg_id / ordering_bic / beneficiary_bic / amount_cents / currency / related_reference），记账走 `PostTransfer`（ID 与幂等键均为 `mt202-`+`:20:`，全部风控门适用，拒付进 repair）。报文非法 `400`、`:20:` 冲突 `422`。计数器 `ledger_mt202_applies_total`。
+
+Go: `ledger.ApplyMT202` / `ledger.MT202ApplyResult`。
+
 ### SWIFT FIN MT900/MT910 借记/贷记确认（库级解析 + 已结算导出）
 
 已结算付款的事后确认用 SWIFT FIN `MT900`（confirmation of debit，借记确认）/

@@ -9055,6 +9055,63 @@ func (s *server) handleMT202Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msg))
 }
 
+// handleMT202Apply implements POST /exports/mt202/apply (LG-442):
+// applies a correspondent's SWIFT FIN MT202 general financial
+// institution transfer to the ledger — the inbound half of the
+// MT202 lifecycle, the mirror of the outbound export (POST
+// /exports/mt202, LG-378). The body is the raw MT202 FIN text;
+// its :52A: and :58A: BICs must each reverse-resolve to a
+// registered nostro account of the right kind for its leg
+// (nostro for :52A:, vostro for :58A:), its :32A: value date
+// must be today's UTC date, and the instruction books through
+// PostTransfer. A refused instruction parks in the repair queue
+// and the response carries its repair_id; the :21: related
+// reference is recorded in the audit details only, never
+// routed. A re-sent :20: with the same terms is an idempotent
+// no-op returning the original receipt; a :20: reused for
+// different terms is a conflict. Error mapping: a malformed FIN
+// document is a 400; a :20: reused for different terms is a
+// 422. The operator identity comes from the x-ledger-actor
+// header, like the other operator actions.
+func (s *server) handleMT202Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT202Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParseMT202(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT202(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT202MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt202/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT202 instruction failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // accountingExportQuery parses the shared query parameters of the
 // accounting export endpoints: account, since/until (RFC 3339,
 // optional), currency (optional ISO 4217 filter), and repeated
@@ -14925,6 +14982,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt192/apply", s.handleMT192Apply)
 	mux.HandleFunc("POST /exports/mt900910", s.handleMT900910Export)
 	mux.HandleFunc("POST /exports/mt202", s.handleMT202Export)
+	mux.HandleFunc("POST /exports/mt202/apply", s.handleMT202Apply)
 	mux.HandleFunc("POST /exports/mt199", s.handleMT199Export)
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
