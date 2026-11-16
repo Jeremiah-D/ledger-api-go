@@ -5682,6 +5682,64 @@ func (s *server) handleMT101Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT101Apply implements POST /exports/mt101/apply (LG-439):
+// applies a customer's SWIFT FIN MT101 request for transfer to the
+// ledger — the inbound half of the MT101 lifecycle, the mirror of
+// the outbound export (GET /exports/mt101, LG-391). The body is the
+// raw MT101 FIN text; its :50H: names the debtor account, each
+// :21: names one transfer to book through PostTransfer, and its
+// :30: carries the execution date. Each booked transfer emits one
+// mt101_transfer_booked event; a transfer refused by any
+// PostTransfer gate parks in the repair queue instead of blocking
+// the other payments. A re-sent :20:+:21: with the same terms is
+// an idempotent no-op; a :20:+:21: reused for different terms is
+// a conflict. Error mapping: a malformed FIN document is a 400;
+// an unknown debtor or creditor IBAN, a :52A:/:57a: mismatch, or
+// a :20:+:21: reused for different terms is a 422. The operator
+// identity comes from the x-ledger-actor header, like the other
+// operator actions.
+func (s *server) handleMT101Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT101Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParseMT101(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT101(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT101UnknownAccount),
+			errors.Is(err, ledger.ErrMT101MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidMT101):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt101/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT101 request for transfer failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handlePain001Export implements GET /exports/pain001: an ISO 20022
 // pain.001.001.03 customer credit transfer initiation generated from the
 // journaled transfer principals (see ledger.ExportPain001). Query
@@ -14716,6 +14774,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/pain001", s.handlePain001Export)
 	mux.HandleFunc("GET /exports/pain007", s.handlePain007Export)
 	mux.HandleFunc("GET /exports/mt101", s.handleMT101Export)
+	mux.HandleFunc("POST /exports/mt101/apply", s.handleMT101Apply)
 	mux.HandleFunc("GET /exports/pain001/{msgid}/status", s.handlePain001Status)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/receipts", s.handlePain001Receipts)
 	mux.HandleFunc("POST /exports/pain001/{msgid}/settle", s.handlePain001Settle)

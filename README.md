@@ -6366,6 +6366,33 @@ whose debtor or creditor has no registered IBAN is a `400` as
 well, fail-closed. `GET /metrics` counts exports as
 `ledger_mt101_exports_total`.
 
+Inbound: `POST /exports/mt101/apply` consumes a customer's SWIFT FIN MT101
+(see `ledger.ParseMT101` / `ledger.ApplyMT101`) — the FIN twin of the
+pain.001 inbound intake, sharing the same booked/parked apply entry:
+each `:21:` books one transfer through `PostTransfer` (frozen/overdraft,
+daily limit, accounting period, denylist, and dual-control gates all
+apply), and a transfer refused by any gate parks in the repair queue
+instead of blocking the other payments. `:20:` is the message reference
+and, together with `:21:`, the idempotency key: re-applying the same
+`:20:`+`:21:` with the same terms is a no-op returning the stored
+outcome, and reusing it for different terms is a `422`. The `:50H:`
+debtor IBAN and every `:59:` creditor IBAN must name a registered
+account (unknown is a fail-closed `422` — the ledger never debits or
+credits an unknown account); a `:52A:` must match the debtor's
+registered BIC and a `:57A:`/`:57D:` must name the creditor's registered
+BIC / account ID. `:28D:` must be `1/1`, `:32B:` carries an ISO 4217
+currency and a positive amount, `:71A:` is `OUR`/`BEN`/`SHA` (default
+`SHA`, the FIN code for the pain.001 `SHAR` default). Each booked
+transfer emits one `mt101_transfer_booked` audit event (details
+`msg_id` / `transfer_id` / `amount` / `currency`). Parsing is strict
+along the MT202 precedent (block structure, field order, full field
+validation, CRLF tolerance, out-of-set fields refused, trailing
+newline tolerated). There is no pain.001 instruction lifecycle
+registration — no pain.002 can answer an MT101 — and no `:70:`,
+`:23E:`/`:77B:`, or FX leg. A malformed FIN document is a `400`; an
+unknown account or a `:20:`+`:21:` reused for different terms is a
+`422`. `GET /metrics` counts applies as `ledger_mt101_applies_total`.
+
 Scope note, stated plainly: cross-border payment instructions
 completed the MT→MX migration on 2025-11-22, so the MT101 serves
 counterparties and scenarios that still accept the FIN form; it is

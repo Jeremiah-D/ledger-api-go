@@ -989,6 +989,16 @@ type Ledger struct {
 	// the hash-chained cancellation_requested and
 	// mt192_request_applied audit events are the durable record.
 	mt192Applied map[string]mt192AppliedRecord
+	// mt101Applied maps a MT101 :20: reference plus :21:
+	// transfer ID to the outcome its first application booked
+	// or parked (see mt101_inbound.go, LG-439): the replay guard
+	// for inbound MT101 transfer requests, so a re-sent request
+	// returns the stored outcome instead of booking twice — and
+	// a :20:+:21: reused for different terms is refused instead
+	// of silently overwritten. In-memory only, like
+	// pain011Applied: the hash-chained mt101_transfer_booked
+	// audit events are the durable record.
+	mt101Applied map[string]mt101AppliedRecord
 	// pain013Applied maps a pain.013 GrpHdr MsgId to the
 	// registration its first application made (see
 	// pain013_apply.go, LG-427): the replay guard for inbound
