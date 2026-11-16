@@ -15,8 +15,12 @@ func TestHTTPFXTransferExpiredRate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A rate that lives for 60ms: the transfer below lands while live.
-	if err := l.SetFXRateRat("USD", "EUR", rate, 60*time.Millisecond); err != nil {
+	// A rate that lives for 1s: the transfer below lands while live.
+	// (60ms was too tight: under a loaded -race run the funding
+	// POST plus the transfer POST can take over 60ms, and the
+	// transfer then correctly gets 422 for an expired rate — the
+	// production check was right, the test's own margin was not.)
+	if err := l.SetFXRateRat("USD", "EUR", rate, 1*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(newRouter(l))
@@ -35,7 +39,7 @@ func TestHTTPFXTransferExpiredRate(t *testing.T) {
 		t.Errorf("fx.source_cents = %v, want 1000", fx["source_cents"])
 	}
 
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(1500 * time.Millisecond)
 	code, body = postJSON(t, srv.URL+"/transfers",
 		`{"transfer_id":"fx-stale","from_account":"payer","to_account":"payee","amount_cents":1000,"currency":"USD","to_currency":"EUR"}`)
 	if code != http.StatusUnprocessableEntity {

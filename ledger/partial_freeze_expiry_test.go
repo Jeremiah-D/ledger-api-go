@@ -149,6 +149,14 @@ func TestPartialFreezeExpirySweepReleasesOnlyDue(t *testing.T) {
 		t.Errorf("second sweep released = %d, want 1 (bob only)", got)
 	}
 
+	// Close the audit log before reading its files: the writer is
+	// asynchronous, and the events above may still be queued when
+	// this read runs (Close drains the queue and syncs, so the
+	// on-disk read after it is exact). The deferred Close is
+	// idempotent, so this early close is safe.
+	if err := al.Close(); err != nil {
+		t.Fatalf("Close audit log: %v", err)
+	}
 	byOp := auditEventsByOp(t, dir)
 	if got := byOp["partial_freeze_expired"]; len(got) != 2 {
 		t.Fatalf("partial_freeze_expired events = %d, want 2", len(got))

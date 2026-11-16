@@ -436,6 +436,16 @@ type BalanceHistoryRecorder struct {
 
 	ticks       atomic.Uint64
 	pointsTotal atomic.Uint64
+
+	// lastTickAt is the wall-clock time run() last consumed a tick
+	// (or built the ticker, before any tick has been consumed
+	// yet). tickInterval is the period of the ticker that produced
+	// it. Both are run()-goroutine-local: only run() reads or
+	// writes them, so no lock is needed — and tick() itself
+	// does not stamp lastTickAt, because tests call tick()
+	// directly and those calls consume no ticker firing.
+	lastTickAt   time.Time
+	tickInterval time.Duration
 }
 
 // StartBalanceHistoryRecorder launches the background recorder. After
@@ -469,6 +479,8 @@ func StartBalanceHistoryRecorder(ctx context.Context, l *Ledger, cfg BalanceHist
 func (r *BalanceHistoryRecorder) run(ctx context.Context) {
 	defer r.wg.Done()
 	ticker := time.NewTicker(r.Interval())
+	r.lastTickAt = time.Now()
+	r.tickInterval = r.Interval()
 	defer ticker.Stop()
 	for {
 		select {
@@ -485,14 +497,47 @@ func (r *BalanceHistoryRecorder) run(ctx context.Context) {
 			// parallel; a sample already in progress is
 			// unaffected — the loop only selects between ticks,
 			// so the revision waits until it finishes.
+			//
+			// The drain below rescues a tick the runtime already
+			// delivered into ticker.C — but that is not the whole
+			// story. Under load (notably under -race) the runtime
+			// delivers a periodic firing late, and a late firing
+			// skips the missed periods (next = when + period x
+			// (1 + delay/period)), so a tick that is due on the
+			// wall clock may not have materialized in the channel
+			// yet when this branch runs: the drain then sees an
+			// empty channel, Stop() discards the timer, and the
+			// late send — if it ever comes — lands in the
+			// abandoned channel. The tick is lost even though it
+			// was due. So when the drain is empty, judge
+			// due-ness by the wall clock instead: if a whole old
+			// interval has elapsed since the last consumed tick
+			// (or since this ticker was built), at least one tick
+			// is due and runs now. At most one tick runs per
+			// retune either way — the same "exactly once"
+			// guarantee the drain alone was meant to give — and
+			// lastTickAt is re-anchored to the rebuild below, so
+			// a retune that lands soon after a tick (or soon
+			// after a rebuild) never conjures a spurious one.
 			ticker.Stop()
 			select {
 			case <-ticker.C:
 				r.tick()
 			default:
+				if time.Since(r.lastTickAt) >= r.tickInterval {
+					r.tick()
+				}
 			}
 			ticker = time.NewTicker(r.Interval())
+			r.lastTickAt = time.Now()
+			r.tickInterval = r.Interval()
 		case <-ticker.C:
+			// Stamp the consumption time: the retune branch
+			// measures due-ness from the last tick run()
+			// actually consumed. (tick() itself does not stamp:
+			// tests call it directly, and those calls consume
+			// no ticker firing.)
+			r.lastTickAt = time.Now()
 			r.tick()
 		}
 	}

@@ -510,11 +510,18 @@ func TestSetBalanceHistoryIntervalAuditPreviousCurrentExact(t *testing.T) {
 		}
 	}
 	// No balance material rides anywhere else in the event either.
+	// ("500" is deliberately not in this list: the blob carries two
+	// random hex seals and a nanosecond timestamp, and "500" turns
+	// up in random digits — 2 hits in 60 runs, both inside a seal.
+	// A leaked 500 balance cannot hide anyway: the exact checks
+	// above pin both Details values, and Details holds exactly two
+	// keys. The remaining strings all contain non-hex letters, so
+	// they cannot occur in a seal or a timestamp.)
 	blob, err := json.Marshal(ev)
 	if err != nil {
 		t.Fatalf("marshal event: %v", err)
 	}
-	for _, bad := range []string{"cash", "equity", "balance_cents", "500"} {
+	for _, bad := range []string{"cash", "equity", "balance_cents"} {
 		if strings.Contains(string(blob), bad) {
 			t.Errorf("audit event contains %q — balance material must never ride in a retune event", bad)
 		}
@@ -530,7 +537,6 @@ func TestSetBalanceHistoryIntervalNoRestartContinuousTicks(t *testing.T) {
 	// Let the recorder sample on the original interval first.
 	waitFor(t, 3*time.Second, "first ticks", func() bool { return r.Ticks() >= 2 })
 	ticksBefore := r.Ticks()
-	rowsBefore := historyRows(t, dir)
 
 	// Revise without restarting: the same goroutine keeps ticking
 	// (ticks only grow) and the counters are continuous.
@@ -540,11 +546,21 @@ func TestSetBalanceHistoryIntervalNoRestartContinuousTicks(t *testing.T) {
 	waitFor(t, 3*time.Second, "ticks after the revision", func() bool {
 		return r.Ticks() >= ticksBefore+2
 	})
-	if got := r.Ticks(); got < ticksBefore+2 {
-		t.Fatalf("Ticks() = %d after the revision, want at least %d", got, ticksBefore+2)
+	ticksAfter := r.Ticks()
+	if ticksAfter < ticksBefore+2 {
+		t.Fatalf("Ticks() = %d after the revision, want at least %d", ticksAfter, ticksBefore+2)
 	}
-	if n := historyRows(t, dir); n < rowsBefore+4 {
-		t.Fatalf("rows = %d after the revision, want at least %d (series continues, none lost)", n, rowsBefore+4)
+	// The row bar is derived from the tick count, not from a row
+	// count taken before the revision: historyRows sums two
+	// sequential per-account queries, and a tick landing between
+	// them inflates the baseline by one (a 5-row baseline against
+	// 2 ticks was observed — impossible for a consistent snapshot,
+	// since every tick writes exactly 2 rows here, cash + equity).
+	// The invariant that actually means "none lost" is rows >= 2
+	// per completed tick: a tick's rows hit disk before its ticks++
+	// lands, so every counted tick's rows are visible to this read.
+	if n := historyRows(t, dir); n < 2*int(ticksAfter) {
+		t.Fatalf("rows = %d after the revision, want at least %d (2 rows per tick x %d ticks: series continues, none lost)", n, 2*ticksAfter, ticksAfter)
 	}
 	if got := r.Interval(); got != 10*time.Millisecond {
 		t.Fatalf("Interval() = %v after the revision, want 10ms", got)

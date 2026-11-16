@@ -141,9 +141,14 @@ func TestRotateSinkSecretSignsNewDeliveriesWithNewKey(t *testing.T) {
 			t.Errorf("delivery %d signature still verifies with the old key", i)
 		}
 	}
-	if sent, failed, dead := sink.Stats(); sent != 2 || failed != 0 || dead != 0 {
-		t.Errorf("Stats = (%d, %d, %d), want (2, 0, 0)", sent, failed, dead)
-	}
+	// Stats() is the sink's own bookkeeping, incremented after the
+	// POST returns — the capture count above only proves the
+	// requests arrived, so wait for the counter to land instead of
+	// reading it in the gap between arrival and bookkeeping.
+	waitForSink(t, 5*time.Second, "sink stats to record both deliveries", func() bool {
+		sent, failed, dead := sink.Stats()
+		return sent == 2 && failed == 0 && dead == 0
+	})
 
 	events := sinkRotatedEvents(t, auditDir)
 	if len(events) != 1 {
@@ -359,9 +364,14 @@ func TestRotateSinkSecretPreservesCursorStatsAndOrder(t *testing.T) {
 			t.Errorf("delivery %d does not verify with the post-rotation key", i+1)
 		}
 	}
-	if sent, failed, dead := sink.Stats(); sent != 3 || failed != 0 || dead != 0 {
-		t.Errorf("Stats = (%d, %d, %d), want (3, 0, 0)", sent, failed, dead)
-	}
+	// Stats() is the sink's own bookkeeping, incremented after the
+	// POST returns — the capture count above only proves the
+	// requests arrived, so wait for the counter to land instead of
+	// reading it in the gap between arrival and bookkeeping.
+	waitForSink(t, 5*time.Second, "sink stats to record all 3 deliveries", func() bool {
+		sent, failed, dead := sink.Stats()
+		return sent == 3 && failed == 0 && dead == 0
+	})
 	dir := filepath.Dir(auditDir)
 	cursorPath := filepath.Join(dir, "outbox", sinkCursorFilename)
 	waitForSink(t, 5*time.Second, "cursor at 3", func() bool {

@@ -278,6 +278,12 @@ func TestSetWebhookKeyGracePeriodWithoutDispatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewOutbox: %v", err)
 	}
+	// Close the audit log on cleanup: its writer goroutine would
+	// otherwise outlive the test and can create the segment file
+	// inside the TempDir while Go's cleanup RemoveAll is traversing
+	// it ("directory not empty"). Registered first so it runs last
+	// (t.Cleanup is LIFO), after the outbox is closed.
+	t.Cleanup(func() { _ = al.Close() })
 	t.Cleanup(func() { _ = ob.Close() })
 	l := New(WithAuditLog(al), WithOutbox(ob))
 	prev, err := l.SetWebhookKeyGracePeriod("risk", time.Hour)

@@ -514,8 +514,16 @@ func TestSetTSAAnchorIntervalNextTickFollowsNewURL(t *testing.T) {
 
 	// The same head was re-anchored against the new endpoint: the
 	// idempotency key includes the URL, so the new anchor is a
-	// second stored anchor carrying url2.
-	stored := readTSAAnchors(t, dir)
+	// second stored anchor carrying url2. Wait for the stored count
+	// itself, not just the counters: a tick that starts before the
+	// re-source takes the idempotent path (same head, same URL),
+	// counts as anchored, and stores nothing — the stored second
+	// anchor lands on the next tick after the re-source.
+	var stored []TimestampAnchor
+	waitFor(t, 3*time.Second, "second stored anchor", func() bool {
+		stored = readTSAAnchors(t, dir)
+		return len(stored) == 2
+	})
 	if len(stored) != 2 {
 		t.Fatalf("stored anchors = %d, want 2 (startup endpoint + re-sourced endpoint)", len(stored))
 	}

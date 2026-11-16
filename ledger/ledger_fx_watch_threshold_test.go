@@ -373,9 +373,12 @@ func TestSetFXWarningThresholdNoRestartContinuousTicks(t *testing.T) {
 	defer func() { _ = al.Close() }()
 
 	// Let the watch tick on the original threshold first, warning
-	// once about the rate expiring in 2h.
+	// once about the rate expiring in 2h. Wait for the tick to
+	// complete, not just the warning: staleTotal is bumped
+	// mid-tick, ticks only at the end, so a warning observed
+	// while its tick is still running reads ticks = 0.
 	mustSetRateTTL(t, l, "USD", "JPY", 2*time.Hour)
-	waitFor(t, 3*time.Second, "stale warning", func() bool { return w.StaleTotal() >= 1 })
+	waitFor(t, 3*time.Second, "stale warning", func() bool { return w.StaleTotal() >= 1 && w.Ticks() >= 1 })
 	ticksBefore := w.Ticks()
 	if ticksBefore == 0 {
 		t.Fatal("ticks = 0 after the first warning, want the watch already ticking")

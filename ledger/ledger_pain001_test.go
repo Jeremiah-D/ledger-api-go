@@ -82,13 +82,25 @@ func TestPain001GoldenDocument(t *testing.T) {
 		}
 	}
 	// The MsgId is deterministic: the same export re-renders
-	// byte-identical.
+	// byte-identical apart from CreDtTm, which honestly records
+	// when each document was created (the camt.060 / pain.011
+	// repeat-export convention) — two renders straddling a second
+	// boundary legitimately differ in that one line.
 	doc2, err := l.ExportPain001(Pain001ExportOptions{Currency: "USD"})
 	if err != nil {
 		t.Fatalf("ExportPain001 (2nd): %v", err)
 	}
-	if string(doc2) != s {
-		t.Errorf("re-export not byte-identical")
+	stripCreDtTm := func(doc []byte) string {
+		var lines []string
+		for _, line := range strings.Split(string(doc), "\n") {
+			if !strings.HasPrefix(line, "<CreDtTm>") {
+				lines = append(lines, line)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	if stripCreDtTm(doc2) != stripCreDtTm(doc) {
+		t.Errorf("re-export not byte-identical apart from CreDtTm")
 	}
 	// One PmtInf per debtor here (single debtor): group totals match.
 	if got := strings.Count(s, "<PmtInf>"); got != 1 {

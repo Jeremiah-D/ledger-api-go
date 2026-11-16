@@ -16,6 +16,16 @@ func mustAuditLog(t *testing.T, opts ...AuditLogOption) *AuditLog {
 	if err != nil {
 		t.Fatalf("NewAuditLog: %v", err)
 	}
+	// Close on test cleanup: the writer goroutine would otherwise
+	// outlive the test and can create the segment file inside the
+	// TempDir while Go's cleanup RemoveAll is traversing it
+	// ("directory not empty"). Registered here, at creation, so it
+	// runs last (t.Cleanup is LIFO) — after any worker the test
+	// stops in its own cleanup. Close is idempotent, so tests
+	// that already close explicitly are unaffected; Log-after-Close
+	// drops cleanly, so late events from a still-running worker
+	// cannot panic.
+	t.Cleanup(func() { _ = al.Close() })
 	return al
 }
 

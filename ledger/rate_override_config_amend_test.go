@@ -122,7 +122,13 @@ func TestSetRateOverrideMaxDeviationBpsAppliesToProposalsAndApprovals(t *testing
 }
 
 func TestSetRateOverrideMaxDeviationBpsValidation(t *testing.T) {
-	l, _ := mustOverrideLedger(t)
+	l, al := mustOverrideLedger(t)
+	// Close the audit log before the test returns: its writer
+	// goroutine would otherwise outlive the test and can create
+	// the segment file inside TempDir while Go's cleanup RemoveAll
+	// is traversing it ("directory not empty" — Go 1.27 TempDir
+	// ends in a /001 subdir).
+	defer func() { _ = al.Close() }()
 	mustSetRate(t, l, "USD", "EUR", 108, 100)
 
 	if err := l.SetRateOverrideMaxDeviationBps(-1); !errors.Is(err, ErrInvalidRateOverrideMaxDeviationBps) {

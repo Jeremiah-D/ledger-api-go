@@ -252,6 +252,12 @@ func TestTSAWorkerFollowsURLAmendment(t *testing.T) {
 	if got := stub1.hits.Load(); got < 1 {
 		t.Fatalf("stub1 hits = %d, want >= 1", got)
 	}
+	// The failure counter is bookkeeping inside the authority
+	// wrapper, incremented after the stub call returns — waiting
+	// for the stub hit only proves the request arrived, so wait
+	// for the counter itself to land instead of reading it in
+	// the gap between arrival and bookkeeping.
+	waitFor(t, 5*time.Second, func() bool { return m.TSAAnchorFailuresTotal.Load() >= 2 })
 	if got := m.TSAAnchorFailuresTotal.Load(); got < 2 {
 		t.Fatalf("TSAAnchorFailuresTotal = %d, want >= 2 (both endpoints failed)", got)
 	}

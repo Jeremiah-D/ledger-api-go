@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -97,6 +98,7 @@ func (c *gatedWebhookCapture) seqsSnapshot() []string {
 type slowSeqWebhookCapture struct {
 	mu          sync.Mutex
 	seqs        []string
+	attempts    int
 	delay       time.Duration
 	entered     chan struct{}
 	enteredOnce sync.Once
@@ -109,6 +111,15 @@ func (c *slowSeqWebhookCapture) handler() http.Handler {
 				close(c.entered)
 			}
 		})
+		// Count every attempt at entry, before the sleep: a test
+		// can wait for the worker to have taken an event (busy
+		// delivering it) instead of guessing from the delivered
+		// seqs, which only land after the slow handler returns.
+		// (entered above is once-only, so it cannot serve a
+		// second wait.)
+		c.mu.Lock()
+		c.attempts++
+		c.mu.Unlock()
 		if c.delay > 0 {
 			time.Sleep(c.delay)
 		}
@@ -117,6 +128,13 @@ func (c *slowSeqWebhookCapture) handler() http.Handler {
 		c.mu.Unlock()
 		w.WriteHeader(200)
 	})
+}
+
+// attemptsMade reports how many delivery attempts have started.
+func (c *slowSeqWebhookCapture) attemptsMade() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.attempts
 }
 
 func (c *slowSeqWebhookCapture) seqsSnapshot() []string {
@@ -360,8 +378,14 @@ func TestSetWebhookQueueSizeShrinkDropsNewEventsUntilBacklogDrains(t *testing.T)
 	// The worker is idle now, so event 5 is taken at once and keeps
 	// it busy for one slow delivery; event 6 fits the new
 	// capacity-1 channel, and event 7 drops by plain channel
-	// semantics while the worker is still busy.
-	notifyQueueSizeSeqs(d, 5, 3)
+	// semantics while the worker is still busy. Wait for the worker
+	// to take event 5 (4th attempt started) before notifying 6 and
+	// 7: without that wait the three notifies can land in a burst
+	// while the worker is still looping back to select, and 6 drops
+	// with 5 still buffered in the capacity-1 channel.
+	notifyQueueSizeSeqs(d, 5, 1)
+	waitFor(t, 10*time.Second, "worker takes event 5", func() bool { return cap.attemptsMade() >= 4 })
+	notifyQueueSizeSeqs(d, 6, 2)
 	got = waitForQueueSizeSeqs(t, cap.seqsSnapshot, 5, "deliveries after shrinking")
 	assertQueueSizeSeqs(t, got, []string{"1", "2", "3", "5", "6"}, "delivery order across the shrink")
 	if _, _, _, dropped := d.Stats(); dropped != 2 {
@@ -485,9 +509,19 @@ func TestSetWebhookQueueSizeConcurrentRevisionNotifyAndDeliveryRaceFree(t *testi
 	// Per-endpoint delivery order still equals outbox seq order:
 	// every delivered seq is strictly greater than the previous
 	// one, so no event overtook an older one across a generation
-	// swap, and none was delivered twice.
-	for i := 1; i < len(got); i++ {
-		if got[i] <= got[i-1] {
+	// swap, and none was delivered twice. Compare numerically:
+	// the capture records the X-Ledger-Event-Seq header as a
+	// string, and lexicographic order would call "10" <= "9".
+	nums := make([]uint64, len(got))
+	for i, s := range got {
+		n, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			t.Fatalf("delivered seq %q is not numeric: %v", s, err)
+		}
+		nums[i] = n
+	}
+	for i := 1; i < len(nums); i++ {
+		if nums[i] <= nums[i-1] {
 			t.Fatalf("delivered seqs out of order: %v", got)
 		}
 	}

@@ -388,6 +388,11 @@ func TestSetAnchorKeyCtxActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Close on cleanup: the writer goroutine would otherwise
+	// outlive the test and can create the segment file inside the
+	// TempDir while Go's cleanup RemoveAll is traversing it
+	// ("directory not empty").
+	t.Cleanup(func() { _ = al.Close() })
 	_, key1, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -425,6 +430,7 @@ func TestSetAnchorKeyCtxActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = al2.Close() })
 	l2 := New(WithAuditLog(al2), WithAnchorKey(key1))
 	if err := l2.SetAnchorKey(key2); err != nil {
 		t.Fatalf("SetAnchorKey = %v", err)

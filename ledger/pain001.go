@@ -253,8 +253,9 @@ type pain001Payment struct {
 //   - Payments are grouped into one PmtInf per (debtor, currency), each
 //     with its own NbOfTxs and CtrlSum; GrpHdr carries the totals.
 //   - MsgId is deterministic in (window, filters, exported content): the
-//     same export re-renders byte-identical, and any content change
-//     changes the ID.
+//     same export re-renders byte-identical apart from CreDtTm (which
+//     honestly records when each document was created), and any content
+//     change changes the ID.
 //   - Pending-review transfers are excluded: a payment instruction must
 //     never be generated from a frozen transfer. Re-export after
 //     approval includes it.

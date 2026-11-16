@@ -315,6 +315,15 @@ func TestSetWebhookMaxRecordsDoesNotRestartEndpointWorker(t *testing.T) {
 		t.Fatalf("SetWebhookMaxRecords(3) = (%d, %v), want (%d, nil)", prev, err, DefaultWebhookMaxRecords)
 	}
 	waitForAttempts(t, cap, 2, "both deliveries after the revision")
+	// Stats() delivered is the dispatcher's own bookkeeping,
+	// incremented after a delivery completes — the attempts above
+	// only prove the slow handler was hit, so wait for the
+	// counter to land instead of reading it while the second
+	// delivery is still in flight.
+	waitFor(t, 10*time.Second, "2 deliveries recorded", func() bool {
+		delivered, _, _, _ := d.Stats()
+		return delivered == 2
+	})
 	delivered, _, _, _ := d.Stats()
 	if delivered != 2 {
 		t.Fatalf("Stats delivered = %d after the revision, want 2 (counters keep accumulating)", delivered)

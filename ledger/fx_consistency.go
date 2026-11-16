@@ -238,6 +238,17 @@ type FXConsistencyWatch struct {
 	// loop that is mid-scan, and a newer revision supersedes a
 	// coalesced wakeup because run() re-reads the live value.
 	retune chan struct{}
+	// lastTickAt is the wall-clock time run() last consumed a tick
+	// (or the time the current ticker was built, if no tick has
+	// been consumed yet). tickInterval is the period of the ticker
+	// run() currently owns. Both are run-loop-goroutine-local: only
+	// run() touches them, so they need no lock — tick() deliberately
+	// does not stamp lastTickAt, because tests call tick() directly
+	// and those calls consume no ticker firing. The retune branch
+	// reads them to decide whether a tick is due when the ticker
+	// channel holds nothing — see run().
+	lastTickAt   time.Time
+	tickInterval time.Duration
 
 	ticks atomic.Uint64
 	total atomic.Uint64
@@ -276,6 +287,8 @@ func StartFXConsistencyWatch(ctx context.Context, l *Ledger, interval time.Durat
 func (w *FXConsistencyWatch) run(ctx context.Context) {
 	defer w.wg.Done()
 	ticker := time.NewTicker(w.Interval())
+	w.lastTickAt = time.Now()
+	w.tickInterval = w.Interval()
 	defer ticker.Stop()
 	for {
 		select {
@@ -292,14 +305,47 @@ func (w *FXConsistencyWatch) run(ctx context.Context) {
 			// parallel; a scan already in progress is
 			// unaffected — the loop only selects between scans,
 			// so the revision waits until it finishes.
+			//
+			// The drain below rescues a tick the runtime already
+			// delivered into ticker.C — but that is not the whole
+			// story. Under load (notably under -race) the runtime
+			// delivers a periodic firing late, and a late firing
+			// skips the missed periods (next = when + period x
+			// (1 + delay/period)), so a tick that is due on the
+			// wall clock may not have materialized in the channel
+			// yet when this branch runs: the drain then sees an
+			// empty channel, Stop() discards the timer, and the
+			// late send — if it ever comes — lands in the
+			// abandoned channel. The tick is lost even though it
+			// was due. So when the drain is empty, judge
+			// due-ness by the wall clock instead: if a whole old
+			// interval has elapsed since the last consumed tick
+			// (or since this ticker was built), at least one tick
+			// is due and runs now. At most one tick runs per
+			// retune either way — the same "exactly once"
+			// guarantee the drain alone was meant to give — and
+			// lastTickAt is re-anchored to the rebuild below, so
+			// a retune that lands soon after a tick (or soon
+			// after a rebuild) never conjures a spurious one.
 			ticker.Stop()
 			select {
 			case <-ticker.C:
 				w.tick()
 			default:
+				if time.Since(w.lastTickAt) >= w.tickInterval {
+					w.tick()
+				}
 			}
 			ticker = time.NewTicker(w.Interval())
+			w.lastTickAt = time.Now()
+			w.tickInterval = w.Interval()
 		case <-ticker.C:
+			// Stamp the consumption time: the retune branch
+			// measures due-ness from the last tick run()
+			// actually consumed. (tick() itself does not stamp:
+			// tests call it directly, and those calls consume
+			// no ticker firing.)
+			w.lastTickAt = time.Now()
 			w.tick()
 		}
 	}

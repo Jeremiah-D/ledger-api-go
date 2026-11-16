@@ -153,9 +153,14 @@ func TestSetSinkURLMovesNextDeliveryToNewURL(t *testing.T) {
 	if n := cap.count(); n != 1 {
 		t.Fatalf("old server got %d deliveries, want 1: the revision must not replay old events", n)
 	}
-	if sent, failed, dead := sink.Stats(); sent != 2 || failed != 0 || dead != 0 {
-		t.Fatalf("Stats = (%d, %d, %d), want (2, 0, 0)", sent, failed, dead)
-	}
+	// Stats() is the sink's own bookkeeping, incremented after the
+	// POST returns — the capture count above only proves the request
+	// arrived, so wait for the counter to land instead of reading
+	// it in the gap between arrival and bookkeeping.
+	waitForSink(t, 10*time.Second, "sink stats to record both deliveries", func() bool {
+		sent, failed, dead := sink.Stats()
+		return sent == 2 && failed == 0 && dead == 0
+	})
 }
 
 func TestSetSinkURLInFlightKeepsOldURL(t *testing.T) {
