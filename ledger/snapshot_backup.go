@@ -283,54 +283,32 @@ func (sw *SnapshotBackup) run(ctx context.Context) {
 	sw.tickInterval = sw.Interval()
 	defer ticker.Stop()
 	for {
+		// A revision waiting in sw.retune is handled before a
+		// tick waiting in ticker.C. Without this the select
+		// below picks randomly between the two ready cases: if
+		// it picks the tick first, the retune branch then drains
+		// a fresh firing that landed while that tick ran (or the
+		// wall-clock fallback fires on the same elapsed time)
+		// and one revision runs two ticks for the same window —
+		// the same shape that made
+		// TestSetBalanceHistoryIntervalDoesNotSwallowTriggeredTick
+		// see Ticks() = 3 in CI. Handling the retune first stops
+		// the old ticker before the drained tick runs, so no
+		// further firing can land and one revision runs at most
+		// one due tick.
+		select {
+		case <-sw.retune:
+			ticker = sw.retuneTicker(ticker)
+			continue
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-sw.done:
 			return
 		case <-sw.retune:
-			// A tick may have fired while the revision was in
-			// flight: run it now so the revision cannot swallow
-			// a due backup, then rebuild the ticker on the new
-			// live interval. The old ticker is stopped before
-			// the new one is built, so two tickers never run in
-			// parallel; a backup already in progress is
-			// unaffected — the loop only selects between ticks,
-			// so the revision waits until it finishes.
-			//
-			// The drain below rescues a tick the runtime already
-			// delivered into ticker.C — but that is not the whole
-			// story. Under load (notably under -race) the runtime
-			// delivers a periodic firing late, and a late firing
-			// skips the missed periods (next = when + period x
-			// (1 + delay/period)), so a tick that is due on the
-			// wall clock may not have materialized in the channel
-			// yet when this branch runs: the drain then sees an
-			// empty channel, Stop() discards the timer, and the
-			// late send — if it ever comes — lands in the
-			// abandoned channel. The tick is lost even though it
-			// was due. So when the drain is empty, judge
-			// due-ness by the wall clock instead: if a whole old
-			// interval has elapsed since the last consumed tick
-			// (or since this ticker was built), at least one tick
-			// is due and runs now. At most one tick runs per
-			// retune either way — the same "exactly once"
-			// guarantee the drain alone was meant to give — and
-			// lastTickAt is re-anchored to the rebuild below, so
-			// a retune that lands soon after a tick (or soon
-			// after a rebuild) never conjures a spurious one.
-			ticker.Stop()
-			select {
-			case <-ticker.C:
-				sw.tick()
-			default:
-				if time.Since(sw.lastTickAt) >= sw.tickInterval {
-					sw.tick()
-				}
-			}
-			ticker = time.NewTicker(sw.Interval())
-			sw.lastTickAt = time.Now()
-			sw.tickInterval = sw.Interval()
+			ticker = sw.retuneTicker(ticker)
 		case <-ticker.C:
 			// Stamp the consumption time: the retune branch
 			// measures due-ness from the last tick run()
@@ -341,6 +319,52 @@ func (sw *SnapshotBackup) run(ctx context.Context) {
 			sw.tick()
 		}
 	}
+}
+
+// retuneTicker runs a tick that fired while a revision was in flight
+// (at most one), then rebuilds the ticker on the live interval and
+// returns it. The old ticker is stopped before the new one is built,
+// so two tickers never run in parallel; a backup already in progress
+// is unaffected — the loop only selects between ticks, so the
+// revision waits until it finishes.
+//
+// The drain below rescues a tick the runtime already delivered into
+// ticker.C — but that is not the whole story. Under load (notably
+// under -race) the runtime delivers a periodic firing late, and a
+// late firing skips the missed periods (next = when + period x
+// (1 + delay/period)), so a tick that is due on the wall clock may
+// not have materialized in the channel yet when this branch runs:
+// the drain then sees an empty channel, Stop() discards the timer,
+// and the late send — if it ever comes — lands in the abandoned
+// channel. The tick is lost even though it was due. So when the
+// drain is empty, judge due-ness by the wall clock instead: if a
+// whole old interval has elapsed since the last consumed tick (or
+// since this ticker was built), at least one tick is due and runs
+// now. At most one tick runs per retune either way — the same
+// "exactly once" guarantee the drain alone was meant to give — and
+// lastTickAt is re-anchored to the rebuild below, so a retune that
+// lands soon after a tick (or soon after a rebuild) never conjures
+// a spurious one.
+//
+// This runs only from run()'s retune paths, which a pending revision
+// always reaches before any pending tick (see the pre-check in
+// run()): that ordering is what keeps the "at most one" guarantee
+// true when a tick is slow — the old ticker is stopped before the
+// drained tick runs, so no fresh firing can land behind it.
+func (sw *SnapshotBackup) retuneTicker(ticker *time.Ticker) *time.Ticker {
+	ticker.Stop()
+	select {
+	case <-ticker.C:
+		sw.tick()
+	default:
+		if time.Since(sw.lastTickAt) >= sw.tickInterval {
+			sw.tick()
+		}
+	}
+	ticker = time.NewTicker(sw.Interval())
+	sw.lastTickAt = time.Now()
+	sw.tickInterval = sw.Interval()
+	return ticker
 }
 
 // tick runs one backup tick: export, count, report. Shared by the

@@ -42,7 +42,9 @@ import (
 //     before the new one is built, so two tickers never run in
 //     parallel, and a tick that fired while the revision was in
 //     flight is run before the rebuild, so a revision cannot
-//     swallow a due backup.
+//     swallow a due backup. A pending revision is handled before a
+//     pending tick, so one revision runs at most one due tick even
+//     when a tick is slow.
 //   - Validation is fail-closed with no silent normalization: the
 //     new interval must be > 0, else ErrInvalidSnapshotBackupInterval
 //     and the live interval stays exactly as it was. Zero is
