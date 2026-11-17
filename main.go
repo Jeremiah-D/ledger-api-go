@@ -6822,6 +6822,72 @@ func (s *server) handleMT320Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT320Apply implements POST /exports/mt320/apply (LG-446):
+// applies a counterparty's SWIFT FIN MT320 fixed loan/deposit
+// confirmation to the ledger — the inbound half of the MT320
+// lifecycle, the mirror of the outbound export (GET /exports/mt320,
+// LG-392). The body is the raw MT320 FIN text; its :20: reference
+// is the deposit ID, and every economic term (:22C: common
+// reference, :30T:/:30V:/:30P: dates, :32B: principal, :34E:
+// contracted interest total, :37G: rate) must agree exactly with
+// the booked deposit, or the whole confirmation is refused. A
+// match records the confirmation (the mt320Applied :20: registry
+// and the mt320Confirmed deposit marker) plus one
+// mt320_confirmation_matched event; it settles nothing, opens no
+// deposit, and moves no lifecycle state. A re-sent :20: with the
+// same terms is an idempotent no-op returning the current deposit;
+// a :20: reused for different terms is a conflict. Error mapping:
+// a malformed FIN document is a 400; an unknown deposit, a terms
+// mismatch, an early-withdrawn deposit, or a :20: reused for
+// different terms is a 422 (an unknown deposit is 422 here, not
+// the export's 404 — a confirmation never opens a deposit); a
+// tiered-rate deposit is a 400, the export's fail-loud rule. The
+// operator identity comes from the x-ledger-actor header, like the
+// other operator actions.
+func (s *server) handleMT320Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT320Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParseMT320(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT320(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrTermDepositNotFound),
+			errors.Is(err, ledger.ErrTermDepositNotActive),
+			errors.Is(err, ledger.ErrMT320TermsMismatch),
+			errors.Is(err, ledger.ErrMT320MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidMT320Export):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt320/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT320 confirmation failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleMT321Export implements GET /exports/mt321 (LG-396): a SWIFT
 // FIN/ISO 15022 MT321 third-party loan/deposit settlement
 // instruction for one active or matured term deposit (see
@@ -15167,6 +15233,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt304", s.handleMT304Export)
 	mux.HandleFunc("POST /exports/mt304/apply", s.handleMT304Apply)
 	mux.HandleFunc("GET /exports/mt320", s.handleMT320Export)
+	mux.HandleFunc("POST /exports/mt320/apply", s.handleMT320Apply)
 	mux.HandleFunc("GET /exports/mt321", s.handleMT321Export)
 	mux.HandleFunc("GET /exports/mt210", s.handleMT210Export)
 	mux.HandleFunc("GET /exports/mt292", s.handleMT292Export)

@@ -1019,6 +1019,28 @@ type Ledger struct {
 	// the hash-chained mt300_confirmation_matched audit events
 	// are the durable record.
 	mt300Confirmed map[string]mt300ConfirmationRecord
+	// mt320Applied maps a MT320 :20: reference to the
+	// confirmation its first application matched (see
+	// mt320_inbound.go, LG-446): the replay guard for inbound
+	// MT320 fixed loan/deposit confirmations, so a re-sent
+	// confirmation returns the stored outcome instead of
+	// matching twice — and a :20: reused for different terms is
+	// refused instead of silently overwritten. In-memory only,
+	// like pain011Applied: the hash-chained
+	// mt320_confirmation_matched audit events are the durable
+	// record.
+	mt320Applied map[string]mt320AppliedRecord
+	// mt320Confirmed maps a deposit ID to the counterparty
+	// confirmation that matched it (see mt320_inbound.go,
+	// LG-446): the read-only confirmation marker — a deposit
+	// appears here once its booked terms have been matched by an
+	// inbound MT320, with no lifecycle effect: the contract
+	// stays active (or matured) and MatureTermDeposit remains
+	// the only settlement entry. In-memory only, like
+	// mt320Applied: the hash-chained
+	// mt320_confirmation_matched audit events are the durable
+	// record.
+	mt320Confirmed map[string]mt320ConfirmationRecord
 	// mt304Applied maps a MT304 :20: reference to the outcome
 	// its first application booked or recorded (see
 	// mt304_inbound.go, LG-443): the replay guard for inbound

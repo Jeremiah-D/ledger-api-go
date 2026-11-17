@@ -5700,6 +5700,34 @@ MT300, the export is read-only and repeat exports are
 byte-identical; active and matured deposits both confirm. `GET
 /metrics` counts exports as `ledger_mt320_exports_total`.
 
+The counterparty's MT320 comes back through `POST
+/exports/mt320/apply`, whose body is the raw MT320 FIN text (see
+`ledger.ParseMT320` / `ledger.ApplyMT320`): the `:20:` reference
+is the deposit ID and addresses the deposit directly, and every
+economic term is verified exactly against the booked contract —
+`:22C:` re-derived from the stored depositor identifier, the
+message's `:87A:` counterparty BIC, and the `:20:` deposit ID;
+`:30T:` / `:30V:` against the opening day and `:30P:` against the
+maturity day; `:32B:` against the principal; `:34E:` against
+`TermDays` x one day's interest; `:37G:` against the flat rate,
+half-up rounded to 12 decimal places. The `:82a:` depositor must
+name the stored depositor in the same form, the `:87a:`
+counterparty must be a BIC, and the `:57a:` settlement legs must
+name the same banks as the parties. A match records the
+confirmation only — the `mt320Applied` `:20:` registry and the
+`mt320Confirmed` deposit marker plus one
+`mt320_confirmation_matched` audit event — and settles nothing,
+opens no deposit, and moves no lifecycle state: active and
+matured deposits both confirm, and `MatureTermDeposit` remains
+the only settlement entry. A re-sent `:20:` with the same terms
+is an idempotent no-op; a `:20:` reused for different terms is a
+conflict. Error mapping: a malformed FIN document is a 400; an
+unknown deposit, a terms mismatch, an early-withdrawn deposit,
+or a `:20:` reused for different terms is a 422 (an unknown
+deposit is 422 here, not the export's 404 — a confirmation never
+opens a deposit); a tiered-rate deposit is a 400. `GET /metrics`
+counts applies as `ledger_mt320_applies_total`.
+
 Where MT320 confirms a term deposit, MT321 instructs the fund's
 custodian to settle one: `GET
 /exports/mt321?deposit_id=<id>&custodian_bic=<bic>&counterparty_bic=<bic>`
