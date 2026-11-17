@@ -391,6 +391,9 @@ type Metrics struct {
 	// CAMT052Imports counts POST /camt052/import requests served (all
 	// attempts, including duplicates and rejected payloads; LG-408).
 	CAMT052Imports atomic.Uint64
+	// MT941Imports counts POST /mt941/import requests served (all
+	// attempts, including duplicates and rejected payloads; LG-444).
+	MT941Imports atomic.Uint64
 	// CAMT053Exports counts GET /exports/camt053 ISO 20022 camt.053
 	// bank statement export requests served, including rejected
 	// exports (see ledger.ExportCAMT053, LG-381).
@@ -1382,6 +1385,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total GET /exports/camt052 ISO 20022 camt.052 intraday account report exports served, including rejected exports.", m.CAMT052Exports.Load())
 	writeCounter(&sb, "ledger_camt052_imports_total",
 		"Total POST /camt052/import camt.052 intraday account report pre-posting imports served, including duplicates and rejected payloads.", m.CAMT052Imports.Load())
+	writeCounter(&sb, "ledger_mt941_imports_total",
+		"Total POST /mt941/import SWIFT FIN MT941 balance report pre-posting imports served, including duplicates and rejected payloads.", m.MT941Imports.Load())
 	writeCounter(&sb, "ledger_camt053_exports_total",
 		"Total GET /exports/camt053 ISO 20022 camt.053 bank statement exports served, including rejected exports.", m.CAMT053Exports.Load())
 	writeCounter(&sb, "ledger_camt054_exports_total",

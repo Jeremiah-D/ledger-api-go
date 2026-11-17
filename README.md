@@ -8966,6 +8966,39 @@ Semantics:
   (money out); amounts are absolute (`1500,00` with a comma decimal
   separator), the sign lives in the `C`/`D` mark.
 
+### SWIFT MT941 balance report import (Go: `ledger.ImportMT941`)
+
+The FIN version of the camt.052 import: where `POST
+/camt052/import` consumes the MX intraday balance report, `POST
+/mt941/import` consumes the FIN one — a bank's MT941 balance
+report becomes a pre-posting reconciliation report, the
+"bank says vs ledger computes" external reconciliation for an
+account's balance snapshot. `ledger.ParseMT941` is the inverse
+of `RenderMT941Statement` (same tag block, same canonical order,
+same self-consistency: `:62F:` must equal `:60F:` + `:90C:` −
+`:90D:`, `:64:`/`:65:` must restate `:62F:`, one currency
+throughout), and `ledger.ImportMT941` compares the `:62F:` book
+balance at the `:13D:` instant with the balance the journal folds
+at the same instant. A disagreement is recorded as a
+`MT941BalanceMismatch` (`reported_cents` vs `ledger_cents`) and
+never fails the import; the `:90D:`/`:90C:` summaries and the
+`:86:` text ride along in the report verbatim. Draft-only: the
+import writes no journal rows, enters no hash chain, bumps no
+version, and never adjusts the ledger — a mismatch is evidence
+for the operator, and any adjustment stays a human decision.
+Re-importing the same document returns the original report with
+`duplicate: true` (SHA-256 idempotency, in-memory registry). The
+`:25:` account must name a known ledger account — the internal ID,
+an `mt941`-system external identifier (usually the IBAN), or a
+registered IBAN — an unknown account is refused fail-closed with
+422, and a report naming a different account than the import
+target is a 400. The same document is available over HTTP:
+
+`POST /mt941/import` with `{"account": "<id>", "mt941": "<FIN text>"}`
+
+There is deliberately no `:61:` matching (MT941 carries no detail
+lines), no MT942 inbound, and no new GET endpoint.
+
 ### SWIFT MT942 interim transaction report export (Go: `ledger.ExportMT942`)
 
 The same accounting fact as MT940, reported in a different tense:

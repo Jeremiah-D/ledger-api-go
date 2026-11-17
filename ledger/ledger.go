@@ -1720,6 +1720,13 @@ type Ledger struct {
 	// state like the camt.053 index — it survives snapshots for the
 	// same reason.
 	camt052Imports map[string]*CAMT053ImportReport
+	// mt941Imports is the SWIFT FIN MT941 balance report import
+	// registry (see mt941_import.go, LG-444): document SHA-256 (hex)
+	// -> import report, for duplicate-import idempotency. In-memory
+	// only: it does not round-trip through snapshots, so a restore
+	// re-imports a report as new rather than replaying the stored
+	// report.
+	mt941Imports map[string]*MT941ImportReport
 	// statementMatches is the statement-line match registry (see
 	// statement_match.go, LG-107): statement line ID
 	// ("ofx/<FITID>" / "camt053/<stmtID>/<seq>", see DraftEntry.ID) ->
@@ -2207,6 +2214,7 @@ func New(opts ...Option) *Ledger {
 		ofxImports:                  make(map[string]*OFXImportReport),
 		camt053Imports:              make(map[string]*CAMT053ImportReport),
 		camt052Imports:              make(map[string]*CAMT053ImportReport),
+		mt941Imports:                make(map[string]*MT941ImportReport),
 		statementMatches:            make(map[string]*statementMatchRecord),
 		statementMatchWindow:        DefaultOFXMatchWindow,
 		painTransfers:               make(map[string]PainTransfer),
