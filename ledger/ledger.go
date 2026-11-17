@@ -1041,6 +1041,18 @@ type Ledger struct {
 	// mt320_confirmation_matched audit events are the durable
 	// record.
 	mt320Confirmed map[string]mt320ConfirmationRecord
+	// mt321Applied maps a MT321 :20C::SEME// reference to the
+	// settlement instruction its first application registered
+	// (see mt321_inbound.go, LG-447): the replay guard and the
+	// settlement-instruction registry for inbound MT321
+	// third-party loan/deposit settlement instructions, so a
+	// re-sent instruction returns the stored outcome instead of
+	// registering twice — and a SEME reused for different terms
+	// is refused instead of silently overwritten. In-memory only,
+	// like pain011Applied: the hash-chained
+	// mt321_settlement_instruction_registered audit events are
+	// the durable record.
+	mt321Applied map[string]mt321AppliedRecord
 	// mt304Applied maps a MT304 :20: reference to the outcome
 	// its first application booked or recorded (see
 	// mt304_inbound.go, LG-443): the replay guard for inbound

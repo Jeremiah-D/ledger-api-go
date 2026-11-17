@@ -5780,6 +5780,40 @@ read-only and repeat exports are byte-identical; active and
 matured deposits both instruct. `GET /metrics` counts exports as
 `ledger_mt321_exports_total`.
 
+The fund manager's MT321 comes back through `POST
+/exports/mt321/apply`, whose body is the raw MT321 FIN text (see
+`ledger.ParseMT321` / `ledger.ApplyMT321`): the `:20C::SEME//`
+reference is the deposit ID and addresses the deposit directly,
+and every economic term is verified exactly against the booked
+contract — `:20C::LDCR//` re-derived from the stored depositor
+identifier, the message's `:95P::LDCO//` counterparty BIC, and
+the `:20C::SEME//` deposit ID; `:98A::TRAD//` / `:98A::VALU//`
+against the opening day and `:98A::MATU//` against the maturity
+day; `:19A::PRIN//` against the principal; `:19A::SETT//`
+against the principal (interest settles separately at maturity);
+`:92A::INTR//` against the flat rate, half-up rounded to 12
+decimal places. Only `:23G:` `NEWM` and `:22H::TLDE//` `CONF`
+are accepted — an instruction to settle a first confirmation.
+The `:95a::INVE//` investor and `:95a::CDEA//` cash delivery
+agent must name the stored depositor in the same form, the
+`:95a::LDCO//` counterparty must be a BIC, the `:95a::ACCW//`
+account-with institution must name that same counterparty BIC,
+and the `:97A::SAFE//` safekeeping account must name the
+deposit's safekeeping account. A match registers the instruction
+only — the `mt321Applied` SEME registry plus one
+`mt321_settlement_instruction_registered` audit event — and moves
+no cash, opens no deposit, and moves no lifecycle state: active
+and matured deposits both instruct, and execution still arrives
+separately through the existing settlement path. A re-sent SEME
+with the same terms is an idempotent no-op; a SEME reused for
+different terms is a conflict. Error mapping: a malformed FIN
+document is a 400; an unknown deposit is a 404 (this endpoint
+names the deposit directly in its reference, unlike the MT320
+apply endpoint, which maps an unknown deposit to 422); a terms
+mismatch, an early-withdrawn deposit, or a SEME reused for
+different terms is a 422; a tiered-rate deposit is a 400. `GET
+/metrics` counts applies as `ledger_mt321_applies_total`.
+
 #### Rate-table snapshot versioning
 
 Every mutation of the rate table (`SetFXRate`, `SetFXRateRat`,

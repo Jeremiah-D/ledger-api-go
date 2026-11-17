@@ -348,6 +348,11 @@ type Metrics struct {
 	// requests served, including rejected exports (see
 	// ledger.ExportMT321, LG-396).
 	MT321Exports atomic.Uint64
+	// MT321Applies counts POST /exports/mt321/apply SWIFT FIN/ISO
+	// 15022 MT321 third-party loan/deposit settlement instruction
+	// apply requests served, including rejected requests (see
+	// ledger.ApplyMT321, LG-447).
+	MT321Applies atomic.Uint64
 	// MT199Exports counts POST /exports/mt199 SWIFT FIN MT199
 	// free-format message export requests served, including rejected
 	// exports (see ledger.ExportMT199, LG-380).
@@ -1371,6 +1376,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/mt192/apply SWIFT FIN MT192 request for cancellation apply requests served, including rejected requests.", m.MT192Applies.Load())
 	writeCounter(&sb, "ledger_mt321_exports_total",
 		"Total GET /exports/mt321 SWIFT FIN/ISO 15022 MT321 third-party loan/deposit settlement instruction exports served, including rejected exports.", m.MT321Exports.Load())
+	writeCounter(&sb, "ledger_mt321_applies_total",
+		"Total POST /exports/mt321/apply SWIFT FIN/ISO 15022 MT321 third-party loan/deposit settlement instruction apply requests served, including rejected requests.", m.MT321Applies.Load())
 	writeCounter(&sb, "ledger_mt199_exports_total",
 		"Total POST /exports/mt199 SWIFT FIN MT199 free-format message exports served, including rejected exports.", m.MT199Exports.Load())
 	writeCounter(&sb, "ledger_xero_exports_total",

@@ -6945,6 +6945,75 @@ func (s *server) handleMT321Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT321Apply implements POST /exports/mt321/apply (LG-447):
+// applies a fund manager's SWIFT FIN/ISO 15022 MT321 third-party
+// loan/deposit settlement instruction to the ledger — the inbound
+// half of the MT321 lifecycle, the mirror of the outbound export
+// (GET /exports/mt321, LG-396). The body is the raw MT321 FIN
+// text; its :20C::SEME// reference is the deposit ID, and every
+// economic term (:20C::LDCR// common reference, :98A::TRAD//
+// /:98A::VALU// /:98A::MATU// dates, :19A::PRIN// principal,
+// :19A::SETT// settlement amount, :92A::INTR// rate) must agree
+// exactly with the booked deposit, or the whole instruction is
+// refused. A match registers the instruction (the mt321Applied
+// SEME registry) plus one
+// mt321_settlement_instruction_registered event; it moves no cash,
+// opens no deposit, and moves no lifecycle state. A re-sent SEME
+// with the same terms is an idempotent no-op returning the stored
+// instruction; a SEME reused for different terms is a conflict.
+// Error mapping: a malformed FIN document is a 400; an unknown
+// deposit is a 404 (this endpoint names the deposit directly in
+// its reference, unlike the MT320 apply endpoint, which maps an
+// unknown deposit to 422); a terms mismatch, an early-withdrawn
+// deposit, or a SEME reused for different terms is a 422; a
+// tiered-rate deposit is a 400, the export's fail-loud rule. The
+// operator identity comes from the x-ledger-actor header, like the
+// other operator actions.
+func (s *server) handleMT321Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT321Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParseMT321(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT321(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrTermDepositNotFound):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrTermDepositNotActive),
+			errors.Is(err, ledger.ErrMT321TermsMismatch),
+			errors.Is(err, ledger.ErrMT321MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidMT321Export):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt321/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT321 instruction failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // pain001ReceiptRequest is one bank receipt in the POST
 // /exports/pain001/{msgid}/receipts body: the pain.002-style per-tx
 // status report. Unknown JSON fields fail fast, like every other POST
@@ -15235,6 +15304,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt320", s.handleMT320Export)
 	mux.HandleFunc("POST /exports/mt320/apply", s.handleMT320Apply)
 	mux.HandleFunc("GET /exports/mt321", s.handleMT321Export)
+	mux.HandleFunc("POST /exports/mt321/apply", s.handleMT321Apply)
 	mux.HandleFunc("GET /exports/mt210", s.handleMT210Export)
 	mux.HandleFunc("GET /exports/mt292", s.handleMT292Export)
 	mux.HandleFunc("GET /exports/camt057", s.handleCAMT057Export)
