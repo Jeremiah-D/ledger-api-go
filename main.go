@@ -10892,6 +10892,51 @@ func (s *server) handleMT941Import(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
+// mt940ImportRequest is the POST /mt940/import body: the ledger
+// account the statement belongs to, and the raw MT940 FIN text.
+type mt940ImportRequest struct {
+	Account ledger.AccountID `json:"account"`
+	MT940   string           `json:"mt940"`
+}
+
+// handleMT940Import implements POST /mt940/import (LG-445): it
+// parses a SWIFT FIN MT940 customer statement and returns a
+// pre-posting (draft) reconciliation report (see
+// ledger.ImportMT940). Nothing is posted, no version is bumped:
+// the response tells the operator what the statement claims, which
+// :61: lines match the journal and which do not, and whether the
+// :62F: closing balance disagrees with the books. Re-importing
+// the same document returns the original report with
+// duplicate=true. A missing account, an empty document, a malformed
+// or unbalanced document, or a statement naming a different account
+// is a 400; a statement for an unknown account is a 422. There is
+// no special auth, like the /mt941/import endpoint.
+func (s *server) handleMT940Import(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT940Imports.Add(1)
+	var req mt940ImportRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.Account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account is required"})
+		return
+	}
+	if strings.TrimSpace(req.MT940) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mt940 document is required"})
+		return
+	}
+	report, err := s.ledgerFor(r).ImportMT940(req.Account, []byte(req.MT940))
+	if err != nil {
+		if errors.Is(err, ledger.ErrMT940UnknownAccount) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // fedNowPacs008Request is the POST /fednow/pacs008 body: the raw
 // pacs.008 (FIToFICstmrCdtTrf) XML document as text.
 type fedNowPacs008Request struct {
@@ -15154,6 +15199,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /ofx/import", s.handleOFXImport)
 	mux.HandleFunc("POST /camt052/import", s.handleCAMT052Import)
 	mux.HandleFunc("POST /mt941/import", s.handleMT941Import)
+	mux.HandleFunc("POST /mt940/import", s.handleMT940Import)
 	mux.HandleFunc("POST /camt053/import", s.handleCAMT053Import)
 	mux.HandleFunc("GET /accounts/{id}/trial-balance", s.handleTrialBalance)
 	mux.HandleFunc("GET /accounts/{id}/rollup", s.handleRollup)

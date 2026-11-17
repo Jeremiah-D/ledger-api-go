@@ -8922,6 +8922,34 @@ Semantics:
   credit-line concept, so the available balance is the honest
   closing balance.
 
+### SWIFT MT940 statement import (Go: `ledger.ImportMT940`)
+
+The inbound half of the MT940 lifecycle — the FIN customer
+statement the bank sends back, reconciled against the journal
+line by line: `POST /mt940/import` takes `{"account": "<id>",
+"mt940": "<raw FIN text>"}` and returns a pre-posting
+reconciliation report. Each `:61:` line is matched against the
+journal by its reference (the entry's idempotency key, else the
+journal entry ID, truncated to `16x`), with amount and direction
+compared per line; the `:62F:` closing balance is compared with
+the ledger balance folded at the end of the closing day. The
+parser is the strict inverse of `RenderMT940Statement` — the
+bare tag block `:20: :25: :28C: :60F: (:61: [:86:])* :62F: :64:`
+in canonical order, CRLF tolerated, no `:65:` (an MT940 statement
+carries no forward balance) — and a statement that does not foot
+(closing != opening + signed lines) or whose `:64:` does not
+restate `:62F:` is refused with a 400; a statement for an unknown
+account is a 422. The import is a draft, not a posting: nothing is
+booked, nothing is adjusted, the journal version does not move.
+Line and balance disagreements are reported in the report
+(`matched` / `mismatched` / `unmatched` per line,
+`balance_mismatches` for `:62F:`), never fail-closed. Re-importing
+the same document returns the original report with
+`duplicate: true` (SHA-256 dedup). A successful first import emits
+one `mt940_import_received` audit event (actor `ImportMT940`) —
+receipt only, no posting. MT941 reports balances only; MT940 is
+the statement that reconciles line by line.
+
 ### SWIFT MT941 balance report export (Go: `ledger.ExportMT941`)
 
 The same accounting fact as MT940, reported as a balance snapshot
