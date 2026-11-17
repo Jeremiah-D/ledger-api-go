@@ -5638,6 +5638,28 @@ expired and a cancelled one not-booked (both 422), an unknown ID
 404, and an illegal scope, an invalid custodian BIC, or a contract
 that cannot be rendered as a valid MT304 400.
 
+MT304 also arrives inbound: `POST /exports/mt304/apply` consumes
+a fund manager's FIN MT304 text (see `ledger.ApplyMT304`). The
+`:94A:` scope splits the handling: `ADVI` only records the advice
+— the registry entry plus one `mt304_advice_recorded` event — and
+books nothing, while `INST` books the instructed deal as a forward
+contract through `BookForward` (the `:20:` is the forward ID and
+the idempotency key) and emits `mt304_deal_booked`. Either way the
+fund (`:83a:`) and the manager (`:82a:`) must name the same From
+account, the broker (`:87a:`) a known To account, and the delivery
+(`:53a:`) and receiving (`:57a:`) banks that same To account; an
+unknown party fails closed (422), the `:32B:` bought amount must
+equal `floor(:33B: * :36:)` at the `:36:` rate, a `:20:` reused for
+different terms is refused, and a replay with the same terms
+returns the original contract with `duplicate` set and no second
+audit event. A past `:30V:` refuses `INST` (a forward settles in
+the future) while `ADVI` is still recorded, and settlement still
+runs only through `SettleForward`. Where MT300 is the bilateral
+confirmation — the trade's two parties confirming their own deal,
+matched and never booked — MT304 is the third-party instruction:
+the fund manager telling the custodian what deal to settle for the
+fund, so `INST` books and `ADVI` advises.
+
 A term deposit can be confirmed as a SWIFT FIN MT320 fixed
 loan/deposit confirmation: `GET
 /exports/mt320?deposit_id=<id>&counterparty_bic=<bic>` renders the

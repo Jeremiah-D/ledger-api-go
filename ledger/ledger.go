@@ -1019,6 +1019,17 @@ type Ledger struct {
 	// the hash-chained mt300_confirmation_matched audit events
 	// are the durable record.
 	mt300Confirmed map[string]mt300ConfirmationRecord
+	// mt304Applied maps a MT304 :20: reference to the outcome
+	// its first application booked or recorded (see
+	// mt304_inbound.go, LG-443): the replay guard for inbound
+	// MT304 third-party FX deal instructions, so a re-sent
+	// instruction returns the stored outcome instead of booking
+	// or recording twice — and a :20: reused for different terms
+	// is refused instead of silently overwritten. For ADVI scope
+	// this record IS the advice registry. In-memory only, like
+	// pain011Applied: the hash-chained mt304_deal_booked /
+	// mt304_advice_recorded audit events are the durable record.
+	mt304Applied map[string]mt304AppliedRecord
 	// mt103Applied maps a MT103 :20: reference to the outcome
 	// its first application booked or parked (see
 	// mt103_inbound.go, LG-441): the replay guard for inbound

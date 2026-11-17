@@ -304,6 +304,11 @@ type Metrics struct {
 	// third-party FX deal instruction export requests served,
 	// including rejected exports (see ledger.ExportMT304, LG-390).
 	MT304Exports atomic.Uint64
+	// MT304Applies counts POST /exports/mt304/apply SWIFT FIN
+	// MT304 third-party FX deal instruction apply requests
+	// served, including rejected requests (see
+	// ledger.ApplyMT304, LG-443).
+	MT304Applies atomic.Uint64
 	// MT101Exports counts GET /exports/mt101 SWIFT FIN MT101
 	// customer request-for-transfer export requests served,
 	// including rejected exports (see ledger.ExportMT101, LG-391).
@@ -1335,6 +1340,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/mt300/apply SWIFT FIN MT300 FX forward confirmation apply requests served, including rejected requests.", m.MT300Applies.Load())
 	writeCounter(&sb, "ledger_mt304_exports_total",
 		"Total GET /exports/mt304 SWIFT FIN MT304 third-party FX deal instruction exports served, including rejected exports.", m.MT304Exports.Load())
+	writeCounter(&sb, "ledger_mt304_applies_total",
+		"Total POST /exports/mt304/apply SWIFT FIN MT304 third-party FX deal instruction apply requests served, including rejected requests.", m.MT304Applies.Load())
 	writeCounter(&sb, "ledger_mt101_exports_total",
 		"Total GET /exports/mt101 SWIFT FIN MT101 customer request-for-transfer exports served, including rejected exports.", m.MT101Exports.Load())
 	writeCounter(&sb, "ledger_mt101_applies_total",

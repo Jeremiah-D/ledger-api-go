@@ -6486,6 +6486,78 @@ func (s *server) handleMT304Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT304Apply implements POST /exports/mt304/apply (LG-443):
+// applies a fund manager's SWIFT FIN MT304 third-party FX deal
+// instruction to the ledger — the inbound half of the MT304
+// lifecycle, the mirror of the outbound export (GET /exports/mt304,
+// LG-390). The body is the raw MT304 FIN text; its :94A: scope
+// splits the handling: ADVI only records the advice (the
+// mt304Applied registry entry plus one mt304_advice_recorded
+// event), while INST books the instructed deal as a forward
+// contract through BookForward — the :20: is the forward ID and
+// the idempotency key — and emits one mt304_deal_booked event.
+// Either way the parties must name known ledger accounts, the
+// fund (:83a:) and manager (:82a:) must be the same From account,
+// the :32B: bought amount must equal the floored conversion at
+// the :36: rate, and a :20: reused for different terms is refused.
+// A past :30V: refuses INST (a forward settles in the future)
+// while ADVI is still recorded; settlement still runs only
+// through SettleForward. A re-sent :20: with the same terms is an
+// idempotent no-op returning the stored outcome. Error mapping: a
+// malformed FIN document is a 400; an illegal :94A: scope, an
+// unknown party, a terms mismatch, a past :30V: on INST, or a
+// :20: reused for different terms is a 422. The operator identity
+// comes from the x-ledger-actor header, like the other operator
+// actions.
+func (s *server) handleMT304Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT304Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParseMT304(string(body))
+	if err != nil {
+		if errors.Is(err, ledger.ErrMT304Scope) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT304(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT304UnknownAccount),
+			errors.Is(err, ledger.ErrMT304TermsMismatch),
+			errors.Is(err, ledger.ErrForwardInvalid),
+			errors.Is(err, ledger.ErrForwardNotFound),
+			errors.Is(err, ledger.ErrForwardNotBooked),
+			errors.Is(err, ledger.ErrForwardExpired),
+			errors.Is(err, ledger.ErrTransferIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt304/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT304 instruction failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleMT210Export implements GET /exports/mt210 (LG-393): a SWIFT
 // FIN MT210 notice to receive for the next run of one active
 // transfer schedule (see ledger.ExportMT210). Query parameters:
@@ -15004,6 +15076,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt300", s.handleMT300Export)
 	mux.HandleFunc("POST /exports/mt300/apply", s.handleMT300Apply)
 	mux.HandleFunc("GET /exports/mt304", s.handleMT304Export)
+	mux.HandleFunc("POST /exports/mt304/apply", s.handleMT304Apply)
 	mux.HandleFunc("GET /exports/mt320", s.handleMT320Export)
 	mux.HandleFunc("GET /exports/mt321", s.handleMT321Export)
 	mux.HandleFunc("GET /exports/mt210", s.handleMT210Export)
