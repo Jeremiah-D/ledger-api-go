@@ -6605,6 +6605,83 @@ func (s *server) handleMT210Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(doc))
 }
 
+// handleMT210Apply implements POST /exports/mt210/apply (LG-448):
+// applies a counterparty's SWIFT FIN MT210 notice to receive to
+// the ledger — the inbound half of the MT210 lifecycle, the mirror
+// of the outbound export (GET /exports/mt210, LG-393), and the FIN
+// equivalent of the camt.057 inbound half (POST
+// /exports/camt057/apply, LG-420). The body is the raw MT210 FIN
+// text; its :20: reference is the MsgId (the replay key), its :21:
+// the NotificationID, its :25: the account to be credited (a
+// registered IBAN, else the account ID — never a fabricated BIC),
+// its :30: the expected value date (6!n), its :32B: the principal,
+// and its :50a:/:52a: exactly one ordering party, carried verbatim
+// as the debtor. The notice registers as an ExpectedReceipt in the
+// same registry camt.057 writes: only the forecast registers — no
+// journal rows, no version bump, no money moved — and the receipt
+// counts as the fifth intraday-liquidity source on its expected
+// value date. A re-sent :20: with the same notification is an
+// idempotent no-op; a :20: reused for a different notification is
+// a conflict. Error mapping: a malformed FIN document is a 400; an
+// unknown :25: account is a 404 (this endpoint names an account to
+// be credited, like camt.057's unknown Acct — unlike the MT320
+// apply endpoint, which maps an unknown deposit to 422); a :20:
+// reused for a different notification is a 422. Fail-closed
+// refusals — parse and apply alike — park in the repair queue when
+// the document names a notification, and the error body carries the
+// repair record ID. The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
+func (s *server) handleMT210Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT210Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	req, err := ledger.ParseMT210(string(body))
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if repairID, parkErr := l.ParkMT210Unparsed(string(body), actor); parkErr != nil {
+			log.Printf("ledger-api-go: POST /exports/mt210/apply: repair parking failed: %v", parkErr)
+		} else if repairID != "" {
+			errBody["repair_id"] = repairID
+		}
+		writeJSON(w, http.StatusBadRequest, errBody)
+		return
+	}
+	res, err := l.ApplyMT210(req, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrMT210UnknownAccount):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrMT210MsgIDConflict),
+			errors.Is(err, ledger.ErrInvalidMT210):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt210/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT210 notice failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleMT292Export implements GET /exports/mt292 (LG-435): a SWIFT
 // FIN MT292 cancellation of notification to receive for the next run
 // of one transfer schedule whose notification premise is dead (see
@@ -15306,6 +15383,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt321", s.handleMT321Export)
 	mux.HandleFunc("POST /exports/mt321/apply", s.handleMT321Apply)
 	mux.HandleFunc("GET /exports/mt210", s.handleMT210Export)
+	mux.HandleFunc("POST /exports/mt210/apply", s.handleMT210Apply)
 	mux.HandleFunc("GET /exports/mt292", s.handleMT292Export)
 	mux.HandleFunc("GET /exports/camt057", s.handleCAMT057Export)
 	mux.HandleFunc("GET /exports/camt058", s.handleCAMT058Export)

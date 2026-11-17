@@ -330,6 +330,10 @@ type Metrics struct {
 	// to receive export requests served, including rejected exports
 	// (see ledger.ExportMT210, LG-393).
 	MT210Exports atomic.Uint64
+	// MT210Applies counts POST /exports/mt210/apply SWIFT FIN
+	// MT210 notice to receive apply requests served, including
+	// rejected requests (see ledger.ApplyMT210, LG-448).
+	MT210Applies atomic.Uint64
 	// MT292Exports counts GET /exports/mt292 SWIFT FIN MT292
 	// cancellation of notification to receive export requests
 	// served, including rejected exports (see ledger.ExportMT292,
@@ -1368,6 +1372,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/mt320/apply SWIFT FIN MT320 fixed loan/deposit confirmation apply requests served, including rejected requests.", m.MT320Applies.Load())
 	writeCounter(&sb, "ledger_mt210_exports_total",
 		"Total GET /exports/mt210 SWIFT FIN MT210 notice to receive exports served, including rejected exports.", m.MT210Exports.Load())
+	writeCounter(&sb, "ledger_mt210_applies_total",
+		"Total POST /exports/mt210/apply SWIFT FIN MT210 notice to receive apply requests served, including rejected requests.", m.MT210Applies.Load())
 	writeCounter(&sb, "ledger_mt292_exports_total",
 		"Total GET /exports/mt292 SWIFT FIN MT292 cancellation of notification to receive exports served, including rejected exports.", m.MT292Exports.Load())
 	writeCounter(&sb, "ledger_mt192_exports_total",

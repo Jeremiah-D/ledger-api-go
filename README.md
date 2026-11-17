@@ -6534,6 +6534,37 @@ byte-identical until a run fires (then `RunSeq` advances and
 `:21:` / `:30:` move with it). `GET /metrics` counts exports as
 `ledger_mt210_exports_total`.
 
+The inbound direction is the mirror: `POST /exports/mt210/apply`
+consumes a counterparty's SWIFT FIN MT210 notice to receive (see
+`ledger.ParseMT210` / `ledger.ApplyMT210`) — the FIN equivalent
+of the camt.057 inbound half, registering into the same
+`ExpectedReceipt` registry. The body is the raw FIN text; `:20:`
+is the MsgId (the replay key), `:21:` the NotificationID, `:25:`
+the account to be credited (a registered IBAN, else the account
+ID — never a fabricated BIC), `:30:` the expected value date
+(6!n `YYMMDD`, rendered `YYYY-MM-DD`), `:32B:` the principal
+only (a per-run fee never reduces it), and `:50a:` / `:52a:`
+exactly one ordering party — `:52A:` the BIC when the ordering
+party is a financial institution, else `:50D:` the ordering
+customer named by account ID — carried verbatim as the debtor.
+Only the forecast registers: no journal rows, no version bump, no
+money moved — the registered receipt counts as the fifth
+intraday-liquidity source (`notified_inflow_cents`) on its
+expected value date and nowhere else, so it can never
+double-count against a later pacs.008/pacs.009 receipt of the same
+money. A re-sent `:20:` with the same notification is an
+idempotent no-op; a `:20:` reused for a different notification is
+a conflict (422). A malformed FIN document is a 400, an unknown
+`:25:` account a 404 — like camt.057's unknown `Acct`, not like
+MT320's unknown deposit (422): the notice names an account to be
+credited, not a contract to match — and fail-closed refusals park
+in the repair queue, the error body carrying the repair record ID.
+No cancellation is built here: a counterparty's camt.058 advice
+already cancels `ExpectedReceipt` records by MsgId, so an MT210
+registration is naturally cancellable the same way a camt.057 one
+is. `GET /metrics` counts applies as
+`ledger_mt210_applies_total`.
+
 A sent MT210 can be withdrawn with a SWIFT FIN MT292
 cancellation of notification to receive: `GET
 /exports/mt292?schedule_id=<id>&servicing_bic=<bic>&original_date=<YYYY-MM-DD>&reason=<text>`
