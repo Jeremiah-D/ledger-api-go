@@ -25,9 +25,14 @@ import (
 //
 // The export is the cancellation *request*, not the cancellation
 // itself: the schedule keeps its status until the bank confirms,
-// and the ledger parses no MT292 receipt — whether the bank
-// honours the request is confirmed by its own reply, outside this
-// ledger. Cancelling the notification is not cancelling the plan:
+// and the ledger parses no reply to this export — whether the
+// bank honours the request is confirmed by its own reply,
+// outside this ledger. The reverse direction is a different
+// flow: a counterparty's MT292 cancelling one of its MT210
+// notices to this ledger is parsed and applied by ParseMT292 /
+// ApplyMT292 (see mt292_inbound.go, LG-452) — that one withdraws
+// a notification this ledger registered, it is not a reply to
+// this export. Cancelling the notification is not cancelling the plan:
 // the schedule's state machine does not move, and a paused plan
 // resumes with its next run intact. To correct a notice instead
 // of withdrawing it, pause the plan, cancel the old notice,

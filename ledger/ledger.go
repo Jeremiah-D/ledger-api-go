@@ -940,6 +940,17 @@ type Ledger struct {
 	// camt057_notification_cancelled audit events are the
 	// durable record.
 	camt058Applied map[string]CAMT058ApplyResult
+	// mt292Applied maps an inbound MT292 :20: reference to the
+	// apply result its first application returned (see
+	// mt292_inbound.go, LG-452): the replay guard for inbound
+	// cancellation requests, so a re-sent request returns the
+	// stored result instead of cancelling twice — and so a
+	// second request on an already-cancelled notification
+	// converges the same way. In-memory only, like
+	// camt058Applied: the hash-chained
+	// mt210_notification_cancelled audit events are the
+	// durable record.
+	mt292Applied map[string]MT292ApplyResult
 	// pain010Applied maps a pain.010 GrpHdr MsgId to the
 	// amendment its first application applied (see
 	// pain010_inbound.go, LG-425): the replay guard for inbound
@@ -2164,7 +2175,10 @@ func New(opts ...Option) *Ledger {
 		expectedReceipts: make(map[string]ExpectedReceipt),
 		// LG-421: the camt.058 advice registry starts empty;
 		// records land as cancellation advices apply.
-		camt058Applied:     make(map[string]CAMT058ApplyResult),
+		camt058Applied: make(map[string]CAMT058ApplyResult),
+		// LG-452: the MT292 request registry starts empty;
+		// records land as cancellation requests apply.
+		mt292Applied:       make(map[string]MT292ApplyResult),
 		captureKeys:        make(map[string]CaptureReceipt),
 		partialCaptureKeys: make(map[string]PartialCaptureReceipt),
 		termDeposits:       make(map[string]TermDeposit),

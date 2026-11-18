@@ -6596,12 +6596,31 @@ pause the plan, export the MT292 to withdraw the old notice,
 resume the plan, and issue a new MT210. The export is the
 cancellation request, not the cancellation itself — the schedule
 keeps its status, and whether the bank honours the request is
-confirmed by its own reply, which this ledger does not parse.
+confirmed by its own reply, which is not an inbound MT292 to this
+ledger (the reverse direction is parsed, below).
 One MT292 cancels one run: the next run only. Like MT210, the
 export is read-only and repeat exports are byte-identical (`:20:`
 pinned to schedule plus `RunSeq`, `:11S:` pinned to the
 caller-supplied `original_date`). `GET /metrics` counts exports
 as `ledger_mt292_exports_total`.
+
+The reverse direction — a counterparty's MT292 cancelling one of
+its MT210 notices to this ledger — is `POST /exports/mt292/apply`
+with a JSON body `{"mt292": "<FIN text>"}` (see
+`ledger.ParseMT292`/`ApplyMT292`), the FIN twin of the camt.058
+apply below: `:20:` is the request's own reference (the replay
+key), `:21:` the original MT210's `:20:`, `:11S:` must read `210`
+plus the original issue date (any other type is refused
+fail-closed — the ledger only ever registers MT210 notifications),
+and `:79:` is carried verbatim as the cancellation reason.
+Applying marks the stored receipt cancelled — no journal rows, no
+version bump, no money moved — and the cancelled notice stops
+counting in intraday liquidity; a re-sent `:20:` is an idempotent
+no-op and a `:20:` reused for a different original is a conflict.
+A malformed document is 400, an unknown `:21:` original is 422
+(parked in the repair queue, the error body carrying the repair
+record ID), and a conflict is 422. `GET /metrics` counts applies
+as `ledger_mt292_applies_total`.
 
 The same notice exists in ISO 20022 syntax: `GET
 /exports/camt057?schedule_id=<id>&servicing_bic=<bic>` renders
