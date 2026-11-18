@@ -9118,7 +9118,7 @@ target is a 400. The same document is available over HTTP:
 `POST /mt941/import` with `{"account": "<id>", "mt941": "<FIN text>"}`
 
 There is deliberately no `:61:` matching (MT941 carries no detail
-lines), no MT942 inbound, and no new GET endpoint.
+lines) and no new GET endpoint.
 
 ### SWIFT MT942 interim transaction report export (Go: `ledger.ExportMT942`)
 
@@ -9166,6 +9166,43 @@ Semantics:
   as the debit leg reads `C` (money in), as the credit leg `D`
   (money out); amounts are absolute (`1500,00` with a comma decimal
   separator), the sign lives in the `C`/`D` mark.
+
+### SWIFT MT942 interim transaction report import (Go: `ledger.ImportMT942`)
+
+The inbound half of the MT942 lifecycle — the FIN version of the
+camt.052 import for the intraday side: where `POST /mt941/import`
+consumes the FIN balance report, `POST /mt942/import` consumes the
+FIN interim transaction report, and a bank's MT942 becomes a
+pre-posting reconciliation report, the "bank says vs ledger
+computes" external reconciliation for an account's intraday
+transactions. `ledger.ParseMT942` is the inverse of
+`RenderMT942Statement` (same tag block, same canonical order, same
+self-consistency: the `:90D:`/`:90C:` trailers must foot the `:61:`
+lines), and `ledger.ImportMT942` matches every `:61:` line against
+the journal by its reference and — when the report names a currency
+through `:34F:` — compares the `:90D:`/`:90C:` trailers with the
+journal's debit/credit totals folded over the report window (from
+the earliest `:61:` value date to the `:13D:` report instant). A
+line that disagrees with its journal row lands in the report as
+mismatched or unmatched, and a trailer that disagrees with the
+journal fold lands as a `MT942SummaryMismatch` (`reported_cents`
+vs `ledger_cents`, side `D` or `C`); neither ever fails the import.
+The `:34F:` floor limit and the per-line `:86:` text ride along in
+the report verbatim. Draft-only: the import writes no journal rows,
+enters no hash chain, bumps no version, and never adjusts the
+ledger — a mismatch is evidence for the operator, and any
+adjustment stays a human decision. Re-importing the same document
+returns the original report with `duplicate: true` (SHA-256
+idempotency, in-memory registry). The `:25:` account must name a
+known ledger account — the internal ID, an `mt942`-system external
+identifier (usually the IBAN), or a registered IBAN — an unknown
+account is refused fail-closed with 422, and a report naming a
+different account than the import target is a 400. A report
+carries no currency except through `:34F:`; without it the lines
+match currency-agnostically and no trailer fold is computed. The
+same document is available over HTTP:
+
+`POST /mt942/import` with `{"account": "<id>", "mt942": "<FIN text>"}`
 
 ### SWIFT MT950 interbank statement export (Go: `ledger.ExportMT950`)
 
