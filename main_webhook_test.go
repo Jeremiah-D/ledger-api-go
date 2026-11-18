@@ -96,6 +96,28 @@ func waitForMainWebhook(t *testing.T, d *ledger.WebhookDispatcher, cond func() b
 	t.Fatalf("timed out: %s", msg)
 }
 
+// waitForMainDeliveryRecord polls GET /webhooks/deliveries until its single
+// record reaches the given status. The stub counts a delivery the moment
+// the request arrives, but the worker marks the record delivered only
+// after post() returns — under load a GET issued right after the stub
+// count can still see "pending", so a test that asserts on the record
+// must wait on the record, not on the stub count (LG-452 CI red,
+// 2026-11-18: record still pending/attempts=1 at the first GET).
+func waitForMainDeliveryRecord(t *testing.T, srv *httptest.Server, status string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		_, body := getJSON(t, srv.URL+"/webhooks/deliveries")
+		if recs, ok := body["deliveries"].([]any); ok && len(recs) == 1 {
+			if rec, ok := recs[0].(map[string]any); ok && rec["status"] == status {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out: delivery record did not reach %q", status)
+}
+
 func TestHandleWebhookDeliveries(t *testing.T) {
 	stub := &webhookStubMain{}
 	recv := httptest.NewServer(stub.handler(200))
@@ -113,6 +135,7 @@ func TestHandleWebhookDeliveries(t *testing.T) {
 	}
 
 	waitForMainWebhook(t, d, func() bool { return stub.delivered() == 1 }, "transfer_posted webhook")
+	waitForMainDeliveryRecord(t, srv, ledger.WebhookDeliveryDelivered)
 
 	stub.mu.Lock()
 	typ, sig, keyID := stub.types[0], stub.sigs[0], stub.keyIDs[0]
