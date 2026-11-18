@@ -1783,6 +1783,13 @@ type Ledger struct {
 	// snapshots, so a restore re-imports a statement as new
 	// rather than replaying the stored report.
 	mt950Imports map[string]*MT950ImportReport
+	// mt900910Imports is the SWIFT FIN MT900/MT910 confirmation
+	// import registry (see mt900910_import.go, LG-451): document
+	// SHA-256 (hex) -> import report, for duplicate-import
+	// idempotency. In-memory only: it does not round-trip through
+	// snapshots, so a restore re-imports a confirmation as new
+	// rather than replaying the stored report.
+	mt900910Imports map[string]*MT900910ImportReport
 	// statementMatches is the statement-line match registry (see
 	// statement_match.go, LG-107): statement line ID
 	// ("ofx/<FITID>" / "camt053/<stmtID>/<seq>", see DraftEntry.ID) ->
@@ -2274,6 +2281,7 @@ func New(opts ...Option) *Ledger {
 		mt940Imports:                make(map[string]*MT940ImportReport),
 		mt942Imports:                make(map[string]*MT942ImportReport),
 		mt950Imports:                make(map[string]*MT950ImportReport),
+		mt900910Imports:             make(map[string]*MT900910ImportReport),
 		statementMatches:            make(map[string]*statementMatchRecord),
 		statementMatchWindow:        DefaultOFXMatchWindow,
 		painTransfers:               make(map[string]PainTransfer),

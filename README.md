@@ -8065,6 +8065,16 @@ Go: `ledger.ApplyMT202` / `ledger.MT202ApplyResult`。
 Go: `ledger.MT900910` / `ledger.ParseMT900910` / `ledger.ExportMT900910` /
 `ledger.Ledger.ExportMT900910ForPayout`。
 
+入站（LG-451）：`ledger.Ledger.ImportMT900910` 解析银行发来的
+MT900/MT910 确认、返回预入账核对报告——单笔已结算 movement 按 `:21:`
+相关引用（三形态键：分录 `mt940LineRef` 原样、剥离 `mt103-`/`mt202-`
+前缀、payout 派生键）配金额与方向，`:21:` 为 `NONREF` 时退化为金
+额+币种+方向+起息日单候选搜索；`:32A:` 起息日在引用路径下只原样载
+入报告、不作匹配键；一切不入账、不进哈希链、不发审计事件，同文档
+重导返回原报告且 `duplicate=true`。HTTP: `POST /mt900910/import`，
+JSON 体 `{"account": ..., "mt900910": "<FIN 文本>"}`；错账户/空文档/
+畸形文档 → 400，未知账户 → 422。
+
 HTTP: `POST /exports/mt900910`（LG-377）以 JSON 导出已结算付款的确认：
 
 ```json
