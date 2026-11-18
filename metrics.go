@@ -414,6 +414,9 @@ type Metrics struct {
 	// MT942Imports counts POST /mt942/import requests served (all
 	// attempts, including duplicates and rejected payloads; LG-449).
 	MT942Imports atomic.Uint64
+	// MT950Imports counts POST /mt950/import requests served (all
+	// attempts, including duplicates and rejected payloads; LG-450).
+	MT950Imports atomic.Uint64
 	// CAMT053Exports counts GET /exports/camt053 ISO 20022 camt.053
 	// bank statement export requests served, including rejected
 	// exports (see ledger.ExportCAMT053, LG-381).
@@ -1417,6 +1420,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /mt940/import SWIFT FIN MT940 customer statement pre-posting imports served, including duplicates and rejected payloads.", m.MT940Imports.Load())
 	writeCounter(&sb, "ledger_mt942_imports_total",
 		"Total POST /mt942/import SWIFT FIN MT942 interim transaction report pre-posting imports served, including duplicates and rejected payloads.", m.MT942Imports.Load())
+	writeCounter(&sb, "ledger_mt950_imports_total",
+		"Total POST /mt950/import SWIFT FIN MT950 interbank statement pre-posting imports served, including duplicates and rejected payloads.", m.MT950Imports.Load())
 	writeCounter(&sb, "ledger_camt053_exports_total",
 		"Total GET /exports/camt053 ISO 20022 camt.053 bank statement exports served, including rejected exports.", m.CAMT053Exports.Load())
 	writeCounter(&sb, "ledger_camt054_exports_total",

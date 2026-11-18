@@ -9232,6 +9232,45 @@ when one exists (usually the account number at the correspondent
 bank); a mapping declared under the `mt940` system does not apply
 here, since the two messages go to different recipients.
 
+### SWIFT MT950 interbank statement import (Go: `ledger.ImportMT950`)
+
+The inbound half of the MT950 lifecycle — the FIN version of the
+camt.053 import for the interbank side: where `POST /mt940/import`
+consumes the customer statement, `POST /mt950/import` consumes the
+interbank statement, and a correspondent bank's MT950 becomes a
+pre-posting reconciliation report, the "bank says vs ledger
+computes" external reconciliation for an account's statement
+window. `ledger.ParseMT950` is the inverse of
+`RenderMT950Statement` (same tag block, same canonical order, same
+self-consistency: the `:62F:` closing balance must equal opening +
+signed lines, and both `:64:` and `:65:` must restate `:62F:` with
+the same signed amount and the same currency), and
+`ledger.ImportMT950` matches every `:61:` line against the journal
+by its reference and compares the `:60F:` opening balance with the
+journal balance folded at the start of the opening day and the
+`:62F:` closing balance with the journal balance folded at the end
+of the closing day. A line that disagrees with its journal row
+lands in the report as mismatched or unmatched, and a balance that
+disagrees with the journal fold lands as a `MT950BalanceMismatch`
+(`reported_cents` vs `ledger_cents`); neither ever fails the
+import. The per-line `:86:` text and the trailing `:86:` owner info
+ride along in the report verbatim. Draft-only: the import writes
+no journal rows, enters no hash chain, bumps no version, and never
+adjusts the ledger — a mismatch is evidence for the operator, and
+any adjustment stays a human decision. Re-importing the same
+document returns the original report with `duplicate: true`
+(SHA-256 idempotency, in-memory registry). The `:25:` account must
+name a known ledger account — the internal ID, an `mt950`-system
+external identifier (usually the account number at the
+correspondent bank), or a registered IBAN — an unknown account is
+refused fail-closed with 422, and a statement naming a different
+account than the import target is a 400. A statement carries no
+currency except through its balance tags; all of them must name
+one currency, and the lines match in that currency. The same
+document is available over HTTP:
+
+`POST /mt950/import` with `{"account": "<id>", "mt950": "<FIN text>"}`
+
 ### `GET /accounts/{id}/statement` — JSON account statement
 
 A bank-style account statement for one account over the half-open
