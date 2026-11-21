@@ -1014,6 +1014,27 @@ type Ledger struct {
 	// replay, and a re-sent query parks again — or answers, once
 	// the payout exists.
 	mt195Queries map[string]mt195QueryRecord
+	// mt190Applied maps a MT190 :20: reference to the charge
+	// advice its first application recorded (see
+	// mt190_inbound.go, LG-454): the replay guard for inbound
+	// MT190 charge advices, so a re-sent advice returns the
+	// stored outcome instead of recording twice — and a :20:
+	// reused for different terms is refused instead of
+	// silently overwritten. In-memory only, like mt192Applied:
+	// the hash-chained mt190_charges_advised audit events are
+	// the durable record. An advice parked in the repair queue
+	// (unknown :21:, or a :32A: currency that disagrees with
+	// the payout's) records nothing here: it has no advice to
+	// replay, and a re-sent advice parks again — or records,
+	// once the payout exists or the currency agrees.
+	mt190Applied map[string]mt190AppliedRecord
+	// payoutCharges maps a payout ID to the charge advices
+	// recorded against it, in apply order (see
+	// mt190_inbound.go, LG-454): the per-payout evidence list
+	// for correspondent-bank fees. In-memory only, like
+	// mt190Applied: the hash-chained mt190_charges_advised
+	// audit events are the durable record.
+	payoutCharges map[string][]PayoutChargeAdvice
 	// mt101Applied maps a MT101 :20: reference plus :21:
 	// transfer ID to the outcome its first application booked
 	// or parked (see mt101_inbound.go, LG-439): the replay guard

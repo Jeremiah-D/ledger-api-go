@@ -8007,6 +8007,39 @@ Go: `ledger.ExportMT192` / `ledger.MT192ExportOptions`。
   审计事件），同 `:20:` 异 terms `422`。未知 payout `422`（沿出站
   错误）、报文非法 `400`。计数器 `ledger_mt192_applies_total`。
 
+### `POST /exports/mt190/apply` — SWIFT FIN MT190 费用通知入站登记（LG-454）
+
+代理行对一笔已发 MT103 收了手续费时，发 SWIFT FIN `MT190`
+（Advice of Charges, Interest and Other Adjustments）通知本账本：
+报文含 block 1（发送方 LT 地址）、block 2（应用头 `I190`、接收方
+LT 地址）、block 3（`{108:MUR}`）与 block 4 字段集 `:20:` / `:21:`
+/ `:32A:` / `:71B:`。`:20:` 为通知自身引用（幂等键），`:21:` 为被
+收费原付款的 `:20:`（payout ID），`:32A:` 为带值日的收费金额
+（值日/币种/金额，6!n3!a15d），`:71B:` 为费用明细原文（verbatim
+携带、不解释、不翻译）。字段号核对：`:32A:` 含值日（Oracle
+FLEXCUBE Advice of Charges 表列“Value Date, Currency,
+Amount (32)”）；`:32B:`（仅币种+金额、无值日）不在核心集内——无
+值日的收费通知无法钉到值日，拒而不静默丢弃日期维度；`:71B:`
+6*35x（SWIFT MT190 字段表列 Details of Charges）；`:25:`/`:52a:`/
+`:57a:`/`:72:` 同样不在核心集内——账本已知 payout 账户、路由信息
+不是证据，一律拒。
+
+语义：通知只记证据、不记账——登记进 payout 的费用通知列表
+（`GetPayoutCharges` 按 payout ID 取），不贴分录、不改余额、不
+改 payout 状态、不推进 gpi；收费是代理行的费用，与 payout 本身
+金额无关，不拿两者比对。币种须与原付款一致（不一致进 repair
+queue，`invalid_format`，绝不静默换算）；金额须 > 0（解析层拒，
+非正金额不是可路由的报文）。未知 `:21:` fail-closed 进 repair
+queue（`unknown_route`，camt.055 形态：结果带 repair ID + 422）。
+审计记一条 `mt190_charges_advised`（msg_id/payout_id/currency/
+amount_cents/value_date，`:71B:` 原文附后）。同 `:20:` 同 terms
+复放幂等 no-op（不重复记审计事件、不重复登记），同 `:20:` 异
+terms `422`。报文非法 `400`。计数器
+`ledger_mt190_applies_total`。
+
+Go: `ledger.ParseMT190` / `ledger.ApplyMT190` /
+`ledger.GetPayoutCharges`。
+
 ### `POST /exports/mt195/apply` — SWIFT FIN MT195 付款查询入站登记（LG-453）
 
 代理行对一笔已发 MT103 有疑问（“这笔款到哪了”）时，发 SWIFT FIN
