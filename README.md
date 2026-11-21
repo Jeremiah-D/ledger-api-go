@@ -8040,6 +8040,44 @@ terms `422`。报文非法 `400`。计数器
 Go: `ledger.ParseMT190` / `ledger.ApplyMT190` /
 `ledger.GetPayoutCharges`。
 
+### `POST /exports/mt191/apply` — SWIFT FIN MT191 费用支付请求入站登记（LG-455）
+
+代理行要求本账本为一笔已发 MT103 支付一笔手续费时，发 SWIFT
+FIN `MT191`（Request for Payment of Charges, Interest and
+Other Expenses）——与 MT190 相对：MT190 是“已扣费”的通知，
+MT191 是“请付费”的请求，钱还没动。报文含 block 1（发送方 LT
+地址）、block 2（应用头 `I191`、接收方 LT 地址）、block 3
+（`{108:MUR}`）与 block 4 字段集 `:20:` / `:21:` / `:32B:` /
+`:71B:`。`:20:` 为请求自身引用（幂等键），`:21:` 为被收费原付
+款的 `:20:`（payout ID），`:32B:` 为请求金额（币种/金额，
+3!a15d，无值日——请求没有值日可钉，`:32A:` 不在核心集内），
+`:71B:` 为费用明细原文（verbatim 携带、不解释、不翻译）。
+字段号核对：Oracle SWIFT Messages 指南 §12.1.7 / §14.1.7（两版
+一致）MT191 字段表——`:20:` 16x M、`:21:` 16x M、`:32B:`
+3!a15d M、`:52a:` A or D O、`:57a:` A, B or D O、`:71B:`
+6*35x M、`:72:` 6*35x O；`:71B:` 在 MT191 里是强制（M），与
+MT190 的可选不同——不写明收费事由的请求不是操作员能决策的账
+单；`:25:`/`:32a:`/`:52a:`/`:57a:`/`:72:` 同样不在核心集内，
+一律拒。CBPR+ 路线图把 MT191 配对到 camt.106（Charges Payment
+Request）。
+
+语义：请求只登记、不付款——登记进 payout 的费用请求列表
+（`GetPayoutChargeRequests` 按 payout ID 取），状态恒为
+`pending`，进待操作员决策队列；不贴分录、不改余额、不改 payout
+状态、不推进 gpi；凭对方一句话动账是错的，付款（如有）是另一
+条独立指令。币种须与原付款一致（不一致进 repair queue，
+`invalid_format`，绝不静默换算）；金额须 > 0（解析层拒，非正
+金额不是可路由的报文）。未知 `:21:` fail-closed 进 repair
+queue（`unknown_route`，camt.055 形态：结果带 repair ID +
+422）。审计记一条 `mt191_charges_requested`（msg_id/payout_id/
+currency/amount_cents/status，`:71B:` 原文附后）。同 `:20:` 同
+terms 复放幂等 no-op（不重复记审计事件、不重复登记），同 `:20:`
+异 terms `422`。报文非法 `400`。计数器
+`ledger_mt191_applies_total`。
+
+Go: `ledger.ParseMT191` / `ledger.ApplyMT191` /
+`ledger.GetPayoutChargeRequests`。
+
 ### `POST /exports/mt195/apply` — SWIFT FIN MT195 付款查询入站登记（LG-453）
 
 代理行对一笔已发 MT103 有疑问（“这笔款到哪了”）时，发 SWIFT FIN
