@@ -8078,6 +8078,43 @@ terms 复放幂等 no-op（不重复记审计事件、不重复登记），同 `
 Go: `ledger.ParseMT191` / `ledger.ApplyMT191` /
 `ledger.GetPayoutChargeRequests`。
 
+### `POST /exports/mt290/apply` — SWIFT FIN MT290 费用通知入站登记（LG-456）
+
+代理行对一笔已发 MT202 收了手续费时，发 SWIFT FIN `MT290`
+（Advice of Charges, Interest and Other Expenses）通知本账本——
+MT190 的 MT202 侧对偶：MT190 是 MT103 侧的费用通知，MT290 是
+MT202 侧的同款通知。报文含 block 1（发送方 LT 地址）、block 2
+（应用头 `I290`、接收方 LT 地址）、block 3（`{108:MUR}`）与
+block 4 字段集 `:20:` / `:21:` / `:32B:` / `:71B:`。`:20:` 为通
+知自身引用（幂等键），`:21:` 为被收费原 MT202 的 `:20:`（MT202
+ID），`:32B:` 为收费金额（币种/金额，3!a15d，无值日——值日钉在
+原 MT202 的 `:32A:` 上，通知本身没有值日可钉，`:32A:` 不在核心
+集内），`:71B:` 为费用明细原文（verbatim 携带、不解释、不翻
+译）。字段号核对：ISO 15022 User Handbook MT n90（Advice of
+Charges, Interest and Other Adjustments）字段表——`:20:` 16x M、
+`:21:` 16x M、`:25:` 35x M、`:32a:` C or D M、`:52a:` A or D O、
+`:71B:` 6*35x M、`:72:` 6*35x O；MT290 取 `:32a:` 的 D 选项
+（`:32B:`）；`:71B:` 在 MT290 里是强制（M），与 MT190 的可选不
+同——与 MT191 的强制一致，不写明收费事由的通知不是操作员能用的
+证据；`:25:`/`:52a:`/`:57a:`/`:72:` 同样不在核心集内，一律拒。
+CBPR+ 路线图把 MT190 与 MT290 一并配对到 camt.105。
+
+语义：通知只记证据、不记账——登记进 MT202 的费用通知列表
+（`GetMT202Charges` 按 MT202 ID 取），不贴分录、不改余额、不改
+MT202 状态；收费是代理行的费用，与 MT202 本身金额无关，不拿两
+者比对。币种须与原 MT202 一致（不一致进 repair queue，
+`invalid_format`，绝不静默换算）；金额须 > 0（解析层拒，非正金
+额不是可路由的报文）。未知 `:21:` fail-closed 进 repair
+queue（`unknown_route`，camt.055 形态：结果带 repair ID +
+422）。审计记一条 `mt290_charges_advised`（msg_id/mt202_ref/
+currency/amount_cents，`:71B:` 原文附后，无 value_date）。
+同 `:20:` 同 terms 复放幂等 no-op（不重复记审计事件、不重复登
+记），同 `:20:` 异 terms `422`。报文非法 `400`。计数器
+`ledger_mt290_applies_total`。
+
+Go: `ledger.ParseMT290` / `ledger.ApplyMT290` /
+`ledger.GetMT202Charges`。
+
 ### `POST /exports/mt195/apply` — SWIFT FIN MT195 付款查询入站登记（LG-453）
 
 代理行对一笔已发 MT103 有疑问（“这笔款到哪了”）时，发 SWIFT FIN
