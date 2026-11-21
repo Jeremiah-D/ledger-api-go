@@ -1001,6 +1001,19 @@ type Ledger struct {
 	// the hash-chained cancellation_requested and
 	// mt192_request_applied audit events are the durable record.
 	mt192Applied map[string]mt192AppliedRecord
+	// mt195Queries maps a MT195 :20: reference to the query and
+	// the answer snapshot its first application recorded (see
+	// mt195_inbound.go, LG-453): the replay guard for inbound
+	// MT195 queries, so a re-sent query returns the stored
+	// answer instead of answering twice — and a :20: reused for
+	// different terms is refused instead of silently
+	// overwritten. In-memory only, like mt192Applied: the
+	// hash-chained mt195_query_received audit events are the
+	// durable record. A query parked in the repair queue
+	// (unknown :21:) records no answer here: it has none to
+	// replay, and a re-sent query parks again — or answers, once
+	// the payout exists.
+	mt195Queries map[string]mt195QueryRecord
 	// mt101Applied maps a MT101 :20: reference plus :21:
 	// transfer ID to the outcome its first application booked
 	// or parked (see mt101_inbound.go, LG-439): the replay guard

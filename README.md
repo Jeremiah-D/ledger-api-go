@@ -8007,6 +8007,36 @@ Go: `ledger.ExportMT192` / `ledger.MT192ExportOptions`。
   审计事件），同 `:20:` 异 terms `422`。未知 payout `422`（沿出站
   错误）、报文非法 `400`。计数器 `ledger_mt192_applies_total`。
 
+### `POST /exports/mt195/apply` — SWIFT FIN MT195 付款查询入站登记（LG-453）
+
+代理行对一笔已发 MT103 有疑问（“这笔款到哪了”）时，发 SWIFT FIN
+`MT195`（Queries）问本账本：报文含 block 1（发送方 LT 地址）、
+block 2（应用头 `I195`、接收方 LT 地址）、block 3
+（`{108:MUR}`）与 block 4 字段集 `:20:` / `:21:` / `:75:` /
+`:79:`。`:20:` 为查询自身引用（幂等键），`:21:` 为被查询原报文
+的 `:20:`（payout ID），`:75:` 为编码问题（STAT/DUPL/PRTY 等，
+verbatim 携带、不解释），`:79:` 为自由格式问题描述。字段号核对：
+`:75:` 6*35x、`:79:` 50*35x（MT199 叙述同形）；规则 C1（`:79:` 与
+原报文强制字段复印件二选一）中复印件形态不解析、作未知字段拒；
+`:77A:`（改优先级）与 `:11S:` 不在核心集内——改优先级是另一动作、
+值日取自账本而非报文，一律拒。
+
+语义：查询只登记、不推进状态——应答只取账本事实：payout 状态、
+MT103 值日（提交时、再批准时、再创建时）与有 gpi track 时的当前
+状态；不移动资金、不改 payout 状态机、不推进 gpi、不渲染 MT196
+答复报文（应答只登记、MT196 导出另立项）。未知 `:21:` fail-closed
+进 repair queue（`unknown_route`，沿 camt.055 形态：结果带 repair
+ID、错误仍为 `ErrMT103PayoutNotFound`），`422`；已停车的查询无应
+答快照可复放，重发再停车——或 payout 到账后重发即作答。同 `:20:`
+同 terms 复放幂等 no-op 回既有应答快照（不重复记审计事件），同
+`:20:` 异 terms `422`。审计 `mt195_query_received`（details 含
+msg_id / related_reference / payout_id / gpi_status /
+value_date）。解析沿 MT192 严格先例（块结构/字段序/全字段校验、
+CRLF 容忍、块外字段拒、尾换行容忍，`:75:` / `:79:` 可跨行，至少
+其一必填）。计数器 `ledger_mt195_applies_total`。
+
+Go: `ledger.ParseMT195` / `ledger.ApplyMT195` / `ledger.GetMT195Query`。
+
 ### SWIFT FIN MT202 银行间汇款（库级解析 + 导出）
 
 银行间资金划转用 SWIFT FIN `MT202`（general financial institution
