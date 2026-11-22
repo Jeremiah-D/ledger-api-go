@@ -9298,7 +9298,9 @@ the same document returns the original report with
 `duplicate: true` (SHA-256 dedup). A successful first import emits
 one `mt940_import_received` audit event (actor `ImportMT940`) —
 receipt only, no posting. MT941 reports balances only; MT940 is
-the statement that reconciles line by line.
+the statement that reconciles line by line. The request side —
+asking the bank for a statement now instead of waiting for the
+timetable — is `POST /exports/mt920` (see the MT920 section).
 
 ### SWIFT MT941 balance report export (Go: `ledger.ExportMT941`)
 
@@ -9527,6 +9529,67 @@ one currency, and the lines match in that currency. The same
 document is available over HTTP:
 
 `POST /mt950/import` with `{"account": "<id>", "mt950": "<FIN text>"}`
+
+### SWIFT FIN MT920 报表索要报文（HTTP 导出，LG-459）
+
+类别 9（现金管理与客户状态）的报表索要请求用 SWIFT FIN `MT920`
+渲染：账本已有 MT940/MT941/MT942/MT950 的导入（回执面），从未向
+开户行索要过报表——MT920 正是索要面：向开户行说“现在发一份报表
+来”，而不等约定的报送时刻。字段表经两源核对：Payments Signal
+“MT920: asking the bank for a report now”与“MT920 — message
+reference”（`:12:` 只能是 940/941/942/950 四种、`:25:` 为索要报表
+的账户、`:20:` 为本次请求的自有引用、回执在 `:21:` 原样引回、942
+序列必随同一序列的 `:34F:`）与 docs.rs swift-mt-message
+`MT920Sequence`（`{field_12, field_25, floor_limit_debit:
+Option<Field34F>, floor_limit_credit: Option<Field34F>}`，序列可重
+复——一次请求可跨多账户索要多份报表）。
+HTTP 导出：`POST /exports/mt920`，JSON 体含 `sender_lt` /
+`receiver_lt` / `transaction_reference`（`:20:`）/ `sequences`
+（数组，每项 `requested_type`（`:12:`，940/941/942/950）/ 可选
+`account`（`:25:`，至多 35 字符）/ 可选 `floor_limit_debit` /
+`floor_limit_credit`（`:34F:`，各 `{currency, amount_cents}`））。
+响应 `text/plain`，200 直接写 FIN 文本（block 1/2/3/4，MUR 即
+`:20:`，block 5 省略）。只记证据、不记账：无分录、无余额/状态改
+动、无 version bump；导出落地一条 `:20:` 注册表记录与一个
+`mt920_request_exported` 审计事件（details `msg_id` / `requested`
+（各序列的 `:12:`，按序）/ `account`（各序列的 `:25:`，按序），
+trace 即 `:20:`，无 accounts——`:25:` 命名的是开户行处的账户，不
+是账本账户）。幂等沿 MT196/MT999 的 pain.014 惯例：同 `:20:` 同
+terms（同序列：同 `:12:`、同 `:25:`、同 `:34F:`）复放返回已存报文
+（`duplicate`），异 terms 拒 422（`MT920MsgIDConflictError`，包内
+唯一哨兵 `ErrInvalidMT920Export` 的类型化包装——`errors.Is` 仍命
+中哨兵，`ledger.IsMT920MsgIDConflict` 判 422），绝不静默覆盖；发
+送/接收 LT 为信封非 terms，复放换 LT 仍回首次渲染。全部校验失败均
+为 400；重复导出字节相同。
+
+```json
+{"sender_lt": "BANKUS33", "receiver_lt": "BANKDEFF",
+ "transaction_reference": "REQ-920-001",
+ "sequences": [{"requested_type": "940", "account": "DE89370400440532013000"},
+               {"requested_type": "942", "account": "DE89370400440532013001",
+                "floor_limit_debit": {"currency": "USD", "amount_cents": 100000}}]}
+```
+
+语义：
+- 请求与回执的配对：回执（MT940/MT941/MT942）在 `:21:` 原样引回
+  本次请求的 `:20:`，该配对是计划外报送与索要方之间的唯一结构化
+  链接；MT950 没有 `:21:` 字段，950 请求的配对只活在
+  `mt920_request_exported` 审计事件与操作员自己的记录里——账本绝
+  不向 MT950 伪造一个 `:21:`。索要侧见本节，导入侧见 MT940/941/
+  942/950 各节。
+- 942 规则：`:12:` 为 942 的序列必随同一序列至少一个 `:34F:`（借
+  或贷其一即满足，两者同在亦可）；非 942 序列可带可不带 `:34F:`。
+  `:34F:` 为 3!a15d：币种（必填三位大写、无缺省可 fallback——MT920
+  没有报表币种可兜底）+ 借/贷标记 + 金额（逗号小数点，零是限额、
+  不是缺失，负数拒、超 15d 拒）。
+- 与结构化报文正交：LG-400 的 camt.060 是 ISO 20022 的索要孪生
+  （本项为 FIN 索要孪生）；LG-458 的 MT999 是自由格式（本项为结构
+  化请求）；MT940/941/942/950 导入管回执本身（本项管其索要面）。
+  不做 MT920 解析/导入、不做报表自动索取调度。
+- 字段纪律（MT196/MT999 惯例）：`:20:` 1–16 `x` 字符；`:12:` 只能
+  是 940/941/942/950；`:25:` 至多 35 `x` 字符（斜杠合法——账号里本
+  来就有斜杠）；序列至少一个；block 3 只做形状校验、导出时 MUR 写
+  `:20:`；block 5 省略（CHK 由 SWIFT 网络计算，不伪造）。
 
 ### `GET /accounts/{id}/statement` — JSON account statement
 

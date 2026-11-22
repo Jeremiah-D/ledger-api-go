@@ -1036,6 +1036,15 @@ type Ledger struct {
 	// the hash-chained mt999_exported audit events are the durable
 	// record.
 	mt999Exports map[string]mt999ExportRecord
+	// mt920Exports maps a MT920 :20: reference to the message
+	// its first export rendered (see mt920.go, LG-459): the replay
+	// guard for outbound MT920 report requests, so a re-sent
+	// request returns the stored message instead of rendering twice
+	// — and a :20: reused for different terms is refused instead of
+	// silently overwritten. In-memory only, like mt999Exports:
+	// the hash-chained mt920_request_exported audit events are the
+	// durable record.
+	mt920Exports map[string]mt920ExportRecord
 	// mt190Applied maps a MT190 :20: reference to the charge
 	// advice its first application recorded (see
 	// mt190_inbound.go, LG-454): the replay guard for inbound

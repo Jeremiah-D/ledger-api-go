@@ -9656,6 +9656,117 @@ func (s *server) handleMT999Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(res.Message))
 }
 
+// mt920FloorLimitRequest is one :34F: floor limit indicator in the
+// JSON body of POST /exports/mt920: the 3-letter currency and the
+// limit amount in cents.
+type mt920FloorLimitRequest struct {
+	Currency    string `json:"currency"`
+	AmountCents int64  `json:"amount_cents"`
+}
+
+// mt920SequenceRequest is one requested report in the JSON body of
+// POST /exports/mt920: the :12: report type, the optional :25:
+// account, and the optional :34F: floor limits (at most one debit
+// and one credit per sequence; a 942 sequence must carry at least
+// one).
+type mt920SequenceRequest struct {
+	RequestedType    string                  `json:"requested_type"`
+	Account          string                  `json:"account,omitempty"`
+	FloorLimitDebit  *mt920FloorLimitRequest `json:"floor_limit_debit,omitempty"`
+	FloorLimitCredit *mt920FloorLimitRequest `json:"floor_limit_credit,omitempty"`
+}
+
+// mt920ExportRequest is the JSON body of POST /exports/mt920: the
+// fields of ledger.MT920 — sender/receiver LT addresses, the :20:
+// transaction reference, and the repeating :12: / :25: / :34F:
+// sequence (one entry per requested report).
+type mt920ExportRequest struct {
+	SenderLT             string                 `json:"sender_lt"`
+	ReceiverLT           string                 `json:"receiver_lt"`
+	TransactionReference string                 `json:"transaction_reference"`
+	Sequences            []mt920SequenceRequest `json:"sequences"`
+}
+
+// handleMT920Export implements POST /exports/mt920 (LG-459): a SWIFT
+// FIN MT920 request message asking the account-servicing bank to send
+// a report now (see ledger.ExportMT920). The JSON body names the
+// sender/receiver LT addresses, the :20: reference, and the
+// sequences; the body is strictly decoded (unknown fields fail fast).
+// The export records evidence only: a :20: registry entry and one
+// mt920_request_exported audit event — no journal entry, no balance
+// or status change, no version bump. Error mapping: a malformed body
+// or any invalid field is a 400, with the ledger sentinel passed
+// through as-is; a :20: reused for different terms is a 422. The
+// operator identity comes from the x-ledger-actor header, like the
+// other operator actions.
+func (s *server) handleMT920Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT920Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt920ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	msg := ledger.MT920{
+		SenderLT:             req.SenderLT,
+		ReceiverLT:           req.ReceiverLT,
+		TransactionReference: req.TransactionReference,
+	}
+	for _, seq := range req.Sequences {
+		sq := ledger.MT920Sequence{
+			RequestedType: seq.RequestedType,
+			Account:       seq.Account,
+		}
+		if seq.FloorLimitDebit != nil {
+			sq.FloorLimitDebit = &ledger.MT920FloorLimit{
+				Currency:    seq.FloorLimitDebit.Currency,
+				AmountCents: seq.FloorLimitDebit.AmountCents,
+			}
+		}
+		if seq.FloorLimitCredit != nil {
+			sq.FloorLimitCredit = &ledger.MT920FloorLimit{
+				Currency:    seq.FloorLimitCredit.Currency,
+				AmountCents: seq.FloorLimitCredit.AmountCents,
+			}
+		}
+		msg.Sequences = append(msg.Sequences, sq)
+	}
+	res, err := l.ExportMT920(msg, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case ledger.IsMT920MsgIDConflict(err):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidMT920Export):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt920: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exporting MT920 request message failed"})
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(res.Message))
+}
+
 // mt900910ExportRequest is the JSON body of POST /exports/mt900910:
 // the per-export options of ledger.MT900910PayoutOptions, with the
 // value date as an ISO date string.
@@ -15982,6 +16093,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt199", s.handleMT199Export)
 	mux.HandleFunc("POST /exports/mt196", s.handleMT196Export)
 	mux.HandleFunc("POST /exports/mt999", s.handleMT999Export)
+	mux.HandleFunc("POST /exports/mt920", s.handleMT920Export)
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
