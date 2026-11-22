@@ -8334,6 +8334,56 @@ HTTP 导出：`POST /exports/mt199`，JSON 体含 `sender_lt` /
 Go: `ledger.MT199` / `ledger.ParseMT199` / `ledger.ExportMT199` /
 `ledger.WrapMT199Narrative`。
 
+### SWIFT FIN MT999 自由格式报文（HTTP 导出，LG-458）
+
+类别 9（现金管理与客户状态）的自由格式通知用 SWIFT FIN `MT999`
+渲染：余额、状态与流动性说明均走正文，不下达指令、不确认结算。
+与类别 1 的 MT199（LG-380）同形同字段集——block 1（发送方 LT
+地址）、block 2（应用头 `I999`、接收方 LT 地址）、block 3
+（`{108:MUR}`）与 block 4 字段集 `:20:` / `:21:` / `:79:`——仅所属
+类别不同：MT199 是通用自由格式，MT999 是现金管理自由格式。字段
+表经 Standards MT November 2017 类别 9 报文参考指南（列出“MT 999
+Free Format Message”）与 Oracle SWIFT Message Library 类别 9 表
+（“MT 999 | Free Format Message”）双源核对：`:20:` 16x M、`:21:`
+16x O、`:79:` 50*35x M。
+HTTP 导出：`POST /exports/mt999`，JSON 体含 `sender_lt` /
+`receiver_lt` / `transaction_reference`（`:20:`）/ 可选
+`related_reference`（`:21:`）/ `narrative`（`:79:`，1–50 行字符
+串数组，每行至多 35 字符）。响应 `text/plain`，200 直接写 FIN
+文本（block 1/2/3/4，MUR 即 `:20:`，block 5 省略）。只记证据、
+不记账：无分录、无余额/状态改动、无 version bump；导出落地一条
+`:20:` 注册表记录与一个 `mt999_exported` 审计事件（details
+`msg_id` / `related_reference`，trace 即 `:20:`，无 accounts——
+自由格式通知不触及任何账本账户）。幂等沿 MT196 的 pain.014 惯例：
+同 `:20:` 同 terms（同 `:21:`、同 `:79:` 正文）复放返回已存报文
+（`duplicate`），异 terms 拒 422（`ErrMT999MsgIDConflict`），绝不
+静默覆盖；发送/接收 LT 为信封非 terms，复放换 LT 仍回首次渲染。
+全部校验失败均为 400；重复导出字节相同。
+
+```json
+{"sender_lt": "BANKUS33", "receiver_lt": "BANKDEFF",
+ "transaction_reference": "FREE-999-001",
+ "related_reference": "po-mt999-1",
+ "narrative": ["Please advise cash position", "for account po-mt999-1."]}
+```
+
+语义：
+- 与结构化报文正交：MT900/MT910（LG-209）是已结算确认、MT920
+  （LG-459）是报表索要请求——MT999 三者都不是：结构体根本没有
+  金额、币种、起息日字段，MT999 永远不可能被误读为一笔付款，付款
+  也不可能经由自由格式通知偷渡。
+- 字段纪律（MT199 同形）：`:20:` / `:21:` 均为 1–16 `x` 字符；
+  `:79:` 必填，1–50 行、每行 1–35 `x` 字符，且为 block 4 末字段
+  ——其后续行均为续行（含以冒号开头的行也不会被误读为新字段）；
+  `:79:` 之前的任何金额类字段（如 `:32A:`）一律拒绝——那是另一种
+  报文类型，不是正文；block 3 只做形状校验、导出时 MUR 写 `:20:`；
+  block 5 省略（CHK 由 SWIFT 网络计算，不伪造）；解析接受 CRLF；
+  重复导出字节一致。
+
+Go: `ledger.MT999` / `ledger.ParseMT999` / `ledger.ExportMT999`（纯
+渲染）/ `(*Ledger).ExportMT999`（注册表 + 审计）/
+`ledger.GetMT999Export`。
+
 ### 贷款分期摊还表（预测性只读计算）
 
 贷款的分期表用 `GenerateLoanAmortizationSchedule` 生成：本金（整型

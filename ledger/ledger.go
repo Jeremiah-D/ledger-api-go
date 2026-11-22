@@ -1027,6 +1027,15 @@ type Ledger struct {
 	// replay, and a re-sent export parks again — or renders, once
 	// the query exists.
 	mt196Exports map[string]mt196ExportRecord
+	// mt999Exports maps a MT999 :20: reference to the message
+	// its first export rendered (see mt999.go, LG-458): the replay
+	// guard for outbound MT999 free-format messages, so a re-sent
+	// export returns the stored message instead of rendering twice
+	// — and a :20: reused for different terms is refused instead
+	// of silently overwritten. In-memory only, like mt196Exports:
+	// the hash-chained mt999_exported audit events are the durable
+	// record.
+	mt999Exports map[string]mt999ExportRecord
 	// mt190Applied maps a MT190 :20: reference to the charge
 	// advice its first application recorded (see
 	// mt190_inbound.go, LG-454): the replay guard for inbound

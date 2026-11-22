@@ -9578,6 +9578,84 @@ func (s *server) handleMT196Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(res.Message))
 }
 
+// mt999ExportRequest is the JSON body of POST /exports/mt999: the
+// fields of ledger.MT999 — sender/receiver LT addresses, the :20:
+// transaction reference, the optional :21: related reference, and
+// the :79: narrative lines.
+type mt999ExportRequest struct {
+	SenderLT             string   `json:"sender_lt"`
+	ReceiverLT           string   `json:"receiver_lt"`
+	TransactionReference string   `json:"transaction_reference"`
+	RelatedReference     string   `json:"related_reference,omitempty"`
+	Narrative            []string `json:"narrative"`
+}
+
+// handleMT999Export implements POST /exports/mt999 (LG-458): a SWIFT
+// FIN MT999 category 9 free-format message (see
+// ledger.ExportMT999). The JSON body names the sender/receiver LT
+// addresses, the :20: reference, the optional :21: related
+// reference, and the 1–50 :79: narrative lines; the body is strictly
+// decoded (unknown fields fail fast). The export records evidence
+// only: a :20: registry entry and one mt999_exported audit event —
+// no journal entry, no balance or status change, no version bump.
+// Error mapping: a malformed body or any invalid field is a 400,
+// with the ledger sentinel errors passed through as-is; a :20:
+// reused for different terms is a 422. The operator identity comes
+// from the x-ledger-actor header, like the other operator actions.
+func (s *server) handleMT999Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT999Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt999ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	res, err := l.ExportMT999(ledger.MT999{
+		SenderLT:             req.SenderLT,
+		ReceiverLT:           req.ReceiverLT,
+		TransactionReference: req.TransactionReference,
+		RelatedReference:     req.RelatedReference,
+		Narrative:            req.Narrative,
+	}, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT999MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrMT999Framing),
+			errors.Is(err, ledger.ErrMT999Field),
+			errors.Is(err, ledger.ErrMT999Reference),
+			errors.Is(err, ledger.ErrMT999LT),
+			errors.Is(err, ledger.ErrMT999Narrative):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt999: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exporting MT999 free-format message failed"})
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(res.Message))
+}
+
 // mt900910ExportRequest is the JSON body of POST /exports/mt900910:
 // the per-export options of ledger.MT900910PayoutOptions, with the
 // value date as an ISO date string.
@@ -15903,6 +15981,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt202/apply", s.handleMT202Apply)
 	mux.HandleFunc("POST /exports/mt199", s.handleMT199Export)
 	mux.HandleFunc("POST /exports/mt196", s.handleMT196Export)
+	mux.HandleFunc("POST /exports/mt999", s.handleMT999Export)
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
