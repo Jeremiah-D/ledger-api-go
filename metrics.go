@@ -356,6 +356,10 @@ type Metrics struct {
 	// query apply requests served, including rejected requests
 	// (see ledger.ApplyMT195, LG-453).
 	MT195Applies atomic.Uint64
+	// MT195Exports counts POST /exports/mt195 SWIFT FIN MT195
+	// query export requests served, including rejected exports
+	// (see ledger.ExportMT195, LG-460).
+	MT195Exports atomic.Uint64
 	// MT190Applies counts POST /exports/mt190/apply SWIFT FIN MT190
 	// advice of charges apply requests served, including rejected
 	// requests (see ledger.ApplyMT190, LG-454).
@@ -1427,6 +1431,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/mt192/apply SWIFT FIN MT192 request for cancellation apply requests served, including rejected requests.", m.MT192Applies.Load())
 	writeCounter(&sb, "ledger_mt195_applies_total",
 		"Total POST /exports/mt195/apply SWIFT FIN MT195 query apply requests served, including rejected requests.", m.MT195Applies.Load())
+	writeCounter(&sb, "ledger_mt195_exports_total",
+		"Total POST /exports/mt195 SWIFT FIN MT195 query exports served, including rejected exports.", m.MT195Exports.Load())
 	writeCounter(&sb, "ledger_mt190_applies_total",
 		"Total POST /exports/mt190/apply SWIFT FIN MT190 advice of charges apply requests served, including rejected requests.", m.MT190Applies.Load())
 	writeCounter(&sb, "ledger_mt191_applies_total",

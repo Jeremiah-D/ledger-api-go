@@ -9492,6 +9492,86 @@ func (s *server) handleMT199Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msg))
 }
 
+// mt195ExportRequest is the JSON body of POST /exports/mt195: the
+// payout to ask about, the correspondent's LT address, and the
+// question — the :75: coded question and/or the :79: narrative,
+// each an array of lines. The :20: is derived, never supplied:
+// "MT195-" plus the first 10 lowercase hex of the SHA-256 of the
+// payout ID and the question body (see ledger.ExportMT195). The
+// sender LT is not in the body either: it is the payee account's
+// registered IBAN BIC.
+type mt195ExportRequest struct {
+	PayoutID   string   `json:"payout_id"`
+	ReceiverLT string   `json:"receiver_lt"`
+	Queries    []string `json:"queries,omitempty"`
+	Narrative  []string `json:"narrative,omitempty"`
+}
+
+// handleMT195Export implements POST /exports/mt195 (LG-460): a SWIFT
+// FIN MT195 query about a payout the ledger already sent (see
+// ledger.ExportMT195). The JSON body names the payout, the
+// correspondent's LT address, and the question; the body is
+// strictly decoded (unknown fields fail fast). Rendering is
+// read-only: no journal entry, no payout status change, no gpi
+// advance, no version bump — only the mt195_query_exported audit
+// event lands. Error mapping: a malformed body or any invalid
+// field is a 400, with the ledger sentinel errors passed through
+// as-is; an unknown payout (parked fail-closed in the repair
+// queue) or a :20: reused for different terms is a 422. The
+// operator identity comes from the x-ledger-actor header, like
+// the other operator actions.
+func (s *server) handleMT195Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT195Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt195ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	res, err := l.ExportMT195(req.PayoutID, ledger.MT195ExportOptions{
+		ReceiverLT: req.ReceiverLT,
+		Queries:    strings.Join(req.Queries, "\n"),
+		Narrative:  strings.Join(req.Narrative, "\n"),
+	}, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT103PayoutNotFound),
+			errors.Is(err, ledger.ErrMT195MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrMT195Export),
+			errors.Is(err, ledger.ErrMT195Field),
+			errors.Is(err, ledger.ErrMT195Reference),
+			errors.Is(err, ledger.ErrMT195LT):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt195: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exporting MT195 query failed"})
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(res.Message))
+}
+
 // mt196ExportRequest is the JSON body of POST /exports/mt196: the
 // envelope of one MT196 answer export — sender/receiver LT
 // addresses, the export's own :20: transaction reference, the
@@ -16091,6 +16171,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt202", s.handleMT202Export)
 	mux.HandleFunc("POST /exports/mt202/apply", s.handleMT202Apply)
 	mux.HandleFunc("POST /exports/mt199", s.handleMT199Export)
+	mux.HandleFunc("POST /exports/mt195", s.handleMT195Export)
 	mux.HandleFunc("POST /exports/mt196", s.handleMT196Export)
 	mux.HandleFunc("POST /exports/mt999", s.handleMT999Export)
 	mux.HandleFunc("POST /exports/mt920", s.handleMT920Export)
