@@ -9492,6 +9492,92 @@ func (s *server) handleMT199Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msg))
 }
 
+// mt196ExportRequest is the JSON body of POST /exports/mt196: the
+// envelope of one MT196 answer export — sender/receiver LT
+// addresses, the export's own :20: transaction reference, the
+// :21: related reference naming the registered MT195 query, and
+// the optional :77A: narrative lines. The :76: answers are not
+// in the body: they are rendered from the registered MT195 answer
+// snapshot, never supplied by the caller.
+type mt196ExportRequest struct {
+	SenderLT             string   `json:"sender_lt"`
+	ReceiverLT           string   `json:"receiver_lt"`
+	TransactionReference string   `json:"transaction_reference"`
+	RelatedReference     string   `json:"related_reference"`
+	Narrative            []string `json:"narrative,omitempty"`
+}
+
+// handleMT196Export implements POST /exports/mt196 (LG-457): a SWIFT
+// FIN MT196 answer to a registered MT195 query (see
+// ledger.ExportMT196ForQuery). The JSON body names the sender/
+// receiver LT addresses, the export's own :20: reference, the :21:
+// related reference naming the query, and the optional :77A:
+// narrative; the body is strictly decoded (unknown fields fail
+// fast). The export renders from the registered answer snapshot:
+// the :76: answers are the snapshot's payout status, MT103 value
+// date, and gpi status when one exists. Rendering is read-only:
+// no journal entry, no payout status change, no gpi advance, no
+// version bump — only the mt196_answer_exported audit event lands.
+// Error mapping: a malformed body or any invalid field is a 400,
+// with the ledger sentinel errors passed through as-is; an unknown
+// :21: (parked fail-closed in the repair queue) or a :20: reused
+// for different terms is a 422. The operator identity comes from
+// the x-ledger-actor header, like the other operator actions.
+func (s *server) handleMT196Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT196Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt196ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	res, err := l.ExportMT196ForQuery(req.RelatedReference, ledger.MT196ExportOptions{
+		SenderLT:   req.SenderLT,
+		ReceiverLT: req.ReceiverLT,
+		Reference:  req.TransactionReference,
+		Narrative:  req.Narrative,
+	}, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT196QueryNotFound),
+			errors.Is(err, ledger.ErrMT196MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrMT196Framing),
+			errors.Is(err, ledger.ErrMT196Field),
+			errors.Is(err, ledger.ErrMT196Reference),
+			errors.Is(err, ledger.ErrMT196LT),
+			errors.Is(err, ledger.ErrMT196Answers),
+			errors.Is(err, ledger.ErrMT196Narrative):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt196: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exporting MT196 answer failed"})
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(res.Message))
+}
+
 // mt900910ExportRequest is the JSON body of POST /exports/mt900910:
 // the per-export options of ledger.MT900910PayoutOptions, with the
 // value date as an ISO date string.
@@ -15816,6 +15902,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt202", s.handleMT202Export)
 	mux.HandleFunc("POST /exports/mt202/apply", s.handleMT202Apply)
 	mux.HandleFunc("POST /exports/mt199", s.handleMT199Export)
+	mux.HandleFunc("POST /exports/mt196", s.handleMT196Export)
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)

@@ -8131,8 +8131,8 @@ verbatim 携带、不解释），`:79:` 为自由格式问题描述。字段号�
 
 语义：查询只登记、不推进状态——应答只取账本事实：payout 状态、
 MT103 值日（提交时、再批准时、再创建时）与有 gpi track 时的当前
-状态；不移动资金、不改 payout 状态机、不推进 gpi、不渲染 MT196
-答复报文（应答只登记、MT196 导出另立项）。未知 `:21:` fail-closed
+状态；不移动资金、不改 payout 状态机、不推进 gpi；MT196 答复报文
+导出见下节（LG-457：应答快照渲染 `:76:` / `:77A:`）。未知 `:21:` fail-closed
 进 repair queue（`unknown_route`，沿 camt.055 形态：结果带 repair
 ID、错误仍为 `ErrMT103PayoutNotFound`），`422`；已停车的查询无应
 答快照可复放，重发再停车——或 payout 到账后重发即作答。同 `:20:`
@@ -8144,6 +8144,46 @@ CRLF 容忍、块外字段拒、尾换行容忍，`:75:` / `:79:` 可跨行，�
 其一必填）。计数器 `ledger_mt195_applies_total`。
 
 Go: `ledger.ParseMT195` / `ledger.ApplyMT195` / `ledger.GetMT195Query`。
+
+### SWIFT FIN MT196 答复报文（HTTP 导出）
+
+对一笔已登记 `MT195` 查询的答复用 SWIFT FIN `MT196`（Answers）
+渲染：`:21:` 取被答查询的 `:20:`，`:76:` 答案由该查询登记时
+的应答快照渲染（payout 状态、MT103 值日、有 gpi track 时的当前
+状态），`:20:` 为本次导出报文自有引用（幂等键），`:77A:` 为可选
+的补充说明。报文含 block 1（发送方 LT 地址）、block 2（应用头
+`I196`、接收方 LT 地址）、block 3（`{108:MUR}`）与 block 4 字段集
+`:20:` / `:21:` / `:76:` / `:77A:`。字段号核对：KELER RCMS via
+SWIFT 用户指南 v3.0 第 1.3 节“MT196 – Answers”与 Oracle Banking
+Payments Cloud Service “Answers”（表 6-5）两版一致——`:20:` 16x
+M、`:21:` 16x M、`:76:` 6*35x M、`:77A:` 20*35x O；`:11a:`（原报文
+MT 与日期）不在核心集内——原报文已由 `:21:` 锚进已登记查询，不另
+抄一份可能不一致的副本。HTTP 导出：`POST /exports/mt196`，JSON
+体含 `sender_lt` / `receiver_lt` / `transaction_reference`
+（`:20:`）/ `related_reference`（`:21:`，被答查询的 `:20:`）/
+可选 `narrative`（`:77A:`，0–20 行字符串数组，每行至多 35 字符）。
+响应 `text/plain`，200 直接写 FIN 文本。
+
+语义：只渲染、不记账——无分录、无余额/状态改动、无 gpi 推进、无
+version bump；`:76:` 逐行取快照事实（`PAYOUT STATUS: <状态>` /
+`VALUE DATE: <YYMMDD>` / 有 gpi 时 `GPI STATUS: <状态>`），无 gpi
+track 时该行省略、不虚构状态；`:76:` 不用 `/CNCL/` 式决策码——那
+是答 MT192 撤销请求的码，MT195 状态查询要的是事实、不是撤销决
+定。未知 `:21:` fail-closed 进 repair queue（`unknown_route`，
+沿 MT195 未知 `:21:`），`422`；同 `:20:` 同 terms（同查询、同
+`:77A:` 正文）复放幂等 no-op 回已渲染报文（不重复记审计事件），
+同 `:20:` 异 terms `422`；发送/接收 LT 为信封、非 terms，复放换
+LT 仍回首次渲染。审计 `mt196_answer_exported`（details 含
+msg_id / related_reference / payout_id）。解析沿 MT199 严格先例
+（块结构/字段序/全字段校验、CRLF 容忍、块外字段拒、尾换行容忍，
+`:76:` / `:77A:` 可跨行，`:77A:` 为末字段、其续行可含冒号）。
+计数器 `ledger_mt196_exports_total`。
+
+纠偏：立项时写 `:77E:` 叙述有误——两处来源均确认 MT196 的叙述
+字段是 `:77A:`，实现按 `:77A:`、`:77E:` 作未知字段拒（测试锁定）。
+
+Go: `ledger.MT196` / `ledger.ParseMT196` / `ledger.ExportMT196` /
+`ledger.ExportMT196ForQuery` / `ledger.GetMT196Export`。
 
 ### SWIFT FIN MT202 银行间汇款（库级解析 + 导出）
 
