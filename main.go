@@ -10782,6 +10782,89 @@ func (s *server) handleCamt026Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// camt026ExportRequest is the JSON body of POST /exports/camt026:
+// the instruction reference (a UETR or an EndToEndId), the
+// justification arm, and the reason — the coded reason code and
+// free text, the investigation case, and the envelope names. The
+// MsgId is derived, never supplied: "CAMT026-" plus the first 10
+// lowercase hex of the SHA-256 of the resolved instruction and the
+// reason (see ledger.ExportCAMT026).
+type camt026ExportRequest struct {
+	Reference     string `json:"reference"`
+	Justification string `json:"justification"`
+	ReasonCode    string `json:"reason_code,omitempty"`
+	ReasonInfo    string `json:"reason_info,omitempty"`
+	CaseID        string `json:"case_id,omitempty"`
+	Assignor      string `json:"assignor,omitempty"`
+	Assignee      string `json:"assignee,omitempty"`
+}
+
+// handleCamt026Export implements POST /exports/camt026 (LG-461): an
+// ISO 20022 camt.026.001.07 Unable to Apply report about a tracked
+// instruction the ledger cannot execute or reconcile (see
+// ledger.ExportCAMT026). The JSON body names the instruction by its
+// UETR or EndToEndId and the reason; the body is strictly decoded
+// (unknown fields fail fast). Rendering is read-only: no journal
+// entry, no payout status change, no gpi advance, no version bump
+// — only the camt026_unable_to_apply_exported audit event lands.
+// Error mapping: a malformed body or any invalid field is a 400,
+// with the ledger sentinel errors passed through as-is; an unknown
+// reference is a 404; a MsgId reused for different terms is a 422.
+// The operator identity comes from the x-ledger-actor header, like
+// the other operator actions.
+func (s *server) handleCamt026Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.CAMT026Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req camt026ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	res, err := l.ExportCAMT026(req.Reference, ledger.CAMT026ExportOptions{
+		Justification: ledger.CAMT026Justification(req.Justification),
+		ReasonCode:    req.ReasonCode,
+		ReasonInfo:    req.ReasonInfo,
+		CaseID:        req.CaseID,
+		Assignor:      req.Assignor,
+		Assignee:      req.Assignee,
+	}, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrCAMT026UnknownReference):
+			writeJSON(w, http.StatusNotFound, errBody)
+		case errors.Is(err, ledger.ErrCAMT026MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrCAMT026Export):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/camt026: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exporting camt.026 report failed"})
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(res.Message))
+}
+
 // handleCamt055Apply implements POST /exports/camt055/apply (LG-419):
 // applies a customer's ISO 20022 camt.055.001.01 CustomerPayment
 // CancellationRequest to the tracked payment it names (see
@@ -16215,6 +16298,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/camt029/apply", s.handleCAMT029Apply)
 	mux.HandleFunc("POST /exports/camt056/apply", s.handleCAMT056Apply)
 	mux.HandleFunc("POST /exports/camt026/apply", s.handleCamt026Apply)
+	mux.HandleFunc("POST /exports/camt026", s.handleCamt026Export)
 	mux.HandleFunc("POST /exports/camt055/apply", s.handleCamt055Apply)
 	mux.HandleFunc("POST /exports/camt057/apply", s.handleCamt057Apply)
 	mux.HandleFunc("POST /exports/camt058/apply", s.handleCamt058Apply)

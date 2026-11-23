@@ -910,6 +910,15 @@ type Ledger struct {
 	// only, like RfPs: the hash-chained camt026_unable_to_apply
 	// audit events are the durable record.
 	camt026Reports map[string]CAMT026ApplyResult
+	// camt026Exports maps a camt.026 Assgnmt Id to its outbound
+	// export record (see camt026_export.go, LG-461): the replay
+	// guard for unable-to-apply exports, so a re-sent export
+	// returns the stored message instead of rendering twice — and
+	// a MsgId reused for different terms is refused instead of
+	// silently overwritten. In-memory only, like camt026Reports:
+	// the hash-chained camt026_unable_to_apply_exported audit
+	// events are the durable record.
+	camt026Exports map[string]camt026ExportRecord
 	// camt055Applied maps a camt.055 CxlId to the cancellation
 	// record its first application opened (see
 	// camt055_inbound.go, LG-419): the replay guard for customer
@@ -2290,6 +2299,9 @@ func New(opts ...Option) *Ledger {
 		// LG-417: the camt.026 report registry starts empty; records
 		// land as unable-to-apply reports apply.
 		camt026Reports: make(map[string]CAMT026ApplyResult),
+		// LG-461: the camt.026 export registry starts empty;
+		// records land as unable-to-apply reports export.
+		camt026Exports: make(map[string]camt026ExportRecord),
 		// LG-419: the camt.055 CxlId registry starts empty; records
 		// land as customer cancellation requests apply.
 		camt055Applied: make(map[string]PayoutCancellation),

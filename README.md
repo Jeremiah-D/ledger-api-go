@@ -7675,6 +7675,26 @@ Go: `ledger.ParsePacs028`、`ledger.AnswerPacs028`。
   `200` no-op（`duplicate: true`），复用于不同报告 `422`。
   审计事件为入站 op `camt026_unable_to_apply`。计数器
   `ledger_camt026_applies_total`。
+- 出站 `POST /exports/camt026`（LG-461）：我方发出的
+  camt.026.001.07（`UblToApply`）“无法执行/无法核对”报告是入站
+  的镜像——同一条原指令（`Undrlyg` 以 UETR 或 EndToEndId 关联
+  payout/transfer/RfP，UETR 优先解析），`Justfn` 三臂择一说明无
+  法执行的原因（`MssngOrIncrrctInf` 渲染为一条 `MssngInf`，
+  原因码原文进审计与结果）；`MsgId` 由指令与原因确定性派生
+  （`CAMT026-` + SHA-256 前 10 位小写 hex），同一指令同一原因
+  重复导出字节相同。只渲染、不记账：无分录、不改原指令状态、
+  不推进 gpi；无状态门（已终态指令亦可报告）。`Assgnr` 缺省取
+  指令账户已登记 IBAN 的 BIC、否则账户 ID，`Assgne` 缺省取
+  payout 的 `Destination`/transfer 的贷方账户/RfP 的债务人
+  账户——均为信封字段，不参与 `MsgId` 派生与 terms 比较。
+  引用未知 `404`；字段非法（无引用、无 `justification`、
+  `missing-or-incorrect` 无原因码、其余两臂带原因码/附加信息）
+  `400`；同一 `MsgId` 复用于不同 terms `422`；同一 `MsgId` 重放
+  为 `200`（`duplicate: true`，返回首次渲染的字节）。审计事件
+  为出站 op `camt026_unable_to_apply_exported`（details 含
+  `msg_id` / `uetr` / `end_to_end_id` / `justification`）。
+  计数器 `ledger_camt026_exports_total`。问—答闭环：出站
+  camt.026 报告我方无法执行，对方回 camt.029 或重新发起。
 - 计数器 `ledger_camt056_exports_total` /
   `ledger_camt056_applies_total` /
   `ledger_camt029_applies_total` /
