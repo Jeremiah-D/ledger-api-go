@@ -1072,6 +1072,20 @@ type Ledger struct {
 	// the hash-chained mt999_exported audit events are the durable
 	// record.
 	mt999Exports map[string]mt999ExportRecord
+	// mt999Received maps a MT999 :20: reference to the inbound
+	// free-format notification its first application registered
+	// (see mt999_inbound.go, LG-463): the replay guard for
+	// inbound MT999 notifications, so a re-sent notification
+	// returns the stored outcome instead of registering twice —
+	// and a :20: reused for different terms is refused instead
+	// of silently overwritten. In-memory only, like
+	// mt999Exports: the hash-chained mt999_received audit events
+	// are the durable record. A notification parked in the
+	// repair queue (unknown :21:) records nothing here: it has
+	// no notification to replay, and a re-sent notification
+	// parks again — or registers, once the outbound message or
+	// the payout exists.
+	mt999Received map[string]mt999ReceivedRecord
 	// mt920Exports maps a MT920 :20: reference to the message
 	// its first export rendered (see mt920.go, LG-459): the replay
 	// guard for outbound MT920 report requests, so a re-sent

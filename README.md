@@ -8473,6 +8473,39 @@ Go: `ledger.MT999` / `ledger.ParseMT999` / `ledger.ExportMT999`（纯
 渲染）/ `(*Ledger).ExportMT999`（注册表 + 审计）/
 `ledger.GetMT999Export`。
 
+### `POST /exports/mt999/apply` — SWIFT FIN MT999 自由格式回音入站登记（LG-463）
+
+对方银行回一封 `MT999` 自由格式回音时，发 SWIFT FIN
+`MT999` 入站登记：报文形态与出站同形（block 1/2/3/4，`:20:` /
+`:21:` / `:79:`）。`:20:` 为回音自身引用（幂等键），`:21:` 为
+锚定分两档——先查我方出站 `MT999` 的 `:20:` 注册表（对方答复
+我方发出的 `MT999`，沿 `MT196` 的 `:21:` 回指），无匹配再查付
+款（`:21:` 亦可载 transfer/payout ID，沿 `ApplyMT190` 的
+`:21:→payout` 形态）；`:21:` 为空则无锚独立通知，直接登记——无
+所指的自由格式通知仍是通知。HTTP 入站：`POST
+/exports/mt999/apply`，请求体为原始 FIN 文本（`text/plain`，
+`MaxBytesReader` 惯例），响应 200 写登记结果 JSON。
+
+语义：只登记、不记账——无分录、无余额/状态改动、无 version
+bump；回音按原样登记：`:79:` 逐字存入 `mt999Received` 注册表
+（键为 `:20:`，`:79:` 原文进登记记录、可经 getter 取回，不塞审
+计 details）。`:21:` 两档皆无时 fail-closed 进 repair queue
+（`unknown_route`，结果带 repair ID、错误为新哨兵
+`ErrMT999UnknownReference`），`422`；实施轮决断：不取 `404`——
+入站的银行回音绝不能无记录地丢掉，且出站注册表是内存态、重启
+即空，重启后到的合法迟复若走 `404` 将无迹可查。同 `:20:` 同
+terms（同 `:21:`、同 `:79:` 正文逐字）复放幂等 no-op 回已登记回
+音（不重复记审计事件），同 `:20:` 异 terms 拒 `422`
+（`ErrMT999MsgIDConflict`）；发送/接收 LT 为信封、非 terms，复
+放换 LT 仍回首次登记。审计 `mt999_received`（details
+`msg_id` / `related_reference` / `sender_lt`，trace 即 `:20:`，
+无 accounts——自由格式通知不触及任何账本账户）。“问—答”闭环
+至此合拢：出站 `MT999` 发出去（LG-458），对方 `MT999` 回音回
+来即登记（本项）。计数器 `ledger_mt999_applies_total`。
+
+Go: `ledger.ParseMT999` / `ledger.ApplyMT999` /
+`ledger.GetMT999Received`。
+
 ### 贷款分期摊还表（预测性只读计算）
 
 贷款的分期表用 `GenerateLoanAmortizationSchedule` 生成：本金（整型
