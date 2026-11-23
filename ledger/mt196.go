@@ -125,8 +125,11 @@ var (
 	ErrMT196QueryNotFound = errors.New("ledger: mt196: unknown MT195 query reference")
 	// ErrMT196MsgIDConflict is returned by ExportMT196ForQuery
 	// when a :20: reference already exported carries different
-	// terms: the reference names one export, and a second,
-	// different export under it is refused rather than silently
+	// terms, and by ApplyMT196 (LG-462) when a :20: reference
+	// already applied carries different terms or a second,
+	// different answer is applied to an already-answered query:
+	// the reference names one answer, and a second, different
+	// answer under it is refused rather than silently
 	// overwritten (the pain.014 ErrPain014MsgIDConflict
 	// convention). It is a 422-class error.
 	ErrMT196MsgIDConflict = errors.New("ledger: mt196: message reference already exported with different terms")

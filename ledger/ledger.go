@@ -1049,6 +1049,20 @@ type Ledger struct {
 	// replay, and a re-sent export parks again — or renders, once
 	// the payout exists.
 	mt195Exports map[string]mt195ExportRecord
+	// mt196Answers maps a MT195 :20: reference (the :21: of the
+	// inbound MT196) to the answer its first application
+	// registered (see mt196_apply.go, LG-462): the replay guard
+	// for inbound MT196 answers, so a re-sent answer returns
+	// the stored outcome instead of registering twice — and a
+	// :20: reused for different terms, or a second answer to an
+	// already-answered query, is refused instead of silently
+	// overwritten. In-memory only, like mt195Exports: the
+	// hash-chained mt196_answer_applied audit events are the
+	// durable record. An answer parked in the repair queue
+	// (unknown :21:) records nothing here: it has no answer to
+	// replay, and a re-sent answer parks again — or registers,
+	// once the query exists.
+	mt196Answers map[string]mt196AnswerRecord
 	// mt999Exports maps a MT999 :20: reference to the message
 	// its first export rendered (see mt999.go, LG-458): the replay
 	// guard for outbound MT999 free-format messages, so a re-sent

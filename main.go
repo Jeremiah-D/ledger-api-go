@@ -9658,6 +9658,63 @@ func (s *server) handleMT196Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(res.Message))
 }
 
+// handleMT196Apply implements POST /exports/mt196/apply (LG-462):
+// registers a correspondent bank's SWIFT FIN MT196 answer to our
+// outbound MT195 query — the inbound half of the MT195 "问—答"
+// loop, closing the half LG-460 opened. The body is the raw MT196
+// FIN text; its :21: names our outbound query's :20: (registered
+// by POST /exports/mt195), and its :76: answers and :77A:
+// narrative are registered verbatim, never re-derived from live
+// facts. Registering an answer moves nothing: no journal entry,
+// no payout status change, no gpi advance. A re-sent :20: with
+// the same terms is an idempotent no-op returning the stored
+// answer; a :20: reused for different terms, or a second answer
+// to an already-answered query, is a conflict. Error mapping: a
+// malformed FIN document is a 400; an unknown :21: (parked
+// fail-closed in the repair queue, never dropped without a
+// record) or a :20: reused for different terms is a 422. The
+// operator identity comes from the x-ledger-actor header, like
+// the other operator actions.
+func (s *server) handleMT196Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT196Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	ans, err := ledger.ParseMT196(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT196(ans, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT196QueryNotFound),
+			errors.Is(err, ledger.ErrMT196MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt196/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT196 answer failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // mt999ExportRequest is the JSON body of POST /exports/mt999: the
 // fields of ledger.MT999 — sender/receiver LT addresses, the :20:
 // transaction reference, the optional :21: related reference, and
@@ -16256,6 +16313,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt199", s.handleMT199Export)
 	mux.HandleFunc("POST /exports/mt195", s.handleMT195Export)
 	mux.HandleFunc("POST /exports/mt196", s.handleMT196Export)
+	mux.HandleFunc("POST /exports/mt196/apply", s.handleMT196Apply)
 	mux.HandleFunc("POST /exports/mt999", s.handleMT999Export)
 	mux.HandleFunc("POST /exports/mt920", s.handleMT920Export)
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)

@@ -8237,6 +8237,43 @@ msg_id / related_reference / payout_id）。解析沿 MT199 严格先例
 Go: `ledger.MT196` / `ledger.ParseMT196` / `ledger.ExportMT196` /
 `ledger.ExportMT196ForQuery` / `ledger.GetMT196Export`。
 
+### `POST /exports/mt196/apply` — SWIFT FIN MT196 答复入站登记（LG-462）
+
+代理行答回本账本发出的 `MT195` 查询时，发 SWIFT FIN
+`MT196`（Answers）作答：报文含 block 1（发送方 LT 地址）、
+block 2（应用头 `I196`、接收方 LT 地址）、block 3
+（`{108:MUR}`）与 block 4 字段集 `:20:` / `:21:` / `:76:` /
+`:77A:`。`:20:` 为答复自身引用（幂等键），`:21:` 为被答的出站
+查询的 `:20:`（须为已登记出站查询，未知 fail-closed 进
+repair queue，`422`），`:76:` 为代理行的答案（1–6 行、每行至
+多 35 字符，verbatim 登记、永不按账本事实重算），`:77A:` 为
+可选的补充说明（0–20 行）。HTTP 入站：`POST
+/exports/mt196/apply`，请求体为原始 FIN 文本（`text/plain`，
+`MaxBytesReader` 惯例），响应 200 写登记结果 JSON。
+
+语义：只登记、不记账——无分录、无余额/状态改动、无 gpi
+推进、无 version bump；答复按原样登记：`:76:` / `:77A:`
+逐字存入 `mt196Answers` 注册表（键为 `:21:`，即被答查询，
+一问一答——同查询的第二份不同答复亦为冲突），供将来查询状
+态查询（`GetMT196Answer` 按查询取、`GetMT196AnswerByReference`
+按答复 `:20:` 取）。未知 `:21:` fail-closed 进 repair queue
+（`unknown_route`，结果带 repair ID、错误仍为
+`ErrMT196QueryNotFound`），`422`；实施轮决断：不取 `404`——
+入站的银行答复绝不能无记录地丢掉，且出站注册表是内存态、重
+启即空，重启后到的合法迟答若走 `404` 将无迹可查；与
+`ApplyMT195` / `ExportMT196ForQuery` / `ApplyMT292` 的未知引用
+处理一致。同 `:20:` 同 terms（同查询、同 `:76:`、同 `:77A:`
+正文）复放幂等 no-op 回已登记答复（不重复记审计事件），同
+`:20:` 异 terms `422`；发送/接收 LT 为信封、非 terms，复放换
+LT 仍回首次登记。审计 `mt196_answer_applied`（details 含
+msg_id / related_reference / query_ref / payout_id）。“问—答”
+闭环至此合拢：出站 `MT195` 问出去（LG-460），对方 `MT196` 答
+回来即登记（本项）；本账本答别人的问仍走 `POST /exports/mt196`
+（LG-457）。计数器 `ledger_mt196_applies_total`。
+
+Go: `ledger.ParseMT196` / `ledger.ApplyMT196` /
+`ledger.GetMT196Answer` / `ledger.GetMT196AnswerByReference`。
+
 ### SWIFT FIN MT202 银行间汇款（库级解析 + 导出）
 
 银行间资金划转用 SWIFT FIN `MT202`（general financial institution
