@@ -9964,6 +9964,71 @@ func (s *server) handleMT920Export(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(res.Message))
 }
 
+// handleMT920Apply implements POST /exports/mt920/apply (LG-464):
+// registers a counterparty bank's SWIFT FIN MT920 report request
+// — the inbound half of the MT920 lifecycle, closing the half
+// LG-459 opened. The body is the raw MT920 FIN text; its :20: is
+// the request's own reference (the registration key), its :12:
+// names the report wanted, and a :25: names the account the
+// report is wanted for — which must resolve to a ledger account,
+// or the request parks fail-closed in the repair queue. A
+// sequence with no :25: registers as-is. Registering a request
+// moves nothing: no journal entry, no balance or payout change,
+// no version bump, and no report is ever sent back
+// automatically — the reply travels the existing GET
+// /exports/mt940/941/942/950 routes. A re-sent :20: with the
+// same terms is an idempotent no-op returning the stored
+// request; a :20: reused for different terms is a conflict.
+// Error mapping: a malformed FIN document is a 400; an unknown
+// :25: (parked fail-closed in the repair queue, never dropped
+// without a record) or a :20: reused for different terms is a
+// 422. The operator identity comes from the x-ledger-actor
+// header, like the other operator actions.
+func (s *server) handleMT920Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT920Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	m, err := ledger.ParseMT920(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT920(m, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrMT920UnknownAccount),
+			ledger.IsMT920MsgIDConflict(err):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrInvalidMT920Export):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt920/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT920 report request failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // mt900910ExportRequest is the JSON body of POST /exports/mt900910:
 // the per-export options of ledger.MT900910PayoutOptions, with the
 // value date as an ISO date string.
@@ -16377,6 +16442,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt999", s.handleMT999Export)
 	mux.HandleFunc("POST /exports/mt999/apply", s.handleMT999Apply)
 	mux.HandleFunc("POST /exports/mt920", s.handleMT920Export)
+	mux.HandleFunc("POST /exports/mt920/apply", s.handleMT920Apply)
 	mux.HandleFunc("GET /exports/accounting/xero", s.handleAccountingXeroExport)
 	mux.HandleFunc("GET /exports/accounting/quickbooks", s.handleAccountingQuickBooksExport)
 	mux.HandleFunc("GET /exports/pacs009", s.handlePacs009Export)
