@@ -7079,6 +7079,102 @@ func (s *server) handleMT295Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// mt295ExportRequest is the JSON body of POST /exports/mt295: the
+// schedule and run whose outbound MT292 cancellation request is
+// queried, the sender/receiver LT addresses, and the question —
+// the :75: coded question (mandatory), and the optional :77A:
+// narrative and :79: description, each an array of lines. The
+// :21: is derived, never supplied: the queried MT292's :20: (see
+// ledger.mt292MessageReference). The :20: is derived too, never
+// supplied: "MT295-" plus the first 10 lowercase hex of the
+// SHA-256 of the queried MT292's :20: and the question body (see
+// ledger.ExportMT295ForCancelled). :11S: / :11R: are not in the
+// body (strict decode refuses them, along the inbound rule).
+type mt295ExportRequest struct {
+	ScheduleID  string   `json:"schedule_id"`
+	RunSeq      uint64   `json:"run_seq"`
+	SenderLT    string   `json:"sender_lt"`
+	ReceiverLT  string   `json:"receiver_lt"`
+	Queries     []string `json:"queries"`
+	Narrative   []string `json:"narrative,omitempty"`
+	Description []string `json:"description,omitempty"`
+}
+
+// handleMT295Export implements POST /exports/mt295 (LG-468): a SWIFT
+// FIN MT295 query about an outbound MT292 cancellation request this
+// ledger rendered (see ledger.ExportMT295ForCancelled). The JSON body
+// names the schedule and run, the sender/receiver LT addresses, and
+// the question; the body is strictly decoded (unknown fields fail
+// fast). Rendering is read-only: no journal entry, no schedule
+// status change, no ExpectedReceipt cancellation, no version bump —
+// only the mt295_query_exported audit event lands. Error mapping: a
+// malformed body or any invalid field is a 400, with the ledger
+// sentinel errors passed through as-is; an unknown schedule or a
+// schedule still active (parked fail-closed in the repair queue, the
+// error body carrying the repair record ID) or a :20: reused for
+// different terms is a 422. The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
+func (s *server) handleMT295Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT295Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt295ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	res, err := l.ExportMT295ForCancelled(req.ScheduleID, req.RunSeq, ledger.MT295ExportOptions{
+		SenderLT:    req.SenderLT,
+		ReceiverLT:  req.ReceiverLT,
+		Queries:     req.Queries,
+		Narrative:   req.Narrative,
+		Description: req.Description,
+	}, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrScheduleNotFound),
+			errors.Is(err, ledger.ErrMT292ScheduleStillActive),
+			errors.Is(err, ledger.ErrMT295MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrMT295Framing),
+			errors.Is(err, ledger.ErrMT295Field),
+			errors.Is(err, ledger.ErrMT295Reference),
+			errors.Is(err, ledger.ErrMT295LT),
+			errors.Is(err, ledger.ErrMT295Queries),
+			errors.Is(err, ledger.ErrMT295Narrative),
+			errors.Is(err, ledger.ErrMT295Description):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt295: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exporting MT295 query failed"})
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(res.Message))
+}
+
 // handleCAMT057Export implements GET /exports/camt057 (LG-403): an
 // ISO 20022 camt.057.001.07 notification to receive for the next run
 // of one active transfer schedule (see ledger.ExportCAMT057) — the
@@ -16726,6 +16822,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt296/apply", s.handleMT296Apply)
 	mux.HandleFunc("POST /exports/mt296", s.handleMT296Export)
 	mux.HandleFunc("POST /exports/mt295/apply", s.handleMT295Apply)
+	mux.HandleFunc("POST /exports/mt295", s.handleMT295Export)
 	mux.HandleFunc("GET /exports/camt057", s.handleCAMT057Export)
 	mux.HandleFunc("GET /exports/camt058", s.handleCAMT058Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)

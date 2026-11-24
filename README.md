@@ -6700,6 +6700,52 @@ query registration (here) → answer registration (`POST
 loop. `GET /metrics` counts applies as
 `ledger_mt295_applies_total`.
 
+Asking the other way — this ledger asking a correspondent bank
+about a cancellation request it sent — is `POST /exports/mt295`
+with a JSON body (see `ledger.ExportMT295ForCancelled`):
+`schedule_id` / `run_seq` (the run whose outbound MT292 is
+queried), `sender_lt` / `receiver_lt`, and the question — the
+`:75:` coded question (`queries`, mandatory — 1–6 lines of up to
+35 characters each), and the optional `:77A:` (`narrative`) and
+`:79:` (`description`). The `:21:` is the queried MT292's `:20:`
+(`MT292-` plus 10 lowercase hex, derived from the schedule and
+run), and the `:20:` is derived too (`MT295-` plus 10 lowercase
+hex of the SHA-256 of that `:21:` and the question body, the MT195
+precedent) — neither is supplied in the body. The `:21:` anchors
+in a single tier: the schedule must exist, and it must be in
+MT292-exportable state (paused, cancelled, completed, or
+exhausted — a still-active schedule with a live next run cannot
+have had its MT292 sent, so the gate itself is the proof that the
+MT292 the `:21:` names could exist). The anchor is shape-plus-
+state, never a sent-record check: the ledger holds no outbound
+MT292 registry, so it cannot verify that the MT292 was actually
+sent — and no MT202 tier is offered, because an outbound MT202's
+`:20:` is caller-supplied at render time and was never
+registered. The `:75:` / `:77A:` / `:79:` ride verbatim from the
+operator — the codewords inside `:75:` are the operator's words,
+never interpreted — and no query snapshot is built: the question
+is the operator's words, not a fact computed at export time.
+Rendering moves nothing — no journal rows, no schedule status
+change, no ExpectedReceipt cancellation, no version bump — and
+the audit event is `mt295_query_exported` (details `msg_id` /
+`related_reference` / `schedule_id` / `sender_lt`). A malformed
+body or invalid field is 400, an unknown schedule or a schedule
+still active is 422 (parked in the repair queue, the error body
+carrying the repair record ID), and a `:20:` reused for different
+terms is 422; a re-sent `:20:` with the same terms is an
+idempotent no-op returning the stored message. `GET /metrics`
+counts exports as `ledger_mt295_exports_total`. The chain now
+reads both ways: inbound query registration (`POST
+/exports/mt295/apply`, above) → outbound query rendering (here)
+→ answer registration (`POST /exports/mt296/apply`, above) — the
+outbound query is the half the inbound half alone could never
+prove, and its answer comes back as an inbound MT296 whose `:21:`
+names this export's `:20:`. (One gap stays open by design: the
+inbound MT296 `:21:` gate still recognises only the `MT292-`
+shape, so an MT296 answering this export's `MT295-` `:20:` parks
+fail-closed until that gate is extended — a later item, anchored
+on the `mt295Exports` registry built here.)
+
 The same notice exists in ISO 20022 syntax: `GET
 /exports/camt057?schedule_id=<id>&servicing_bic=<bic>` renders
 the next run as a camt.057.001.07 `NotificationToReceive` (see
