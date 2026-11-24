@@ -17,10 +17,10 @@ func mt296InboundLedger(t *testing.T, al *AuditLog) *Ledger {
 // mt296InboundDoc renders one inbound MT296 answer: ref as :20:,
 // relatedRef as :21: (the answered MT292's :20:), answers as the
 // :76: lines, narrative as the :77A: lines (empty omits :77A:),
-// description as the :79: lines (empty omits :79:). There is no
-// ExportMT296 (LG-465 explicitly excludes an MT296 export —
-// this ledger never answers another bank's MT292), so the
-// fixture is hand-built FIN text, the MT292 inbound convention.
+// description as the :79: lines (empty omits :79:). The fixture
+// is hand-built FIN text, the MT292 inbound convention: the parse
+// side takes raw text, and the export side lives in
+// mt296_export.go (LG-467).
 func mt296InboundDoc(ref, relatedRef string, answers, narrative, description []string) string {
 	var b strings.Builder
 	b.WriteString("{1:F01CITIUS33XXX0000000000}\n")

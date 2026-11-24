@@ -6644,6 +6644,35 @@ repair record ID), and a `:20:` reused for different terms is 422;
 a re-sent `:20:` with the same terms is an idempotent no-op.
 `GET /metrics` counts applies as `ledger_mt296_applies_total`.
 
+Answering the other way — this ledger answering a correspondent
+bank's MT292 or MT295 — is `POST /exports/mt296` with a JSON body
+(see `ledger.ExportMT296ForAnswered`): `sender_lt` /
+`receiver_lt`, the export's own `:20:` (`transaction_reference`,
+the replay key), the `:21:` (`related_reference`, the answered
+request's `:20:`), the operator's `:76:` answer lines (`answers`,
+mandatory — 1–6 lines of up to 35 characters each), and the
+optional `:77A:` (`narrative`) and `:79:` (`description`). The
+`:21:` anchors in two tiers: the `:20:` of a registered inbound
+MT292 cancellation request, or the `:20:` of a registered inbound
+MT295 query. The `:76:` is the operator's statement, organised per
+answered object and rendered verbatim — the published answer codes
+(`/CNCL/`, `/RJCR/`, `/PDCR/`) are text lines inside `:76:`, and
+the ledger invents no accept/reject code table and runs no status
+machine off them — the opposite of the MT196 export, whose `:76:`
+is rendered from the registered answer snapshot, because a status
+query asks for ledger facts while a cancellation answer reports a
+decision. Rendering moves nothing — no journal rows, no
+ExpectedReceipt cancellation flip, no version bump — and the audit
+event is `mt296_answer_exported` (details `msg_id` /
+`related_reference` / `answered_kind` / `sender_lt`). A malformed
+body or invalid field is 400, an unknown `:21:` (including one
+shaped like our own outbound MT292's `:20:`, which the ledger
+holds no state for) is 422 (parked in the repair queue), and a
+`:20:` reused for different terms is 422; a re-sent `:20:` with
+the same terms is an idempotent no-op returning the stored
+message. `GET /metrics` counts exports as
+`ledger_mt296_exports_total`.
+
 The other direction of the Category 2 question-answer chain — a
 correspondent bank asking this ledger about a Category 2 message
 it holds — is `POST /exports/mt295/apply` with the raw FIN text
@@ -6666,8 +6695,8 @@ carrying the repair record ID), a `:20:` reused for different
 terms is 422, and a malformed document is 400; a re-sent `:20:`
 with the same terms is an idempotent no-op. The chain now reads:
 query registration (here) → answer registration (`POST
-/exports/mt296/apply`, above) → answer rendering (a later MT296
-export item) — the Category 2 twin of the Category 1 MT195/MT196
+/exports/mt296/apply`, above) → answer rendering (`POST
+/exports/mt296`, above) — the Category 2 twin of the Category 1 MT195/MT196
 loop. `GET /metrics` counts applies as
 `ledger_mt295_applies_total`.
 

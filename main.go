@@ -6901,6 +6901,109 @@ func (s *server) handleMT296Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// mt296ExportRequest is the JSON body of POST /exports/mt296: the
+// envelope of one MT296 answer export — sender/receiver LT
+// addresses, the export's own :20: transaction reference, the
+// :21: related reference naming the registered inbound MT292
+// cancellation request or inbound MT295 query being answered,
+// and the operator's answer. The :76: answers are in the body
+// here — unlike the MT196 export, where they are rendered from
+// the registered snapshot — because the answer is the operator's
+// statement, organised per answered object, never a ledger fact.
+// The optional :77A: narrative and :79: description ride
+// verbatim; :11S: / :11R: are not in the body (strict decode
+// refuses them, along the inbound rule).
+type mt296ExportRequest struct {
+	SenderLT             string   `json:"sender_lt"`
+	ReceiverLT           string   `json:"receiver_lt"`
+	TransactionReference string   `json:"transaction_reference"`
+	RelatedReference     string   `json:"related_reference"`
+	Answers              []string `json:"answers"`
+	Narrative            []string `json:"narrative,omitempty"`
+	Description          []string `json:"description,omitempty"`
+}
+
+// handleMT296Export implements POST /exports/mt296 (LG-467): a SWIFT
+// FIN MT296 answer to a registered inbound MT292 cancellation
+// request or inbound MT295 query (see
+// ledger.ExportMT296ForAnswered). The JSON body names the sender/
+// receiver LT addresses, the export's own :20: reference, the :21:
+// related reference naming the answered request, the operator's
+// :76: answer lines (mandatory — an answer with no answer lines
+// is malformed), and the optional :77A: narrative and :79:
+// description; the body is strictly decoded (unknown fields fail
+// fast). The answers are rendered verbatim from the operator's
+// lines: the published answer codes (/CNCL/, /RJCR/, /PDCR/) are
+// text lines inside :76:, and the ledger invents no accept/reject
+// code table and runs no status machine off them. Rendering is
+// read-only: no journal entry, no ExpectedReceipt cancellation
+// flip, no schedule status change, no version bump — only the
+// mt296_answer_exported audit event lands. Error mapping: a
+// malformed body or any invalid field is a 400, with the ledger
+// sentinel errors passed through as-is; an unknown :21: (parked
+// fail-closed in the repair queue, including one shaped like our
+// own outbound MT292's :20:, which the ledger holds no state
+// for) or a :20: reused for different terms is a 422. The
+// operator identity comes from the x-ledger-actor header, like
+// the other operator actions.
+func (s *server) handleMT296Export(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT296Exports.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req mt296ExportRequest
+	if err := dec.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: unexpected trailing data"})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	res, err := l.ExportMT296ForAnswered(req.RelatedReference, ledger.MT296ExportOptions{
+		SenderLT:    req.SenderLT,
+		ReceiverLT:  req.ReceiverLT,
+		Reference:   req.TransactionReference,
+		Answers:     req.Answers,
+		Narrative:   req.Narrative,
+		Description: req.Description,
+	}, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		switch {
+		case errors.Is(err, ledger.ErrMT296AnsweredNotFound),
+			errors.Is(err, ledger.ErrMT296MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrMT296Framing),
+			errors.Is(err, ledger.ErrMT296Field),
+			errors.Is(err, ledger.ErrMT296Reference),
+			errors.Is(err, ledger.ErrMT296LT),
+			errors.Is(err, ledger.ErrMT296Answers),
+			errors.Is(err, ledger.ErrMT296Narrative),
+			errors.Is(err, ledger.ErrMT296Description):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt296: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exporting MT296 answer failed"})
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(res.Message))
+}
+
 // handleMT295Apply implements POST /exports/mt295/apply (LG-466):
 // registers a correspondent bank's SWIFT FIN MT295 query about an
 // earlier Category 2 message — the inbound half of the Category 2
@@ -16621,6 +16724,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt292", s.handleMT292Export)
 	mux.HandleFunc("POST /exports/mt292/apply", s.handleMT292Apply)
 	mux.HandleFunc("POST /exports/mt296/apply", s.handleMT296Apply)
+	mux.HandleFunc("POST /exports/mt296", s.handleMT296Export)
 	mux.HandleFunc("POST /exports/mt295/apply", s.handleMT295Apply)
 	mux.HandleFunc("GET /exports/camt057", s.handleCAMT057Export)
 	mux.HandleFunc("GET /exports/camt058", s.handleCAMT058Export)

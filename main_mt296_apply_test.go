@@ -10,8 +10,9 @@ import (
 // as :20:, relatedRef as :21: (the answered MT292's :20:),
 // answers as the :76: lines, narrative as the :77A: lines (empty
 // omits :77A:), description as the :79: lines (empty omits
-// :79:). There is no ExportMT296, so the fixture is hand-built
-// FIN text, the MT292 inbound convention.
+// :79:). The fixture is hand-built FIN text, the MT292 inbound
+// convention: the parse side takes raw text, and the export side
+// lives in ledger/mt296_export.go (LG-467).
 func mt296HTTPDoc(ref, relatedRef string, answers, narrative, description []string) string {
 	var b strings.Builder
 	b.WriteString("{1:F01CITIUS33XXX0000000000}\n")
