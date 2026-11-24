@@ -6828,6 +6828,79 @@ func (s *server) handleMT292Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handleMT296Apply implements POST /exports/mt296/apply (LG-465):
+// registers a correspondent bank's SWIFT FIN MT296 answer to an
+// MT292 cancellation request — the inbound half of the MT292
+// lifecycle's answer leg, closing the half LG-435 opened. The
+// body is the raw MT296 FIN text; its :20: is the answer's own
+// reference (the registration key), its :21: names the answered
+// MT292's :20: (which must have the `MT292-` + 10 lowercase hex
+// shape), its :76: carries the bank's answer lines verbatim, and
+// its :77A: / :79: carry the narrative verbatim. Registering an
+// answer moves nothing: no journal entry, no schedule status
+// change, no version bump — the answer is evidence, and the
+// operator matches it to the request from the :21: and the audit
+// event; there is no :21:→schedule reverse lookup. A re-sent :20:
+// with the same terms is an idempotent no-op returning the stored
+// answer; a :20: reused for different terms is a conflict. Error
+// mapping: a malformed FIN document is a 400; an unknown :21:
+// (parked fail-closed in the repair queue, never dropped without
+// a record) or a :20: reused for different terms is a 422. A
+// parse failure is a plain 400 — no unparsed-document parking
+// variant (the MT292 handler's ParkMT292Unparsed is not
+// repeated here). The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
+func (s *server) handleMT296Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT296Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	m, err := ledger.ParseMT296(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT296(m, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrMT296UnknownReference),
+			errors.Is(err, ledger.ErrMT296MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrMT296Framing),
+			errors.Is(err, ledger.ErrMT296Field),
+			errors.Is(err, ledger.ErrMT296Reference),
+			errors.Is(err, ledger.ErrMT296LT),
+			errors.Is(err, ledger.ErrMT296Answers),
+			errors.Is(err, ledger.ErrMT296Narrative),
+			errors.Is(err, ledger.ErrMT296Description):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt296/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT296 answer failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleCAMT057Export implements GET /exports/camt057 (LG-403): an
 // ISO 20022 camt.057.001.07 notification to receive for the next run
 // of one active transfer schedule (see ledger.ExportCAMT057) — the
@@ -16472,6 +16545,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /exports/mt210/apply", s.handleMT210Apply)
 	mux.HandleFunc("GET /exports/mt292", s.handleMT292Export)
 	mux.HandleFunc("POST /exports/mt292/apply", s.handleMT292Apply)
+	mux.HandleFunc("POST /exports/mt296/apply", s.handleMT296Apply)
 	mux.HandleFunc("GET /exports/camt057", s.handleCAMT057Export)
 	mux.HandleFunc("GET /exports/camt058", s.handleCAMT058Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)

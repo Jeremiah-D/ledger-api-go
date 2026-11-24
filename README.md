@@ -6596,8 +6596,9 @@ pause the plan, export the MT292 to withdraw the old notice,
 resume the plan, and issue a new MT210. The export is the
 cancellation request, not the cancellation itself — the schedule
 keeps its status, and whether the bank honours the request is
-confirmed by its own reply, which is not an inbound MT292 to this
-ledger (the reverse direction is parsed, below).
+confirmed by its own reply, which arrives as an inbound MT296
+(registered below) — not an inbound MT292 (the reverse direction
+is parsed, below).
 One MT292 cancels one run: the next run only. Like MT210, the
 export is read-only and repeat exports are byte-identical (`:20:`
 pinned to schedule plus `RunSeq`, `:11S:` pinned to the
@@ -6621,6 +6622,27 @@ A malformed document is 400, an unknown `:21:` original is 422
 (parked in the repair queue, the error body carrying the repair
 record ID), and a conflict is 422. `GET /metrics` counts applies
 as `ledger_mt292_applies_total`.
+
+The bank's answer to our MT292 comes back as a SWIFT FIN MT296:
+`POST /exports/mt296/apply` with the raw FIN text as the body
+(see `ledger.ParseMT296`/`ApplyMT296`). The answer's `:20:` is
+its own reference (the replay key), its `:21:` names the MT292 it
+answers — which must have the `MT292-` plus 10 lowercase hex
+shape our own MT292 `:20:`s carry — its `:76:` carries the bank's
+answer lines verbatim (`/CNCL/`, `/RJCR/`, `/PDCR/`, or any other
+text: the ledger runs no accept/reject code table off them), and
+its `:77A:` and `:79:` carry the narrative verbatim. Registering
+an answer moves nothing — no journal rows, no schedule status
+change, no version bump — and the `:21:` lives only in the
+registration and the `mt296_answer_received` audit event: there is
+no `:21:`→schedule reverse lookup (the SHA-256 is irreversible,
+and the ledger holds no outbound MT292 registry), so the operator
+matches the answer to the request from the `:21:` and the audit
+event. A malformed document is 400, a `:21:` of the wrong shape
+is 422 (parked in the repair queue, the error body carrying the
+repair record ID), and a `:20:` reused for different terms is 422;
+a re-sent `:20:` with the same terms is an idempotent no-op.
+`GET /metrics` counts applies as `ledger_mt296_applies_total`.
 
 The same notice exists in ISO 20022 syntax: `GET
 /exports/camt057?schedule_id=<id>&servicing_bic=<bic>` renders

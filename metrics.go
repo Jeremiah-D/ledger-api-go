@@ -414,6 +414,10 @@ type Metrics struct {
 	// MT920 report request apply requests served, including
 	// rejected requests (see ledger.ApplyMT920, LG-464).
 	MT920Applies atomic.Uint64
+	// MT296Applies counts POST /exports/mt296/apply SWIFT FIN
+	// MT296 answer apply requests served, including rejected
+	// requests (see ledger.ApplyMT296, LG-465).
+	MT296Applies atomic.Uint64
 	// XeroExports counts GET /exports/accounting/xero Xero
 	// bank-statement CSV export requests served, including rejected
 	// exports (see ledger.ExportAccounting, LG-184).
@@ -1475,6 +1479,8 @@ func (m *Metrics) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Total POST /exports/mt920 SWIFT FIN MT920 request message exports served, including rejected exports.", m.MT920Exports.Load())
 	writeCounter(&sb, "ledger_mt920_applies_total",
 		"Total POST /exports/mt920/apply SWIFT FIN MT920 report request apply requests served, including rejected requests.", m.MT920Applies.Load())
+	writeCounter(&sb, "ledger_mt296_applies_total",
+		"Total POST /exports/mt296/apply SWIFT FIN MT296 answer apply requests served, including rejected requests.", m.MT296Applies.Load())
 	writeCounter(&sb, "ledger_xero_exports_total",
 		"Total GET /exports/accounting/xero Xero bank-statement CSV exports served, including rejected exports.", m.XeroExports.Load())
 	writeCounter(&sb, "ledger_quickbooks_exports_total",

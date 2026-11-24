@@ -25,9 +25,10 @@ import (
 //
 // The export is the cancellation *request*, not the cancellation
 // itself: the schedule keeps its status until the bank confirms,
-// and the ledger parses no reply to this export — whether the
-// bank honours the request is confirmed by its own reply,
-// outside this ledger. The reverse direction is a different
+// and whether the bank honours the request is confirmed by its
+// own reply — an inbound MT296, parsed and registered by
+// ParseMT296 / ApplyMT296 (see mt296_inbound.go, LG-465). The
+// reverse direction is a different
 // flow: a counterparty's MT292 cancelling one of its MT210
 // notices to this ledger is parsed and applied by ParseMT292 /
 // ApplyMT292 (see mt292_inbound.go, LG-452) — that one withdraws
