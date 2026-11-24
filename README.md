@@ -6644,6 +6644,33 @@ repair record ID), and a `:20:` reused for different terms is 422;
 a re-sent `:20:` with the same terms is an idempotent no-op.
 `GET /metrics` counts applies as `ledger_mt296_applies_total`.
 
+The other direction of the Category 2 question-answer chain — a
+correspondent bank asking this ledger about a Category 2 message
+it holds — is `POST /exports/mt295/apply` with the raw FIN text
+as the body (see `ledger.ParseMT295`/`ApplyMT295`). The query's
+`:20:` is its own reference (the replay key), its `:21:` names the
+queried message's `:20:` — an MT210 notification, an inbound
+MT292 cancellation request, or an inbound MT202 transfer, looked
+up in the ledger's own registries in that order — its `:75:`
+carries the coded question verbatim (mandatory: a query with no
+question text is malformed), and its `:77A:` and `:79:` carry the
+narrative verbatim. Registering a query moves nothing — no journal
+rows, no schedule status change, no ExpectedReceipt cancellation,
+no version bump — and no answer snapshot is built: the answer is
+organised per queried object by the later MT296 export, so a
+query is evidence for the answer to come, not an answer itself.
+A `:21:` naming nothing the ledger holds — including one shaped
+like our own outbound MT292's `:20:`, which the ledger holds no
+state for — is 422 (parked in the repair queue, the error body
+carrying the repair record ID), a `:20:` reused for different
+terms is 422, and a malformed document is 400; a re-sent `:20:`
+with the same terms is an idempotent no-op. The chain now reads:
+query registration (here) → answer registration (`POST
+/exports/mt296/apply`, above) → answer rendering (a later MT296
+export item) — the Category 2 twin of the Category 1 MT195/MT196
+loop. `GET /metrics` counts applies as
+`ledger_mt295_applies_total`.
+
 The same notice exists in ISO 20022 syntax: `GET
 /exports/camt057?schedule_id=<id>&servicing_bic=<bic>` renders
 the next run as a camt.057.001.07 `NotificationToReceive` (see

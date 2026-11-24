@@ -6901,6 +6901,81 @@ func (s *server) handleMT296Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handleMT295Apply implements POST /exports/mt295/apply (LG-466):
+// registers a correspondent bank's SWIFT FIN MT295 query about an
+// earlier Category 2 message — the inbound half of the Category 2
+// query leg, closing the half LG-465's MT296 answer registration
+// left open. The body is the raw MT295 FIN text; its :20: is the
+// query's own reference (the registration key), its :21: names the
+// queried message's :20: (an MT210 notification, an inbound MT292
+// cancellation request, or an inbound MT202 transfer — all three
+// looked up in the ledger's own registries), its :75: carries the
+// coded question verbatim, and its :77A: / :79: carry the narrative
+// verbatim. Registering a query moves nothing: no journal entry, no
+// schedule status change, no ExpectedReceipt cancellation, no
+// version bump — the query is evidence, and no answer snapshot is
+// built (the answer is organised per queried object by the later
+// MT296 export). A re-sent :20: with the same terms is an
+// idempotent no-op returning the stored query; a :20: reused for
+// different terms is a conflict. Error mapping: a malformed FIN
+// document is a 400; an unknown :21: (parked fail-closed in the
+// repair queue, never dropped without a record) or a :20: reused
+// for different terms is a 422. A parse failure is a plain 400 —
+// no unparsed-document parking variant (the MT292 handler's
+// ParkMT292Unparsed is not repeated here). The operator identity
+// comes from the x-ledger-actor header, like the other operator
+// actions.
+func (s *server) handleMT295Apply(w http.ResponseWriter, r *http.Request) {
+	s.metrics.MT295Applies.Add(1)
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	m, err := ledger.ParseMT295(string(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := l.ApplyMT295(m, actor)
+	if err != nil {
+		errBody := map[string]string{"error": err.Error()}
+		if res.RepairID != "" {
+			errBody["repair_id"] = res.RepairID
+		}
+		switch {
+		case errors.Is(err, ledger.ErrMT295UnknownReference),
+			errors.Is(err, ledger.ErrMT295MsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, errBody)
+		case errors.Is(err, ledger.ErrMT295Framing),
+			errors.Is(err, ledger.ErrMT295Field),
+			errors.Is(err, ledger.ErrMT295Reference),
+			errors.Is(err, ledger.ErrMT295LT),
+			errors.Is(err, ledger.ErrMT295Queries),
+			errors.Is(err, ledger.ErrMT295Narrative),
+			errors.Is(err, ledger.ErrMT295Description):
+			writeJSON(w, http.StatusBadRequest, errBody)
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt295/apply: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "applying MT295 query failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleCAMT057Export implements GET /exports/camt057 (LG-403): an
 // ISO 20022 camt.057.001.07 notification to receive for the next run
 // of one active transfer schedule (see ledger.ExportCAMT057) — the
@@ -16546,6 +16621,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /exports/mt292", s.handleMT292Export)
 	mux.HandleFunc("POST /exports/mt292/apply", s.handleMT292Apply)
 	mux.HandleFunc("POST /exports/mt296/apply", s.handleMT296Apply)
+	mux.HandleFunc("POST /exports/mt295/apply", s.handleMT295Apply)
 	mux.HandleFunc("GET /exports/camt057", s.handleCAMT057Export)
 	mux.HandleFunc("GET /exports/camt058", s.handleCAMT058Export)
 	mux.HandleFunc("POST /cancellations", s.handleRequestCancellation)

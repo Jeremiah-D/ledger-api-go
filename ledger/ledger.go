@@ -1121,6 +1121,19 @@ type Ledger struct {
 	// replay, and a re-sent answer parks again — or registers,
 	// once the :21: names an outbound MT292 :20: shape.
 	mt296Received map[string]mt296ReceivedRecord
+	// mt295Received maps a MT295 :20: reference to the inbound
+	// query its first application registered (see
+	// mt295_inbound.go, LG-466): the replay guard for inbound
+	// MT295 queries, so a re-sent query returns the stored
+	// outcome instead of registering twice — and a :20:
+	// reused for different terms is refused instead of
+	// silently overwritten. In-memory only, like mt296Received:
+	// the hash-chained mt295_query_received audit events are
+	// the durable record. A query parked in the repair queue
+	// (unknown :21:) records nothing here: it has no query to
+	// replay, and a re-sent query parks again — or registers,
+	// once the queried message exists.
+	mt295Received map[string]mt295ReceivedRecord
 	// mt190Applied maps a MT190 :20: reference to the charge
 	// advice its first application recorded (see
 	// mt190_inbound.go, LG-454): the replay guard for inbound
