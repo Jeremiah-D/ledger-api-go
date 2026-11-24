@@ -172,6 +172,20 @@ type AuditSink struct {
 	// independent of it.
 	pollPageLimit int
 	cursorPath    string
+	// onIdleSleep, when non-nil, is invoked with the duration of
+	// every idle sleep the run loop enters (empty-outbox polls
+	// only). Test-only observability: it lets timing tests wait
+	// until the sink has actually entered a sleep under a revised
+	// interval instead of assuming a fixed wall-clock nap is
+	// enough (LG-314 flake, 2026-11-24: the CI run on b9c2704 and
+	// local -count=30 both failed TestSetSinkPollIntervalLoosens-
+	// IdlePoll when the sink goroutine had not yet entered its
+	// 500ms sleep 50ms after the revision, so the next event was
+	// picked up by the tail of the old rhythm). Guarded by cfgMu;
+	// set only from the amend tests via setIdleSleepHookForTest.
+	// Never set by production code, and the hook is never invoked
+	// while holding cfgMu, so it cannot deadlock a revision.
+	onIdleSleep func(time.Duration)
 
 	done     chan struct{}
 	stopOnce sync.Once
@@ -280,7 +294,13 @@ func (s *AuditSink) run(ctx context.Context) {
 			continue
 		}
 		if len(events) == 0 {
-			if !sinkSleep(ctx, s.done, s.pollInterval()) {
+			// Read the live interval once per idle cycle and report
+			// the sleep entry (test-only hook) before the timer is
+			// built, so a test waiting on the hook knows the sink
+			// is in a sleep of exactly this duration.
+			d := s.pollInterval()
+			s.notifyIdleSleep(d)
+			if !sinkSleep(ctx, s.done, d) {
 				return
 			}
 			continue
@@ -298,6 +318,20 @@ func (s *AuditSink) run(ctx context.Context) {
 				fmt.Fprintf(os.Stderr, "ledger: audit sink: persist cursor: %v\n", err)
 			}
 		}
+	}
+}
+
+// notifyIdleSleep reports an idle-sleep entry to the test-only hook
+// (onIdleSleep), if one is installed. The hook is read under cfgMu
+// and invoked without holding the lock, so a test hook can never
+// deadlock against a concurrent revision; a nil hook costs one
+// RLock pair per idle cycle and changes nothing.
+func (s *AuditSink) notifyIdleSleep(d time.Duration) {
+	s.cfgMu.RLock()
+	hook := s.onIdleSleep
+	s.cfgMu.RUnlock()
+	if hook != nil {
+		hook(d)
 	}
 }
 

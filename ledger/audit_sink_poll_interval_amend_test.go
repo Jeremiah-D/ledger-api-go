@@ -56,6 +56,72 @@ func sinkPollIntervalRetunedCount(t *testing.T, auditDir string) int {
 	return n
 }
 
+// setIdleSleepHookForTest installs the sink's idle-sleep hook under
+// cfgMu, so the run goroutine never races the test goroutine on the
+// field. Test-only; production code never calls it.
+func (s *AuditSink) setIdleSleepHookForTest(hook func(time.Duration)) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	s.onIdleSleep = hook
+}
+
+// idleSleepEventsForTest returns a channel fed with the duration of
+// every idle sleep the sink enters after the hook is installed. The
+// send is non-blocking (a full buffer drops), so the hook can never
+// stall the run loop; entries older than the wait are skipped by the
+// caller, never trusted.
+func (s *AuditSink) idleSleepEventsForTest() <-chan time.Duration {
+	ch := make(chan time.Duration, 32)
+	s.setIdleSleepHookForTest(func(d time.Duration) {
+		select {
+		case ch <- d:
+		default:
+		}
+	})
+	return ch
+}
+
+// waitForIdleSleep blocks until the sink enters an idle sleep of
+// exactly want, or fails the test. Entries of other durations (the
+// tail of the old rhythm, entered before a revision took effect)
+// are skipped. This is the deterministic replacement for "sleep N
+// ms and assume the sink has settled into the new rhythm": the
+// 50ms/100ms naps the loosen/in-flight tests used to guess with
+// failed in CI (b9c2704) and locally under -race when the sink
+// goroutine had not yet looped back and entered the new sleep —
+// the event was then picked up by the tail of the old rhythm and
+// delivered inside the 200ms window. The assertions below are
+// unchanged; only the synchronization is real now.
+func waitForIdleSleep(t *testing.T, ch <-chan time.Duration, want time.Duration) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case d := <-ch:
+			if d == want {
+				return
+			}
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for the sink to enter a %v idle sleep", want)
+		}
+	}
+}
+
+// drainIdleSleepEvents drops every sleep entry observed so far, so
+// the next waitForIdleSleep can only be satisfied by a sleep the
+// sink enters after the drain — i.e. after the delivery the test
+// just observed, not by a sleep entered before it.
+func drainIdleSleepEvents(ch <-chan time.Duration) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
 func TestSetSinkPollIntervalTightensIdlePoll(t *testing.T) {
 	cap := &sinkCapture{}
 	cfg := sinkTestConfig("")
@@ -102,6 +168,7 @@ func TestSetSinkPollIntervalLoosensIdlePoll(t *testing.T) {
 	cfg := sinkTestConfig("")
 	cfg.PollInterval = 10 * time.Millisecond
 	l, sink, _ := startSinkTestLedger(t, cap, cfg)
+	sleeps := sink.idleSleepEventsForTest()
 
 	mustPostSink(t, l, "amend-sink-poll-loose-1")
 	waitForSink(t, 5*time.Second, "first delivery", func() bool { return cap.count() == 1 })
@@ -113,10 +180,12 @@ func TestSetSinkPollIntervalLoosensIdlePoll(t *testing.T) {
 	if prev != 10*time.Millisecond {
 		t.Fatalf("returned previous interval = %v, want 10ms", prev)
 	}
-	// Let the sink wake from its last 10ms sleep and enter a 500ms
-	// one under the new value before posting: otherwise the event
-	// could land on the tail of the old rhythm.
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the sink has actually entered a 500ms sleep under
+	// the new value before posting: only then is the event held back
+	// by the loosened rhythm. (A fixed nap here used to guess this,
+	// and the guess lost whenever the sink goroutine was scheduled
+	// late.)
+	waitForIdleSleep(t, sleeps, 500*time.Millisecond)
 
 	posted := time.Now()
 	mustPostSink(t, l, "amend-sink-poll-loose-2")
@@ -303,12 +372,18 @@ func TestSetSinkPollIntervalInFlightSleepNotInterrupted(t *testing.T) {
 	cfg := sinkTestConfig("")
 	cfg.PollInterval = 500 * time.Millisecond
 	l, sink, _ := startSinkTestLedger(t, cap, cfg)
+	sleeps := sink.idleSleepEventsForTest()
 
 	mustPostSink(t, l, "amend-sink-poll-sleep-1")
 	waitForSink(t, 5*time.Second, "first delivery", func() bool { return cap.count() == 1 })
-	// The sink is now inside a 500ms idle sleep (it entered the
-	// sleep right after the first delivery).
-	time.Sleep(100 * time.Millisecond)
+	// The sink is inside a 500ms idle sleep only once it has
+	// finished the first delivery and entered a fresh sleep: drain
+	// any entry from before the delivery, then wait for the next
+	// one. (A fixed 100ms nap here used to guess this, and the
+	// guess lost the same way as the loosen test when the sink
+	// goroutine was scheduled late.)
+	drainIdleSleepEvents(sleeps)
+	waitForIdleSleep(t, sleeps, 500*time.Millisecond)
 
 	posted := time.Now()
 	mustPostSink(t, l, "amend-sink-poll-sleep-2")
