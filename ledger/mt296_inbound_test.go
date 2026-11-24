@@ -122,8 +122,8 @@ func TestParseMT296_RejectsMissingFields(t *testing.T) {
 	cases := map[string]string{
 		"missing :21:": "{1:F01CITIUS33XXX0000000000}\n{2:I296NWBKGB2LXXXU3003}\n{3:{108:ANS-296-3}}\n{4:\n:20:ANS-296-3\n:76:/CNCL/\n-}",
 		"missing :76:": "{1:F01CITIUS33XXX0000000000}\n{2:I296NWBKGB2LXXXU3003}\n{3:{108:ANS-296-3}}\n{4:\n:20:ANS-296-3\n:21:" + mt296AnsweredRef() + "\n-}",
-		"empty :20:": "{1:F01CITIUS33XXX0000000000}\n{2:I296NWBKGB2LXXXU3003}\n{3:{108:ANS-296-3}}\n{4:\n:20:\n:21:" + mt296AnsweredRef() + "\n:76:/CNCL/\n-}",
-		"empty :21:": "{1:F01CITIUS33XXX0000000000}\n{2:I296NWBKGB2LXXXU3003}\n{3:{108:ANS-296-3}}\n{4:\n:20:ANS-296-3\n:21:\n:76:/CNCL/\n-}",
+		"empty :20:":   "{1:F01CITIUS33XXX0000000000}\n{2:I296NWBKGB2LXXXU3003}\n{3:{108:ANS-296-3}}\n{4:\n:20:\n:21:" + mt296AnsweredRef() + "\n:76:/CNCL/\n-}",
+		"empty :21:":   "{1:F01CITIUS33XXX0000000000}\n{2:I296NWBKGB2LXXXU3003}\n{3:{108:ANS-296-3}}\n{4:\n:20:ANS-296-3\n:21:\n:76:/CNCL/\n-}",
 	}
 	for name, doc := range cases {
 		if _, err := ParseMT296(doc); err == nil {
@@ -432,5 +432,232 @@ func TestApplyMT296_RejectsInvalidMessage(t *testing.T) {
 	}
 	if _, ok := l.GetMT296Received("ANS-296-15"); ok {
 		t.Error("GetMT296Received = true for a refused answer, want false")
+	}
+}
+
+// mt296MT295ExportRef renders one outbound MT295 query about the
+// paused fixture schedule (sched-1, run 0) and returns its
+// derived :20: — the tier-(b) anchor for the inbound MT296
+// tests (LG-469): the answer's :21: names this export.
+func mt296MT295ExportRef(t *testing.T, l *Ledger) string {
+	t.Helper()
+	res, err := l.ExportMT295ForCancelled("sched-1", 0, MT295ExportOptions{
+		SenderLT:   "DEUTDEFF",
+		ReceiverLT: "CHASUS33",
+		Queries:    []string{"STAT"},
+	}, "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT295ForCancelled: %v", err)
+	}
+	return res.Reference
+}
+
+func TestApplyMT296_MT295TierRegistersAnswer(t *testing.T) {
+	al := mustAuditLog(t)
+	l, _ := mt295ExportPausedLedger(t, al)
+	ref := mt296MT295ExportRef(t, l)
+	if ref == "" || len(ref) != 16 {
+		t.Fatalf("export :20: = %q, want a 16-character MT295- reference", ref)
+	}
+	before := l.Version()
+	entriesBefore := len(l.Entries())
+
+	res := applyInboundMT296(t, l, mt296InboundDoc("ANS-296-20", ref,
+		[]string{"/CNCL/", "CANCELLATION CONFIRMED 261124"},
+		[]string{"OPERATOR NOTE"},
+		[]string{"BANK CONFIRMS THE NOTIFICATION", "IS WITHDRAWN"}), "correspondent-bank")
+	if res.Duplicate {
+		t.Error("duplicate = true on first apply")
+	}
+	if res.Reference != "ANS-296-20" || res.RelatedReference != ref {
+		t.Errorf("refs = %q/%q, want ANS-296-20/%s", res.Reference, res.RelatedReference, ref)
+	}
+	if len(res.Answers) != 2 || res.Answers[0] != "/CNCL/" {
+		t.Errorf("answers = %v, want the :76: lines verbatim", res.Answers)
+	}
+	// Registering is read-only: no version bump, no journal rows.
+	if l.Version() != before {
+		t.Errorf("version = %d, want %d (read-only, no bump)", l.Version(), before)
+	}
+	if len(l.Entries()) != entriesBefore {
+		t.Errorf("entries = %d, want %d (no journal rows)", len(l.Entries()), entriesBefore)
+	}
+	// The stored answer round-trips through the getter, verbatim.
+	stored, ok := l.GetMT296Received("ANS-296-20")
+	if !ok {
+		t.Fatal("GetMT296Received = false, want the stored answer")
+	}
+	if stored.RelatedReference != ref || len(stored.Answers) != 2 ||
+		stored.Answers[1] != "CANCELLATION CONFIRMED 261124" ||
+		len(stored.Narrative) != 1 || stored.Narrative[0] != "OPERATOR NOTE" ||
+		len(stored.Description) != 2 || stored.Description[1] != "IS WITHDRAWN" {
+		t.Errorf("stored = %+v, want the registered answer verbatim", stored)
+	}
+	// Audit: exactly one received marker with the exact details
+	// — the :20: on the durable record, and no accounts — plus
+	// the export marker for the query being answered.
+	events := readAuditOps(t, al)
+	if countOp(events, "mt296_answer_received") != 1 {
+		t.Errorf("mt296_answer_received count = %d, want 1", countOp(events, "mt296_answer_received"))
+	}
+	if countOp(events, "mt295_query_exported") != 1 {
+		t.Errorf("mt295_query_exported count = %d, want 1", countOp(events, "mt295_query_exported"))
+	}
+	ev := findOp(events, "mt296_answer_received")
+	if ev == nil {
+		t.Fatal("mt296_answer_received event missing")
+	}
+	if ev.Actor != "correspondent-bank" {
+		t.Errorf("actor = %q, want correspondent-bank (ApplyMT296)", ev.Actor)
+	}
+	if ev.TraceID != "ANS-296-20" {
+		t.Errorf("trace = %q, want ANS-296-20", ev.TraceID)
+	}
+	if ev.Details["msg_id"] != "ANS-296-20" || ev.Details["related_reference"] != ref ||
+		ev.Details["sender_lt"] != "CITIUS33XXX" {
+		t.Errorf("details = %v, want msg/related/sender", ev.Details)
+	}
+	if len(ev.Accounts) != 0 {
+		t.Errorf("accounts = %v, want none (evidence-only registration)", ev.Accounts)
+	}
+}
+
+func TestApplyMT296_MT295TierUnregisteredGoesToRepair(t *testing.T) {
+	al := mustAuditLog(t)
+	l, _ := mt295ExportPausedLedger(t, al)
+	// A well-shaped MT295 :20: for a query this ledger never
+	// rendered: run 1's MT292 asked the same question derives
+	// a different :20: that is in no registry — the shape
+	// alone is not enough for tier (b).
+	unregistered := mt295MessageReference(mt292MessageReference("sched-1", 1),
+		[]string{"STAT"}, nil, nil)
+	m, err := ParseMT296(mt296InboundDoc("ANS-296-21", unregistered,
+		[]string{"/CNCL/"}, nil, []string{"ANSWER TO NOTHING WE ASKED"}))
+	if err != nil {
+		t.Fatalf("ParseMT296: %v", err)
+	}
+	res, err := l.ApplyMT296(m, "correspondent-bank")
+	if !errors.Is(err, ErrMT296UnknownReference) {
+		t.Errorf("err = %v, want ErrMT296UnknownReference", err)
+	}
+	if res.RepairID == "" {
+		t.Error("repair_id empty, want the parked repair record")
+	}
+	rec, ok := l.GetRepair(res.RepairID)
+	if !ok {
+		t.Fatalf("GetRepair(%q) = false, want the parked record", res.RepairID)
+	}
+	if rec.ReasonCode != RepairReasonUnknownRoute {
+		t.Errorf("repair reason = %q, want unknown_route", rec.ReasonCode)
+	}
+	if rec.Instruction.ID != unregistered {
+		t.Errorf("repair instruction id = %q, want the unanchored :21:", rec.Instruction.ID)
+	}
+	if rec.Instruction.Destination != "mt296-inbound:ANS-296-21" {
+		t.Errorf("repair destination = %q, want mt296-inbound:ANS-296-21", rec.Instruction.Destination)
+	}
+	if _, ok := l.GetMT296Received("ANS-296-21"); ok {
+		t.Error("GetMT296Received = true for a parked answer, want false")
+	}
+	events := readAuditOps(t, al)
+	if countOp(events, "mt296_answer_received") != 0 {
+		t.Errorf("mt296_answer_received count = %d, want 0", countOp(events, "mt296_answer_received"))
+	}
+	if countOp(events, "repair_enqueued") != 1 {
+		t.Errorf("repair_enqueued count = %d, want 1", countOp(events, "repair_enqueued"))
+	}
+}
+
+func TestApplyMT296_MT295TierBadShapeGoesToRepair(t *testing.T) {
+	l := mt296InboundLedger(t, mustAuditLog(t))
+
+	// Three :21: references that are valid MT296 references but
+	// match neither tier: an MT295- prefix with non-hex
+	// characters, a short MT295- prefix, and an MT295- prefix
+	// with a non-hex tail character.
+	for _, badRef := range []string{"MT295-ABCDEF0123", "MT295-abc", "MT295-abcdef012g"} {
+		m, err := ParseMT296(mt296InboundDoc("ANS-296-22", badRef,
+			[]string{"/CNCL/"}, nil, []string{"ANSWER TO NOTHING WE SENT"}))
+		if err != nil {
+			t.Fatalf("ParseMT296 :21: %q: %v", badRef, err)
+		}
+		res, err := l.ApplyMT296(m, "correspondent-bank")
+		if !errors.Is(err, ErrMT296UnknownReference) {
+			t.Errorf(":21: %q: err = %v, want ErrMT296UnknownReference", badRef, err)
+		}
+		if res.RepairID == "" {
+			t.Errorf(":21: %q: repair_id empty, want the parked repair record", badRef)
+		}
+	}
+}
+
+func TestApplyMT296_MT295TierReplaysSameTerms(t *testing.T) {
+	al := mustAuditLog(t)
+	l, _ := mt295ExportPausedLedger(t, al)
+	ref := mt296MT295ExportRef(t, l)
+
+	doc := mt296InboundDoc("ANS-296-25", ref,
+		[]string{"/CNCL/"}, nil, []string{"CONFIRMED"})
+	first := applyInboundMT296(t, l, doc, "correspondent-bank")
+	if first.Duplicate {
+		t.Error("duplicate = true on first apply")
+	}
+	// A replay under different LTs is still the same answer: LTs
+	// are envelope, not terms.
+	replayDoc := strings.Replace(doc, "CITIUS33XXX", "DEUTDEFFXXX", 1)
+	replayDoc = strings.Replace(replayDoc, "NWBKGB2LXXX", "CITIUS33XXX", 1)
+	m, err := ParseMT296(replayDoc)
+	if err != nil {
+		t.Fatalf("ParseMT296: %v", err)
+	}
+	res, err := l.ApplyMT296(m, "correspondent-bank")
+	if err != nil {
+		t.Fatalf("ApplyMT296 replay: %v", err)
+	}
+	if !res.Duplicate {
+		t.Error("duplicate = false on replay, want true")
+	}
+	if res.Reference != first.Reference || res.RelatedReference != first.RelatedReference ||
+		len(res.Answers) != len(first.Answers) || res.Answers[0] != first.Answers[0] {
+		t.Errorf("replay = %+v, want the stored outcome", res)
+	}
+	events := readAuditOps(t, al)
+	if countOp(events, "mt296_answer_received") != 1 {
+		t.Errorf("mt296_answer_received count = %d, want 1 (no second marker)", countOp(events, "mt296_answer_received"))
+	}
+	// Same :20:, different :79: — refused, never silently
+	// overwritten.
+	m, err = ParseMT296(mt296InboundDoc("ANS-296-25", ref,
+		[]string{"/CNCL/"}, nil, []string{"REJECTED INSTEAD"}))
+	if err != nil {
+		t.Fatalf("ParseMT296: %v", err)
+	}
+	if _, err := l.ApplyMT296(m, "correspondent-bank"); !errors.Is(err, ErrMT296MsgIDConflict) {
+		t.Errorf("different :79:: err = %v, want ErrMT296MsgIDConflict", err)
+	}
+	// Same :20:, different :21: (the tier-(a) shape this time)
+	// — the terms include the anchor, so this is a conflict too.
+	m, err = ParseMT296(mt296InboundDoc("ANS-296-25", mt296AnsweredRef(),
+		[]string{"/CNCL/"}, nil, []string{"CONFIRMED"}))
+	if err != nil {
+		t.Fatalf("ParseMT296: %v", err)
+	}
+	if _, err := l.ApplyMT296(m, "correspondent-bank"); !errors.Is(err, ErrMT296MsgIDConflict) {
+		t.Errorf("different :21:: err = %v, want ErrMT296MsgIDConflict", err)
+	}
+}
+
+// The tier-(a) gate is untouched by the tier-(b) addition: a
+// shape-matching MT292 :20: still registers with no registry
+// lookup behind it.
+func TestApplyMT296_MT292TierStillRegisters(t *testing.T) {
+	l := mt296InboundLedger(t, mustAuditLog(t))
+	res := applyInboundMT296(t, l, mt296InboundDoc("ANS-296-26", mt296AnsweredRef(),
+		[]string{"/CNCL/"}, nil, nil), "correspondent-bank")
+	if res.Duplicate || res.RelatedReference != mt296AnsweredRef() {
+		t.Errorf("res = %+v, want the tier-(a) answer registered", res)
+	}
+	if _, ok := l.GetMT296Received("ANS-296-26"); !ok {
+		t.Error("GetMT296Received = false, want the tier-(a) answer")
 	}
 }

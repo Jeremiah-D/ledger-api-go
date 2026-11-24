@@ -1146,7 +1146,8 @@ type Ledger struct {
 	// the durable record. An answer parked in the repair queue
 	// (unknown :21:) records nothing here: it has no answer to
 	// replay, and a re-sent answer parks again — or registers,
-	// once the :21: names an outbound MT292 :20: shape.
+	// once the :21: names an outbound MT292 :20: shape, or a
+	// registered outbound MT295 :20: (LG-469 tier (b)).
 	mt296Received map[string]mt296ReceivedRecord
 	// mt295Received maps a MT295 :20: reference to the inbound
 	// query its first application registered (see
