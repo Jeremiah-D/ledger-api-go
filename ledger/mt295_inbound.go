@@ -224,6 +224,14 @@ var (
 	// in the repair queue fail-closed rather than dropped. It
 	// is a 422-class error.
 	ErrMT295UnknownReference = errors.New("ledger: mt295 inbound: unknown :21: related reference")
+	// ErrMT295UnknownMT202 is returned by ExportMT295ForMT202
+	// when the outbound MT202 :20: the query names is not
+	// registered in mt202Exports (LG-475) — the transfer was
+	// never rendered by this ledger, so the query parks in the
+	// repair queue fail-closed rather than asking about a
+	// transfer this ledger could not have sent. It is a
+	// 422-class error.
+	ErrMT295UnknownMT202 = errors.New("ledger: mt295 export: unknown MT202 reference")
 	// ErrMT295MsgIDConflict is returned when a :20: reference
 	// already applied carries different terms: the reference
 	// names one query, and a second, different query under

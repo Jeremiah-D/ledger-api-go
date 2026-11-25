@@ -213,3 +213,142 @@ func TestHTTPMT295Export(t *testing.T) {
 		t.Errorf("metrics exposition missing ledger_mt295_exports_total 10:\n%s", metricsBody)
 	}
 }
+
+// MT202-tier MT295 query export through HTTP: register an
+// outbound MT202, ask the correspondent bank about it by its
+// :20:, replay the same question, and verify the FIN body, the
+// anchor errors, and the metrics counter.
+func TestHTTPMT295ExportForMT202(t *testing.T) {
+	srv := mt195ExportTestServer(t)
+
+	post := func(t *testing.T, path, body string) (int, http.Header, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-ledger-actor", "ops")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return resp.StatusCode, resp.Header, string(b)
+	}
+	mustJSON := func(t *testing.T, req mt295ExportRequest) string {
+		t.Helper()
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(b)
+	}
+
+	// Register the outbound MT202 first: the query anchors
+	// against the registry, so nothing is queryable before
+	// this export lands.
+	code, _, mt202Msg := post(t, "/exports/mt202", `{
+		"sender_lt": "BANKUS33",
+		"receiver_lt": "BANKDEFFXXXX",
+		"transaction_reference": "MT202-REF-1",
+		"related_reference": "ORIG-REF-9",
+		"value_date": "2026-10-22",
+		"currency": "USD",
+		"amount_cents": 250000,
+		"ordering_institution_bic": "BANKUS33",
+		"beneficiary_institution_bic": "BANKDEFF"
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("register MT202: status=%d, want 200 (body=%v)", code, mt202Msg)
+	}
+	if !strings.Contains(mt202Msg, ":20:MT202-REF-1") {
+		t.Fatalf("registered MT202 missing :20:MT202-REF-1, body:\n%s", mt202Msg)
+	}
+
+	valid := mt295ExportRequest{
+		MT202Reference: "MT202-REF-1",
+		SenderLT:       "DEUTDEFF",
+		ReceiverLT:     "CHASUS33",
+		Queries:        []string{"STAT"},
+	}
+	validBody := mustJSON(t, valid)
+
+	// The two anchors are mutually exclusive: a body naming
+	// both the MT202 reference and a schedule is a 400.
+	both := valid
+	both.ScheduleID = "sched-295-http"
+	if code, _, _ := post(t, "/exports/mt295", mustJSON(t, both)); code != http.StatusBadRequest {
+		t.Errorf("schedule_id + mt202_reference: status=%d, want 400", code)
+	}
+	// A non-zero run_seq counts as the MT292 anchor too.
+	bothRun := valid
+	bothRun.RunSeq = 5
+	if code, _, _ := post(t, "/exports/mt295", mustJSON(t, bothRun)); code != http.StatusBadRequest {
+		t.Errorf("run_seq + mt202_reference: status=%d, want 400", code)
+	}
+
+	// An unregistered MT202 reference is a 422 (parked
+	// fail-closed in the repair queue, the error body carrying
+	// the repair record ID).
+	unknown := valid
+	unknown.MT202Reference = "MT202-REF-9"
+	code, _, errBody := post(t, "/exports/mt295", mustJSON(t, unknown))
+	if code != http.StatusUnprocessableEntity {
+		t.Errorf("unknown MT202: status=%d, want 422", code)
+	}
+	var errDoc map[string]any
+	if err := json.Unmarshal([]byte(errBody), &errDoc); err != nil {
+		t.Fatalf("unknown MT202 error body is not JSON: %v", err)
+	}
+	if errDoc["repair_id"] == nil || errDoc["repair_id"] == "" {
+		t.Errorf("unknown MT202 error body = %v, want a repair_id", errDoc)
+	}
+
+	// The export renders the question: the :21: is the MT202's
+	// own :20:, caller-supplied — no derivation, no shape.
+	code, hdr, msg := post(t, "/exports/mt295", validBody)
+	if code != http.StatusOK {
+		t.Fatalf("export: status=%d, want 200", code)
+	}
+	if ct := hdr.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("content-type = %q, want text/plain", ct)
+	}
+	for _, want := range []string{
+		"{1:F01DEUTDEFFXXX0000000000}",
+		"{2:I295CHASUS33XXXU3003}",
+		":20:MT295-",
+		":21:MT202-REF-1",
+		":75:STAT",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("export missing %q, body:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "{5:") {
+		t.Errorf("export must omit block 5, body:\n%s", msg)
+	}
+
+	// Re-export is byte-identical: the same MT202 reference
+	// asked the same question returns the stored message.
+	_, _, msg2 := post(t, "/exports/mt295", validBody)
+	if msg2 != msg {
+		t.Errorf("repeat export differs:\nfirst:\n%s\nsecond:\n%s", msg, msg2)
+	}
+
+	// The metrics counter counts the export, including the
+	// rejected requests above (2 dual-anchor 400s + 1 parked
+	// 422 + 1 ok + 1 repeat = 5). The MT202 registration is
+	// counted separately, under ledger_mt202_exports_total.
+	code, _, metricsBody := getBody(t, srv.URL+"/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("GET /metrics: status=%d", code)
+	}
+	if !strings.Contains(metricsBody, "ledger_mt295_exports_total 5") {
+		t.Errorf("metrics exposition missing ledger_mt295_exports_total 5:\n%s", metricsBody)
+	}
+}

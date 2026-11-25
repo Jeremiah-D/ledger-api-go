@@ -6750,38 +6750,45 @@ loop. `GET /metrics` counts applies as
 `ledger_mt295_applies_total`.
 
 Asking the other way — this ledger asking a correspondent bank
-about a cancellation request it sent — is `POST /exports/mt295`
-with a JSON body (see `ledger.ExportMT295ForCancelled`):
-`schedule_id` / `run_seq` (the run whose outbound MT292 is
-queried), `sender_lt` / `receiver_lt`, and the question — the
+about a cancellation request it sent, or about a transfer it
+sent — is `POST /exports/mt295`
+with a JSON body (see `ledger.ExportMT295ForCancelled` /
+`ledger.ExportMT295ForMT202`): `schedule_id` / `run_seq` (the run whose outbound MT292 is
+queried), or `mt202_reference` (the outbound MT202's `:20:`,
+LG-475) — the two anchors are mutually exclusive — plus
+`sender_lt` / `receiver_lt`, and the question — the
 `:75:` coded question (`queries`, mandatory — 1–6 lines of up to
 35 characters each), and the optional `:77A:` (`narrative`) and
 `:79:` (`description`). The `:21:` is the queried MT292's `:20:`
 (`MT292-` plus 10 lowercase hex, derived from the schedule and
-run), and the `:20:` is derived too (`MT295-` plus 10 lowercase
+run), or the queried MT202's `:20:` itself, caller-supplied; and the `:20:` is derived too (`MT295-` plus 10 lowercase
 hex of the SHA-256 of that `:21:` and the question body, the MT195
 precedent) — neither is supplied in the body. The `:21:` anchors
-in a single tier: the schedule must exist, and it must be in
+in two tiers: the MT292 tier, where the schedule must exist, and it must be in
 MT292-exportable state (paused, cancelled, completed, or
 exhausted — a still-active schedule with a live next run cannot
 have had its MT292 sent, so the gate itself is the proof that the
-MT292 the `:21:` names could exist). The anchor is shape-plus-
-state, never a sent-record check: the ledger holds no outbound
-MT292 registry, so it cannot verify that the MT292 was actually
-sent — and no MT202 tier is offered yet: an outbound MT202's
-`:20:` is caller-supplied at render time, and is now registered on
-export (`mt202Exports`, LG-470) — but no MT296 tier anchors
-against it, so that tier is a later item. The `:75:` / `:77A:` / `:79:` ride verbatim from the
+MT292 the `:21:` names could exist); and the MT202 tier, where
+the reference must be registered in `mt202Exports` (LG-470) —
+a pure registry lookup, no shape to verify, the mirror of the
+inbound MT296 tier (c) (LG-472). The MT292 anchor is shape-plus-
+state, never a sent-record check: that tier does not consult the
+outbound MT292 registry, so it cannot verify that the MT292 was actually
+sent — while a hit on the MT202 tier proves the transfer was
+rendered, because the lookup is the registry itself. The `:75:` / `:77A:` / `:79:` ride verbatim from the
 operator — the codewords inside `:75:` are the operator's words,
 never interpreted — and no query snapshot is built: the question
 is the operator's words, not a fact computed at export time.
 Rendering moves nothing — no journal rows, no schedule status
 change, no ExpectedReceipt cancellation, no version bump — and
 the audit event is `mt295_query_exported` (details `msg_id` /
-`related_reference` / `schedule_id` / `sender_lt`). A malformed
-body or invalid field is 400, an unknown schedule or a schedule
-still active is 422 (parked in the repair queue, the error body
-carrying the repair record ID), and a `:20:` reused for different
+`related_reference` / `schedule_id` / `sender_lt` on the MT292
+tier, `msg_id` / `related_reference` / `queried_kind` /
+`sender_lt` on the MT202 tier, which names no schedule). A malformed
+body or invalid field is 400, a body naming both anchors is 400,
+an unknown schedule or a schedule still active is 422 (parked in the repair queue, the
+error body carrying the repair record ID), an unregistered MT202
+reference is 422 the same way, and a `:20:` reused for different
 terms is 422; a re-sent `:20:` with the same terms is an
 idempotent no-op returning the stored message. `GET /metrics`
 counts exports as `ledger_mt295_exports_total`. The chain now
