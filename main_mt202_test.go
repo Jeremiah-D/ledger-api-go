@@ -10,8 +10,9 @@ import (
 )
 
 // mt202TestServer builds an HTTP test server for the MT202 export.
-// The endpoint is pure rendering — no ledger state is consulted —
-// so the ledger is empty.
+// The endpoint registers each export under its :20: (LG-470); the
+// ledger starts empty, so each test's first export is a fresh
+// registration.
 func mt202TestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(newRouter(ledger.New()))

@@ -10478,15 +10478,19 @@ type mt202ExportRequest struct {
 	BeneficiaryInstitutionBIC string `json:"beneficiary_institution_bic"`
 }
 
-// handleMT202Export implements POST /exports/mt202 (LG-378): a SWIFT
-// FIN MT202 general financial institution transfer (see
-// ledger.ExportMT202). The JSON body carries the complete field set;
-// the body is strictly decoded (unknown fields fail fast). The export
-// is pure rendering: no ledger lookup, no version bump, no audit
-// event, and repeat exports render byte-identical output. Error
-// mapping: a malformed body or any invalid field is a 400, with the
-// ledger sentinel error passed through verbatim. There is no 404
-// (nothing is looked up) and no 422 (no state gate).
+// handleMT202Export implements POST /exports/mt202 (LG-378, LG-470):
+// a SWIFT FIN MT202 general financial institution transfer (see
+// ledger.ExportMT202Registered). The JSON body carries the complete
+// field set; the body is strictly decoded (unknown fields fail
+// fast). The export is registered under its :20: (LG-470): a re-sent
+// :20: with the same terms returns the stored message, and a :20:
+// reused for different terms is refused. Rendering is read-only: no
+// journal entry, no version bump — only the mt202_exported audit
+// event lands. Error mapping: a malformed body or any invalid field
+// is a 400, with the ledger sentinel error passed through verbatim;
+// a :20: reused for different terms is a 422. There is no 404
+// (nothing is looked up). The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
 func (s *server) handleMT202Export(w http.ResponseWriter, r *http.Request) {
 	s.metrics.MT202Exports.Add(1)
 	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
@@ -10515,7 +10519,13 @@ func (s *server) handleMT202Export(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid value_date: want YYYY-MM-DD"})
 		return
 	}
-	msg, err := ledger.ExportMT202(ledger.MT202{
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	res, err := l.ExportMT202Registered(ledger.MT202{
 		SenderLT:                  req.SenderLT,
 		ReceiverLT:                req.ReceiverLT,
 		TransactionReference:      req.TransactionReference,
@@ -10525,14 +10535,29 @@ func (s *server) handleMT202Export(w http.ResponseWriter, r *http.Request) {
 		AmountCents:               req.AmountCents,
 		OrderingInstitutionBIC:    req.OrderingInstitutionBIC,
 		BeneficiaryInstitutionBIC: req.BeneficiaryInstitutionBIC,
-	})
+	}, actor)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		switch {
+		case errors.Is(err, ledger.ErrMT202ExportMsgIDConflict):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		case errors.Is(err, ledger.ErrMT202Framing),
+			errors.Is(err, ledger.ErrMT202Reference),
+			errors.Is(err, ledger.ErrMT202ValueDate),
+			errors.Is(err, ledger.ErrMT202Currency),
+			errors.Is(err, ledger.ErrMT202Amount),
+			errors.Is(err, ledger.ErrMT202BIC),
+			errors.Is(err, ledger.ErrMT202LT),
+			errors.Is(err, ledger.ErrMT202Field):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		default:
+			log.Printf("ledger-api-go: POST /exports/mt202: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exporting MT202 transfer failed"})
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(msg))
+	w.Write([]byte(res.Message))
 }
 
 // handleMT202Apply implements POST /exports/mt202/apply (LG-442):

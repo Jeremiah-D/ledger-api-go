@@ -67,7 +67,9 @@ import (
 // an MT202 names two banks and a value, and the caller supplies
 // them. The value is therefore pure: no ledger lock, no version
 // bump, no journal rows, no audit event, and export is deterministic
-// per message (repeat exports render byte-identical output).
+// per message (repeat exports render byte-identical output). The
+// registered export (ExportMT202Registered, LG-470) wraps this
+// render with a :20: registry; the render itself stays pure.
 //
 // Field discipline is fail-loud, the nacha.go convention: every field
 // is validated on both parse and export, and any violation is an
@@ -88,6 +90,17 @@ var (
 	// character set, carrying a brace, or with a leading/trailing
 	// colon or slash, or a double slash.
 	ErrMT202Reference = errors.New("ledger: mt202: invalid reference")
+	// ErrMT202ExportMsgIDConflict is returned when a :20: is reused
+	// for different terms: the reference names one export (LG-470),
+	// so a second, different transfer under it is refused rather
+	// than silently overwritten. It is not the inbound sentinel
+	// ErrMT202MsgIDConflict (mt202_inbound.go): that one's wording
+	// is inbound ("already applied with different terms"), and
+	// reusing it for an export conflict would mislead the
+	// operator — the MT292 precedent (LG-471) keeps the two apart
+	// the same way. The wording follows ErrMT295MsgIDConflict
+	// (mt295_inbound.go), whose text is neutral enough to share.
+	ErrMT202ExportMsgIDConflict = errors.New("ledger: mt202: :20: reused for different terms")
 	// ErrMT202ValueDate is returned for an invalid :32A: value date:
 	// not a YYMMDD calendar date.
 	ErrMT202ValueDate = errors.New("ledger: mt202: invalid :32A: value date")
@@ -129,6 +142,18 @@ type MT202 struct {
 	AmountCents               int64
 	OrderingInstitutionBIC    string
 	BeneficiaryInstitutionBIC string
+}
+
+// mt202ExportRecord is the registry record for one rendered MT202
+// transfer, keyed by :20: in mt202Exports (LG-470): the rendered
+// message in full, the MT202 it was rendered from verbatim, and the
+// actor that exported it, so a replay returns the same message
+// without rendering twice — and a :20: reused for different terms
+// is refused instead of silently overwritten.
+type mt202ExportRecord struct {
+	Message string
+	Request MT202
+	Actor   string
 }
 
 // mt202Reference validates a :20:/:21: reference: 1–16 SWIFT `x`

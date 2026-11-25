@@ -6728,9 +6728,10 @@ have had its MT292 sent, so the gate itself is the proof that the
 MT292 the `:21:` names could exist). The anchor is shape-plus-
 state, never a sent-record check: the ledger holds no outbound
 MT292 registry, so it cannot verify that the MT292 was actually
-sent — and no MT202 tier is offered, because an outbound MT202's
-`:20:` is caller-supplied at render time and was never
-registered. The `:75:` / `:77A:` / `:79:` ride verbatim from the
+sent — and no MT202 tier is offered yet: an outbound MT202's
+`:20:` is caller-supplied at render time, and is now registered on
+export (`mt202Exports`, LG-470) — but no MT296 tier anchors
+against it, so that tier is a later item. The `:75:` / `:77A:` / `:79:` ride verbatim from the
 operator — the codewords inside `:75:` are the operator's words,
 never interpreted — and no query snapshot is built: the question
 is the operator's words, not a fact computed at export time.
@@ -8433,17 +8434,16 @@ LT 地址）、block 3（`{108:MUR}`）与 block 4 核心字段集 `:20:` /
   （`:20:` 才是业务键）；导出时 MUR 写 `:20:`（MT103 惯例）。
   block 5 省略（CHK 由 SWIFT 网络计算，不伪造）；block 1 的
   session/sequence 填零（发送方接口分配）。
-- HTTP 导出（LG-378）：`POST /exports/mt202` + JSON，调用方给齐
+- HTTP 导出（LG-378，登记 LG-470）：`POST /exports/mt202` + JSON，调用方给齐
   全部字段（`sender_lt` / `receiver_lt` / `transaction_reference`
   （`:20:`）/ `related_reference`（`:21:`，必填）/ `value_date`
   （`YYYY-MM-DD`，必填）/ `currency` / `amount_cents` /
   `ordering_institution_bic` / `beneficiary_institution_bic`），
-  纯渲染、无 ledger 查找、无状态门控（无 404/422），字段非法一
-  律 400（ledger 哨兵错原样透出）；无锁、无 version bump、无记账、
-  无审计链追加；重复导出字节一致。库级 `ParseMT202` /
+  导出登记进 `mt202Exports` 注册表（`:20:` 为键）：`:20:` 调用方提供、登记只证渲染不证发送（block 1 会话/序号填零、发送方接口在传输时赋值）、同 `:20:` 同 terms 重放返回已存报文（字节一致）、异 terms `422`、重启清空；字段非法一
+  律 400（ledger 哨兵错原样透出），无 404；无 version bump、无记账、只记一条 `mt202_exported` 审计事件（msg_id / related_reference / sender_lt）；重复导出字节一致。库级 `ParseMT202` /
   `ExportMT202` 仍在（MT940 同款定位），解析接受 CRLF。
 
-Go: `ledger.MT202` / `ledger.ParseMT202` / `ledger.ExportMT202`。
+Go: `ledger.MT202` / `ledger.ParseMT202` / `ledger.ExportMT202` / `ledger.ExportMT202Registered` / `ledger.GetMT202Export` / `ledger.MT202ExportResult`。
 
 HTTP: `POST /exports/mt202` + `{"sender_lt":"BANKUS33","receiver_lt":"BANKDEFF","transaction_reference":"MT202REF1","related_reference":"RELREF202","value_date":"2026-10-22","currency":"USD","amount_cents":250000,"ordering_institution_bic":"DEUTDEFF","beneficiary_institution_bic":"BNPAFRPP"}` → 200 text/plain FIN 文本。
 

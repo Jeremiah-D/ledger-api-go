@@ -61,9 +61,9 @@ import (
 // with this :20: — it cannot verify that the MT292 was actually
 // sent. The gate is shape-plus-state, never claimed as a sent
 // record check. No MT202 tier is offered: an outbound MT202's :20:
-// is caller-supplied at render time and was never registered, so
-// there is no registry to anchor a query against — that tier waits
-// for an mt202Exports registry, a later item.
+// is caller-supplied at render time and is registered on export
+// (mt202Exports, LG-470), but no MT296 tier anchors against it
+// yet — that tier is a later item.
 //
 // Identity wiring — scope honesty, the ledger is not a SWIFT member
 // (see mt192.go, LG-434):
