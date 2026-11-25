@@ -6605,6 +6605,22 @@ pinned to schedule plus `RunSeq`, `:11S:` pinned to the
 caller-supplied `original_date`). `GET /metrics` counts exports
 as `ledger_mt292_exports_total`.
 
+The export is registered under its `:20:` (`mt292Exports`): the
+registry records the schedule, run, options, and rendered message,
+so a re-sent `:20:` with the same terms returns the stored message
+(a no-op success) and a `:20:` reused for different terms (a
+different servicing BIC, original date, or reason) is a 422.
+Registration proves only that this ledger rendered the message —
+not that it was sent (block 1 session/sequence are zero-filled)
+and not that the bank honoured it (that is confirmed by its reply,
+the inbound MT296 below). The registry is in-memory only: the
+hash-chained `mt292_exported` audit event (`msg_id` /
+`related_reference` / `schedule_id` / `run_seq` / `sender_lt`) is
+the durable record, and a restart clears it — a late MT296 answer
+arriving after a restart falls back to the shape gate, exactly as
+before. A new run sequence exports under a new `:20:` and never
+collides with the old registration.
+
 The reverse direction — a counterparty's MT292 cancelling one of
 its MT210 notices to this ledger — is `POST /exports/mt292/apply`
 with a JSON body `{"mt292": "<FIN text>"}` (see
@@ -6640,11 +6656,12 @@ its `:77A:` and `:79:` carry the narrative verbatim. Registering
 an answer moves nothing — no journal rows, no schedule status
 change, no version bump — and the `:21:` lives only in the
 registration and the `mt296_answer_received` audit event. The two
-tiers are deliberately asymmetric: tier (a) has no registry to
-check against, so there is no `:21:`→schedule reverse lookup (the
-SHA-256 is irreversible, and the ledger holds no outbound MT292
-registry) and the operator matches the answer to the request from
-the `:21:` and the audit event; tier (b) is a registry lookup, so
+tiers are deliberately asymmetric: tier (a) has a registry now
+(`mt292Exports`, LG-471) but the tier does not consult it yet, so
+there is still no `:21:`→schedule reverse lookup (the SHA-256 is
+irreversible) and the operator matches the answer to the request
+from the `:21:` and the audit event; the registry lookup tier is a
+later item. Tier (b) is a registry lookup, so
 an answer naming a query this ledger never rendered parks. A
 malformed document is 400, a `:21:` matching neither tier (or a
 `MT295-` shape naming no rendered query) is 422 (parked in the
@@ -6675,8 +6692,9 @@ ExpectedReceipt cancellation flip, no version bump — and the audit
 event is `mt296_answer_exported` (details `msg_id` /
 `related_reference` / `answered_kind` / `sender_lt`). A malformed
 body or invalid field is 400, an unknown `:21:` (including one
-shaped like our own outbound MT292's `:20:`, which the ledger
-holds no state for) is 422 (parked in the repair queue), and a
+shaped like our own outbound MT292's `:20:` — registered in
+`mt292Exports`, but this export answers registered inbound queries,
+not our own exports) is 422 (parked in the repair queue), and a
 `:20:` reused for different terms is 422; a re-sent `:20:` with
 the same terms is an idempotent no-op returning the stored
 message. `GET /metrics` counts exports as
@@ -6698,10 +6716,10 @@ no version bump — and no answer snapshot is built: the answer is
 organised per queried object by the later MT296 export, so a
 query is evidence for the answer to come, not an answer itself.
 A `:21:` naming nothing the ledger holds — including one shaped
-like our own outbound MT292's `:20:`, which the ledger holds no
-state for — is 422 (parked in the repair queue, the error body
-carrying the repair record ID), a `:20:` reused for different
-terms is 422, and a malformed document is 400; a re-sent `:20:`
+like our own outbound MT292's `:20:` (registered in `mt292Exports`,
+but this module consults no outbound registry) — is 422 (parked in
+the repair queue, the error body carrying the repair record ID), a
+`:20:` reused for different terms is 422, and a malformed document is 400; a re-sent `:20:`
 with the same terms is an idempotent no-op. The chain now reads:
 query registration (here) → answer registration (`POST
 /exports/mt296/apply`, above) → answer rendering (`POST

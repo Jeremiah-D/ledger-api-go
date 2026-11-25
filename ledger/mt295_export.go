@@ -54,13 +54,13 @@ import (
 // the camt.055 shape, along parkMT195Export) and reports a
 // 422-class error.
 //
-// Scope honesty, the same limit ExportMT292 carries: the ledger
-// holds no outbound MT292 registry (ExportMT292 is a pure render;
-// ledger.go holds only mt292Applied for inbound requests), so the
-// anchor can only verify that the schedule could produce an MT292
-// with this :20: — it cannot verify that the MT292 was actually
-// sent. The gate is shape-plus-state, never claimed as a sent
-// record check. No MT202 tier is offered: an outbound MT202's :20:
+// Scope honesty, the same limit ExportMT292 carries: the outbound
+// MT292 :20: is registered on export (mt292Exports, LG-471), but
+// this module does not consult it, so the anchor can only verify
+// that the schedule could produce an MT292 with this :20: — it
+// cannot verify that the MT292 was actually sent. The gate is
+// shape-plus-state, never claimed as a sent record check. No MT202
+// tier is offered: an outbound MT202's :20:
 // is caller-supplied at render time and is registered on export
 // (mt202Exports, LG-470), but no MT296 tier anchors against it
 // yet — that tier is a later item.
@@ -337,9 +337,10 @@ func (l *Ledger) parkMT295Export(ref, relatedRef, actor string) (string, error) 
 // (a still-active schedule with a live next run is
 // ErrMT292ScheduleStillActive, parked the same way — the gate
 // itself is the proof that the MT292 the :21: names could exist).
-// The anchor is shape-plus-state, never a sent-record check: the
-// ledger holds no outbound MT292 registry, so it cannot verify
-// that the MT292 was actually sent. Nothing moves: no journal
+// The anchor is shape-plus-state, never a sent-record check: this
+// module does not consult the outbound MT292 registry
+// (mt292Exports, LG-471), so it cannot verify that the MT292 was
+// actually sent. Nothing moves: no journal
 // entry, no schedule status change, no ExpectedReceipt
 // cancellation, no version bump — rendering a question is
 // read-only, and the audit event is the durable record, not a

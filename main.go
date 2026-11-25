@@ -6682,10 +6682,10 @@ func (s *server) handleMT210Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// handleMT292Export implements GET /exports/mt292 (LG-435): a SWIFT
+// handleMT292Export implements GET /exports/mt292 (LG-435, LG-471): a SWIFT
 // FIN MT292 cancellation of notification to receive for the next run
 // of one transfer schedule whose notification premise is dead (see
-// ledger.ExportMT292) — the FIN twin of the camt.058 cancellation
+// ledger.ExportMT292Registered) — the FIN twin of the camt.058 cancellation
 // advice, and the withdrawal of the MT210 notice above. Query
 // parameters: schedule_id (required), servicing_bic (required, the
 // BIC of the bank holding the account to be credited — the receiving
@@ -6693,15 +6693,20 @@ func (s *server) handleMT210Apply(w http.ResponseWriter, r *http.Request) {
 // the original MT210's issue date — the ledger records no MT210
 // issue date, so the caller supplies it; it is never defaulted from
 // NextRunAt), reason (optional, the :79: narrative, verbatim). The
-// export is read-only: no version bump, nothing booked, no audit
-// event, and the schedule keeps its status — the export is the
+// export is registered under its :20: (LG-471): a re-sent :20: with
+// the same terms returns the stored message, and a :20: reused for
+// different terms is refused. Rendering is read-only: no journal
+// entry, no version bump — only the mt292_exported audit event
+// lands — and the schedule keeps its status — the export is the
 // cancellation request, not the cancellation itself. Error mapping:
 // a missing schedule_id, servicing_bic, or original_date, or an
 // unparseable original_date, is a 400; an unknown schedule is a 404;
-// a still-active schedule with a live next run is a 422; an invalid
-// servicing BIC, a missing original date, or a schedule that cannot
-// be rendered as a valid MT292 (:21: format, LT form, :79: shape)
-// is a 400.
+// a still-active schedule with a live next run, or a :20: reused
+// for different terms, is a 422; an invalid servicing BIC, a missing
+// original date, or a schedule that cannot be rendered as a valid
+// MT292 (:21: format, LT form, :79: shape) is a 400. The operator
+// identity comes from the x-ledger-actor header, like the other
+// operator actions.
 func (s *server) handleMT292Export(w http.ResponseWriter, r *http.Request) {
 	s.metrics.MT292Exports.Add(1)
 	q := r.URL.Query()
@@ -6725,18 +6730,25 @@ func (s *server) handleMT292Export(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid original_date: want YYYY-MM-DD"})
 		return
 	}
-	doc, err := s.ledgerFor(r).ExportMT292(ledger.MT292ExportOptions{
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	res, err := l.ExportMT292Registered(ledger.MT292ExportOptions{
 		ScheduleID:   scheduleID,
 		ServicingBIC: servicingBIC,
 		OriginalDate: originalDate,
 		Reason:       q.Get("reason"),
-	})
+	}, actor)
 	if err != nil {
 		status := http.StatusInternalServerError
 		switch {
 		case errors.Is(err, ledger.ErrScheduleNotFound):
 			status = http.StatusNotFound
-		case errors.Is(err, ledger.ErrMT292ScheduleStillActive):
+		case errors.Is(err, ledger.ErrMT292ScheduleStillActive),
+			errors.Is(err, ledger.ErrMT292ExportMsgIDConflict):
 			status = http.StatusUnprocessableEntity
 		case errors.Is(err, ledger.ErrInvalidMT292Export):
 			status = http.StatusBadRequest
@@ -6746,7 +6758,7 @@ func (s *server) handleMT292Export(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(doc))
+	w.Write([]byte(res.Message))
 }
 
 // mt292ApplyRequest is the POST /exports/mt292/apply body: the

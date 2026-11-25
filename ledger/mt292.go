@@ -211,6 +211,17 @@ func mt292ReasonLines(reason string) ([]string, error) {
 // opposite of MT210's active-only gate, and the same gate as
 // camt.058 (LG-404).
 func (l *Ledger) ExportMT292(opts MT292ExportOptions) (string, error) {
+	msg, _, _, err := l.exportMT292(opts)
+	return msg, err
+}
+
+// exportMT292 is ExportMT292's body, also returning the sender LT
+// and the run sequence the message was rendered for, so the
+// registering export (ExportMT292Registered, LG-471) can audit the
+// exact sender and recheck the run sequence without re-reading
+// live facts. ExportMT292's behaviour is unchanged: the wrapper
+// above keeps its signature and its byte-identical render.
+func (l *Ledger) exportMT292(opts MT292ExportOptions) (string, string, uint64, error) {
 	// Caller-given options fail fast, before any schedule lookup:
 	// a servicing bank that is not a valid BIC can never be a
 	// valid cancellation request, and an original date the caller
@@ -218,14 +229,14 @@ func (l *Ledger) ExportMT292(opts MT292ExportOptions) (string, error) {
 	// ledger records no MT210 issue date.
 	servicing := strings.ToUpper(strings.TrimSpace(opts.ServicingBIC))
 	if servicing == "" || !validBIC(servicing) {
-		return "", fmt.Errorf("%w: servicing BIC %q: want a valid 8/11-character BIC", ErrInvalidMT292Export, opts.ServicingBIC)
+		return "", "", 0, fmt.Errorf("%w: servicing BIC %q: want a valid 8/11-character BIC", ErrInvalidMT292Export, opts.ServicingBIC)
 	}
 	if opts.OriginalDate.IsZero() {
-		return "", fmt.Errorf("%w: original date is required: the ledger records no MT210 issue date", ErrInvalidMT292Export)
+		return "", "", 0, fmt.Errorf("%w: original date is required: the ledger records no MT210 issue date", ErrInvalidMT292Export)
 	}
 	sched, err := l.GetTransferSchedule(opts.ScheduleID)
 	if err != nil {
-		return "", err
+		return "", "", 0, err
 	}
 	// The gate is the deliberate opposite of MT210's: only a
 	// schedule whose notification premise is dead can be
@@ -234,12 +245,12 @@ func (l *Ledger) ExportMT292(opts MT292ExportOptions) (string, error) {
 	// so such a schedule always still has a live next run.
 	// (Identical to the camt.058 gate, LG-404.)
 	if sched.Status == ScheduleActive && (sched.EndsAt.IsZero() || !sched.NextRunAt.After(sched.EndsAt)) {
-		return "", fmt.Errorf("%w: schedule %q is still active with a next run at %s", ErrMT292ScheduleStillActive, opts.ScheduleID, sched.NextRunAt.UTC().Format(time.RFC3339))
+		return "", "", 0, fmt.Errorf("%w: schedule %q is still active with a next run at %s", ErrMT292ScheduleStillActive, opts.ScheduleID, sched.NextRunAt.UTC().Format(time.RFC3339))
 	}
 	// :21: is the schedule ID — the original MT210's :20:. It
 	// must itself fit 16x, or the request cannot be rendered.
 	if err := mt292RelatedReference(":21:", sched.ID); err != nil {
-		return "", err
+		return "", "", 0, err
 	}
 	// The To party identifier feeds block 1 — read under the
 	// lock, like the MT210 identifier lookup. An FX schedule
@@ -255,11 +266,11 @@ func (l *Ledger) ExportMT292(opts MT292ExportOptions) (string, error) {
 	// emitting a malformed header.
 	senderLT, err := mt103NormalizeLT(toID)
 	if err != nil {
-		return "", fmt.Errorf("%w: sender LT from %q: %w", ErrInvalidMT292Export, toID, err)
+		return "", "", 0, fmt.Errorf("%w: sender LT from %q: %w", ErrInvalidMT292Export, toID, err)
 	}
 	receiverLT, err := mt103NormalizeLT(servicing)
 	if err != nil {
-		return "", fmt.Errorf("%w: receiver LT from %q: %w", ErrInvalidMT292Export, servicing, err)
+		return "", "", 0, fmt.Errorf("%w: receiver LT from %q: %w", ErrInvalidMT292Export, servicing, err)
 	}
 
 	// :79: — the narrative, only when the caller gives a reason.
@@ -267,7 +278,7 @@ func (l *Ledger) ExportMT292(opts MT292ExportOptions) (string, error) {
 	if opts.Reason != "" {
 		reasonLines, err = mt292ReasonLines(opts.Reason)
 		if err != nil {
-			return "", err
+			return "", "", 0, err
 		}
 	}
 
@@ -296,5 +307,5 @@ func (l *Ledger) ExportMT292(opts MT292ExportOptions) (string, error) {
 		b.WriteString("\n")
 	}
 	b.WriteString("-}")
-	return b.String(), nil
+	return b.String(), senderLT, sched.RunSeq, nil
 }

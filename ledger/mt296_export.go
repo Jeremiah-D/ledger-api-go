@@ -47,8 +47,9 @@ import (
 // mt295Received. Either tier anchors; neither tier is consulted
 // for the other direction's records — an outbound MT292's :20:
 // (`MT292-` + 10 lowercase hex, mt292MessageReference) names
-// nothing here: the ledger holds no outbound MT292 registry, and
-// our own MT292's answer comes back as an inbound MT296 (LG-465),
+// nothing here: it is registered in mt292Exports (LG-471), but
+// this export answers registered inbound queries, and our own
+// MT292's answer comes back as an inbound MT296 (LG-465),
 // never as an export anchor. A :21: in neither registry is
 // fail-closed into the repair queue (RepairReasonUnknownRoute, the
 // camt.055 shape, along parkMT196Export) and reported as

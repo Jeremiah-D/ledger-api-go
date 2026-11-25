@@ -85,15 +85,15 @@ import (
 // ApplyMT999 and ApplyMT292: the returned result carries the
 // repair ID alongside the ErrMT296UnknownReference error),
 // and reported as a 422-class error. The two tiers are
-// deliberately asymmetric: tier (a) has no registry to check
-// against (ExportMT292 is a pure render, and ledger.go holds
-// only mt292Applied for the inbound direction), so the shape
-// is the whole anchor and there is no :21:→schedule reverse
-// lookup — the SHA-256 is irreversible, and the operator
+// deliberately asymmetric: tier (a) has a registry now
+// (mt292Exports, LG-471) but does not consult it yet, so the
+// shape is still the whole anchor and there is no :21:→schedule
+// reverse lookup — the SHA-256 is irreversible, and the operator
 // matches the answer to the request from the :21: and the
-// audit event, not from a ledger lookup; tier (b) has a
-// registry, so a shape alone is not enough — the answer must
-// name a query this ledger actually rendered.
+// audit event, not from a ledger lookup; the registry lookup
+// tier is a later item. Tier (b) has a registry, so a shape
+// alone is not enough — the answer must name a query this
+// ledger actually rendered.
 //
 // The answer is registered verbatim: the :76: answers, the
 // :77A: narrative, and the :79: description ride into the
@@ -514,8 +514,8 @@ func ParseMT296(text string) (MT296, error) {
 // lowercase hex characters of the SHA-256 of the run transfer
 // ID (mt292MessageReference, mt292.go:152), 16 characters in
 // all. The shape is the whole anchor: the SHA-256 is
-// irreversible and the ledger holds no outbound MT292
-// registry to look the reference up in, so a :21: that is
+// irreversible, and this tier does not consult the outbound
+// MT292 registry (mt292Exports, LG-471) yet, so a :21: that is
 // not even shaped like an MT292 :20: names nothing this
 // ledger could have sent.
 func mt296IsMT292Reference(ref string) bool {
@@ -712,9 +712,10 @@ func (l *Ledger) parkMT296Answer(m MT296, actor string) (string, error) {
 // carries the repair ID alongside the error. A
 // tier-matching :21: registers — tier (a) has no
 // :21:→schedule reverse lookup (the SHA-256 is
-// irreversible, and the ledger holds no outbound MT292
-// registry), so the operator matches the answer to the
-// request from the :21: and the audit event. No journal
+// irreversible, and the tier does not consult the outbound
+// MT292 registry, mt292Exports, LG-471, yet), so the operator
+// matches the answer to the request from the :21: and the
+// audit event. No journal
 // entry is ever posted, no schedule state is ever changed,
 // and no version is ever bumped: an answer is evidence, not
 // an instruction.

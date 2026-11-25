@@ -1089,6 +1089,24 @@ type Ledger struct {
 	// replay, and a re-sent export refuses again — or renders,
 	// once the terms are valid.
 	mt202Exports map[string]mt202ExportRecord
+	// mt292Exports maps a MT292 :20: reference to the schedule
+	// and run it cancels and the message its first export rendered
+	// (see mt292_export.go, LG-471): the replay guard for outbound
+	// MT292 cancellation requests, so a re-sent export returns the
+	// stored message instead of rendering twice — and a :20:
+	// reused for different terms is refused instead of silently
+	// overwritten. In-memory only, like mt202Exports: the
+	// hash-chained mt292_exported audit events are the durable
+	// record. A refused export (an unknown schedule, a schedule
+	// still active, or a :20: conflict) records nothing here: it
+	// has no message to replay, and a re-sent export refuses
+	// again — or renders, once the schedule is in
+	// MT292-exportable state. The registry is also the anchor the
+	// MT296 tier-(a) lookup and the inbound MT295 outbound tier
+	// will consult once those tiers land (later items): until
+	// then, tier (a) stays shape-only and the MT295 module
+	// consults no outbound registry.
+	mt292Exports map[string]mt292ExportRecord
 	// mt196Answers maps a MT195 :20: reference (the :21: of the
 	// inbound MT196) to the answer its first application
 	// registered (see mt196_apply.go, LG-462): the replay guard

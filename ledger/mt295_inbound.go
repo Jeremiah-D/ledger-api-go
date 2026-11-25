@@ -106,12 +106,14 @@ import (
 // module: a :21: naming our outbound MT292's :20: shape
 // (`MT292-` + 10 lowercase hex, mt292MessageReference) or our
 // outbound MT202's :20: is likewise fail-closed — this module
-// consults no outbound registry (an outbound MT292 is
-// "confirmed by its own reply, outside this ledger",
-// mt292.go:29; the outbound MT202 registry mt202Exports (LG-470)
-// is not consulted here — the MT296 tier that would anchor
-// against it is a later item), so there is nothing to ask about
-// from a shape. Such a query is for the operator to
+// consults no outbound registry (the outbound MT292 registry
+// mt292Exports, LG-471, and the outbound MT202 registry
+// mt202Exports, LG-470, are both registered, but neither is
+// consulted here — an outbound MT292 is "confirmed by its own
+// reply, outside this ledger", mt292.go:29; the MT296 tier that
+// would anchor against them is a later item), so there is
+// nothing to ask about from a shape. Such a query is for the
+// operator to
 // resolve from the repair queue (for example by asking the other
 // bank back with an outbound MT295, a later item), not for this
 // module to answer from a shape.
