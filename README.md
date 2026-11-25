@@ -6645,7 +6645,10 @@ or to our MT202 transfer — comes back as a SWIFT FIN MT296:
 (see `ledger.ParseMT296`/`ApplyMT296`). The answer's `:20:` is
 its own reference (the replay key), its `:21:` names the MT292 it
 answers — which must have the `MT292-` plus 10 lowercase hex
-shape our own MT292 `:20:`s carry — or the MT295 it answers,
+shape our own MT292 `:20:`s carry and be registered in the
+outbound MT292 registry (a shape alone is not enough: the answer
+must name a cancellation request this ledger actually rendered) —
+or the MT295 it answers,
 which must have the `MT295-` plus 10 lowercase hex shape and be
 registered in the outbound MT295 registry (a shape alone is not
 enough: the answer must name a query this ledger actually
@@ -6658,17 +6661,23 @@ its `:77A:` and `:79:` carry the narrative verbatim. Registering
 an answer moves nothing — no journal rows, no schedule status
 change, no version bump — and the `:21:` lives only in the
 registration and the `mt296_answer_received` audit event. The three
-tiers are deliberately asymmetric: tier (a) has a registry now
-(`mt292Exports`, LG-471) but the tier does not consult it yet, so
-there is still no `:21:`→schedule reverse lookup (the SHA-256 is
-irreversible) and the operator matches the answer to the request
-from the `:21:` and the audit event; the registry lookup tier is a
-later item. Tier (b) is a registry lookup, so
-an answer naming a query this ledger never rendered parks. Tier (c)
-is a pure registry lookup with no shape gate at all, so an answer
-naming a transfer this ledger never rendered parks. A
+tiers are deliberately asymmetric: tiers (a) and (b) are shape
+plus their own registry, tier (c) is a pure registry lookup with
+no shape gate at all. No tier does a `:21:`→schedule reverse
+lookup (the SHA-256 is irreversible); the operator matches the
+answer to the request from the `:21:` and the audit event. The
+registries are in-memory: after a restart, or for an MT292
+rendered before registration existed, a late MT296 parks in the
+repair queue instead of registering — the evidence is kept (the
+repair queue holds the verbatim answer), and the recovery is
+deterministic: re-export the MT292 (`GET /exports/mt292` — the
+same schedule and run derive the same `:20:`) and re-apply the
+same MT296. An answer naming a query this ledger never rendered
+parks, as does an answer naming a transfer this ledger never
+rendered. A
 malformed document is 400, a `:21:` matching no tier (or a
-`MT295-` shape naming no rendered query, or an unregistered MT202
+`MT292-` shape naming no rendered MT292, or a `MT295-` shape
+naming no rendered query, or an unregistered MT202
 `:20:`) is 422 (parked in the
 repair queue, the error body carrying the repair record ID), and a
 `:20:` reused for different terms is 422;

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -46,17 +48,49 @@ func mt296HTTPDoc(ref, relatedRef string, answers, narrative, description []stri
 // mt296HTTPAnsweredRef is a :21: with the shape of an outbound
 // MT292 :20: — the deterministic reference ExportMT292 derives
 // for schedule "sched-1", run 1 (SHA-256 of "sched-1/run/1",
-// first 10 hex characters: 117c924981).
+// first 10 hex characters: 117c924981) — that this ledger never
+// rendered: no export is ever registered for it, so since
+// LG-473 it is the tier-(a) shape that parks, not the tier-(a)
+// anchor.
 const mt296HTTPAnsweredRef = "MT292-117c924981"
 
 // Full flow through HTTP: register a correspondent bank's MT296
 // answer, replay the same :20:, and verify the error mapping and
-// the metrics counter.
+// the metrics counter. Since LG-473 the tier-(a) :21: must name
+// an MT292 this ledger rendered: the schedule is paused, its
+// MT292 exported over HTTP, and the export's :20: is the anchor.
 func TestMT296ApplyEndpoint_RegistersAnswer(t *testing.T) {
-	srv := mt195ExportTestServer(t)
+	l, sched := mt292HTTPSetup(t)
+	if _, err := l.PauseTransferSchedule(sched.ID); err != nil {
+		t.Fatalf("PauseTransferSchedule: %v", err)
+	}
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+
+	// Register the outbound MT292 over HTTP; its :20: is the
+	// tier-(a) anchor for the answers below.
+	q := url.Values{}
+	q.Set("schedule_id", sched.ID)
+	q.Set("servicing_bic", "CITIUS33")
+	q.Set("original_date", "2026-11-10")
+	q.Set("reason", "Schedule paused by operator")
+	code, _, msg := mt292ExportHTTPGet(t, srv.URL+"/exports/mt292?"+q.Encode(), "ledger-operator")
+	if code != http.StatusOK {
+		t.Fatalf("export MT292: status=%d, want 200", code)
+	}
+	mt292Ref := ""
+	for _, ln := range strings.Split(msg, "\n") {
+		if strings.HasPrefix(ln, ":20:") {
+			mt292Ref = strings.TrimPrefix(ln, ":20:")
+		}
+	}
+	if mt292Ref == "" || !strings.HasPrefix(mt292Ref, "MT292-") || len(mt292Ref) != 16 {
+		t.Fatalf("export :20: = %q, want a 16-character MT292- reference", mt292Ref)
+	}
+
 	applyURL := srv.URL + "/exports/mt296/apply"
 
-	doc := mt296HTTPDoc("ANS-296-HTTP-1", mt296HTTPAnsweredRef,
+	doc := mt296HTTPDoc("ANS-296-HTTP-1", mt292Ref,
 		[]string{"/CNCL/", "CANCELLATION CONFIRMED 261124"},
 		[]string{"OPERATOR NOTE"},
 		[]string{"BANK CONFIRMS THE NOTIFICATION"})
@@ -67,8 +101,8 @@ func TestMT296ApplyEndpoint_RegistersAnswer(t *testing.T) {
 	if body["reference"] != "ANS-296-HTTP-1" {
 		t.Errorf("reference = %v, want ANS-296-HTTP-1", body["reference"])
 	}
-	if body["related_reference"] != mt296HTTPAnsweredRef {
-		t.Errorf("related_reference = %v, want %s", body["related_reference"], mt296HTTPAnsweredRef)
+	if body["related_reference"] != mt292Ref {
+		t.Errorf("related_reference = %v, want %s", body["related_reference"], mt292Ref)
 	}
 	answers, ok := body["answers"].([]any)
 	if !ok || len(answers) != 2 || answers[0] != "/CNCL/" {
@@ -104,7 +138,7 @@ func TestMT296ApplyEndpoint_RegistersAnswer(t *testing.T) {
 	}
 	// Same :20:, different terms: a 422 conflict, never a
 	// silent overwrite.
-	conflict := mt296HTTPDoc("ANS-296-HTTP-1", mt296HTTPAnsweredRef,
+	conflict := mt296HTTPDoc("ANS-296-HTTP-1", mt292Ref,
 		[]string{"/RJCR/"}, nil, []string{"BANK CONFIRMS THE NOTIFICATION"})
 	code, body = postMT195Text(t, applyURL, conflict, "ops")
 	if code != http.StatusUnprocessableEntity {
@@ -112,7 +146,7 @@ func TestMT296ApplyEndpoint_RegistersAnswer(t *testing.T) {
 	}
 	// A second answer with no :77A: registers as-is: the
 	// narrative is optional.
-	second := mt296HTTPDoc("ANS-296-HTTP-3", mt296HTTPAnsweredRef,
+	second := mt296HTTPDoc("ANS-296-HTTP-3", mt292Ref,
 		[]string{"/PDCR/"}, nil, []string{"STILL PENDING AT THE BANK"})
 	code, body = postMT195Text(t, applyURL, second, "ops")
 	if code != http.StatusOK {
@@ -128,6 +162,28 @@ func TestMT296ApplyEndpoint_RegistersAnswer(t *testing.T) {
 	}
 	if !strings.Contains(metricsBody, "ledger_mt296_applies_total 6") {
 		t.Errorf("metrics exposition missing ledger_mt296_applies_total 6:\n%s", metricsBody)
+	}
+}
+
+// The tier-(a) gate end to end (LG-473): a well-shaped MT292
+// :20: for a cancellation request this ledger never rendered is
+// a 422 (parked fail-closed in the repair queue), the error body
+// carrying the repair record ID — the shape alone is not enough.
+func TestMT296ApplyEndpoint_MT292TierUnregisteredGoesToRepair(t *testing.T) {
+	srv := mt195ExportTestServer(t)
+	doc := mt296HTTPDoc("ANS-296-HTTP-4", mt296HTTPAnsweredRef,
+		[]string{"/CNCL/"}, nil, nil)
+	code, body := postMT195Text(t, srv.URL+"/exports/mt296/apply", doc, "ops")
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("unregistered tier-(a) :21:: status=%d body=%v, want 422", code, body)
+	}
+	if body["repair_id"] == nil || body["repair_id"] == "" {
+		t.Errorf("repair_id = %v, want the parked repair record", body["repair_id"])
+	}
+	// The counter counts this rejected apply too.
+	_, _, metricsBody := getBody(t, srv.URL+"/metrics")
+	if !strings.Contains(metricsBody, "ledger_mt296_applies_total 1") {
+		t.Errorf("metrics exposition missing ledger_mt296_applies_total 1:\n%s", metricsBody)
 	}
 }
 

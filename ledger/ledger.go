@@ -1102,10 +1102,10 @@ type Ledger struct {
 	// has no message to replay, and a re-sent export refuses
 	// again — or renders, once the schedule is in
 	// MT292-exportable state. The registry is also the anchor the
-	// MT296 tier-(a) lookup and the inbound MT295 outbound tier
-	// will consult once those tiers land (later items): until
-	// then, tier (a) stays shape-only and the MT295 module
-	// consults no outbound registry.
+	// MT296 tier-(a) lookup consults (LG-473) and the inbound
+	// MT295 outbound tier will consult once that tier lands (a
+	// later item): until then, the MT295 module consults no
+	// outbound registry.
 	mt292Exports map[string]mt292ExportRecord
 	// mt196Answers maps a MT195 :20: reference (the :21: of the
 	// inbound MT196) to the answer its first application
