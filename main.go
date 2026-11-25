@@ -7023,8 +7023,11 @@ func (s *server) handleMT296Export(w http.ResponseWriter, r *http.Request) {
 // left open. The body is the raw MT295 FIN text; its :20: is the
 // query's own reference (the registration key), its :21: names the
 // queried message's :20: (an MT210 notification, an inbound MT292
-// cancellation request, or an inbound MT202 transfer — all three
-// looked up in the ledger's own registries), its :75: carries the
+// cancellation request, an inbound MT202 transfer, an outbound
+// MT292 cancellation request registered in mt292Exports, or an
+// outbound MT202 transfer registered in mt202Exports — the two
+// outbound tiers since LG-474, all five looked up in the ledger's
+// own registries, inbound tiers first), its :75: carries the
 // coded question verbatim, and its :77A: / :79: carry the narrative
 // verbatim. Registering a query moves nothing: no journal entry, no
 // schedule status change, no ExpectedReceipt cancellation, no

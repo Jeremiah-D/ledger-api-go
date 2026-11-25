@@ -82,13 +82,17 @@ import (
 // handbook's here, the same call the MT195, MT196 and MT296
 // modules made.
 //
-// The :21: anchors in three tiers, in order — the query asks
+// The :21: anchors in five tiers, in order — the query asks
 // about a message this ledger holds, so the anchor is a lookup
 // in the ledger's own registries (the MT999 two-tier shape,
-// extended to three; the MT195 "look the :21: up in the ledger"
+// extended to five; the MT195 "look the :21: up in the ledger"
 // shape, not the MT296 "shape of an outbound :20:" shape,
 // because a query names what we hold and an answer names what
-// we sent):
+// we sent). The three inbound tiers come first, so a :21: that
+// names both an inbound record and an outbound export anchors
+// to the inbound one — the order is fixed so the kind is
+// deterministic (along the MT296 export's "MT292 tier
+// consulted first" precedent, mt296_export.go):
 //
 //  1. An MT210 notification: the :21: is an expectedReceipts
 //     MsgID (the notification's :20:, itself a schedule ID —
@@ -97,26 +101,41 @@ import (
 //     mt292Applied :20: (mt292_inbound.go, LG-452).
 //  3. An inbound MT202 transfer: the :21: is an mt202Applied
 //     :20: (mt202_inbound.go, LG-442).
+//  4. An outbound MT292 cancellation request (LG-474): the
+//     :21: has the outbound MT292 :20: shape (`MT292-` + 10
+//     lowercase hex, mt292MessageReference) and is registered
+//     in mt292Exports (mt292_export.go, LG-471). The shape
+//     alone is not enough — a shape naming no rendered MT292
+//     still parks, because a cancellation request this ledger
+//     never rendered cannot be asked about.
+//  5. An outbound MT202 transfer (LG-474): the :21: is
+//     registered in mt202Exports (mt202_export.go, LG-470).
+//     An outbound MT202 :20: is caller-supplied, 1-16 `x`
+//     characters with no shape to check, so the lookup alone
+//     anchors it (along the MT296 third tier, LG-472).
 //
 // A :21: that matches no tier is fail-closed into the repair
 // queue (RepairReasonUnknownRoute, the camt.055 shape, along
 // ApplyMT999 and ApplyMT292: the returned result carries the
 // repair ID alongside the ErrMT295UnknownReference error), and
-// reported as a 422-class error. The asymmetry, along the MT296
-// module: a :21: naming our outbound MT292's :20: shape
-// (`MT292-` + 10 lowercase hex, mt292MessageReference) or our
-// outbound MT202's :20: is likewise fail-closed — this module
-// consults no outbound registry (the outbound MT292 registry
-// mt292Exports, LG-471, and the outbound MT202 registry
-// mt202Exports, LG-470, are both registered, but neither is
-// consulted here — an outbound MT292 is "confirmed by its own
-// reply, outside this ledger", mt292.go:29; the MT296 tier that
-// would anchor against them is a later item), so there is
-// nothing to ask about from a shape. Such a query is for the
-// operator to
-// resolve from the repair queue (for example by asking the other
-// bank back with an outbound MT295, a later item), not for this
-// module to answer from a shape.
+// reported as a 422-class error. The outbound tiers close the
+// asymmetry the MT296 module once had: a :21: naming our
+// outbound MT292's :20: or our outbound MT202's :20: now
+// anchors against the outbound registries (the MT296 tier that
+// would anchor against them, once a later item, is this one —
+// the answer side still answers registered inbound queries,
+// not our own exports, mt296_export.go). There is no
+// :21:→schedule reverse lookup: the SHA-256 behind the
+// outbound MT292 :20: is irreversible, so the operator matches
+// the query to the export from the :21: and the audit event.
+// The registries are in-memory only, like the exports they
+// record: a restart clears them, and a late query arriving
+// after a restart parks exactly as it did before the outbound
+// tiers existed — recovery is re-export (GET /exports/mt292
+// deterministically re-derives the same :20:; POST
+// /exports/mt202 with the same :20: and terms replays
+// Duplicate) and then re-apply the same query (parking holds
+// no :20:, so a re-apply is not a replay).
 //
 // The query is registered verbatim: the :75: question, the :77A:
 // narrative, and the :79: description ride into the record
@@ -198,8 +217,12 @@ var (
 	// the inbound query's :21: names no message this ledger
 	// holds — neither an MT210 notification, nor an inbound
 	// MT292 cancellation request, nor an inbound MT202
-	// transfer — so it is parked in the repair queue
-	// fail-closed rather than dropped. It is a 422-class error.
+	// transfer, nor an outbound MT292 cancellation request
+	// registered in mt292Exports (LG-474, shape + registry),
+	// nor an outbound MT202 transfer registered in
+	// mt202Exports (LG-474, registry alone) — so it is parked
+	// in the repair queue fail-closed rather than dropped. It
+	// is a 422-class error.
 	ErrMT295UnknownReference = errors.New("ledger: mt295 inbound: unknown :21: related reference")
 	// ErrMT295MsgIDConflict is returned when a :20: reference
 	// already applied carries different terms: the reference
@@ -222,7 +245,10 @@ const (
 // MT295AnchorKind names which ledger registry a query's :21:
 // anchored to: "mt210" for an MT210 notification, "mt292" for
 // an inbound MT292 cancellation request, "mt202" for an inbound
-// MT202 transfer.
+// MT202 transfer, "outbound-mt292" for an outbound MT292
+// cancellation request registered in mt292Exports (LG-474),
+// "outbound-mt202" for an outbound MT202 transfer registered
+// in mt202Exports (LG-474).
 type MT295AnchorKind string
 
 const (
@@ -235,6 +261,15 @@ const (
 	// MT295AnchorMT202 is the :21: tier for an inbound MT202
 	// transfer (mt202Applied).
 	MT295AnchorMT202 MT295AnchorKind = "mt202"
+	// MT295AnchorOutboundMT292 is the :21: tier for an outbound
+	// MT292 cancellation request: the :21: has the outbound
+	// MT292 :20: shape and is registered in mt292Exports.
+	MT295AnchorOutboundMT292 MT295AnchorKind = "outbound-mt292"
+	// MT295AnchorOutboundMT202 is the :21: tier for an outbound
+	// MT202 transfer: the :21: is registered in mt202Exports.
+	// No shape is checked — an outbound MT202 :20: is
+	// caller-supplied, 1-16 `x` characters.
+	MT295AnchorOutboundMT202 MT295AnchorKind = "outbound-mt202"
 )
 
 // MT295 is one SWIFT FIN MT295 query message: the block-4 field
@@ -567,7 +602,8 @@ type MT295ApplyResult struct {
 	// RelatedReference is the queried message's :20: (the :21:).
 	RelatedReference string `json:"related_reference"`
 	// AnchoredKind names the registry the :21: anchored to —
-	// "mt210", "mt292", or "mt202". Empty on a parked query.
+	// "mt210", "mt292", "mt202", "outbound-mt292", or
+	// "outbound-mt202". Empty on a parked query.
 	AnchoredKind MT295AnchorKind `json:"anchored_kind,omitempty"`
 	// Queries is the :75: question, verbatim.
 	Queries []string `json:"queries,omitempty"`
@@ -683,10 +719,13 @@ func (l *Ledger) parkMT295Query(m MT295, actor string) (string, error) {
 // question, the :77A: narrative, and the :79: description as
 // received, never re-derived from live facts.
 //
-// The :21: anchors in three tiers, in order: an MT210
+// The :21: anchors in five tiers, in order: an MT210
 // notification (expectedReceipts), an inbound MT292
 // cancellation request (mt292Applied), an inbound MT202
-// transfer (mt202Applied). A :21: matching no tier is
+// transfer (mt202Applied), an outbound MT292 cancellation
+// request (the outbound MT292 :20: shape registered in
+// mt292Exports), an outbound MT202 transfer (registered in
+// mt202Exports). A :21: matching no tier is
 // ErrMT295UnknownReference, parked in the repair queue
 // fail-closed in the camt.055 shape: the returned result
 // carries the repair ID alongside the error. A parked query
@@ -737,12 +776,17 @@ func (l *Ledger) ApplyMT295(m MT295, actor string) (MT295ApplyResult, error) {
 	}
 	l.mu.RUnlock()
 
-	// The :21: anchor, three tiers in order: the MT210
+	// The :21: anchor, five tiers in order: the MT210
 	// notification, the inbound MT292 cancellation request, the
-	// inbound MT202 transfer. A :21: naming our outbound MT292
-	// or MT202 shape matches none of them — the ledger holds no
-	// state for outbound messages — and parks like any other
-	// unknown reference.
+	// inbound MT202 transfer, the outbound MT292 cancellation
+	// request (shape + mt292Exports registration, LG-474), the
+	// outbound MT202 transfer (mt202Exports registration alone,
+	// LG-474 — no shape to check). The four registries are
+	// read under one read lock, and the tier order is fixed so
+	// a :21: that names both an inbound record and an outbound
+	// export anchors to the inbound one. A :21: with the
+	// outbound MT292 shape but no registration matches none of
+	// them, and parks like any other unknown reference.
 	res := MT295ApplyResult{
 		Reference:        m.TransactionReference,
 		RelatedReference: m.RelatedReference,
@@ -754,6 +798,8 @@ func (l *Ledger) ApplyMT295(m MT295, actor string) (MT295ApplyResult, error) {
 	_, inMT210 := l.expectedReceipts[m.RelatedReference]
 	_, inMT292 := l.mt292Applied[m.RelatedReference]
 	_, inMT202 := l.mt202Applied[m.RelatedReference]
+	_, outMT292 := l.mt292Exports[m.RelatedReference]
+	_, outMT202 := l.mt202Exports[m.RelatedReference]
 	l.mu.RUnlock()
 	switch {
 	case inMT210:
@@ -762,6 +808,10 @@ func (l *Ledger) ApplyMT295(m MT295, actor string) (MT295ApplyResult, error) {
 		res.AnchoredKind = MT295AnchorMT292
 	case inMT202:
 		res.AnchoredKind = MT295AnchorMT202
+	case mt296IsMT292Reference(m.RelatedReference) && outMT292:
+		res.AnchoredKind = MT295AnchorOutboundMT292
+	case outMT202:
+		res.AnchoredKind = MT295AnchorOutboundMT202
 	default:
 		repairID, parkErr := l.parkMT295Query(m, actor)
 		if parkErr != nil {

@@ -52,11 +52,11 @@ import (
 //
 // The export renders only: no journal entry, no version bump —
 // rendering a cancellation request is read-only, and the audit
-// event is the durable record, not a state change. No MT296 tier
-// anchors against this registry yet: a :21: naming an outbound
-// MT292's :20: is still shape-only in tier (a), and the MT295
-// inbound module still consults no outbound registry — those
-// tiers are later items.
+// event is the durable record, not a state change. The MT296
+// tier-(a) lookup anchors against this registry since LG-473
+// (shape + registration, not shape alone), and the MT295
+// inbound module's outbound-MT292 tier anchors against it
+// since LG-474.
 
 // MT292 outbound export errors.
 var (

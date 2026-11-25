@@ -51,10 +51,13 @@ func mt295InboundDoc(ref, relatedRef string, queries, narrative, description []s
 }
 
 // mt295OutboundMT292Ref is a :21: with the shape of an outbound
-// MT292 :20: — the deterministic reference ExportMT292 derives
-// for schedule "sched-1", run 1 (mt292MessageReference). No
-// inbound MT292 carries it, so a query naming it has nothing to
-// ask about: the outbound-shape asymmetry, fail-closed.
+// MT292 :20: — the deterministic reference for schedule
+// "sched-1", run 1 (mt292MessageReference). A fresh fixture
+// schedule's first run is run 0, so this is not what a fresh
+// fixture export registers — it is the shape-only ref the
+// unregistered-shape test parks on. Registered tests use the
+// export result's Reference instead (the mt296MT292ExportRef
+// precedent, LG-473).
 func mt295OutboundMT292Ref() string {
 	return mt296AnsweredRef()
 }
@@ -349,21 +352,233 @@ func TestApplyMT295_UnknownReferenceParks(t *testing.T) {
 }
 
 func TestApplyMT295_OutboundMT292ShapeAlsoParks(t *testing.T) {
-	// A :21: with the shape of our outbound MT292's :20: names
-	// no inbound record — the ledger holds no state for outbound
-	// messages — so it parks like any other unknown reference.
+	// A :21: with the shape of our outbound MT292's :20: anchors
+	// once the export is registered in mt292Exports (LG-474):
+	// the query registers against the outbound cancellation
+	// request, with kind outbound-mt292. (Before LG-474 the
+	// shape alone parked — the outbound-shape asymmetry, now
+	// closed by the registry lookup.)
+	al := mustAuditLog(t)
+	l, sched := mt292ExportTestLedger(t, al)
+	if _, err := l.PauseTransferSchedule(sched.ID); err != nil {
+		t.Fatalf("PauseTransferSchedule: %v", err)
+	}
+	exp, err := l.ExportMT292Registered(mt292ExportTestOptions(sched.ID), "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
+	res := applyInboundMT295(t, l, mt295InboundDoc("QRY-295-14", exp.Reference,
+		[]string{"STAT"}, nil, nil), "ops")
+	if res.AnchoredKind != MT295AnchorOutboundMT292 {
+		t.Errorf("anchored_kind = %q, want outbound-mt292", res.AnchoredKind)
+	}
+	if res.RelatedReference != exp.Reference {
+		t.Errorf("related_reference = %q, want %q", res.RelatedReference, exp.Reference)
+	}
+	if res.Duplicate {
+		t.Error("duplicate = true on first apply")
+	}
+	// The stored query round-trips through the getter, kind
+	// included.
+	stored, ok := l.GetMT295Received("QRY-295-14")
+	if !ok {
+		t.Fatal("GetMT295Received = false, want the stored query")
+	}
+	if stored.AnchoredKind != MT295AnchorOutboundMT292 {
+		t.Errorf("stored anchored_kind = %q, want outbound-mt292", stored.AnchoredKind)
+	}
+	events := readAuditOps(t, al)
+	if countOp(events, "mt295_query_received") != 1 {
+		t.Errorf("mt295_query_received count = %d, want 1", countOp(events, "mt295_query_received"))
+	}
+}
+
+func TestApplyMT295_OutboundMT292ShapeUnregisteredParks(t *testing.T) {
+	// The shape alone is not enough (LG-474): a :21: shaped
+	// like our outbound MT292's :20: that names no rendered
+	// MT292 still parks fail-closed, with the repair ID on the
+	// returned result.
 	l := mt295InboundLedger(t, mustAuditLog(t))
-	m, err := ParseMT295(mt295InboundDoc("QRY-295-14", mt295OutboundMT292Ref(),
+	m, err := ParseMT295(mt295InboundDoc("QRY-295-17", mt295OutboundMT292Ref(),
 		[]string{"STAT"}, nil, nil))
 	if err != nil {
 		t.Fatalf("ParseMT295: %v", err)
 	}
 	res, err := l.ApplyMT295(m, "ops")
 	if !errors.Is(err, ErrMT295UnknownReference) {
-		t.Fatalf("ApplyMT295 outbound-shaped :21:: err = %v, want ErrMT295UnknownReference", err)
+		t.Fatalf("ApplyMT295 unregistered outbound-shaped :21:: err = %v, want ErrMT295UnknownReference", err)
 	}
 	if res.RepairID == "" {
 		t.Error("RepairID empty on a parked query, want the repair record")
+	}
+	if res.AnchoredKind != "" {
+		t.Errorf("anchored_kind = %q, want empty on a parked query", res.AnchoredKind)
+	}
+}
+
+func TestApplyMT295_AnchorsOutboundMT202(t *testing.T) {
+	// An outbound MT202 :20: is caller-supplied, 1-16 `x`
+	// characters with no shape to check, so the mt202Exports
+	// lookup alone anchors it (LG-474, along the MT296 third
+	// tier, LG-472).
+	al := mustAuditLog(t)
+	l := mt202ExportTestLedger(t, al)
+	if _, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT202Registered: %v", err)
+	}
+	res := applyInboundMT295(t, l, mt295InboundDoc("QRY-295-18", "MT202-REF-1",
+		[]string{"STAT"}, []string{"OPERATOR NOTE"}, []string{"PLEASE ADVISE"}), "ops")
+	if res.AnchoredKind != MT295AnchorOutboundMT202 {
+		t.Errorf("anchored_kind = %q, want outbound-mt202", res.AnchoredKind)
+	}
+	if res.RelatedReference != "MT202-REF-1" {
+		t.Errorf("related_reference = %q, want MT202-REF-1", res.RelatedReference)
+	}
+	if len(res.Queries) != 1 || res.Queries[0] != "STAT" ||
+		len(res.Narrative) != 1 || res.Narrative[0] != "OPERATOR NOTE" ||
+		len(res.Description) != 1 || res.Description[0] != "PLEASE ADVISE" {
+		t.Errorf("registered query = %+v, want the verbatim terms", res)
+	}
+}
+
+func TestApplyMT295_UnregisteredMT202Parks(t *testing.T) {
+	// A :21: naming no rendered MT202 transfer parks, even
+	// though nothing about its shape could rule it out — the
+	// registry is the whole anchor.
+	l := mt295InboundLedger(t, mustAuditLog(t))
+	m, err := ParseMT295(mt295InboundDoc("QRY-295-19", "MT202-REF-9",
+		[]string{"STAT"}, nil, nil))
+	if err != nil {
+		t.Fatalf("ParseMT295: %v", err)
+	}
+	res, err := l.ApplyMT295(m, "ops")
+	if !errors.Is(err, ErrMT295UnknownReference) {
+		t.Fatalf("ApplyMT295 unregistered MT202 :21:: err = %v, want ErrMT295UnknownReference", err)
+	}
+	if res.RepairID == "" {
+		t.Error("RepairID empty on a parked query, want the repair record")
+	}
+}
+
+func TestApplyMT295_InboundTierBeatsOutboundTier(t *testing.T) {
+	// Tier order is deterministic (LG-474): the same :21: hits
+	// both the inbound MT202 tier and the outbound MT292 tier —
+	// an inbound MT202 :20: takes the outbound MT292 :20: shape
+	// — and the inbound tier wins, kind mt202.
+	al := mustAuditLog(t)
+	l, sched := mt292ExportTestLedger(t, al)
+	// The shared :20:: the outbound MT292 reference the paused
+	// schedule's export will derive (mt292ExpectedRef, from the
+	// schedule's own RunSeq — a fresh fixture schedule's first
+	// run is run 0, not run 1).
+	sharedRef := mt292ExpectedRef(sched.ID, sched.RunSeq)
+	// The inbound MT202: a transfer whose caller-supplied :20:
+	// takes the outbound MT292 shape.
+	if _, _, err := l.Post(JournalEntry{ID: "fund-nostro-295", DebitAccount: "nostro-acct", CreditAccount: "bank", AmountCents: 1000000, Currency: "USD"}); err != nil {
+		t.Fatalf("fund Post: %v", err)
+	}
+	if _, err := l.RegisterNostroAccount("nostro-acct", "DEUTDEFF", NostroKindNostro); err != nil {
+		t.Fatalf("RegisterNostroAccount nostro: %v", err)
+	}
+	if _, err := l.RegisterNostroAccount("vostro-acct", "BNPAFRPP", NostroKindVostro); err != nil {
+		t.Fatalf("RegisterNostroAccount vostro: %v", err)
+	}
+	if res, err := l.ApplyMT202(mt202ApplyMsg(sharedRef), ""); err != nil || res.Err != nil {
+		t.Fatalf("ApplyMT202: err=%v res.Err=%v", err, res.Err)
+	}
+	// The outbound MT292: the same :20:, derived for the
+	// schedule's first run.
+	if _, err := l.PauseTransferSchedule(sched.ID); err != nil {
+		t.Fatalf("PauseTransferSchedule: %v", err)
+	}
+	exp, err := l.ExportMT292Registered(mt292ExportTestOptions(sched.ID), "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
+	if exp.Reference != sharedRef {
+		t.Fatalf("export reference = %q, want %q (the shared :20:)", exp.Reference, sharedRef)
+	}
+	res := applyInboundMT295(t, l, mt295InboundDoc("QRY-295-20", sharedRef,
+		[]string{"STAT"}, nil, nil), "ops")
+	if res.AnchoredKind != MT295AnchorMT202 {
+		t.Errorf("anchored_kind = %q, want mt202 (inbound tier beats outbound tier)", res.AnchoredKind)
+	}
+}
+
+func TestApplyMT295_OutboundTierReplayAndConflict(t *testing.T) {
+	// De-dup and conflict semantics along LG-466, on an
+	// outbound-tier query: a replay with the same :20: and
+	// terms is a no-op with Duplicate set and no second audit
+	// marker; a :20: reused for different terms is refused and
+	// never overwrites the first registration.
+	al := mustAuditLog(t)
+	l := mt202ExportTestLedger(t, al)
+	if _, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT202Registered: %v", err)
+	}
+	doc := mt295InboundDoc("QRY-295-21", "MT202-REF-1",
+		[]string{"STAT"}, []string{"OPERATOR NOTE"}, nil)
+	first := applyInboundMT295(t, l, doc, "ops")
+	if first.AnchoredKind != MT295AnchorOutboundMT202 {
+		t.Fatalf("anchored_kind = %q, want outbound-mt202", first.AnchoredKind)
+	}
+	dup := applyInboundMT295(t, l, doc, "ops")
+	if !dup.Duplicate {
+		t.Error("duplicate = false on replay, want true")
+	}
+	if dup.AnchoredKind != MT295AnchorOutboundMT202 {
+		t.Errorf("replay anchored_kind = %q, want outbound-mt202", dup.AnchoredKind)
+	}
+	events := readAuditOps(t, al)
+	if countOp(events, "mt295_query_received") != 1 {
+		t.Errorf("mt295_query_received count = %d, want 1 (no second marker)", countOp(events, "mt295_query_received"))
+	}
+	conflictDoc := mt295InboundDoc("QRY-295-21", "MT202-REF-1",
+		[]string{"DUPL"}, []string{"OPERATOR NOTE"}, nil)
+	m, err := ParseMT295(conflictDoc)
+	if err != nil {
+		t.Fatalf("ParseMT295 conflict doc: %v", err)
+	}
+	if _, err := l.ApplyMT295(m, "ops"); !errors.Is(err, ErrMT295MsgIDConflict) {
+		t.Errorf("ApplyMT295 different terms: err = %v, want ErrMT295MsgIDConflict", err)
+	}
+	// The first registration is untouched by the refused
+	// conflict.
+	stored, ok := l.GetMT295Received("QRY-295-21")
+	if !ok {
+		t.Fatal("GetMT295Received = false, want the first registration")
+	}
+	if len(stored.Queries) != 1 || stored.Queries[0] != "STAT" || stored.AnchoredKind != MT295AnchorOutboundMT202 {
+		t.Errorf("stored = %+v, want the first registration verbatim", stored)
+	}
+}
+
+func TestApplyMT295_OutboundTierGetterReturnsFirstRegistration(t *testing.T) {
+	// The getter returns the first registration verbatim — the
+	// :75: / :77A: / :79: texts as received and the outbound
+	// kind — not a re-derivation from live facts.
+	al := mustAuditLog(t)
+	l, sched := mt292ExportTestLedger(t, al)
+	if _, err := l.PauseTransferSchedule(sched.ID); err != nil {
+		t.Fatalf("PauseTransferSchedule: %v", err)
+	}
+	exp, err := l.ExportMT292Registered(mt292ExportTestOptions(sched.ID), "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
+	applyInboundMT295(t, l, mt295InboundDoc("QRY-295-22", exp.Reference,
+		[]string{"STAT", "PLEASE ADVISE STATUS"},
+		[]string{"OPERATOR NOTE"},
+		[]string{"BANK ASKS FOR THE VALUE DATE"}), "ops")
+	stored, ok := l.GetMT295Received("QRY-295-22")
+	if !ok {
+		t.Fatal("GetMT295Received = false, want the stored query")
+	}
+	if stored.RelatedReference != exp.Reference || stored.AnchoredKind != MT295AnchorOutboundMT292 ||
+		len(stored.Queries) != 2 || stored.Queries[0] != "STAT" || stored.Queries[1] != "PLEASE ADVISE STATUS" ||
+		len(stored.Narrative) != 1 || stored.Narrative[0] != "OPERATOR NOTE" ||
+		len(stored.Description) != 1 || stored.Description[0] != "BANK ASKS FOR THE VALUE DATE" {
+		t.Errorf("stored = %+v, want the registered query verbatim with kind outbound-mt292", stored)
 	}
 }
 

@@ -6720,8 +6720,11 @@ it holds — is `POST /exports/mt295/apply` with the raw FIN text
 as the body (see `ledger.ParseMT295`/`ApplyMT295`). The query's
 `:20:` is its own reference (the replay key), its `:21:` names the
 queried message's `:20:` — an MT210 notification, an inbound
-MT292 cancellation request, or an inbound MT202 transfer, looked
-up in the ledger's own registries in that order — its `:75:`
+MT292 cancellation request, an inbound MT202 transfer, an outbound
+MT292 cancellation request (the outbound MT292 `:20:` shape,
+registered in `mt292Exports`), or an outbound MT202 transfer
+(registered in `mt202Exports`), looked up in the ledger's own
+registries in that order, inbound tiers first — its `:75:`
 carries the coded question verbatim (mandatory: a query with no
 question text is malformed), and its `:77A:` and `:79:` carry the
 narrative verbatim. Registering a query moves nothing — no journal
@@ -6729,9 +6732,14 @@ rows, no schedule status change, no ExpectedReceipt cancellation,
 no version bump — and no answer snapshot is built: the answer is
 organised per queried object by the later MT296 export, so a
 query is evidence for the answer to come, not an answer itself.
-A `:21:` naming nothing the ledger holds — including one shaped
-like our own outbound MT292's `:20:` (registered in `mt292Exports`,
-but this module consults no outbound registry) — is 422 (parked in
+The outbound registries are in-memory only: a restart clears
+them, and a query arriving after a restart about an export made
+before it parks exactly as an unknown `:21:` would — recovery is
+re-export (`GET /exports/mt292` deterministically re-derives the
+same `:20:`; `POST /exports/mt202` with the same `:20:` and terms
+replays Duplicate) and then re-apply the same query. A `:21:`
+naming nothing the ledger holds — including one shaped like our
+own outbound MT292's `:20:` that names no rendered MT292 — is 422 (parked in
 the repair queue, the error body carrying the repair record ID), a
 `:20:` reused for different terms is 422, and a malformed document is 400; a re-sent `:20:`
 with the same terms is an idempotent no-op. The chain now reads:

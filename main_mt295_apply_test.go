@@ -2,6 +2,8 @@ package main
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -161,5 +163,80 @@ func TestMT295ApplyEndpoint_RegistersQuery(t *testing.T) {
 	}
 	if !strings.Contains(metricsBody, "ledger_mt295_applies_total 7") {
 		t.Errorf("metrics exposition missing ledger_mt295_applies_total 7:\n%s", metricsBody)
+	}
+}
+
+// Full flow through HTTP for the outbound tiers (LG-474):
+// register an outbound MT292 over GET /exports/mt292, then ask
+// about it with POST /exports/mt295/apply — the query registers
+// against the outbound cancellation request, kind
+// outbound-mt292.
+func TestMT295ApplyEndpoint_AnchorsOutboundMT292(t *testing.T) {
+	l, sched := mt292HTTPSetup(t)
+	if _, err := l.PauseTransferSchedule(sched.ID); err != nil {
+		t.Fatalf("PauseTransferSchedule: %v", err)
+	}
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+	applyURL := srv.URL + "/exports/mt295/apply"
+
+	// Register the outbound MT292: the deterministic :20: for
+	// sched-1 run 1.
+	q := url.Values{}
+	q.Set("schedule_id", sched.ID)
+	q.Set("servicing_bic", "CITIUS33")
+	q.Set("original_date", "2026-11-10")
+	q.Set("reason", "Schedule paused by operator")
+	code, doc292, _ := getText(t, srv.URL+"/exports/mt292?"+q.Encode())
+	if code != http.StatusOK {
+		t.Fatalf("export MT292: status=%d, want 200", code)
+	}
+	ref := mt292DocRef(t, doc292)
+
+	doc := mt295HTTPDoc("QRY-295-HTTP-O29", ref,
+		[]string{"STAT"}, []string{"OPERATOR NOTE"}, nil)
+	code, body := postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt295/apply: status=%d body=%v", code, body)
+	}
+	if body["reference"] != "QRY-295-HTTP-O29" {
+		t.Errorf("reference = %v, want QRY-295-HTTP-O29", body["reference"])
+	}
+	if body["related_reference"] != ref {
+		t.Errorf("related_reference = %v, want %v", body["related_reference"], ref)
+	}
+	if body["anchored_kind"] != "outbound-mt292" {
+		t.Errorf("anchored_kind = %v, want outbound-mt292", body["anchored_kind"])
+	}
+	if body["duplicate"] == true {
+		t.Errorf("duplicate = true on first apply, want false")
+	}
+	// Replay the same :20: with the same terms: idempotent,
+	// duplicate set.
+	code, body = postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("replay: status=%d body=%v", code, body)
+	}
+	if body["duplicate"] != true {
+		t.Errorf("duplicate = %v, want true", body["duplicate"])
+	}
+}
+
+// The shape alone is not enough over HTTP either (LG-474): a
+// :21: shaped like our outbound MT292's :20: that names no
+// rendered MT292 is a 422, and the error body carries the repair
+// record ID.
+func TestMT295ApplyEndpoint_UnregisteredOutboundShapeIs422(t *testing.T) {
+	srv := mt195ExportTestServer(t)
+	applyURL := srv.URL + "/exports/mt295/apply"
+
+	doc := mt295HTTPDoc("QRY-295-HTTP-422", "MT292-0123456789",
+		[]string{"STAT"}, nil, nil)
+	code, body := postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("unregistered outbound-shaped :21:: status=%d body=%v, want 422", code, body)
+	}
+	if body["repair_id"] == nil || body["repair_id"] == "" {
+		t.Errorf("repair_id = %v, want the parked repair record", body["repair_id"])
 	}
 }
