@@ -270,3 +270,113 @@ func TestMT296ApplyEndpoint_UnknownReferenceErrorNamesReference(t *testing.T) {
 		t.Errorf("metrics exposition missing ledger_mt296_applies_total 1:\n%s", metricsBody)
 	}
 }
+
+// The tier-(c) gate end to end (LG-472): export an MT202 transfer
+// over HTTP, answer it with an inbound MT296 over HTTP, and verify
+// the registry-backed registration, the replay, and the metrics
+// counter. The MT202's :20: ("MT202REF1") matches neither the
+// tier-(a) nor the tier-(b) shape: only tier (c) can anchor it.
+func TestMT296ApplyEndpoint_MT202TierRegistersAnswer(t *testing.T) {
+	srv := mt195ExportTestServer(t)
+
+	code, _, _ := postTextResp(t, srv.URL+"/exports/mt202", mt202ValidBody)
+	if code != http.StatusOK {
+		t.Fatalf("export MT202: status=%d, want 200", code)
+	}
+
+	applyURL := srv.URL + "/exports/mt296/apply"
+	doc := mt296HTTPDoc("ANS-296-HTTP-30", "MT202REF1",
+		[]string{"/CNCL/"}, nil, []string{"CONFIRMED"})
+	code, body := postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("apply tier-(c): status=%d body=%v, want 200", code, body)
+	}
+	if body["reference"] != "ANS-296-HTTP-30" || body["related_reference"] != "MT202REF1" {
+		t.Errorf("refs = %v/%v, want ANS-296-HTTP-30/MT202REF1", body["reference"], body["related_reference"])
+	}
+	if body["duplicate"] == true {
+		t.Errorf("duplicate = true on first apply, want false")
+	}
+	// Replay the same :20: with the same terms: idempotent,
+	// duplicate set.
+	code, body = postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("replay: status=%d body=%v", code, body)
+	}
+	if body["duplicate"] != true {
+		t.Errorf("duplicate = %v, want true", body["duplicate"])
+	}
+	// The metrics counter counts every apply served (register +
+	// replay = 2; the MT202 export counts under its own counter).
+	code, _, metricsBody := getBody(t, srv.URL+"/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("GET /metrics: status=%d", code)
+	}
+	if !strings.Contains(metricsBody, "ledger_mt296_applies_total 2") {
+		t.Errorf("metrics exposition missing ledger_mt296_applies_total 2:\n%s", metricsBody)
+	}
+}
+
+// Tier (c) errors end to end (LG-472): a :21: naming a transfer
+// this ledger never rendered is a 422, a :20: reused for different
+// terms is a 422, and a replay after the conflict still returns
+// the first registration.
+func TestMT296ApplyEndpoint_MT202TierUnknownAndConflict(t *testing.T) {
+	srv := mt195ExportTestServer(t)
+
+	code, _, _ := postTextResp(t, srv.URL+"/exports/mt202", mt202ValidBody)
+	if code != http.StatusOK {
+		t.Fatalf("export MT202: status=%d, want 200", code)
+	}
+
+	applyURL := srv.URL + "/exports/mt296/apply"
+	// A :21: naming no rendered transfer is a 422 (parked
+	// fail-closed in the repair queue), the error body carrying
+	// the repair record ID — the lookup is the whole tier.
+	unknown := mt296HTTPDoc("ANS-296-HTTP-31", "MT202REF9",
+		[]string{"/CNCL/"}, nil, nil)
+	code, body := postMT195Text(t, applyURL, unknown, "ops")
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("unregistered tier-(c) :21:: status=%d body=%v, want 422", code, body)
+	}
+	if body["repair_id"] == nil || body["repair_id"] == "" {
+		t.Errorf("repair_id = %v, want the parked repair record", body["repair_id"])
+	}
+	// Register the answer against the exported transfer.
+	doc := mt296HTTPDoc("ANS-296-HTTP-32", "MT202REF1",
+		[]string{"/CNCL/"}, nil, []string{"CONFIRMED"})
+	code, body = postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("apply tier-(c): status=%d body=%v, want 200", code, body)
+	}
+	// Same :20:, different terms: a 422 conflict, never a
+	// silent overwrite.
+	conflict := mt296HTTPDoc("ANS-296-HTTP-32", "MT202REF1",
+		[]string{"/RJCR/"}, nil, []string{"CONFIRMED"})
+	code, body = postMT195Text(t, applyURL, conflict, "ops")
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("conflict: status=%d body=%v, want 422", code, body)
+	}
+	// The conflict overwrote nothing: the original answer still
+	// replays with duplicate set.
+	code, body = postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("replay after conflict: status=%d body=%v", code, body)
+	}
+	if body["duplicate"] != true {
+		t.Errorf("duplicate = %v, want true", body["duplicate"])
+	}
+	answers, ok := body["answers"].([]any)
+	if !ok || len(answers) != 1 || answers[0] != "/CNCL/" {
+		t.Errorf("answers = %v, want [/CNCL/] (the first registration)", body["answers"])
+	}
+	// The metrics counter counts every apply served (unknown +
+	// register + conflict + replay = 4).
+	code, _, metricsBody := getBody(t, srv.URL+"/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("GET /metrics: status=%d", code)
+	}
+	if !strings.Contains(metricsBody, "ledger_mt296_applies_total 4") {
+		t.Errorf("metrics exposition missing ledger_mt296_applies_total 4:\n%s", metricsBody)
+	}
+}

@@ -35,16 +35,21 @@ import (
 // honoured it (that is confirmed by its reply, the inbound MT296).
 // The registry is in-memory only, like mt295Exports: the
 // hash-chained mt202_exported audit events are the durable record,
-// and a restart clears it — a late MT296 answer arriving after a
-// restart falls back to the shape gate, exactly as before.
+// and a restart clears it — a late MT296 answer naming that :20:
+// then parks in the repair queue, exactly as before this registry
+// existed (the caller-supplied :20: carries no shape for the gate
+// to match); re-exporting the same :20: with the same terms
+// re-registers it, and re-applying the answer then registers.
 //
 // The export renders only: no journal entry, no version bump —
 // rendering a transfer is read-only, and the audit event is the
-// durable record, not a state change. No MT296 tier anchors
-// against this registry yet: a :21: naming an outbound MT202's
-// :20: is still fail-closed by the inbound MT295 module
-// (mt295_inbound.go), and the tier that would consult this
-// registry is a later item.
+// durable record, not a state change. The inbound MT296's tier
+// (c) (LG-472) anchors against this registry: a :21: naming an
+// outbound MT202's :20: registers the answer against the
+// transfer it names — the pure-lookup tier, because the
+// caller-supplied :20: carries no MT292-/MT295- shape to check.
+// The inbound MT295 module (mt295_inbound.go) still consults no
+// outbound registry: that module answers a different question.
 
 // MT202ExportResult is the outcome of ExportMT202Registered: the
 // rendered transfer message and the facts it was rendered from.

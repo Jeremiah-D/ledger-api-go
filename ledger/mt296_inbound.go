@@ -68,8 +68,8 @@ import (
 // disagreeing copy of its type and date would be a different
 // claim — refused, never silently dropped.
 //
-// The :21: anchors in two tiers (LG-469, extending the LG-465
-// single tier): tier (a) is the shape of our outbound MT292's
+// The :21: anchors in three tiers (LG-472, extending the LG-469
+// two tiers): tier (a) is the shape of our outbound MT292's
 // :20: — `MT292-` plus the first 10 lowercase hex characters
 // of the SHA-256 of the run transfer ID
 // (mt292MessageReference, mt292.go:152), 16 characters in
@@ -78,13 +78,18 @@ import (
 // SHA-256 of the queried MT292's :20: and the question body
 // (mt295MessageReference, mt295_export.go) — and the :21:
 // must also be registered in mt295Exports, the outbound MT295
-// query registry (LG-468). A :21: that matches neither tier —
-// or a tier-(b) shape naming no query this ledger rendered —
-// is fail-closed into the repair queue
+// query registry (LG-468); tier (c) is the :20: of an outbound
+// MT202 transfer this ledger rendered — the caller-supplied
+// transaction reference (mt202.go), which carries no MT292-/
+// MT295- shape to check, so the tier is a pure lookup in
+// mt202Exports, the outbound MT202 transfer registry (LG-470).
+// A :21: that matches no tier — or a tier-(b) shape naming no
+// query this ledger rendered, or a :21: naming no transfer
+// this ledger rendered — is fail-closed into the repair queue
 // (RepairReasonUnknownRoute, the camt.055 shape, along
 // ApplyMT999 and ApplyMT292: the returned result carries the
 // repair ID alongside the ErrMT296UnknownReference error),
-// and reported as a 422-class error. The two tiers are
+// and reported as a 422-class error. The three tiers are
 // deliberately asymmetric: tier (a) has a registry now
 // (mt292Exports, LG-471) but does not consult it yet, so the
 // shape is still the whole anchor and there is no :21:→schedule
@@ -93,7 +98,12 @@ import (
 // audit event, not from a ledger lookup; the registry lookup
 // tier is a later item. Tier (b) has a registry, so a shape
 // alone is not enough — the answer must name a query this
-// ledger actually rendered.
+// ledger actually rendered. Tier (c) has a registry and no
+// shape at all — the lookup alone is the anchor, because the
+// :20: is the caller's own reference, not a derived one; a
+// :21: whose shape overlaps tier (a) or (b) is accepted
+// whichever tier hits, and the lookup order does not change
+// the accepted set.
 //
 // The answer is registered verbatim: the :76: answers, the
 // :77A: narrative, and the :79: description ride into the
@@ -168,10 +178,11 @@ var (
 	// could have sent: neither the shape of an outbound MT292
 	// :20: (`MT292-` + 10 lowercase hex) nor the shape of an
 	// outbound MT295 :20: (`MT295-` + 10 lowercase hex) that
-	// is registered in mt295Exports — the answer names no
-	// cancellation request or query this ledger could have
-	// sent, so it is parked in the repair queue fail-closed
-	// rather than dropped. It is a 422-class error.
+	// is registered in mt295Exports, nor a :20: registered in
+	// mt202Exports — the answer names no cancellation request,
+	// query, or transfer this ledger could have sent, so it is
+	// parked in the repair queue fail-closed rather than
+	// dropped. It is a 422-class error.
 	ErrMT296UnknownReference = errors.New("ledger: mt296 inbound: unknown :21: related reference")
 	// ErrMT296MsgIDConflict is returned when a :20: reference
 	// already applied carries different terms: the reference
@@ -558,20 +569,32 @@ func mt296IsMT295Reference(ref string) bool {
 // against, so the shape is the whole anchor), or tier (b),
 // the shape of an outbound MT295 :20: that is registered in
 // mt295Exports — a shape-matching :21: that names no query
-// this ledger rendered is still unknown. The registry lookup
-// runs under the read lock; the shape checks read nothing.
+// this ledger rendered is still unknown — or tier (c), a :20:
+// registered in mt202Exports: the caller-supplied MT202
+// reference carries no shape to check, so the lookup alone
+// anchors it, and a :21: whose shape overlaps tier (a) or (b)
+// is accepted whichever tier hits. The registry lookups run
+// under the read lock; the shape checks read nothing.
 // Registry entries are only ever added, never removed, so a
 // lookup hit stays valid past this call.
 func (l *Ledger) mt296IsAnchoredReference(ref string) bool {
 	if mt296IsMT292Reference(ref) {
 		return true
 	}
-	if !mt296IsMT295Reference(ref) {
-		return false
-	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	_, ok := l.mt295Exports[ref]
+	if mt296IsMT295Reference(ref) {
+		if _, ok := l.mt295Exports[ref]; ok {
+			return true
+		}
+	}
+	// Tier (c) (LG-472): the :21: names an outbound MT202's
+	// :20:, registered in mt202Exports. The caller-supplied
+	// reference carries no MT292-/MT295- shape to check, so
+	// the lookup alone anchors it — including a :21: whose
+	// shape overlaps tier (a) or (b) but is registered only
+	// here.
+	_, ok := l.mt202Exports[ref]
 	return ok
 }
 
@@ -701,12 +724,16 @@ func (l *Ledger) parkMT296Answer(m MT296, actor string) (string, error) {
 // the :76: answers, the :77A: narrative, and the :79:
 // description as received, never re-derived from live facts.
 //
-// The :21: anchors in two tiers (LG-469): tier (a) the shape
+// The :21: anchors in three tiers (LG-472): tier (a) the shape
 // of an outbound MT292 :20: (`MT292-` + 10 lowercase hex),
-// or tier (b) the shape of an outbound MT295 :20:
+// tier (b) the shape of an outbound MT295 :20:
 // (`MT295-` + 10 lowercase hex) that is registered in
-// mt295Exports. A :21: matching neither tier — or a tier-(b)
-// shape naming no rendered query — is
+// mt295Exports, or tier (c) a :20: registered in mt202Exports
+// (the outbound MT202 transfer registry, LG-470) — a
+// caller-supplied reference with no shape to check, so the
+// lookup alone anchors it. A :21: matching no tier — or a
+// tier-(b) shape naming no rendered query, or a :21: naming
+// no rendered transfer — is
 // ErrMT296UnknownReference, parked in the repair queue
 // fail-closed in the camt.055 shape: the returned result
 // carries the repair ID alongside the error. A
@@ -730,8 +757,9 @@ func (l *Ledger) parkMT296Answer(m MT296, actor string) (string, error) {
 //
 // Locking: the validation runs on the parsed values alone;
 // the replay read runs under the read lock and the :21:
-// anchor check takes the read lock only for the tier-(b)
-// registry lookup (the shape checks read nothing); the :20: record and the
+// anchor check takes the read lock for the tier-(b) and
+// tier-(c) registry lookups (the shape checks read nothing);
+// the :20: record and the
 // inbound marker event run under a short write lock of their
 // own, re-checking the registry first so a concurrent
 // double-apply still records once; the repair parking runs
@@ -761,12 +789,15 @@ func (l *Ledger) ApplyMT296(m MT296, actor string) (MT296ApplyResult, error) {
 	}
 	l.mu.RUnlock()
 
-	// The :21: anchor, two tiers (LG-469): the shape of an
-	// outbound MT292 :20:, or the shape of an outbound MT295
-	// :20: registered in mt295Exports. Anything else names no
-	// cancellation request or query this ledger could have
-	// sent, so the answer parks fail-closed instead of
-	// registering against nothing.
+	// The :21: anchor, three tiers (LG-472): the shape of an
+	// outbound MT292 :20:, the shape of an outbound MT295
+	// :20: registered in mt295Exports, or a :20: registered
+	// in mt202Exports (the MT202 transfer registry — a
+	// caller-supplied reference with no shape to check, so
+	// the lookup alone anchors it). Anything else names no
+	// cancellation request, query, or transfer this ledger
+	// could have sent, so the answer parks fail-closed
+	// instead of registering against nothing.
 	res := MT296ApplyResult{
 		Reference:        m.TransactionReference,
 		RelatedReference: m.RelatedReference,
