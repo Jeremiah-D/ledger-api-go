@@ -6503,7 +6503,7 @@ onboarding.
 A transfer schedule can be pre-announced to its servicing bank as
 a SWIFT FIN MT210 notice to receive: `GET
 /exports/mt210?schedule_id=<id>&servicing_bic=<bic>` renders the
-next run (see `ledger.ExportMT210`). Where MT300/MT304/MT320
+next run (see `ledger.ExportMT210Registered`). Where MT300/MT304/MT320
 confirm contracts that already exist, MT210 covers the other side
 of the timeline — a payment that is due to arrive. The direction
 is account owner to account bank: the sender is the To account
@@ -6531,7 +6531,19 @@ valid MT210 400. One MT210 notifies one run: `:30:` is shared
 across the whole message, so a multi-run notice would mix value
 dates. Like MT300, the export is read-only and repeat exports are
 byte-identical until a run fires (then `RunSeq` advances and
-`:21:` / `:30:` move with it). `GET /metrics` counts exports as
+`:21:` / `:30:` move with it). The export is registered under its
+`:20:` (the schedule ID): a re-sent export with the same terms
+returns the stored message instead of rendering twice, a `:20:`
+reused for a different servicing BIC is refused (422), and when a
+run fires the next export supersedes the stored notice with the
+new run's issue — the registry holds the latest issue, not one
+run. The registration is in-memory only: a restart clears it, and
+a re-export after a restart re-renders and re-registers. Each
+registration lands one `mt210_exported` audit event (msg_id /
+schedule_id / run_seq / sender_lt, trace `:20:`); a replay emits
+no second event. The registry proves only that this ledger
+rendered the notice — not that it was sent — and is the anchor the
+future MT295 MT210 tier will consult. `GET /metrics` counts exports as
 `ledger_mt210_exports_total`.
 
 The inbound direction is the mirror: `POST /exports/mt210/apply`

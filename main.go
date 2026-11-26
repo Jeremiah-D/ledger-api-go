@@ -6558,18 +6558,24 @@ func (s *server) handleMT304Apply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// handleMT210Export implements GET /exports/mt210 (LG-393): a SWIFT
+// handleMT210Export implements GET /exports/mt210 (LG-393, LG-479): a SWIFT
 // FIN MT210 notice to receive for the next run of one active
-// transfer schedule (see ledger.ExportMT210). Query parameters:
+// transfer schedule (see ledger.ExportMT210Registered). Query parameters:
 // schedule_id (required), servicing_bic (required, the BIC of the
 // bank holding the account to be credited — the ledger holds no
 // bank-identity registry, so the caller names the servicing bank on
-// every export). The export is read-only: no version bump, nothing
-// booked, no audit event. Error mapping: a missing schedule_id or
+// every export). The export is registered under its :20: (the schedule
+// ID, LG-479): a re-sent export with the same terms returns the stored
+// message, a :20: reused for different terms is refused, and a new run
+// supersedes the stored notice with the next issue. Rendering is
+// read-only: no version bump, nothing booked — only the mt210_exported
+// audit event lands. Error mapping: a missing schedule_id or
 // servicing_bic is a 400; an unknown schedule is a 404; a paused,
-// cancelled, completed, or exhausted schedule is a 422; an invalid
-// servicing BIC, an FX schedule, or a schedule that cannot be
-// rendered as a valid MT210 (:20:/:21: format, LT form) is a 400.
+// cancelled, completed, or exhausted schedule, or a :20: reused for
+// different terms, is a 422; an invalid servicing BIC, an FX schedule,
+// or a schedule that cannot be rendered as a valid MT210 (:20:/:21:
+// format, LT form) is a 400. The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
 func (s *server) handleMT210Export(w http.ResponseWriter, r *http.Request) {
 	s.metrics.MT210Exports.Add(1)
 	q := r.URL.Query()
@@ -6583,16 +6589,23 @@ func (s *server) handleMT210Export(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "servicing_bic is required"})
 		return
 	}
-	doc, err := s.ledgerFor(r).ExportMT210(ledger.MT210ExportOptions{
+	actx, ok := s.actorCtx(w, r)
+	if !ok {
+		return
+	}
+	l := s.ledgerFor(r)
+	actor := ledger.ActorFromContext(actx)
+	res, err := l.ExportMT210Registered(ledger.MT210ExportOptions{
 		ScheduleID:   scheduleID,
 		ServicingBIC: servicingBIC,
-	})
+	}, actor)
 	if err != nil {
 		status := http.StatusInternalServerError
 		switch {
 		case errors.Is(err, ledger.ErrScheduleNotFound):
 			status = http.StatusNotFound
-		case errors.Is(err, ledger.ErrMT210ScheduleNotActive):
+		case errors.Is(err, ledger.ErrMT210ScheduleNotActive),
+			errors.Is(err, ledger.ErrMT210ExportMsgIDConflict):
 			status = http.StatusUnprocessableEntity
 		case errors.Is(err, ledger.ErrInvalidMT210Export):
 			status = http.StatusBadRequest
@@ -6602,7 +6615,7 @@ func (s *server) handleMT210Export(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(doc))
+	w.Write([]byte(res.Message))
 }
 
 // handleMT210Apply implements POST /exports/mt210/apply (LG-448):

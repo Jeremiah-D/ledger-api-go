@@ -1107,6 +1107,26 @@ type Ledger struct {
 	// both look the :21: up here rather than trusting the
 	// `MT292-` shape alone.
 	mt292Exports map[string]mt292ExportRecord
+	// mt210Exports maps a MT210 :20: reference — the schedule ID
+	// itself, stable across runs — to the latest notice rendered
+	// for it (see mt210_export.go, LG-479): the replay guard for
+	// outbound MT210 notices, so a re-sent export returns the
+	// stored message instead of rendering twice — and a :20:
+	// reused for different terms is refused instead of silently
+	// overwritten. Unlike mt292Exports, the key does not pin the
+	// run: when a run fires, the next export supersedes the stored
+	// notice with the new run's, because a :20: names the latest
+	// issue, not one run. In-memory only, like mt292Exports: the
+	// hash-chained mt210_exported audit events are the durable
+	// record. A refused export (an unknown schedule, a paused
+	// schedule, an FX schedule, or a :20: conflict) records
+	// nothing here: it has no message to replay, and a re-sent
+	// export refuses again — or renders, once the schedule is
+	// notifiable. The registry is also the anchor the future
+	// MT295 MT210 tier will consult: a :21: naming our outbound
+	// MT210's :20: will look the run up here rather than
+	// trusting the shape alone.
+	mt210Exports map[string]mt210ExportRecord
 	// mt196Answers maps a MT195 :20: reference (the :21: of the
 	// inbound MT196) to the answer its first application
 	// registered (see mt196_apply.go, LG-462): the replay guard

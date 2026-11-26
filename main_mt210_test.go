@@ -174,3 +174,79 @@ func TestHTTPMT210ExportErrors(t *testing.T) {
 		t.Errorf("metrics missing ledger_mt210_exports_total 5")
 	}
 }
+
+// Registered export flow through HTTP (LG-479): the first GET
+// registers the notice, a repeat GET returns the stored message
+// (Duplicate semantics — same body, still 200), a GET with a
+// different servicing BIC for the same run is refused (422), and
+// a GET differing only in BIC case is the same terms (200, same
+// body).
+func TestHTTPMT210ExportRegistered(t *testing.T) {
+	l, sched := mt210HTTPSetup(t)
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+
+	get := func(t *testing.T, raw string) (int, string) {
+		t.Helper()
+		resp, err := http.Get(raw)
+		if err != nil {
+			t.Fatalf("GET %s: %v", raw, err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", raw, err)
+		}
+		return resp.StatusCode, string(body)
+	}
+	q := url.Values{}
+	q.Set("schedule_id", sched.ID)
+	q.Set("servicing_bic", "CITIUS33")
+
+	code, body := get(t, srv.URL+"/exports/mt210?"+q.Encode())
+	if code != http.StatusOK {
+		t.Fatalf("first export: status=%d, want 200", code)
+	}
+	if !strings.Contains(body, ":21:sched-1/run/0") {
+		t.Errorf("first export missing :21:sched-1/run/0, body:\n%s", body)
+	}
+
+	// Repeat export: the stored message, byte-identical, still 200.
+	code, body2 := get(t, srv.URL+"/exports/mt210?"+q.Encode())
+	if code != http.StatusOK {
+		t.Fatalf("repeat export: status=%d, want 200", code)
+	}
+	if body2 != body {
+		t.Errorf("repeat export differs:\nfirst:\n%s\nsecond:\n%s", body, body2)
+	}
+
+	// Same :20:, same run, different servicing BIC: refused, 422.
+	q.Set("servicing_bic", "DEUTDEFF")
+	if code, _ := get(t, srv.URL+"/exports/mt210?"+q.Encode()); code != http.StatusUnprocessableEntity {
+		t.Errorf("different servicing BIC: status=%d, want 422", code)
+	}
+
+	// Same terms modulo BIC case: the stored message again, 200.
+	q.Set("servicing_bic", "citius33")
+	code, body3 := get(t, srv.URL+"/exports/mt210?"+q.Encode())
+	if code != http.StatusOK {
+		t.Fatalf("BIC-case replay: status=%d, want 200", code)
+	}
+	if body3 != body {
+		t.Errorf("BIC-case replay differs:\nfirst:\n%s\nreplay:\n%s", body, body3)
+	}
+
+	// All four requests count: 2 exports + 1 refusal + 1 replay.
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	mbody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /metrics: %v", err)
+	}
+	if !strings.Contains(string(mbody), "ledger_mt210_exports_total 4") {
+		t.Errorf("metrics missing ledger_mt210_exports_total 4")
+	}
+}

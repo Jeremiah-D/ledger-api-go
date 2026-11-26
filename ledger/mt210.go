@@ -65,6 +65,17 @@ import (
 // every field is pinned to the stored schedule and its RunSeq —
 // once a run fires, RunSeq advances and :21:/:30: move with it,
 // which is a content change, not drift.
+//
+// The registered export (ExportMT210Registered, LG-479) wraps this
+// pure render: the notice is recorded under its :20: (the schedule
+// ID) in mt210Exports, so the ledger can later confirm it rendered
+// that notice — a replay returns the stored message, a :20: reused
+// for different terms is refused, and a new run supersedes the
+// stored notice with the next issue. The registry is in-memory
+// only: a restart clears it, and a re-export after a restart
+// re-renders and re-registers. The pure render itself stays
+// unchanged: it still takes the read lock only, bumps no version,
+// books nothing, and appends no audit event.
 
 // ErrInvalidMT210Export is returned when a schedule cannot be
 // rendered as an MT210: a :20: or :21: reference outside 16x, a
@@ -100,36 +111,47 @@ type MT210ExportOptions struct {
 // exhausted schedule reports ErrMT210ScheduleNotActive. Only an
 // active schedule with a next run exports.
 func (l *Ledger) ExportMT210(opts MT210ExportOptions) (string, error) {
+	msg, _, _, err := l.exportMT210(opts)
+	return msg, err
+}
+
+// exportMT210 is ExportMT210's body, also returning the sender LT
+// and the run sequence the message was rendered for, so the
+// registering export (ExportMT210Registered, LG-479) can audit the
+// exact sender and recheck the run sequence without re-reading
+// live facts. ExportMT210's behaviour is unchanged: the wrapper
+// above keeps its signature and its byte-identical render.
+func (l *Ledger) exportMT210(opts MT210ExportOptions) (string, string, uint64, error) {
 	// Caller-given options fail fast, before any schedule lookup:
 	// a servicing bank that is not a valid BIC can never be a
 	// valid notice.
 	servicing := strings.ToUpper(strings.TrimSpace(opts.ServicingBIC))
 	if servicing == "" || !validBIC(servicing) {
-		return "", fmt.Errorf("%w: servicing BIC %q: want a valid 8/11-character BIC", ErrInvalidMT210Export, opts.ServicingBIC)
+		return "", "", 0, fmt.Errorf("%w: servicing BIC %q: want a valid 8/11-character BIC", ErrInvalidMT210Export, opts.ServicingBIC)
 	}
 	sched, err := l.GetTransferSchedule(opts.ScheduleID)
 	if err != nil {
-		return "", err
+		return "", "", 0, err
 	}
 	if sched.Status != ScheduleActive {
-		return "", fmt.Errorf("%w: schedule %q is %s", ErrMT210ScheduleNotActive, opts.ScheduleID, sched.Status)
+		return "", "", 0, fmt.Errorf("%w: schedule %q is %s", ErrMT210ScheduleNotActive, opts.ScheduleID, sched.Status)
 	}
 	if !sched.EndsAt.IsZero() && sched.NextRunAt.After(sched.EndsAt) {
-		return "", fmt.Errorf("%w: schedule %q next run %s is past its ends_at %s", ErrMT210ScheduleNotActive, opts.ScheduleID, sched.NextRunAt.UTC().Format(time.RFC3339), sched.EndsAt.UTC().Format(time.RFC3339))
+		return "", "", 0, fmt.Errorf("%w: schedule %q next run %s is past its ends_at %s", ErrMT210ScheduleNotActive, opts.ScheduleID, sched.NextRunAt.UTC().Format(time.RFC3339), sched.EndsAt.UTC().Format(time.RFC3339))
 	}
 	// An FX schedule's receivable amount is only known when the
 	// rate is looked up at fire time: a notice cannot state it.
 	if sched.ToCurrency != "" {
-		return "", fmt.Errorf("%w: schedule %q is an FX schedule (to_currency %q), the receivable amount is unknowable until fire time", ErrInvalidMT210Export, opts.ScheduleID, sched.ToCurrency)
+		return "", "", 0, fmt.Errorf("%w: schedule %q is an FX schedule (to_currency %q), the receivable amount is unknowable until fire time", ErrInvalidMT210Export, opts.ScheduleID, sched.ToCurrency)
 	}
 	// :20: is the schedule ID, 16x.
 	if err := mt210TransactionReference(":20:", sched.ID); err != nil {
-		return "", err
+		return "", "", 0, err
 	}
 	// :21: is the run transfer ID, 16x — "<ID>/run/<seq>".
 	runID := fmt.Sprintf("%s/run/%d", sched.ID, sched.RunSeq)
 	if err := mt210TransactionReference(":21:", runID); err != nil {
-		return "", err
+		return "", "", 0, err
 	}
 	// The parties' best-known identifiers (registered BIC, else
 	// the internal account ID, uppercased) and the To account's
@@ -152,10 +174,10 @@ func (l *Ledger) ExportMT210(opts MT210ExportOptions) (string, error) {
 		creditAccount = toIBAN.IBAN
 	}
 	if len(creditAccount) > 35 {
-		return "", fmt.Errorf("%w: :25: account line %q exceeds 35 characters", ErrInvalidMT210Export, creditAccount)
+		return "", "", 0, fmt.Errorf("%w: :25: account line %q exceeds 35 characters", ErrInvalidMT210Export, creditAccount)
 	}
 	if err := mt103CheckX(creditAccount); err != nil {
-		return "", fmt.Errorf("%w: :25: %w", ErrInvalidMT210Export, err)
+		return "", "", 0, fmt.Errorf("%w: :25: %w", ErrInvalidMT210Export, err)
 	}
 	// Blocks 1/2 LTs derive from the To identifier and the
 	// servicing BIC: a To account without a registered BIC needs
@@ -164,17 +186,17 @@ func (l *Ledger) ExportMT210(opts MT210ExportOptions) (string, error) {
 	// emitting a malformed header.
 	senderLT, err := mt103NormalizeLT(toID)
 	if err != nil {
-		return "", fmt.Errorf("%w: sender LT from %q: %w", ErrInvalidMT210Export, toID, err)
+		return "", "", 0, fmt.Errorf("%w: sender LT from %q: %w", ErrInvalidMT210Export, toID, err)
 	}
 	receiverLT, err := mt103NormalizeLT(servicing)
 	if err != nil {
-		return "", fmt.Errorf("%w: receiver LT from %q: %w", ErrInvalidMT210Export, servicing, err)
+		return "", "", 0, fmt.Errorf("%w: receiver LT from %q: %w", ErrInvalidMT210Export, servicing, err)
 	}
 	// A :50D: ordering customer is named by account ID, which
 	// must be SWIFT `x`.
 	if !fromBIC {
 		if err := mt103CheckX(fromID); err != nil {
-			return "", fmt.Errorf("%w: :50D: account ID %q: %w", ErrInvalidMT210Export, fromID, err)
+			return "", "", 0, fmt.Errorf("%w: :50D: account ID %q: %w", ErrInvalidMT210Export, fromID, err)
 		}
 	}
 
@@ -205,7 +227,7 @@ func (l *Ledger) ExportMT210(opts MT210ExportOptions) (string, error) {
 		fmt.Fprintf(&b, ":50D:%s\n", fromID)
 	}
 	b.WriteString("-}")
-	return b.String(), nil
+	return b.String(), senderLT, sched.RunSeq, nil
 }
 
 // mt210TransactionReference validates a 16x reference — :20: the
