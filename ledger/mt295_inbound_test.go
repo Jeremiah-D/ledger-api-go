@@ -460,6 +460,170 @@ func TestApplyMT295_UnregisteredMT202Parks(t *testing.T) {
 	}
 }
 
+func TestApplyMT295_AnchorsOutboundMT296(t *testing.T) {
+	// An outbound MT296 :20: is operator-supplied, 1-16 `x`
+	// characters with no shape to check, so the mt296Exports
+	// lookup alone anchors it (LG-478, along the MT202 tier,
+	// LG-474, and the MT296 third tier, LG-472).
+	l, al, mt292Ref, _ := mt296ExportLedger(t)
+	if _, err := l.ExportMT296ForAnswered(mt292Ref, mt296ExportOptions(t), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT296ForAnswered: %v", err)
+	}
+	before := l.Version()
+	entriesBefore := len(l.Entries())
+
+	res := applyInboundMT295(t, l, mt295InboundDoc("QRY-295-22", "ANS-296-0001",
+		[]string{"STAT"}, []string{"OPERATOR NOTE"}, []string{"PLEASE ADVISE"}), "ops")
+	if res.Duplicate {
+		t.Error("duplicate = true on first apply")
+	}
+	if res.AnchoredKind != MT295AnchorOutboundMT296 {
+		t.Errorf("anchored_kind = %q, want outbound-mt296", res.AnchoredKind)
+	}
+	if res.Reference != "QRY-295-22" || res.RelatedReference != "ANS-296-0001" {
+		t.Errorf("refs = %q/%q, want QRY-295-22/ANS-296-0001", res.Reference, res.RelatedReference)
+	}
+	if len(res.Queries) != 1 || res.Queries[0] != "STAT" ||
+		len(res.Narrative) != 1 || res.Narrative[0] != "OPERATOR NOTE" ||
+		len(res.Description) != 1 || res.Description[0] != "PLEASE ADVISE" {
+		t.Errorf("registered query = %+v, want the verbatim terms", res)
+	}
+	// Registering is read-only: no version bump, no journal rows.
+	if l.Version() != before {
+		t.Errorf("version = %d, want %d (read-only, no bump)", l.Version(), before)
+	}
+	if len(l.Entries()) != entriesBefore {
+		t.Errorf("entries = %d, want %d (no journal rows)", len(l.Entries()), entriesBefore)
+	}
+	stored, ok := l.GetMT295Received("QRY-295-22")
+	if !ok {
+		t.Fatal("GetMT295Received = false, want the stored query")
+	}
+	if stored.RelatedReference != "ANS-296-0001" || stored.AnchoredKind != MT295AnchorOutboundMT296 {
+		t.Errorf("stored = %+v, want the registered query", stored)
+	}
+	events := readAuditOps(t, al)
+	// Two markers: the fixture's own query (QRY-296-295) and
+	// this one — readAuditOps closes the log, so the count is
+	// asserted once, at the end.
+	if countOp(events, "mt295_query_received") != 2 {
+		t.Errorf("mt295_query_received count = %d, want 2 (fixture query + this query)", countOp(events, "mt295_query_received"))
+	}
+}
+
+func TestApplyMT295_UnregisteredMT296Parks(t *testing.T) {
+	// A :21: naming no rendered MT296 answer parks, even
+	// though nothing about its shape could rule it out — the
+	// registry is the whole anchor (LG-478, along the
+	// unregistered-MT202 precedent, LG-474).
+	l := mt295InboundLedger(t, mustAuditLog(t))
+	m, err := ParseMT295(mt295InboundDoc("QRY-295-23", "ANS-296-9999",
+		[]string{"STAT"}, nil, nil))
+	if err != nil {
+		t.Fatalf("ParseMT295: %v", err)
+	}
+	res, err := l.ApplyMT295(m, "ops")
+	if !errors.Is(err, ErrMT295UnknownReference) {
+		t.Fatalf("ApplyMT295 unregistered MT296 :21:: err = %v, want ErrMT295UnknownReference", err)
+	}
+	if res.RepairID == "" {
+		t.Error("RepairID empty on a parked query, want the repair record")
+	}
+	// A parked query records nothing: the :20: is not a
+	// registered query.
+	if _, ok := l.GetMT295Received("QRY-295-23"); ok {
+		t.Error("GetMT295Received = true on a parked query, want false (no registration)")
+	}
+}
+
+func TestApplyMT295_UnregisteredMT296ReapplyStillParks(t *testing.T) {
+	// A parked query records nothing, so a re-sent query parks
+	// again — under the same :20: or a fresh one — until the
+	// queried answer is rendered and registered.
+	l := mt295InboundLedger(t, mustAuditLog(t))
+	doc := mt295InboundDoc("QRY-295-24", "ANS-296-9999",
+		[]string{"STAT"}, nil, nil)
+	m, err := ParseMT295(doc)
+	if err != nil {
+		t.Fatalf("ParseMT295: %v", err)
+	}
+	first, err := l.ApplyMT295(m, "ops")
+	if !errors.Is(err, ErrMT295UnknownReference) {
+		t.Fatalf("first apply: err = %v, want ErrMT295UnknownReference", err)
+	}
+	if first.RepairID == "" {
+		t.Error("first RepairID empty, want the repair record")
+	}
+	again, err := l.ApplyMT295(m, "ops")
+	if !errors.Is(err, ErrMT295UnknownReference) {
+		t.Fatalf("re-apply same :20:: err = %v, want ErrMT295UnknownReference", err)
+	}
+	if again.RepairID == "" {
+		t.Error("re-apply RepairID empty, want the repair record")
+	}
+	fresh, err := ParseMT295(mt295InboundDoc("QRY-295-24B", "ANS-296-9999",
+		[]string{"STAT"}, nil, nil))
+	if err != nil {
+		t.Fatalf("ParseMT295 fresh doc: %v", err)
+	}
+	res, err := l.ApplyMT295(fresh, "ops")
+	if !errors.Is(err, ErrMT295UnknownReference) {
+		t.Fatalf("fresh :20: apply: err = %v, want ErrMT295UnknownReference", err)
+	}
+	if res.RepairID == "" {
+		t.Error("fresh :20: RepairID empty, want the repair record")
+	}
+}
+
+func TestApplyMT295_OutboundMT296ReplayAndConflict(t *testing.T) {
+	// De-dup and conflict semantics along LG-466, on the
+	// outbound-MT296 tier: a replay with the same :20: and
+	// terms is a no-op with Duplicate set and no second audit
+	// marker; a :20: reused for different terms is refused and
+	// never overwrites the first registration.
+	l, al, mt292Ref, _ := mt296ExportLedger(t)
+	if _, err := l.ExportMT296ForAnswered(mt292Ref, mt296ExportOptions(t), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT296ForAnswered: %v", err)
+	}
+	doc := mt295InboundDoc("QRY-295-25", "ANS-296-0001",
+		[]string{"STAT"}, []string{"OPERATOR NOTE"}, nil)
+	first := applyInboundMT295(t, l, doc, "ops")
+	if first.AnchoredKind != MT295AnchorOutboundMT296 {
+		t.Fatalf("anchored_kind = %q, want outbound-mt296", first.AnchoredKind)
+	}
+	dup := applyInboundMT295(t, l, doc, "ops")
+	if !dup.Duplicate {
+		t.Error("duplicate = false on replay, want true")
+	}
+	if dup.AnchoredKind != MT295AnchorOutboundMT296 {
+		t.Errorf("replay anchored_kind = %q, want outbound-mt296", dup.AnchoredKind)
+	}
+	events := readAuditOps(t, al)
+	// Two markers: the fixture's own query (QRY-296-295) and
+	// the first apply — the replay adds none.
+	if countOp(events, "mt295_query_received") != 2 {
+		t.Errorf("mt295_query_received count = %d, want 2 (no second marker)", countOp(events, "mt295_query_received"))
+	}
+	conflictDoc := mt295InboundDoc("QRY-295-25", "ANS-296-0001",
+		[]string{"DUPL"}, []string{"OPERATOR NOTE"}, nil)
+	m, err := ParseMT295(conflictDoc)
+	if err != nil {
+		t.Fatalf("ParseMT295 conflict doc: %v", err)
+	}
+	if _, err := l.ApplyMT295(m, "ops"); !errors.Is(err, ErrMT295MsgIDConflict) {
+		t.Errorf("ApplyMT295 different terms: err = %v, want ErrMT295MsgIDConflict", err)
+	}
+	// The first registration is untouched by the refused
+	// conflict.
+	stored, ok := l.GetMT295Received("QRY-295-25")
+	if !ok {
+		t.Fatal("GetMT295Received = false, want the first registration")
+	}
+	if len(stored.Queries) != 1 || stored.Queries[0] != "STAT" || stored.AnchoredKind != MT295AnchorOutboundMT296 {
+		t.Errorf("stored = %+v, want the first registration verbatim", stored)
+	}
+}
+
 func TestApplyMT295_InboundTierBeatsOutboundTier(t *testing.T) {
 	// Tier order is deterministic (LG-474): the same :21: hits
 	// both the inbound MT202 tier and the outbound MT292 tier —

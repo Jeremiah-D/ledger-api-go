@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -207,6 +209,89 @@ func TestMT295ApplyEndpoint_AnchorsOutboundMT292(t *testing.T) {
 	}
 	if body["anchored_kind"] != "outbound-mt292" {
 		t.Errorf("anchored_kind = %v, want outbound-mt292", body["anchored_kind"])
+	}
+	if body["duplicate"] == true {
+		t.Errorf("duplicate = true on first apply, want false")
+	}
+	// Replay the same :20: with the same terms: idempotent,
+	// duplicate set.
+	code, body = postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("replay: status=%d body=%v", code, body)
+	}
+	if body["duplicate"] != true {
+		t.Errorf("duplicate = %v, want true", body["duplicate"])
+	}
+}
+
+// The outbound MT296 tier over HTTP (LG-478): register an
+// outbound MT296 answer first, then ask about it — the :21: is
+// the answer's own :20:, caller-supplied, and the query anchors
+// to mt296Exports with kind outbound-mt296.
+func TestMT295ApplyEndpoint_AnchorsOutboundMT296(t *testing.T) {
+	srv := mt195ExportTestServer(t)
+	applyURL := srv.URL + "/exports/mt295/apply"
+
+	// Seed the anchor first: an MT210 notification, then the
+	// inbound MT292 cancellation request the MT296 answers.
+	code, body := postMT195Text(t, srv.URL+"/exports/mt210/apply", mt295SeedMT210Doc("NTF-296-HTTP-478"), "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt210/apply seed: status=%d body=%v", code, body)
+	}
+	code, body = postMT292JSON(t, srv.URL+"/exports/mt292/apply",
+		mt292ApplyDoc("CXL-296-HTTP-478", "NTF-296-HTTP-478", "210261124", "Client withdrew the order"), "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt292/apply seed: status=%d body=%v", code, body)
+	}
+	// Register the outbound MT296 answer: the query anchors
+	// against this registry, so nothing is queryable before
+	// this export lands.
+	mt296Body, err := json.Marshal(mt296ExportRequest{
+		SenderLT:             "DEUTDEFF",
+		ReceiverLT:           "CHASUS33",
+		TransactionReference: "ANS-296-HTTP-478",
+		RelatedReference:     "CXL-296-HTTP-478",
+		Answers:              []string{"/CNCL/", "CANCELLATION CONFIRMED 261124"},
+	})
+	if err != nil {
+		t.Fatalf("marshal mt296 request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/exports/mt296", strings.NewReader(string(mt296Body)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-ledger-actor", "ops")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /exports/mt296: %v", err)
+	}
+	b, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /exports/mt296: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register MT296: status=%d, want 200 (body=%v)", resp.StatusCode, string(b))
+	}
+	if !strings.Contains(string(b), ":20:ANS-296-HTTP-478") {
+		t.Fatalf("registered MT296 missing :20:ANS-296-HTTP-478, body:\n%s", string(b))
+	}
+
+	doc := mt295HTTPDoc("QRY-295-HTTP-O96", "ANS-296-HTTP-478",
+		[]string{"STAT"}, []string{"OPERATOR NOTE"}, nil)
+	code, body = postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt295/apply: status=%d body=%v", code, body)
+	}
+	if body["reference"] != "QRY-295-HTTP-O96" {
+		t.Errorf("reference = %v, want QRY-295-HTTP-O96", body["reference"])
+	}
+	if body["related_reference"] != "ANS-296-HTTP-478" {
+		t.Errorf("related_reference = %v, want ANS-296-HTTP-478", body["related_reference"])
+	}
+	if body["anchored_kind"] != "outbound-mt296" {
+		t.Errorf("anchored_kind = %v, want outbound-mt296", body["anchored_kind"])
 	}
 	if body["duplicate"] == true {
 		t.Errorf("duplicate = true on first apply, want false")
