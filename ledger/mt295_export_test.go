@@ -149,6 +149,11 @@ func TestMT295MessageReferenceDeterministic(t *testing.T) {
 func TestExportMT295ForCancelledRenders(t *testing.T) {
 	al := mustAuditLog(t)
 	l, sched := mt295ExportPausedLedger(t, al)
+	// The MT292 tier is registry-anchored (LG-476): render the
+	// cancellation request first, then ask about it.
+	if _, err := l.ExportMT292Registered(mt292ExportTestOptions(sched.ID), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
 	before := l.Version()
 	opts := mt295ExportOptions(t)
 	res, err := l.ExportMT295ForCancelled(sched.ID, sched.RunSeq, opts, "ledger-operator")
@@ -273,10 +278,113 @@ func TestExportMT295ForCancelledStillActive(t *testing.T) {
 	}
 }
 
+func TestExportMT295ForCancelledUnregisteredMT292(t *testing.T) {
+	al := mustAuditLog(t)
+	l, sched := mt295ExportPausedLedger(t, al)
+	opts := mt295ExportOptions(t)
+	// Paused, so the shape-plus-state steps pass — but no MT292
+	// was ever rendered for this schedule and run, so the
+	// registry step parks the query fail-closed.
+	res, err := l.ExportMT295ForCancelled(sched.ID, sched.RunSeq, opts, "ledger-operator")
+	if !errors.Is(err, ErrMT295UnknownMT292) {
+		t.Fatalf("err = %v, want ErrMT295UnknownMT292", err)
+	}
+	if res.RepairID == "" {
+		t.Error("repair ID empty, want the parked export recorded")
+	}
+	// A parked export records nothing: no registry entry, no
+	// audit marker — and the MT292 registry itself is untouched.
+	related := mt292ExpectedRef(sched.ID, sched.RunSeq)
+	ref := mt295MessageReference(related, opts.Queries, opts.Narrative, opts.Description)
+	if _, ok := l.GetMT295Export(ref); ok {
+		t.Error("GetMT295Export = true for a parked export, want false")
+	}
+	if _, ok := l.GetMT292Export(related); ok {
+		t.Error("GetMT292Export = true, want false (nothing was rendered)")
+	}
+	events := readAuditOps(t, al)
+	if countOp(events, "mt295_query_exported") != 0 {
+		t.Errorf("mt295_query_exported count = %d, want 0 for a parked export", countOp(events, "mt295_query_exported"))
+	}
+}
+
+func TestExportMT295ForCancelledUnregisteredReAskStillParks(t *testing.T) {
+	al := mustAuditLog(t)
+	l, sched := mt295ExportPausedLedger(t, al)
+	opts := mt295ExportOptions(t)
+	if _, err := l.ExportMT295ForCancelled(sched.ID, sched.RunSeq, opts, "ledger-operator"); !errors.Is(err, ErrMT295UnknownMT292) {
+		t.Fatalf("first err = %v, want ErrMT295UnknownMT292", err)
+	}
+	// A re-sent export parks again — the repair queue holds
+	// the question, never a rendered answer.
+	if _, err := l.ExportMT295ForCancelled(sched.ID, sched.RunSeq, opts, "ledger-operator"); !errors.Is(err, ErrMT295UnknownMT292) {
+		t.Errorf("re-sent err = %v, want ErrMT295UnknownMT292 again", err)
+	}
+	related := mt292ExpectedRef(sched.ID, sched.RunSeq)
+	ref := mt295MessageReference(related, opts.Queries, opts.Narrative, opts.Description)
+	if _, ok := l.GetMT295Export(ref); ok {
+		t.Error("GetMT295Export = true after re-parked exports, want false")
+	}
+}
+
+func TestExportMT295ForCancelledRegisteredRenders(t *testing.T) {
+	al := mustAuditLog(t)
+	l, sched := mt295ExportPausedLedger(t, al)
+	opts := mt295ExportOptions(t)
+	// Register the MT292 first: the :21: is that export's
+	// :20:, and the registry hit is what lets the query render.
+	registered, err := l.ExportMT292Registered(mt292ExportTestOptions(sched.ID), "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
+	res, err := l.ExportMT295ForCancelled(sched.ID, sched.RunSeq, opts, "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT295ForCancelled: %v", err)
+	}
+	if res.RelatedReference != registered.Reference {
+		t.Errorf(":21: = %q, want the registered MT292 :20: %q", res.RelatedReference, registered.Reference)
+	}
+	// The stored export names the same :21:.
+	stored, ok := l.GetMT295Export(res.Reference)
+	if !ok {
+		t.Fatal("GetMT295Export = false, want the stored export")
+	}
+	if stored.RelatedReference != registered.Reference {
+		t.Errorf("stored :21: = %q, want %q", stored.RelatedReference, registered.Reference)
+	}
+}
+
+func TestExportMT295ForCancelledStillActiveBeatsUnregistered(t *testing.T) {
+	al := mustAuditLog(t)
+	l, sched := mt295ExportTestLedger(t, al)
+	// Not paused, and nothing registered: the still-active step
+	// runs before the registry step, so the error stays
+	// ErrMT292ScheduleStillActive, never ErrMT295UnknownMT292.
+	if _, err := l.ExportMT295ForCancelled(sched.ID, sched.RunSeq, mt295ExportOptions(t), "ledger-operator"); !errors.Is(err, ErrMT292ScheduleStillActive) {
+		t.Errorf("err = %v, want ErrMT292ScheduleStillActive (before the registry step)", err)
+	}
+}
+
 func TestExportMT295ForCancelledRunSeqChangesReference(t *testing.T) {
 	al := mustAuditLog(t)
 	l, sched := mt295ExportPausedLedger(t, al)
 	opts := mt295ExportOptions(t)
+	// The MT292 tier is registry-anchored (LG-476): register
+	// this run's cancellation request, and seed the next run's
+	// — ExportMT292Registered only ever renders the schedule's
+	// current run, so the next run's record is seeded directly
+	// (the gate reads presence alone, never the record's terms).
+	if _, err := l.ExportMT292Registered(mt292ExportTestOptions(sched.ID), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
+	if l.mt292Exports == nil {
+		l.mt292Exports = make(map[string]mt292ExportRecord)
+	}
+	l.mt292Exports[mt292MessageReference(sched.ID, sched.RunSeq+1)] = mt292ExportRecord{
+		ScheduleID: sched.ID,
+		RunSeq:     sched.RunSeq + 1,
+		Options:    mt292ExportTestOptions(sched.ID),
+	}
 	first, err := l.ExportMT295ForCancelled(sched.ID, sched.RunSeq, opts, "ledger-operator")
 	if err != nil {
 		t.Fatalf("ExportMT295ForCancelled run %d: %v", sched.RunSeq, err)
@@ -299,6 +407,11 @@ func TestExportMT295ForCancelledRunSeqChangesReference(t *testing.T) {
 func TestExportMT295ForCancelledRepeatIsDuplicate(t *testing.T) {
 	al := mustAuditLog(t)
 	l, sched := mt295ExportPausedLedger(t, al)
+	// The MT292 tier is registry-anchored (LG-476): render the
+	// cancellation request first, then ask about it.
+	if _, err := l.ExportMT292Registered(mt292ExportTestOptions(sched.ID), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
 	opts := mt295ExportOptions(t)
 	first, err := l.ExportMT295ForCancelled(sched.ID, sched.RunSeq, opts, "ledger-operator")
 	if err != nil {
@@ -325,6 +438,13 @@ func TestExportMT295ForCancelledConflict(t *testing.T) {
 	al := mustAuditLog(t)
 	l, sched := mt295ExportPausedLedger(t, al)
 	opts := mt295ExportOptions(t)
+	// The MT292 tier is registry-anchored (LG-476): render the
+	// cancellation request first — the conflicting record seeded
+	// below is found by the replay check before the gate runs,
+	// so the registration changes nothing here.
+	if _, err := l.ExportMT292Registered(mt292ExportTestOptions(sched.ID), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
 	related := mt292ExpectedRef(sched.ID, sched.RunSeq)
 	ref := mt295MessageReference(related, opts.Queries, opts.Narrative, opts.Description)
 	// A :20: already exported under different terms: the
@@ -384,6 +504,11 @@ func TestExportMT295ForCancelledQueryLineTooLong(t *testing.T) {
 func TestExportMT295ForCancelledNarrativeAndDescriptionVerbatim(t *testing.T) {
 	al := mustAuditLog(t)
 	l, sched := mt295ExportPausedLedger(t, al)
+	// The MT292 tier is registry-anchored (LG-476): render the
+	// cancellation request first, then ask about it.
+	if _, err := l.ExportMT292Registered(mt292ExportTestOptions(sched.ID), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
 	opts := mt295ExportOptions(t)
 	opts.Queries = []string{"STAT", "DUPL"}
 	opts.Narrative = []string{"OPERATOR NOTE", "SECOND LINE"}

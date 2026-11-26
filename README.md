@@ -6764,18 +6764,19 @@ LG-475) — the two anchors are mutually exclusive — plus
 run), or the queried MT202's `:20:` itself, caller-supplied; and the `:20:` is derived too (`MT295-` plus 10 lowercase
 hex of the SHA-256 of that `:21:` and the question body, the MT195
 precedent) — neither is supplied in the body. The `:21:` anchors
-in two tiers: the MT292 tier, where the schedule must exist, and it must be in
+in two tiers: the MT292 tier, where the schedule must exist, it must be in
 MT292-exportable state (paused, cancelled, completed, or
 exhausted — a still-active schedule with a live next run cannot
-have had its MT292 sent, so the gate itself is the proof that the
-MT292 the `:21:` names could exist); and the MT202 tier, where
+have had its MT292 sent), and the MT292 the `:21:` names must be
+registered in `mt292Exports` (LG-471, LG-476) — a hit proves the
+cancellation request was actually rendered; and the MT202 tier, where
 the reference must be registered in `mt202Exports` (LG-470) —
 a pure registry lookup, no shape to verify, the mirror of the
-inbound MT296 tier (c) (LG-472). The MT292 anchor is shape-plus-
-state, never a sent-record check: that tier does not consult the
-outbound MT292 registry, so it cannot verify that the MT292 was actually
-sent — while a hit on the MT202 tier proves the transfer was
-rendered, because the lookup is the registry itself. The `:75:` / `:77A:` / `:79:` ride verbatim from the
+inbound MT296 tier (c) (LG-472). Both registries are in-memory
+only: a restart clears them, and a query arriving before the
+queried message is re-exported still parks fail-closed — re-export
+the MT292 (`GET /exports/mt292` derives the same `:20:` for the
+same schedule and run) or the MT202 first, then re-ask. The `:75:` / `:77A:` / `:79:` ride verbatim from the
 operator — the codewords inside `:75:` are the operator's words,
 never interpreted — and no query snapshot is built: the question
 is the operator's words, not a fact computed at export time.
@@ -6786,7 +6787,8 @@ the audit event is `mt295_query_exported` (details `msg_id` /
 tier, `msg_id` / `related_reference` / `queried_kind` /
 `sender_lt` on the MT202 tier, which names no schedule). A malformed
 body or invalid field is 400, a body naming both anchors is 400,
-an unknown schedule or a schedule still active is 422 (parked in the repair queue, the
+an unknown schedule, a schedule still active, or an unregistered MT292
+reference is 422 (parked in the repair queue, the
 error body carrying the repair record ID), an unregistered MT202
 reference is 422 the same way, and a `:20:` reused for different
 terms is 422; a re-sent `:20:` with the same terms is an

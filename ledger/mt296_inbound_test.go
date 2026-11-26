@@ -464,6 +464,11 @@ func TestApplyMT296_RejectsInvalidMessage(t *testing.T) {
 // tests (LG-469): the answer's :21: names this export.
 func mt296MT295ExportRef(t *testing.T, l *Ledger) string {
 	t.Helper()
+	// The MT292 tier is registry-anchored (LG-476): render the
+	// cancellation request first, then the query about it.
+	if _, err := l.ExportMT292Registered(mt292ExportTestOptions("sched-1"), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT292Registered: %v", err)
+	}
 	res, err := l.ExportMT295ForCancelled("sched-1", 0, MT295ExportOptions{
 		SenderLT:   "DEUTDEFF",
 		ReceiverLT: "CHASUS33",

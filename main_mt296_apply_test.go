@@ -192,14 +192,20 @@ func TestMT296ApplyEndpoint_MT292TierUnregisteredGoesToRepair(t *testing.T) {
 // the registry-backed registration, the replay, the unregistered
 // shape's 422, and the metrics counter.
 func TestMT296ApplyEndpoint_MT295TierRegistersAnswer(t *testing.T) {
-	srv := mt195ExportTestServer(t)
+	// The MT292 tier is registry-anchored (LG-476): the server
+	// needs BICs on both legs to render one, so this test uses
+	// the MT292 fixture (alice DEUTDEFF, bob NWBKGB2L) rather
+	// than the MT195 one (no BIC on bob).
+	l, _ := mt292HTTPSetup(t)
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
 
 	// Create a schedule (active) and pause it: only a schedule
 	// whose notification premise is dead can be queried about
 	// its MT292.
 	code, body := postJSON(t, srv.URL+"/transfer-schedules", `{
 		"schedule_id": "sched-296-http",
-		"from_account": "saver",
+		"from_account": "alice",
 		"to_account": "bob",
 		"amount_cents": 5000,
 		"currency": "USD",
@@ -213,6 +219,17 @@ func TestMT296ApplyEndpoint_MT295TierRegistersAnswer(t *testing.T) {
 	code, body = postJSON(t, srv.URL+"/transfer-schedules/sched-296-http/pause", `{}`)
 	if code != http.StatusOK {
 		t.Fatalf("pause schedule: status=%d, want 200 (body=%v)", code, body)
+	}
+
+	// Register the MT292 first: the MT292 tier of the MT295
+	// export is registry-anchored (LG-476), so nothing is
+	// queryable before this export lands.
+	code, _, mt292Msg := getBody(t, srv.URL+"/exports/mt292?schedule_id=sched-296-http&servicing_bic=CITIUS33&original_date=2026-11-10&reason=Schedule+paused+by+operator")
+	if code != http.StatusOK {
+		t.Fatalf("register MT292: status=%d, want 200 (body=%v)", code, mt292Msg)
+	}
+	if !strings.Contains(mt292Msg, ":20:"+mt295HTTPExpectedMT292Ref("sched-296-http", 0)) {
+		t.Fatalf("registered MT292 missing :20:%s, body:\n%s", mt295HTTPExpectedMT292Ref("sched-296-http", 0), mt292Msg)
 	}
 
 	postMT295 := func(t *testing.T, reqBody string) (int, string) {

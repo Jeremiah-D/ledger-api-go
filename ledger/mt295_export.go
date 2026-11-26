@@ -44,15 +44,16 @@ import (
 // the schedule and run (see mt292MessageReference): "MT292-" plus
 // the first 10 lowercase hex characters of the SHA-256 of the run
 // transfer ID ("<ID>/run/<seq>", the MT210's :21:). The anchor
-// check has two steps, along ExportMT292 (mt292.go): the schedule
-// must exist (unknown is ErrScheduleNotFound), and it must be in
+// check has three steps, along ExportMT292 (mt292.go): the schedule
+// must exist (unknown is ErrScheduleNotFound), it must be in
 // MT292-exportable state (a still-active schedule with a live next
 // run is ErrMT292ScheduleStillActive — an active schedule's MT292
-// cannot have been sent, so the gate itself is the proof that the
-// MT292 the :21: names could exist). Either step failing parks the
-// export fail-closed in the repair queue (RepairReasonUnknownRoute,
-// the camt.055 shape, along parkMT195Export) and reports a
-// 422-class error.
+// cannot have been sent), and the MT292 the :21: names must be
+// registered in mt292Exports (LG-471) — a :21: naming no rendered
+// MT292 is ErrMT295UnknownMT292 (LG-476). Any step failing parks
+// the export fail-closed in the repair queue
+// (RepairReasonUnknownRoute, the camt.055 shape, along
+// parkMT195Export) and reports a 422-class error.
 //
 // The second tier (LG-475) is the queried outbound MT202
 // transfer: the :21: is that transfer's :20:, caller-supplied at
@@ -67,13 +68,18 @@ import (
 // about nothing.
 //
 // Scope honesty, the same limit ExportMT292 carries: the outbound
-// MT292 :20: is registered on export (mt292Exports, LG-471), but
-// the MT292 tier of this module does not consult it, so the anchor
-// can only verify that the schedule could produce an MT292 with
-// this :20: — it cannot verify that the MT292 was actually sent.
-// The gate is shape-plus-state, never claimed as a sent record
-// check. The MT202 tier has no such limit: the lookup is the
-// registry itself, so a hit proves the transfer was rendered.
+// MT292 :20: is registered on export (mt292Exports, LG-471), and
+// the MT292 tier of this module consults it (LG-476) — a hit
+// proves the MT292 was actually rendered, so the gate is
+// shape-plus-state-plus-registry, never claimed as a sent-record
+// check on shape alone. The registry is in-memory only (along
+// LG-470/LG-471): a restart clears it, and a query arriving
+// before the MT292 is re-exported still parks fail-closed — the
+// recovery is to re-export the MT292 first (GET /exports/mt292
+// derives the same :20: for the same schedule and run) and then
+// re-ask the same MT295. The MT202 tier has the same shape: the
+// lookup is the registry itself, so a hit proves the transfer
+// was rendered.
 //
 // Identity wiring — scope honesty, the ledger is not a SWIFT member
 // (see mt192.go, LG-434):
@@ -163,8 +169,8 @@ type MT295ExportResult struct {
 	// Message is the rendered SWIFT FIN MT295 text.
 	Message string `json:"message"`
 	// RepairID is the repair queue record for a parked export
-	// (unknown schedule, a schedule still active, or an
-	// unregistered MT202). Empty on a rendered export.
+	// (unknown schedule, a schedule still active, an
+	// unregistered MT292, or an unregistered MT202). Empty on a rendered export.
 	RepairID string `json:"repair_id,omitempty"`
 	// Duplicate reports whether the export was already rendered
 	// under the same :20: with the same terms: a no-op success,
@@ -362,14 +368,14 @@ func (l *Ledger) parkMT295Export(ref, relatedRef, actor string) (string, error) 
 // The schedule must exist (an unknown schedule is
 // ErrScheduleNotFound, parked in the repair queue fail-closed in
 // the camt.055 shape: the returned result carries the repair ID
-// alongside the error), and it must be in MT292-exportable state
-// (a still-active schedule with a live next run is
-// ErrMT292ScheduleStillActive, parked the same way — the gate
-// itself is the proof that the MT292 the :21: names could exist).
-// The anchor is shape-plus-state, never a sent-record check: this
-// module does not consult the outbound MT292 registry
-// (mt292Exports, LG-471), so it cannot verify that the MT292 was
-// actually sent. Nothing moves: no journal
+// alongside the error), it must be in MT292-exportable state (a
+// still-active schedule with a live next run is
+// ErrMT292ScheduleStillActive, parked the same way), and the
+// MT292 the :21: names must be registered in mt292Exports
+// (LG-471) — a :21: naming no rendered MT292 is
+// ErrMT295UnknownMT292 (LG-476), parked the same way. The anchor
+// is shape-plus-state-plus-registry: a hit proves the MT292 was
+// actually rendered. Nothing moves: no journal
 // entry, no schedule status change, no ExpectedReceipt
 // cancellation, no version bump — rendering a question is
 // read-only, and the audit event is the durable record, not a
@@ -420,13 +426,16 @@ func (l *Ledger) ExportMT295ForCancelled(scheduleID string, runSeq uint64, opts 
 	}
 	l.mu.RUnlock()
 
-	// The anchor, two steps along ExportMT292: the schedule must
-	// exist, and it must be in MT292-exportable state. A
-	// still-active schedule's MT292 cannot have been sent, so the
-	// gate itself is the proof that the MT292 the :21: names
-	// could exist — and an unknown schedule, or one still active,
-	// parks fail-closed in the repair queue (the camt.055 shape)
-	// and is reported as the export's error.
+	// The anchor, three steps along ExportMT292 (LG-476): the
+	// schedule must exist, it must be in MT292-exportable state,
+	// and the MT292 the :21: names must be registered in
+	// mt292Exports. A still-active schedule's MT292 cannot have
+	// been sent, and an unregistered :21: names a cancellation
+	// request this ledger never rendered — either way the query
+	// would ask about nothing, so it parks fail-closed in the
+	// repair queue (the camt.055 shape) and is reported as the
+	// export's error. The order is fixed: unknown schedule,
+	// then still active, then unregistered (along LG-474).
 	sched, err := l.GetTransferSchedule(scheduleID)
 	if err != nil {
 		repairID, parkErr := l.parkMT295Export(ref, relatedRef, actor)
@@ -442,6 +451,24 @@ func (l *Ledger) ExportMT295ForCancelled(scheduleID string, runSeq uint64, opts 
 		}
 		return MT295ExportResult{Reference: ref, RelatedReference: relatedRef, ScheduleID: scheduleID, RunSeq: runSeq, RepairID: repairID},
 			fmt.Errorf("%w: schedule %q is still active with a next run at %s", ErrMT292ScheduleStillActive, scheduleID, sched.NextRunAt.UTC().Format(time.RFC3339))
+	}
+
+	// The third step, pure lookup (LG-476): the MT292 must be
+	// registered in mt292Exports (LG-471). Registrations are
+	// only ever added, never removed, so a hit stays valid
+	// past this call — and a miss parks fail-closed in the
+	// repair queue (the camt.055 shape) and is reported as the
+	// export's error.
+	l.mu.RLock()
+	_, registered := l.mt292Exports[relatedRef]
+	l.mu.RUnlock()
+	if !registered {
+		repairID, parkErr := l.parkMT295Export(ref, relatedRef, actor)
+		if parkErr != nil {
+			return MT295ExportResult{}, fmt.Errorf("%w: %q (repair parking failed: %v)", ErrMT295UnknownMT292, relatedRef, parkErr)
+		}
+		return MT295ExportResult{Reference: ref, RelatedReference: relatedRef, ScheduleID: scheduleID, RunSeq: runSeq, RepairID: repairID},
+			fmt.Errorf("%w: %q", ErrMT295UnknownMT292, relatedRef)
 	}
 
 	// The question, verbatim from the operator — never from live
@@ -536,7 +563,8 @@ func (l *Ledger) ExportMT295ForCancelled(scheduleID string, runSeq uint64, opts 
 // alongside the error, along ExportMT295ForCancelled). A hit
 // proves the transfer was rendered: the MT202 tier has no
 // shape-plus-state limit, because the lookup is the registry
-// itself. Nothing moves: no journal entry, no schedule status
+// itself — the MT292 tier has shared that property since LG-476.
+// Nothing moves: no journal entry, no schedule status
 // change, no ExpectedReceipt cancellation, no version bump —
 // rendering a question is read-only, and the audit event is the
 // durable record, not a state change. The result carries no

@@ -7120,7 +7120,7 @@ type mt295ExportRequest struct {
 }
 
 // handleMT295Export implements POST /exports/mt295 (LG-468,
-// LG-475): a SWIFT FIN MT295 query about an outbound MT292
+// LG-475, LG-476): a SWIFT FIN MT295 query about an outbound MT292
 // cancellation request this ledger rendered (see
 // ledger.ExportMT295ForCancelled), or about an outbound MT202
 // transfer this ledger rendered (see
@@ -7133,8 +7133,9 @@ type mt295ExportRequest struct {
 // ExpectedReceipt cancellation, no version bump — only the
 // mt295_query_exported audit event lands. Error mapping: a
 // malformed body or any invalid field is a 400, with the ledger
-// sentinel errors passed through as-is; an unknown schedule or a
-// schedule still active, an unregistered MT202 reference (parked
+// sentinel errors passed through as-is; an unknown schedule, a
+// schedule still active, or an unregistered MT292 reference, an
+// unregistered MT202 reference (parked
 // fail-closed in the repair queue, the error body carrying the
 // repair record ID), or a :20: reused for different terms is a
 // 422. The operator identity comes from the
@@ -7195,6 +7196,7 @@ func (s *server) handleMT295Export(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ledger.ErrScheduleNotFound),
 			errors.Is(err, ledger.ErrMT292ScheduleStillActive),
+			errors.Is(err, ledger.ErrMT295UnknownMT292),
 			errors.Is(err, ledger.ErrMT295UnknownMT202),
 			errors.Is(err, ledger.ErrMT295MsgIDConflict):
 			writeJSON(w, http.StatusUnprocessableEntity, errBody)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -27,14 +28,20 @@ func mt295HTTPExpectedMT292Ref(scheduleID string, runSeq uint64) string {
 // replay the same question, and verify the FIN body, the error
 // mapping, and the metrics counter.
 func TestHTTPMT295Export(t *testing.T) {
-	srv := mt195ExportTestServer(t)
+	// The MT292 tier is registry-anchored (LG-476): the server
+	// needs BICs on both legs to render one, so this test uses
+	// the MT292 fixture (alice DEUTDEFF, bob NWBKGB2L) rather
+	// than the MT195 one (no BIC on bob).
+	l, _ := mt292HTTPSetup(t)
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
 
 	// Create a schedule (active) and pause it: only a schedule
 	// whose notification premise is dead can be queried about
 	// its MT292.
 	code, body := postJSON(t, srv.URL+"/transfer-schedules", `{
 		"schedule_id": "sched-295-http",
-		"from_account": "saver",
+		"from_account": "alice",
 		"to_account": "bob",
 		"amount_cents": 5000,
 		"currency": "USD",
@@ -50,11 +57,22 @@ func TestHTTPMT295Export(t *testing.T) {
 		t.Fatalf("pause schedule: status=%d, want 200 (body=%v)", code, body)
 	}
 
+	// Register the MT292 first: the MT292 tier is
+	// registry-anchored (LG-476), so nothing is queryable
+	// before this export lands.
+	code, _, mt292Msg := getBody(t, srv.URL+"/exports/mt292?schedule_id=sched-295-http&servicing_bic=CITIUS33&original_date=2026-11-10&reason=Schedule+paused+by+operator")
+	if code != http.StatusOK {
+		t.Fatalf("register MT292: status=%d, want 200 (body=%v)", code, mt292Msg)
+	}
+	if !strings.Contains(mt292Msg, ":20:"+mt295HTTPExpectedMT292Ref("sched-295-http", 0)) {
+		t.Fatalf("registered MT292 missing :20:%s, body:\n%s", mt295HTTPExpectedMT292Ref("sched-295-http", 0), mt292Msg)
+	}
+
 	// A second schedule, left active: its MT292 cannot have
 	// been sent, so asking about it parks fail-closed.
 	code, body = postJSON(t, srv.URL+"/transfer-schedules", `{
 		"schedule_id": "sched-295-http-active",
-		"from_account": "saver",
+		"from_account": "alice",
 		"to_account": "bob",
 		"amount_cents": 5000,
 		"currency": "USD",
@@ -350,5 +368,185 @@ func TestHTTPMT295ExportForMT202(t *testing.T) {
 	}
 	if !strings.Contains(metricsBody, "ledger_mt295_exports_total 5") {
 		t.Errorf("metrics exposition missing ledger_mt295_exports_total 5:\n%s", metricsBody)
+	}
+}
+
+// MT292-tier MT295 query export without a registered MT292:
+// a paused schedule whose cancellation request was never
+// rendered parks fail-closed with a 422 and a repair ID.
+func TestHTTPMT295ExportUnregisteredMT292(t *testing.T) {
+	// The MT292 tier is registry-anchored (LG-476): the server
+	// needs BICs on both legs to render one, so this test uses
+	// the MT292 fixture (alice DEUTDEFF, bob NWBKGB2L) rather
+	// than the MT195 one (no BIC on bob).
+	l, _ := mt292HTTPSetup(t)
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+
+	code, body := postJSON(t, srv.URL+"/transfer-schedules", `{
+		"schedule_id": "sched-295-unreg",
+		"from_account": "alice",
+		"to_account": "bob",
+		"amount_cents": 5000,
+		"currency": "USD",
+		"interval": "24h",
+		"next_run_at": "2026-11-12T09:00:00Z",
+		"idempotency_key": "sched-295-unreg-key"
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create schedule: status=%d, want 201 (body=%v)", code, body)
+	}
+	code, body = postJSON(t, srv.URL+"/transfer-schedules/sched-295-unreg/pause", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("pause schedule: status=%d, want 200 (body=%v)", code, body)
+	}
+
+	post := func(t *testing.T, body string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/exports/mt295", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-ledger-actor", "ops")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /exports/mt295: %v", err)
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read /exports/mt295: %v", err)
+		}
+		return resp.StatusCode, string(b)
+	}
+	mustJSON := func(t *testing.T, req mt295ExportRequest) string {
+		t.Helper()
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(b)
+	}
+	valid := mt295ExportRequest{
+		ScheduleID: "sched-295-unreg",
+		RunSeq:     0,
+		SenderLT:   "DEUTDEFF",
+		ReceiverLT: "CHASUS33",
+		Queries:    []string{"STAT"},
+	}
+
+	// Paused but never rendered: the query parks fail-closed,
+	// the error body carrying the repair record ID and naming
+	// the unregistered MT292's :20:.
+	code, errBody := post(t, mustJSON(t, valid))
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("unregistered MT292: status=%d, want 422 (body=%v)", code, errBody)
+	}
+	var errDoc map[string]any
+	if err := json.Unmarshal([]byte(errBody), &errDoc); err != nil {
+		t.Fatalf("unregistered MT292 error body is not JSON: %v", err)
+	}
+	if errDoc["repair_id"] == nil || errDoc["repair_id"] == "" {
+		t.Errorf("unregistered MT292 error body = %v, want a repair_id", errDoc)
+	}
+	if !strings.Contains(errBody, mt295HTTPExpectedMT292Ref("sched-295-unreg", 0)) {
+		t.Errorf("unregistered MT292 error body = %v, want the MT292 :20: %s", errDoc, mt295HTTPExpectedMT292Ref("sched-295-unreg", 0))
+	}
+}
+
+// MT292-tier MT295 query export after registration: the same
+// question parks before the MT292 is rendered, then renders
+// 200 once GET /exports/mt292 has registered it — the
+// restart-recovery path (LG-476): re-export first, then re-ask.
+func TestHTTPMT295ExportAfterMT292Registration(t *testing.T) {
+	// The MT292 tier is registry-anchored (LG-476): the server
+	// needs BICs on both legs to render one, so this test uses
+	// the MT292 fixture (alice DEUTDEFF, bob NWBKGB2L) rather
+	// than the MT195 one (no BIC on bob).
+	l, _ := mt292HTTPSetup(t)
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+
+	code, body := postJSON(t, srv.URL+"/transfer-schedules", `{
+		"schedule_id": "sched-295-reg",
+		"from_account": "alice",
+		"to_account": "bob",
+		"amount_cents": 5000,
+		"currency": "USD",
+		"interval": "24h",
+		"next_run_at": "2026-11-12T09:00:00Z",
+		"idempotency_key": "sched-295-reg-key"
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create schedule: status=%d, want 201 (body=%v)", code, body)
+	}
+	code, body = postJSON(t, srv.URL+"/transfer-schedules/sched-295-reg/pause", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("pause schedule: status=%d, want 200 (body=%v)", code, body)
+	}
+
+	post := func(t *testing.T, body string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/exports/mt295", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-ledger-actor", "ops")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /exports/mt295: %v", err)
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read /exports/mt295: %v", err)
+		}
+		return resp.StatusCode, string(b)
+	}
+	mustJSON := func(t *testing.T, req mt295ExportRequest) string {
+		t.Helper()
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(b)
+	}
+	valid := mt295ExportRequest{
+		ScheduleID: "sched-295-reg",
+		RunSeq:     0,
+		SenderLT:   "DEUTDEFF",
+		ReceiverLT: "CHASUS33",
+		Queries:    []string{"STAT"},
+	}
+	validBody := mustJSON(t, valid)
+
+	// Before registration the same question parks.
+	if code, errBody := post(t, validBody); code != http.StatusUnprocessableEntity {
+		t.Fatalf("before registration: status=%d, want 422 (body=%v)", code, errBody)
+	}
+
+	// Register the MT292: the same schedule and run derive the
+	// same :20: the query's :21: will name.
+	code, _, mt292Msg := getBody(t, srv.URL+"/exports/mt292?schedule_id=sched-295-reg&servicing_bic=CITIUS33&original_date=2026-11-10")
+	if code != http.StatusOK {
+		t.Fatalf("register MT292: status=%d, want 200 (body=%v)", code, mt292Msg)
+	}
+
+	// Now the same question renders: the :21: is the
+	// registered MT292's :20:.
+	code, msg := post(t, validBody)
+	if code != http.StatusOK {
+		t.Fatalf("export: status=%d, want 200 (body=%v)", code, msg)
+	}
+	for _, want := range []string{
+		":20:MT295-",
+		":21:" + mt295HTTPExpectedMT292Ref("sched-295-reg", 0),
+		":75:STAT",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("export missing %q, body:\n%s", want, msg)
+		}
 	}
 }
