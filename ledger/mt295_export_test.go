@@ -743,3 +743,183 @@ func TestExportMT295ForMT202Conflict(t *testing.T) {
 		t.Errorf("err = %v, want ErrMT295MsgIDConflict", err)
 	}
 }
+
+func TestExportMT295ForMT296Renders(t *testing.T) {
+	l, al, mt292Ref, _ := mt296ExportLedger(t)
+	before := l.Version()
+	// Register the outbound MT296 first: the query anchors
+	// against the registry, never against a shape.
+	if _, err := l.ExportMT296ForAnswered(mt292Ref, mt296ExportOptions(t), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT296ForAnswered: %v", err)
+	}
+	opts := mt295ExportOptions(t)
+	res, err := l.ExportMT295ForMT296("ANS-296-0001", opts, "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT295ForMT296: %v", err)
+	}
+	// The :21: is the MT296's own :20:, caller-supplied —
+	// no derivation, no shape.
+	if res.RelatedReference != "ANS-296-0001" {
+		t.Errorf(":21: = %q, want the MT296 :20: %q", res.RelatedReference, "ANS-296-0001")
+	}
+	wantRef := mt295MessageReference("ANS-296-0001", opts.Queries, opts.Narrative, opts.Description)
+	if res.Reference != wantRef {
+		t.Errorf(":20: = %q, want %q", res.Reference, wantRef)
+	}
+	// No schedule or run on this tier — the kind is what
+	// tells it apart from the MT292 tier.
+	if res.ScheduleID != "" || res.RunSeq != 0 {
+		t.Errorf("schedule/run = %q/%d, want empty/0 on the MT296 tier", res.ScheduleID, res.RunSeq)
+	}
+	if res.QueriedKind != MT295QueriedMT296 {
+		t.Errorf("queried kind = %q, want %q", res.QueriedKind, MT295QueriedMT296)
+	}
+	for _, want := range []string{
+		"{1:F01DEUTDEFFXXX0000000000}",
+		"{2:I295CHASUS33XXXU3003}",
+		"{3:{108:" + wantRef + "}}",
+		":20:" + wantRef,
+		":21:ANS-296-0001",
+		":75:STAT",
+	} {
+		if !strings.Contains(res.Message, want) {
+			t.Errorf("message missing %q, body:\n%s", want, res.Message)
+		}
+	}
+	// Rendering is read-only: no version bump.
+	if l.Version() != before {
+		t.Errorf("version = %d, want %d (read-only, no bump)", l.Version(), before)
+	}
+	// The stored export round-trips through the registry,
+	// kind and all.
+	stored, ok := l.GetMT295Export(wantRef)
+	if !ok {
+		t.Fatal("GetMT295Export = false, want the stored export")
+	}
+	if stored.Message != res.Message || stored.RelatedReference != "ANS-296-0001" || stored.QueriedKind != MT295QueriedMT296 {
+		t.Errorf("stored export = %+v, want the rendered MT296-tier message", stored)
+	}
+	// Audit: exactly one export marker, with the exact details —
+	// the :20: on the durable record, the kind instead of a
+	// schedule, no accounts.
+	events := readAuditOps(t, al)
+	if countOp(events, "mt295_query_exported") != 1 {
+		t.Errorf("mt295_query_exported count = %d, want 1", countOp(events, "mt295_query_exported"))
+	}
+	ev := findOp(events, "mt295_query_exported")
+	if ev == nil {
+		t.Fatal("mt295_query_exported event missing")
+	}
+	if ev.Actor != "ledger-operator" {
+		t.Errorf("actor = %q, want ledger-operator (ExportMT295ForMT296)", ev.Actor)
+	}
+	if ev.TraceID != wantRef {
+		t.Errorf("trace = %q, want %q", ev.TraceID, wantRef)
+	}
+	if ev.Details["msg_id"] != wantRef || ev.Details["related_reference"] != "ANS-296-0001" ||
+		ev.Details["queried_kind"] != "mt296" || ev.Details["sender_lt"] != "DEUTDEFFXXX" {
+		t.Errorf("details = %v, want msg/related/kind/sender", ev.Details)
+	}
+	if _, hasSchedule := ev.Details["schedule_id"]; hasSchedule {
+		t.Errorf("details = %v, want no schedule_id on the MT296 tier", ev.Details)
+	}
+	if len(ev.Accounts) != 0 {
+		t.Errorf("accounts = %v, want none (a query touches no account)", ev.Accounts)
+	}
+}
+
+func TestExportMT295ForMT296UnknownMT296(t *testing.T) {
+	l, al, _, _ := mt296ExportLedger(t)
+	opts := mt295ExportOptions(t)
+	// No MT296 was ever rendered under this reference: the
+	// answer could not have been sent, so the query parks
+	// fail-closed instead of asking about nothing.
+	res, err := l.ExportMT295ForMT296("ANS-296-9999", opts, "ledger-operator")
+	if !errors.Is(err, ErrMT295UnknownMT296) {
+		t.Fatalf("err = %v, want ErrMT295UnknownMT296", err)
+	}
+	if res.RepairID == "" {
+		t.Error("repair ID empty, want the parked export recorded")
+	}
+	if res.QueriedKind != MT295QueriedMT296 {
+		t.Errorf("parked queried kind = %q, want %q", res.QueriedKind, MT295QueriedMT296)
+	}
+	if res.RelatedReference != "ANS-296-9999" {
+		t.Errorf("parked :21: = %q, want %q", res.RelatedReference, "ANS-296-9999")
+	}
+	// A parked export records nothing: no registry entry, no
+	// audit marker.
+	ref := mt295MessageReference("ANS-296-9999", opts.Queries, opts.Narrative, opts.Description)
+	if _, ok := l.GetMT295Export(ref); ok {
+		t.Error("GetMT295Export = true for a parked export, want false")
+	}
+	events := readAuditOps(t, al)
+	if countOp(events, "mt295_query_exported") != 0 {
+		t.Errorf("mt295_query_exported count = %d, want 0 for a parked export", countOp(events, "mt295_query_exported"))
+	}
+	// A re-sent export parks again.
+	if _, err := l.ExportMT295ForMT296("ANS-296-9999", opts, "ledger-operator"); !errors.Is(err, ErrMT295UnknownMT296) {
+		t.Errorf("re-sent err = %v, want ErrMT295UnknownMT296 again", err)
+	}
+}
+
+func TestExportMT295ForMT296RepeatIsDuplicate(t *testing.T) {
+	l, al, mt292Ref, _ := mt296ExportLedger(t)
+	if _, err := l.ExportMT296ForAnswered(mt292Ref, mt296ExportOptions(t), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT296ForAnswered: %v", err)
+	}
+	opts := mt295ExportOptions(t)
+	first, err := l.ExportMT295ForMT296("ANS-296-0001", opts, "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT295ForMT296: %v", err)
+	}
+	second, err := l.ExportMT295ForMT296("ANS-296-0001", opts, "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT295ForMT296 repeat: %v", err)
+	}
+	if !second.Duplicate {
+		t.Error("duplicate = false on repeat export")
+	}
+	if second.Message != first.Message {
+		t.Errorf("repeat export differs:\nfirst:\n%s\nsecond:\n%s", first.Message, second.Message)
+	}
+	if second.QueriedKind != MT295QueriedMT296 {
+		t.Errorf("repeat queried kind = %q, want %q", second.QueriedKind, MT295QueriedMT296)
+	}
+	// The replay emits no second audit event.
+	events := readAuditOps(t, al)
+	if countOp(events, "mt295_query_exported") != 1 {
+		t.Errorf("mt295_query_exported count = %d, want 1 after replay", countOp(events, "mt295_query_exported"))
+	}
+}
+
+func TestExportMT295ForMT296Conflict(t *testing.T) {
+	l, _, mt292Ref, _ := mt296ExportLedger(t)
+	if _, err := l.ExportMT296ForAnswered(mt292Ref, mt296ExportOptions(t), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT296ForAnswered: %v", err)
+	}
+	opts := mt295ExportOptions(t)
+	ref := mt295MessageReference("ANS-296-0001", opts.Queries, opts.Narrative, opts.Description)
+	// A :20: already exported under different terms: the
+	// reference names one export, so a second, different question
+	// under it is refused rather than silently overwritten. The
+	// derivation makes this unreachable through the public API
+	// (the same terms hash to the same :20:), so the conflicting
+	// record is seeded directly to exercise the gate itself.
+	l.mt295Exports = map[string]mt295ExportRecord{
+		ref: {
+			QueriedRef:  "ANS-296-0001",
+			QueriedKind: MT295QueriedMT296,
+			Options: MT295ExportOptions{
+				SenderLT:   "DEUTDEFF",
+				ReceiverLT: "CHASUS33",
+				Queries:    []string{"STAT"},
+				Narrative:  []string{"A different question"},
+			},
+			Result: MT295ExportResult{Reference: ref, RelatedReference: "ANS-296-0001", QueriedKind: MT295QueriedMT296, Message: "seeded"},
+		},
+	}
+	if _, err := l.ExportMT295ForMT296("ANS-296-0001", opts, "ledger-operator"); !errors.Is(err, ErrMT295MsgIDConflict) {
+		t.Errorf("err = %v, want ErrMT295MsgIDConflict", err)
+	}
+}

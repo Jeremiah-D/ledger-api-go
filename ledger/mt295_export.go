@@ -38,7 +38,7 @@ import (
 // is the only description, and :11S: / :11R: are refused as
 // unknown fields, along the inbound rule.
 //
-// The :21: anchors in two tiers — the queried cancellation
+// The :21: anchors in three tiers — the queried cancellation
 // request is the one this ledger's own outbound MT292 named, so
 // the :21: is that MT292's :20:, derived deterministically from
 // the schedule and run (see mt292MessageReference): "MT292-" plus
@@ -66,6 +66,19 @@ import (
 // :21: names something this ledger could have sent; a query
 // about anything else parks fail-closed instead of asking
 // about nothing.
+//
+// The third tier (LG-477) is the queried outbound MT296
+// answer: the :21: is that answer's :20:, caller-supplied at
+// render time (1–16 `x` characters, no shape to verify), and
+// the anchor is a pure registry lookup — the :20: must be
+// registered in mt296Exports (LG-467), the mirror of the
+// inbound MT296 tier (a) (LG-469), which answers about the
+// same MT292 requests. A :21: naming no rendered MT296 is
+// ErrMT295UnknownMT296, parked the same way. With it the
+// Category 2 ask—answer chain closes on the ask side: the
+// ledger can now ask a correspondent whether it received the
+// ledger's own MT296 answer and how it disposed of it, instead
+// of waiting for the correspondent to ask first.
 //
 // Scope honesty, the same limit ExportMT292 carries: the outbound
 // MT292 :20: is registered on export (mt292Exports, LG-471), and
@@ -140,19 +153,20 @@ type MT295ExportOptions struct {
 }
 
 // MT295ExportResult is the outcome of an MT295 query export
-// (ExportMT295ForCancelled or ExportMT295ForMT202): the rendered
-// query message and the facts it was rendered from. A parked
-// export (unknown schedule, a schedule still active, or an
-// unregistered MT202) carries only Reference, RelatedReference,
-// ScheduleID, RunSeq, and RepairID, alongside the anchor error.
-// The MT202 tier carries no schedule or run, so its ScheduleID
-// is empty and its RunSeq is 0 — QueriedKind is what tells the
-// tiers apart.
+// (ExportMT295ForCancelled, ExportMT295ForMT202, or
+// ExportMT295ForMT296): the rendered query message and the facts
+// it was rendered from. A parked export (unknown schedule, a
+// schedule still active, or an unregistered MT202 or MT296)
+// carries only Reference, RelatedReference, ScheduleID, RunSeq,
+// and RepairID, alongside the anchor error.
+// The MT202 and MT296 tiers carry no schedule or run, so their
+// ScheduleID is empty and their RunSeq is 0 — QueriedKind is
+// what tells the tiers apart.
 type MT295ExportResult struct {
 	// Reference echoes the export's :20: reference.
 	Reference string `json:"reference"`
-	// RelatedReference is the queried MT292's or MT202's :20:
-	// (the :21:).
+	// RelatedReference is the queried MT292's, MT202's, or
+	// MT296's :20: (the :21:).
 	RelatedReference string `json:"related_reference"`
 	// ScheduleID is the transfer schedule whose MT292 is queried.
 	// Empty on the MT202 tier, which names no schedule.
@@ -161,16 +175,18 @@ type MT295ExportResult struct {
 	// tier, which names no run.
 	RunSeq uint64 `json:"run_seq"`
 	// QueriedKind names which tier the query's :21: anchored
-	// to: the outbound MT292 cancellation request or the
-	// outbound MT202 transfer. Empty on MT292-tier exports,
-	// which predate the field (LG-475 added it for the MT202
-	// tier, rendered and parked alike).
+	// to: the outbound MT292 cancellation request, the
+	// outbound MT202 transfer, or the outbound MT296 answer.
+	// Empty on MT292-tier exports, which predate the field
+	// (LG-475 added it for the MT202 tier, rendered and parked
+	// alike).
 	QueriedKind MT295QueriedKind `json:"queried_kind,omitempty"`
 	// Message is the rendered SWIFT FIN MT295 text.
 	Message string `json:"message"`
 	// RepairID is the repair queue record for a parked export
 	// (unknown schedule, a schedule still active, an
-	// unregistered MT292, or an unregistered MT202). Empty on a rendered export.
+	// unregistered MT292, an unregistered MT202, or an
+	// unregistered MT296). Empty on a rendered export.
 	RepairID string `json:"repair_id,omitempty"`
 	// Duplicate reports whether the export was already rendered
 	// under the same :20: with the same terms: a no-op success,
@@ -180,9 +196,10 @@ type MT295ExportResult struct {
 
 // MT295QueriedKind names which kind of ledger object a query's
 // :21: anchored to: the outbound MT292 cancellation request
-// this ledger rendered for the schedule's run, or the outbound
+// this ledger rendered for the schedule's run, the outbound
 // MT202 transfer this ledger rendered under a caller-supplied
-// :20:.
+// :20:, or the outbound MT296 answer this ledger rendered
+// under a caller-supplied :20:.
 type MT295QueriedKind string
 
 const (
@@ -193,6 +210,10 @@ const (
 	// transfer (LG-475): the caller-supplied :20: registered
 	// in mt202Exports.
 	MT295QueriedMT202 MT295QueriedKind = "mt202"
+	// MT295QueriedMT296 is the :21: tier for an outbound MT296
+	// answer (LG-477): the caller-supplied :20: registered
+	// in mt296Exports.
+	MT295QueriedMT296 MT295QueriedKind = "mt296"
 )
 
 // mt295ExportRecord is the registry record for one rendered MT295
@@ -701,6 +722,170 @@ func (l *Ledger) ExportMT295ForMT202(mt202Reference string, opts MT295ExportOpti
 			"msg_id":            ref,
 			"related_reference": relatedRef,
 			"queried_kind":      string(MT295QueriedMT202),
+			"sender_lt":         senderLT,
+		},
+	})
+	l.mu.Unlock()
+	return res, nil
+}
+
+// ExportMT295ForMT296 renders the SWIFT FIN MT295 query about
+// the outbound MT296 answer the reference names: the :21: is
+// that answer's :20: (see ExportMT296ForAnswered, LG-467), the
+// :20: (see mt295MessageReference) is this export's own
+// reference, and the :75: / :77A: / :79: carry the operator's
+// question, verbatim — never interpreted, never derived from live
+// facts, and never snapshotted, because the question is the
+// operator's words, not a ledger fact.
+//
+// The anchor is a pure registry lookup (LG-477), the mirror of
+// the inbound MT296 tier (a) (LG-469): the MT296's :20: is
+// caller-supplied at render time (1–16 `x` characters, no shape
+// to verify), so the lookup alone anchors it — one read lock,
+// mt296Exports, hit or miss. A :21: naming no rendered MT296 is
+// ErrMT295UnknownMT296, parked in the repair queue fail-closed in
+// the camt.055 shape (the returned result carries the repair ID
+// alongside the error, along ExportMT295ForCancelled). A hit
+// proves the answer was rendered: the MT296 tier has no
+// shape-plus-state limit, because the lookup is the registry
+// itself — the MT292 tier has shared that property since LG-476.
+// Nothing moves: no journal entry, no schedule status
+// change, no ExpectedReceipt cancellation, no version bump —
+// rendering a question is read-only, and the audit event is the
+// durable record, not a state change. The result carries no
+// schedule or run (ScheduleID empty, RunSeq 0); QueriedKind
+// ("mt296") is what tells the tiers apart.
+//
+// Idempotency is the :20: with its terms (the pain.014
+// convention): a replay with the same MT296 reference and the
+// same question returns the stored rendered message with
+// Duplicate set, rendering nothing twice and emitting no second
+// audit event; a :20: reused for different terms is refused with
+// ErrMT295MsgIDConflict.
+//
+// Locking: the validation runs on the supplied values alone; the
+// replay read and the anchor lookup run under the read lock; the
+// :20: record and the export marker event run under a short write
+// lock of their own, re-checking the registry first so a
+// concurrent double-export still records once; the repair parking
+// runs outside any held lock because EnqueueRepair takes l.mu
+// itself.
+func (l *Ledger) ExportMT295ForMT296(mt296Reference string, opts MT295ExportOptions, actor string) (MT295ExportResult, error) {
+	if actor == "" {
+		actor = "ExportMT295ForMT296"
+	}
+	senderLT, _, err := validateMT295ExportOptions(opts)
+	if err != nil {
+		return MT295ExportResult{}, err
+	}
+
+	// :21: — the outbound MT296's :20: this query asks about,
+	// caller-supplied: no shape to verify, so the registry
+	// lookup alone anchors it (LG-469 tier (a) shape).
+	relatedRef := mt296Reference
+	// :20: — the deterministic message reference, also the MUR.
+	ref := mt295MessageReference(relatedRef, opts.Queries, opts.Narrative, opts.Description)
+
+	// :20: replay: the query was already rendered under this
+	// reference. Same terms is a no-op returning the stored
+	// message; different terms is a conflict.
+	l.mu.RLock()
+	if rec, ok := l.mt295Exports[ref]; ok {
+		l.mu.RUnlock()
+		if !mt295ExportTermsEqual(rec, relatedRef, opts) {
+			return MT295ExportResult{}, fmt.Errorf("%w: :20: %q", ErrMT295MsgIDConflict, ref)
+		}
+		dup := rec.Result
+		dup.Duplicate = true
+		return dup, nil
+	}
+	l.mu.RUnlock()
+
+	// The anchor, pure lookup: the MT296 answer must be
+	// registered in mt296Exports (LG-467). Registrations are
+	// only ever added, never removed, so a hit stays valid
+	// past this call — and a miss parks fail-closed in the
+	// repair queue (the camt.055 shape) and is reported as the
+	// export's error.
+	l.mu.RLock()
+	_, registered := l.mt296Exports[relatedRef]
+	l.mu.RUnlock()
+	if !registered {
+		repairID, parkErr := l.parkMT295Export(ref, relatedRef, actor)
+		if parkErr != nil {
+			return MT295ExportResult{}, fmt.Errorf("%w: %q (repair parking failed: %v)", ErrMT295UnknownMT296, relatedRef, parkErr)
+		}
+		return MT295ExportResult{Reference: ref, RelatedReference: relatedRef, QueriedKind: MT295QueriedMT296, RepairID: repairID},
+			fmt.Errorf("%w: %q", ErrMT295UnknownMT296, relatedRef)
+	}
+
+	// The question, verbatim from the operator — never from live
+	// facts, so the question is the same question the operator
+	// asked.
+	msg, err := ExportMT295(MT295{
+		SenderLT:             opts.SenderLT,
+		ReceiverLT:           opts.ReceiverLT,
+		TransactionReference: ref,
+		RelatedReference:     relatedRef,
+		Queries:              opts.Queries,
+		Narrative:            opts.Narrative,
+		Description:          opts.Description,
+	})
+	if err != nil {
+		return MT295ExportResult{}, err
+	}
+	res := MT295ExportResult{
+		Reference:        ref,
+		RelatedReference: relatedRef,
+		QueriedKind:      MT295QueriedMT296,
+		Message:          msg,
+	}
+
+	// The :20: record and the export marker event, under one short
+	// write lock: the message is already rendered when the marker
+	// lands. A concurrent double-export that landed first returns
+	// the stored outcome instead of a second marker. The audit
+	// event carries no accounts: a query touches no ledger
+	// account, and inventing one would misattribute the evidence.
+	// The details carry queried_kind, not a schedule: this tier
+	// names no schedule or run.
+	l.mu.Lock()
+	if rec, ok := l.mt295Exports[ref]; ok {
+		l.mu.Unlock()
+		if !mt295ExportTermsEqual(rec, relatedRef, opts) {
+			return MT295ExportResult{}, fmt.Errorf("%w: :20: %q", ErrMT295MsgIDConflict, ref)
+		}
+		dup := rec.Result
+		dup.Duplicate = true
+		return dup, nil
+	}
+	if l.mt295Exports == nil {
+		l.mt295Exports = make(map[string]mt295ExportRecord)
+	}
+	// The options' slices are copied: the :75: / :77A: / :79:
+	// lines are the registered verbatim question, and a caller
+	// mutating its options after the call must never rewrite
+	// them — the mt295Received copy invariant, applied here.
+	storedOpts := opts
+	storedOpts.Queries = mt295LinesCopy(opts.Queries)
+	storedOpts.Narrative = mt295LinesCopy(opts.Narrative)
+	storedOpts.Description = mt295LinesCopy(opts.Description)
+	l.mt295Exports[ref] = mt295ExportRecord{
+		QueriedRef:  relatedRef,
+		QueriedKind: MT295QueriedMT296,
+		Options:     storedOpts,
+		Result:      res,
+	}
+	l.emitAudit(AuditEvent{
+		Op:            "mt295_query_exported",
+		Actor:         actor,
+		TraceID:       ref,
+		VersionBefore: l.version,
+		VersionAfter:  l.version,
+		Details: map[string]any{
+			"msg_id":            ref,
+			"related_reference": relatedRef,
+			"queried_kind":      string(MT295QueriedMT296),
 			"sender_lt":         senderLT,
 		},
 	})

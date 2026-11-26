@@ -6764,19 +6764,24 @@ LG-475) — the two anchors are mutually exclusive — plus
 run), or the queried MT202's `:20:` itself, caller-supplied; and the `:20:` is derived too (`MT295-` plus 10 lowercase
 hex of the SHA-256 of that `:21:` and the question body, the MT195
 precedent) — neither is supplied in the body. The `:21:` anchors
-in two tiers: the MT292 tier, where the schedule must exist, it must be in
+in three tiers: the MT292 tier, where the schedule must exist, it must be in
 MT292-exportable state (paused, cancelled, completed, or
 exhausted — a still-active schedule with a live next run cannot
 have had its MT292 sent), and the MT292 the `:21:` names must be
 registered in `mt292Exports` (LG-471, LG-476) — a hit proves the
-cancellation request was actually rendered; and the MT202 tier, where
+cancellation request was actually rendered; the MT202 tier, where
 the reference must be registered in `mt202Exports` (LG-470) —
 a pure registry lookup, no shape to verify, the mirror of the
-inbound MT296 tier (c) (LG-472). Both registries are in-memory
-only: a restart clears them, and a query arriving before the
+inbound MT296 tier (c) (LG-472); and the MT296 tier (LG-477), where
+the reference must be registered in `mt296Exports` (LG-467) —
+a pure registry lookup, no shape to verify, the mirror of the
+inbound MT296 tier (a) (LG-469) — so the ledger can ask whether
+its own MT296 answer was received and how it was disposed of,
+instead of waiting for the correspondent to ask first. All three
+registries are in-memory only: a restart clears them, and a query arriving before the
 queried message is re-exported still parks fail-closed — re-export
 the MT292 (`GET /exports/mt292` derives the same `:20:` for the
-same schedule and run) or the MT202 first, then re-ask. The `:75:` / `:77A:` / `:79:` ride verbatim from the
+same schedule and run), the MT202, or the MT296 first, then re-ask. The `:75:` / `:77A:` / `:79:` ride verbatim from the
 operator — the codewords inside `:75:` are the operator's words,
 never interpreted — and no query snapshot is built: the question
 is the operator's words, not a fact computed at export time.

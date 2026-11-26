@@ -550,3 +550,193 @@ func TestHTTPMT295ExportAfterMT292Registration(t *testing.T) {
 		}
 	}
 }
+
+// MT296-tier MT295 query export through HTTP: register an
+// outbound MT296 answer first, then ask about it — the :21: is
+// the answer's own :20:, caller-supplied, and the three anchors
+// (schedule/run, mt202_reference, mt296_reference) are mutually
+// exclusive.
+func TestHTTPMT295ExportForMT296(t *testing.T) {
+	srv := mt195ExportTestServer(t)
+
+	// Seed the anchor first: an MT210 notification, then the
+	// inbound MT292 cancellation request the MT296 answers.
+	code, body := postMT195Text(t, srv.URL+"/exports/mt210/apply", mt295SeedMT210Doc("NTF-296-HTTP"), "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt210/apply seed: status=%d body=%v", code, body)
+	}
+	code, body = postMT292JSON(t, srv.URL+"/exports/mt292/apply",
+		mt292ApplyDoc("CXL-296-HTTP", "NTF-296-HTTP", "210261124", "Client withdrew the order"), "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt292/apply seed: status=%d body=%v", code, body)
+	}
+	// Register the outbound MT296 answer: the query anchors
+	// against this registry, so nothing is queryable before
+	// this export lands.
+	mt296Body, err := json.Marshal(mt296ExportRequest{
+		SenderLT:             "DEUTDEFF",
+		ReceiverLT:           "CHASUS33",
+		TransactionReference: "ANS-296-HTTP-1",
+		RelatedReference:     "CXL-296-HTTP",
+		Answers:              []string{"/CNCL/", "CANCELLATION CONFIRMED 261124"},
+	})
+	if err != nil {
+		t.Fatalf("marshal mt296 request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/exports/mt296", strings.NewReader(string(mt296Body)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-ledger-actor", "ops")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /exports/mt296: %v", err)
+	}
+	b, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /exports/mt296: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register MT296: status=%d, want 200 (body=%v)", resp.StatusCode, string(b))
+	}
+	if !strings.Contains(string(b), ":20:ANS-296-HTTP-1") {
+		t.Fatalf("registered MT296 missing :20:ANS-296-HTTP-1, body:\n%s", string(b))
+	}
+
+	post := func(t *testing.T, path, body string) (int, http.Header, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-ledger-actor", "ops")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return resp.StatusCode, resp.Header, string(b)
+	}
+	mustJSON := func(t *testing.T, req mt295ExportRequest) string {
+		t.Helper()
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(b)
+	}
+
+	valid := mt295ExportRequest{
+		MT296Reference: "ANS-296-HTTP-1",
+		SenderLT:       "DEUTDEFF",
+		ReceiverLT:     "CHASUS33",
+		Queries:        []string{"STAT"},
+	}
+	validBody := mustJSON(t, valid)
+
+	// The three anchors are mutually exclusive: a body naming
+	// the MT296 reference plus any other anchor is a 400.
+	bothSched := valid
+	bothSched.ScheduleID = "sched-295-http"
+	if code, _, _ := post(t, "/exports/mt295", mustJSON(t, bothSched)); code != http.StatusBadRequest {
+		t.Errorf("schedule_id + mt296_reference: status=%d, want 400", code)
+	}
+	bothRun := valid
+	bothRun.RunSeq = 5
+	if code, _, _ := post(t, "/exports/mt295", mustJSON(t, bothRun)); code != http.StatusBadRequest {
+		t.Errorf("run_seq + mt296_reference: status=%d, want 400", code)
+	}
+	bothMT202 := valid
+	bothMT202.MT202Reference = "MT202-REF-1"
+	if code, _, _ := post(t, "/exports/mt295", mustJSON(t, bothMT202)); code != http.StatusBadRequest {
+		t.Errorf("mt202_reference + mt296_reference: status=%d, want 400", code)
+	}
+
+	// The export renders the question: the :21: is the MT296's
+	// own :20:, caller-supplied — no derivation, no shape.
+	code, hdr, msg := post(t, "/exports/mt295", validBody)
+	if code != http.StatusOK {
+		t.Fatalf("export: status=%d, want 200", code)
+	}
+	if ct := hdr.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("content-type = %q, want text/plain", ct)
+	}
+	for _, want := range []string{
+		"{1:F01DEUTDEFFXXX0000000000}",
+		"{2:I295CHASUS33XXXU3003}",
+		":20:MT295-",
+		":21:ANS-296-HTTP-1",
+		":75:STAT",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("export missing %q, body:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "{5:") {
+		t.Errorf("export must omit block 5, body:\n%s", msg)
+	}
+
+	// Re-export is byte-identical: the same MT296 reference
+	// asked the same question returns the stored message.
+	_, _, msg2 := post(t, "/exports/mt295", validBody)
+	if msg2 != msg {
+		t.Errorf("repeat export differs:\nfirst:\n%s\nsecond:\n%s", msg, msg2)
+	}
+
+	// The metrics counter counts the export, including the
+	// rejected requests above (3 dual-anchor 400s + 1 ok +
+	// 1 repeat = 5). The MT296 registration is counted
+	// separately, under ledger_mt296_exports_total.
+	code, _, metricsBody := getBody(t, srv.URL+"/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("GET /metrics: status=%d", code)
+	}
+	if !strings.Contains(metricsBody, "ledger_mt295_exports_total 5") {
+		t.Errorf("metrics exposition missing ledger_mt295_exports_total 5:\n%s", metricsBody)
+	}
+}
+
+// MT296-tier MT295 query export without a registered MT296:
+// the answer was never rendered, so the query parks
+// fail-closed with a 422 and a repair ID.
+func TestHTTPMT295ExportUnregisteredMT296(t *testing.T) {
+	srv := mt195ExportTestServer(t)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/exports/mt295", strings.NewReader(`{
+		"mt296_reference": "ANS-296-9999",
+		"sender_lt": "DEUTDEFF",
+		"receiver_lt": "CHASUS33",
+		"queries": ["STAT"]
+	}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-ledger-actor", "ops")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /exports/mt295: %v", err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /exports/mt295: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown MT296: status=%d, want 422 (body=%v)", resp.StatusCode, string(b))
+	}
+	var errDoc map[string]any
+	if err := json.Unmarshal(b, &errDoc); err != nil {
+		t.Fatalf("unknown MT296 error body is not JSON: %v", err)
+	}
+	if errDoc["repair_id"] == nil || errDoc["repair_id"] == "" {
+		t.Errorf("unknown MT296 error body = %v, want a repair_id", errDoc)
+	}
+}
