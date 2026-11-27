@@ -6652,7 +6652,8 @@ record ID), and a conflict is 422. `GET /metrics` counts applies
 as `ledger_mt292_applies_total`.
 
 The bank's answer to our MT292 — or to our MT295 query about one,
-or to our MT202 transfer, or to our MT296 answer — comes back as a SWIFT FIN MT296:
+or to our MT202 transfer, or to our MT296 answer, or to our MT210
+notice — comes back as a SWIFT FIN MT296:
 `POST /exports/mt296/apply` with the raw FIN text as the body
 (see `ledger.ParseMT296`/`ApplyMT296`). The answer's `:20:` is
 its own reference (the replay key), its `:21:` names the MT292 it
@@ -6669,15 +6670,17 @@ the outbound MT202 registry (the caller-supplied `:20:` carries
 no shape, so the lookup alone anchors it), or the MT296 it
 answers, which must be registered in the outbound MT296 registry
 (the operator-supplied `:20:` carries no shape, so the lookup
+alone anchors it), or the MT210 it answers, which must be registered in the
+outbound MT210 registry (the schedule ID `:20:` carries no shape, so the lookup
 alone anchors it). Its `:76:` carries the bank's
 answer lines verbatim (`/CNCL/`, `/RJCR/`, `/PDCR/`, or any other
 text: the ledger runs no accept/reject code table off them), and
 its `:77A:` and `:79:` carry the narrative verbatim. Registering
 an answer moves nothing — no journal rows, no schedule status
 change, no version bump — and the `:21:` lives only in the
-registration and the `mt296_answer_received` audit event. The four
+registration and the `mt296_answer_received` audit event. The five
 tiers are deliberately asymmetric: tiers (a) and (b) are shape
-plus their own registry, tiers (c) and (d) are pure registry lookups with
+plus their own registry, tiers (c), (d) and (e) are pure registry lookups with
 no shape gate at all. No tier does a `:21:`→schedule reverse
 lookup (the SHA-256 is irreversible); the operator matches the
 answer to the request from the `:21:` and the audit event. The
@@ -6689,14 +6692,17 @@ deterministic: re-export the MT292 (`GET /exports/mt292` — the
 same schedule and run derive the same `:20:`), or re-export the
 MT296 answer (`POST /exports/mt296` — the same `:20:` with the
 same terms re-renders the same answer, so the export
-re-registers it), and re-apply the
+re-registers it), or re-export the MT210 notice
+(`GET /exports/mt210` — the same schedule ID re-renders the same
+notice, so the export re-registers it), and re-apply the
 same MT296. An answer naming a query this ledger never rendered
 parks, as does an answer naming a transfer this ledger never
-rendered, or an answer this ledger never rendered. A
+rendered, or an answer this ledger never rendered, or a notice
+this ledger never rendered. A
 malformed document is 400, a `:21:` matching no tier (or a
 `MT292-` shape naming no rendered MT292, or a `MT295-` shape
 naming no rendered query, or an unregistered MT202
-`:20:`, or an unregistered MT296 `:20:`) is 422 (parked in the
+`:20:`, or an unregistered MT296 `:20:`, or an unregistered MT210 `:20:`) is 422 (parked in the
 repair queue, the error body carrying the repair record ID), and a
 `:20:` reused for different terms is 422;
 a re-sent `:20:` with the same terms is an idempotent no-op.
