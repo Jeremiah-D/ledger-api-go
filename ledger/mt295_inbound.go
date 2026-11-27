@@ -247,6 +247,14 @@ var (
 	// answer this ledger could not have sent. It is a
 	// 422-class error.
 	ErrMT295UnknownMT296 = errors.New("ledger: mt295 export: unknown MT296 reference")
+	// ErrMT295UnknownMT210 is returned by ExportMT295ForMT210
+	// when the outbound MT210 :20: the query names is not
+	// registered in mt210Exports (LG-481) — the notification
+	// was never rendered by this ledger, so the query parks in
+	// the repair queue fail-closed rather than asking about a
+	// notification this ledger could not have sent. It is a
+	// 422-class error.
+	ErrMT295UnknownMT210 = errors.New("ledger: mt295 export: unknown MT210 reference")
 	// ErrMT295UnknownMT292 is returned by ExportMT295ForCancelled
 	// when the outbound MT292 :20: the query names is not
 	// registered in mt292Exports (LG-476) — the cancellation

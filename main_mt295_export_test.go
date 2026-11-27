@@ -740,3 +740,156 @@ func TestHTTPMT295ExportUnregisteredMT296(t *testing.T) {
 		t.Errorf("unknown MT296 error body = %v, want a repair_id", errDoc)
 	}
 }
+
+func TestHTTPMT295ExportForMT210(t *testing.T) {
+	l, _ := mt292HTTPSetup(t)
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+
+	// Create a schedule and keep it active: MT210 refuses a
+	// paused schedule (LG-479), the opposite of the MT292
+	// fixture, which pauses first.
+	code, body := postJSON(t, srv.URL+"/transfer-schedules", `{
+		"schedule_id": "sched-210",
+		"from_account": "alice",
+		"to_account": "bob",
+		"amount_cents": 5000,
+		"currency": "USD",
+		"interval": "24h",
+		"next_run_at": "2026-11-12T09:00:00Z",
+		"idempotency_key": "sched-210-key"
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create schedule: status=%d, want 201 (body=%v)", code, body)
+	}
+
+	// Register the outbound MT210 first: the query anchors
+	// against the registry, so nothing is queryable before
+	// this export lands.
+	code, _, mt210Msg := getBody(t, srv.URL+"/exports/mt210?schedule_id=sched-210&servicing_bic=CITIUS33")
+	if code != http.StatusOK {
+		t.Fatalf("register MT210: status=%d, want 200 (body=%v)", code, mt210Msg)
+	}
+	if !strings.Contains(mt210Msg, ":20:sched-210") {
+		t.Fatalf("registered MT210 missing :20:sched-210, body:\n%s", mt210Msg)
+	}
+
+	post := func(t *testing.T, path, body string) (int, http.Header, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-ledger-actor", "ops")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return resp.StatusCode, resp.Header, string(b)
+	}
+	mustJSON := func(t *testing.T, req mt295ExportRequest) string {
+		t.Helper()
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(b)
+	}
+
+	valid := mt295ExportRequest{
+		MT210Reference: "sched-210",
+		SenderLT:       "DEUTDEFF",
+		ReceiverLT:     "CHASUS33",
+		Queries:        []string{"STAT"},
+	}
+	validBody := mustJSON(t, valid)
+
+	// The four anchors are mutually exclusive: a body naming
+	// the MT210 reference plus any other anchor is a 400.
+	bothSched := valid
+	bothSched.ScheduleID = "sched-210"
+	if code, _, _ := post(t, "/exports/mt295", mustJSON(t, bothSched)); code != http.StatusBadRequest {
+		t.Errorf("schedule_id + mt210_reference: status=%d, want 400", code)
+	}
+	bothRun := valid
+	bothRun.RunSeq = 5
+	if code, _, _ := post(t, "/exports/mt295", mustJSON(t, bothRun)); code != http.StatusBadRequest {
+		t.Errorf("run_seq + mt210_reference: status=%d, want 400", code)
+	}
+	bothMT202 := valid
+	bothMT202.MT202Reference = "MT202-REF-1"
+	if code, _, _ := post(t, "/exports/mt295", mustJSON(t, bothMT202)); code != http.StatusBadRequest {
+		t.Errorf("mt202_reference + mt210_reference: status=%d, want 400", code)
+	}
+	bothMT296 := valid
+	bothMT296.MT296Reference = "ANS-296-HTTP-1"
+	if code, _, _ := post(t, "/exports/mt295", mustJSON(t, bothMT296)); code != http.StatusBadRequest {
+		t.Errorf("mt296_reference + mt210_reference: status=%d, want 400", code)
+	}
+
+	// An unregistered MT210 reference is a 422 (parked
+	// fail-closed in the repair queue, the error body carrying
+	// the repair record ID).
+	unknown := valid
+	unknown.MT210Reference = "sched-unknown"
+	code, _, errBody := post(t, "/exports/mt295", mustJSON(t, unknown))
+	if code != http.StatusUnprocessableEntity {
+		t.Errorf("unknown MT210: status=%d, want 422", code)
+	}
+	var errDoc map[string]any
+	if err := json.Unmarshal([]byte(errBody), &errDoc); err != nil {
+		t.Fatalf("unknown MT210 error body is not JSON: %v", err)
+	}
+	if errDoc["repair_id"] == nil || errDoc["repair_id"] == "" {
+		t.Errorf("unknown MT210 error body = %v, want a repair_id", errDoc)
+	}
+
+	// The export renders the question: the :21: is the MT210's
+	// own :20: — the schedule ID itself, stable across runs.
+	code, hdr, msg := post(t, "/exports/mt295", validBody)
+	if code != http.StatusOK {
+		t.Fatalf("export: status=%d, want 200", code)
+	}
+	if ct := hdr.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("content-type = %q, want text/plain", ct)
+	}
+	for _, want := range []string{
+		"{1:F01DEUTDEFFXXX0000000000}",
+		"{2:I295CHASUS33XXXU3003}",
+		":20:MT295-",
+		":21:sched-210",
+		":75:STAT",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("export missing %q, body:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "{5:") {
+		t.Errorf("export must omit block 5, body:\n%s", msg)
+	}
+
+	// Re-export is byte-identical: the same MT210 reference
+	// asked the same question returns the stored message.
+	_, _, msg2 := post(t, "/exports/mt295", validBody)
+	if msg2 != msg {
+		t.Errorf("repeat export differs:\nfirst:\n%s\nsecond:\n%s", msg, msg2)
+	}
+
+	// The metrics counter counts the export, including the
+	// rejected requests above (4 dual-anchor 400s + 1 parked
+	// 422 + 1 ok + 1 repeat = 7). The MT210 registration is
+	// counted separately, under ledger_mt210_exports_total.
+	code, _, metricsBody := getBody(t, srv.URL+"/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("GET /metrics: status=%d", code)
+	}
+	if !strings.Contains(metricsBody, "ledger_mt295_exports_total 7") {
+		t.Errorf("metrics exposition missing ledger_mt295_exports_total 7:\n%s", metricsBody)
+	}
+}

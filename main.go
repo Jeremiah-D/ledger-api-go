@@ -7111,18 +7111,21 @@ func (s *server) handleMT295Apply(w http.ResponseWriter, r *http.Request) {
 // schedule and run whose outbound MT292 cancellation request is
 // queried, or the outbound MT202 transfer queried by its :20:
 // (mt202_reference, LG-475), or the outbound MT296 answer
-// queried by its :20: (mt296_reference, LG-477) — the three
-// anchors are mutually exclusive — the sender/receiver LT
-// addresses, and the question — the :75: coded question
-// (mandatory), and the optional :77A: narrative and :79:
-// description, each an array of lines. The :21: is derived,
-// never supplied: the queried MT292's :20: (see
+// queried by its :20: (mt296_reference, LG-477), or the outbound
+// MT210 notification queried by its :20: (mt210_reference,
+// LG-481) — the four anchors are mutually exclusive — the
+// sender/receiver LT addresses, and the question — the :75:
+// coded question (mandatory), and the optional :77A: narrative
+// and :79: description, each an array of lines. The :21: is
+// derived, never supplied: the queried MT292's :20: (see
 // ledger.mt292MessageReference), or the queried MT202's :20:
 // itself (see ledger.ExportMT295ForMT202), or the queried
-// MT296's :20: itself (see ledger.ExportMT295ForMT296). The :20:
-// is derived too, never supplied: "MT295-" plus the first 10
-// lowercase hex of the SHA-256 of the queried MT292's :20: and
-// the question body (see ledger.ExportMT295ForCancelled).
+// MT296's :20: itself (see ledger.ExportMT295ForMT296), or the
+// queried MT210's :20: itself (see ledger.ExportMT295ForMT210,
+// the schedule ID). The :20: is derived too, never supplied:
+// "MT295-" plus the first 10 lowercase hex of the SHA-256 of the
+// queried MT292's :20: and the question body (see
+// ledger.ExportMT295ForCancelled).
 // :11S: / :11R: are not in the body (strict decode refuses them,
 // along the inbound rule).
 type mt295ExportRequest struct {
@@ -7130,6 +7133,7 @@ type mt295ExportRequest struct {
 	RunSeq         uint64   `json:"run_seq"`
 	MT202Reference string   `json:"mt202_reference,omitempty"`
 	MT296Reference string   `json:"mt296_reference,omitempty"`
+	MT210Reference string   `json:"mt210_reference,omitempty"`
 	SenderLT       string   `json:"sender_lt"`
 	ReceiverLT     string   `json:"receiver_lt"`
 	Queries        []string `json:"queries"`
@@ -7138,29 +7142,32 @@ type mt295ExportRequest struct {
 }
 
 // handleMT295Export implements POST /exports/mt295 (LG-468,
-// LG-475, LG-476, LG-477): a SWIFT FIN MT295 query about an
+// LG-475, LG-476, LG-477, LG-481): a SWIFT FIN MT295 query about an
 // outbound MT292 cancellation request this ledger rendered (see
 // ledger.ExportMT295ForCancelled), or about an outbound MT202
 // transfer this ledger rendered (see
 // ledger.ExportMT295ForMT202, mt202_reference in the body), or
 // about an outbound MT296 answer this ledger rendered (see
-// ledger.ExportMT295ForMT296, mt296_reference in the body). The
+// ledger.ExportMT295ForMT296, mt296_reference in the body), or
+// about an outbound MT210 notification this ledger rendered (see
+// ledger.ExportMT295ForMT210, mt210_reference in the body). The
 // JSON body names the schedule and run, or the MT202 reference,
-// or the MT296 reference, the sender/receiver LT addresses, and
-// the question; the body is strictly decoded (unknown fields fail
-// fast). The three anchors are mutually exclusive: a body naming
-// any two is a 400. Rendering is read-only: no journal entry, no
-// schedule status change, no ExpectedReceipt cancellation, no
-// version bump — only the mt295_query_exported audit event lands.
+// or the MT296 reference, or the MT210 reference, the
+// sender/receiver LT addresses, and the question; the body is
+// strictly decoded (unknown fields fail fast). The four anchors
+// are mutually exclusive: a body naming any two is a 400.
+// Rendering is read-only: no journal entry, no schedule status
+// change, no ExpectedReceipt cancellation, no version bump — only
+// the mt295_query_exported audit event lands.
 // Error mapping: a malformed body or any invalid field is a 400,
 // with the ledger sentinel errors passed through as-is; an
 // unknown schedule, a schedule still active, or an unregistered
 // MT292 reference, an unregistered MT202 reference, an
-// unregistered MT296 reference (parked fail-closed in the repair
-// queue, the error body carrying the repair record ID), or a :20:
-// reused for different terms is a 422. The operator identity
-// comes from the x-ledger-actor header, like the other operator
-// actions.
+// unregistered MT296 reference, or an unregistered MT210
+// reference (parked fail-closed in the repair queue, the error
+// body carrying the repair record ID), or a :20: reused for
+// different terms is a 422. The operator identity comes from the
+// x-ledger-actor header, like the other operator actions.
 func (s *server) handleMT295Export(w http.ResponseWriter, r *http.Request) {
 	s.metrics.MT295Exports.Add(1)
 	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes())
@@ -7186,9 +7193,9 @@ func (s *server) handleMT295Export(w http.ResponseWriter, r *http.Request) {
 	}
 	l := s.ledgerFor(r)
 	actor := ledger.ActorFromContext(actx)
-	// The three anchors are mutually exclusive: a body naming
+	// The four anchors are mutually exclusive: a body naming
 	// any two of the MT292 schedule/run, the MT202 reference,
-	// and the MT296 reference is a 400.
+	// the MT296 reference, and the MT210 reference is a 400.
 	// A run_seq of 0 is the zero value, so it names no run on
 	// its own — only a non-empty schedule_id or a non-zero
 	// run_seq counts as the MT292 anchor.
@@ -7200,8 +7207,20 @@ func (s *server) handleMT295Export(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mt296_reference is mutually exclusive with schedule_id/run_seq"})
 		return
 	}
+	if req.MT210Reference != "" && (req.ScheduleID != "" || req.RunSeq != 0) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mt210_reference is mutually exclusive with schedule_id/run_seq"})
+		return
+	}
 	if req.MT202Reference != "" && req.MT296Reference != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mt202_reference is mutually exclusive with mt296_reference"})
+		return
+	}
+	if req.MT210Reference != "" && req.MT202Reference != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mt210_reference is mutually exclusive with mt202_reference"})
+		return
+	}
+	if req.MT210Reference != "" && req.MT296Reference != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mt210_reference is mutually exclusive with mt296_reference"})
 		return
 	}
 	opts := ledger.MT295ExportOptions{
@@ -7216,6 +7235,8 @@ func (s *server) handleMT295Export(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case req.MT296Reference != "":
 		res, err = l.ExportMT295ForMT296(req.MT296Reference, opts, actor)
+	case req.MT210Reference != "":
+		res, err = l.ExportMT295ForMT210(req.MT210Reference, opts, actor)
 	case req.MT202Reference != "":
 		res, err = l.ExportMT295ForMT202(req.MT202Reference, opts, actor)
 	default:
@@ -7232,6 +7253,7 @@ func (s *server) handleMT295Export(w http.ResponseWriter, r *http.Request) {
 			errors.Is(err, ledger.ErrMT295UnknownMT292),
 			errors.Is(err, ledger.ErrMT295UnknownMT202),
 			errors.Is(err, ledger.ErrMT295UnknownMT296),
+			errors.Is(err, ledger.ErrMT295UnknownMT210),
 			errors.Is(err, ledger.ErrMT295MsgIDConflict):
 			writeJSON(w, http.StatusUnprocessableEntity, errBody)
 		case errors.Is(err, ledger.ErrMT295Framing),
