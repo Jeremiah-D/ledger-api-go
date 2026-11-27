@@ -453,3 +453,87 @@ func TestMT296ApplyEndpoint_MT202TierUnknownAndConflict(t *testing.T) {
 		t.Errorf("metrics exposition missing ledger_mt296_applies_total 4:\n%s", metricsBody)
 	}
 }
+
+// The tier-(d) gate end to end (LG-480): export an MT296 answer
+// over HTTP, answer it with an inbound MT296 over HTTP, and
+// verify the registry-backed registration. The answer's :20:
+// ("ANS-296-HTTP-40") is operator-supplied: only tier (d) can
+// anchor it.
+func TestMT296ApplyEndpoint_MT296TierRegistersAnswer(t *testing.T) {
+	srv := mt195ExportTestServer(t)
+
+	// Seed the anchor first: an MT210 notification, then the
+	// inbound MT292 the outbound MT296 will answer.
+	code, body := postMT195Text(t, srv.URL+"/exports/mt210/apply", mt295SeedMT210Doc("NTF-296-HTTP-40"), "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt210/apply seed: status=%d body=%v", code, body)
+	}
+	code, body = postMT292JSON(t, srv.URL+"/exports/mt292/apply",
+		mt292ApplyDoc("CXL-296-HTTP-40", "NTF-296-HTTP-40", "210261124", "Client withdrew the order"), "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt292/apply seed: status=%d body=%v", code, body)
+	}
+
+	// Export the MT296 answer: its :20: is the tier-(d) anchor.
+	exportBody, err := json.Marshal(mt296ExportRequest{
+		SenderLT:             "DEUTDEFF",
+		ReceiverLT:           "CHASUS33",
+		TransactionReference: "ANS-296-HTTP-40",
+		RelatedReference:     "CXL-296-HTTP-40",
+		Answers:              []string{"/CNCL/", "CANCELLATION CONFIRMED 261124"},
+		Narrative:            []string{"OPERATOR NOTE"},
+		Description:          []string{"BANK CONFIRMS THE NOTIFICATION"},
+	})
+	if err != nil {
+		t.Fatalf("marshal export request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/exports/mt296", strings.NewReader(string(exportBody)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-ledger-actor", "ops")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /exports/mt296: %v", err)
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /exports/mt296: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("export MT296: status=%d body=%s, want 200", resp.StatusCode, respBody)
+	}
+	if !strings.Contains(string(respBody), ":20:ANS-296-HTTP-40") {
+		t.Errorf("export body missing :20:ANS-296-HTTP-40:\n%s", respBody)
+	}
+
+	// Answer the answer: the inbound MT296's :21: names the
+	// exported MT296's :20:.
+	applyURL := srv.URL + "/exports/mt296/apply"
+	doc := mt296HTTPDoc("ANS-296-HTTP-41", "ANS-296-HTTP-40",
+		[]string{"/CNCL/"}, nil, []string{"CONFIRMED"})
+	code, body = postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("apply tier-(d): status=%d body=%v, want 200", code, body)
+	}
+	if body["reference"] != "ANS-296-HTTP-41" || body["related_reference"] != "ANS-296-HTTP-40" {
+		t.Errorf("refs = %v/%v, want ANS-296-HTTP-41/ANS-296-HTTP-40", body["reference"], body["related_reference"])
+	}
+	if body["duplicate"] == true {
+		t.Errorf("duplicate = true on first apply, want false")
+	}
+
+	// A :21: naming an MT296 :20: this ledger never rendered
+	// is a 422, the error body carrying the repair record ID.
+	unknown := mt296HTTPDoc("ANS-296-HTTP-42", "ANS-296-HTTP-99",
+		[]string{"/CNCL/"}, nil, nil)
+	code, body = postMT195Text(t, applyURL, unknown, "ops")
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("unregistered tier-(d) :21:: status=%d body=%v, want 422", code, body)
+	}
+	if body["repair_id"] == nil || body["repair_id"] == "" {
+		t.Errorf("repair_id = %v, want the parked repair record", body["repair_id"])
+	}
+}
