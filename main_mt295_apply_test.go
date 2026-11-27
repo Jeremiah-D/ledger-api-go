@@ -325,3 +325,57 @@ func TestMT295ApplyEndpoint_UnregisteredOutboundShapeIs422(t *testing.T) {
 		t.Errorf("repair_id = %v, want the parked repair record", body["repair_id"])
 	}
 }
+
+// The outbound MT210 tier over HTTP (LG-482): render an MT210
+// notice first, then ask about it — the :21: is the schedule
+// ID itself, and the query anchors to mt210Exports with kind
+// outbound-mt210. A :21: naming no rendered notice is a 422.
+func TestMT295ApplyEndpoint_AnchorsOutboundMT210(t *testing.T) {
+	l, sched := mt292HTTPSetup(t)
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+	applyURL := srv.URL + "/exports/mt295/apply"
+
+	// Register the outbound MT210: the notice's :20: is the
+	// schedule ID itself.
+	q := url.Values{}
+	q.Set("schedule_id", sched.ID)
+	q.Set("servicing_bic", "CITIUS33")
+	code, doc210, _ := getText(t, srv.URL+"/exports/mt210?"+q.Encode())
+	if code != http.StatusOK {
+		t.Fatalf("export MT210: status=%d, want 200", code)
+	}
+	if !strings.Contains(doc210, ":20:"+sched.ID) {
+		t.Fatalf("exported MT210 missing :20:%s, body:\n%s", sched.ID, doc210)
+	}
+
+	doc := mt295HTTPDoc("QRY-295-HTTP-O10", sched.ID,
+		[]string{"STAT"}, []string{"OPERATOR NOTE"}, nil)
+	code, body := postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt295/apply: status=%d body=%v", code, body)
+	}
+	if body["reference"] != "QRY-295-HTTP-O10" {
+		t.Errorf("reference = %v, want QRY-295-HTTP-O10", body["reference"])
+	}
+	if body["related_reference"] != sched.ID {
+		t.Errorf("related_reference = %v, want %v", body["related_reference"], sched.ID)
+	}
+	if body["anchored_kind"] != "outbound-mt210" {
+		t.Errorf("anchored_kind = %v, want outbound-mt210", body["anchored_kind"])
+	}
+	if body["duplicate"] == true {
+		t.Errorf("duplicate = true on first apply, want false")
+	}
+	// An unregistered schedule ID parks: 422 with the repair
+	// record ID in the error body.
+	doc = mt295HTTPDoc("QRY-295-HTTP-O1B", "sched-999",
+		[]string{"STAT"}, nil, nil)
+	code, body = postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("unregistered MT210 :21:: status=%d body=%v, want 422", code, body)
+	}
+	if body["repair_id"] == nil || body["repair_id"] == "" {
+		t.Errorf("repair_id = %v, want the parked repair record", body["repair_id"])
+	}
+}

@@ -6741,9 +6741,10 @@ queried message's `:20:` — an MT210 notification, an inbound
 MT292 cancellation request, an inbound MT202 transfer, an outbound
 MT292 cancellation request (the outbound MT292 `:20:` shape,
 registered in `mt292Exports`), an outbound MT202 transfer
-(registered in `mt202Exports`), or an outbound MT296 answer
-(registered in `mt296Exports`), looked up in the ledger's own
-registries in that order, inbound tiers first — its `:75:`
+(registered in `mt202Exports`), an outbound MT296 answer
+(registered in `mt296Exports`), or an outbound MT210
+notification (registered in `mt210Exports`), looked up in the
+ledger's own registries in that order, inbound tiers first — its `:75:`
 carries the coded question verbatim (mandatory: a query with no
 question text is malformed), and its `:77A:` and `:79:` carry the
 narrative verbatim. Registering a query moves nothing — no journal
@@ -6757,7 +6758,8 @@ before it parks exactly as an unknown `:21:` would — recovery is
 re-export (`GET /exports/mt292` deterministically re-derives the
 same `:20:`; `POST /exports/mt202` with the same `:20:` and terms
 replays Duplicate; `POST /exports/mt296` with the same `:20:` and
-terms replays Duplicate) and then re-apply the same query. A `:21:`
+terms replays Duplicate; `POST /exports/mt210` with the same `:20:`
+and terms replays Duplicate) and then re-apply the same query. A `:21:`
 naming nothing the ledger holds — including one shaped like our
 own outbound MT292's `:20:` that names no rendered MT292 — is 422 (parked in
 the repair queue, the error body carrying the repair record ID), a

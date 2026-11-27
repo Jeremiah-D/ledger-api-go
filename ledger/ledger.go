@@ -1122,9 +1122,9 @@ type Ledger struct {
 	// schedule, an FX schedule, or a :20: conflict) records
 	// nothing here: it has no message to replay, and a re-sent
 	// export refuses again — or renders, once the schedule is
-	// notifiable. The registry is also the anchor the future
-	// MT295 MT210 tier will consult: a :21: naming our outbound
-	// MT210's :20: will look the run up here rather than
+	// notifiable. The registry is also the anchor the MT295
+	// outbound-MT210 tier consults (LG-482): a :21: naming our
+	// outbound MT210's :20: looks the run up here rather than
 	// trusting the shape alone.
 	mt210Exports map[string]mt210ExportRecord
 	// mt196Answers maps a MT195 :20: reference (the :21: of the
