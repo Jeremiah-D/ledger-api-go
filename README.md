@@ -9887,12 +9887,25 @@ the same signed amount and the same currency), and
 by its reference and compares the `:60F:` opening balance with the
 journal balance folded at the start of the opening day and the
 `:62F:` closing balance with the journal balance folded at the end
-of the closing day. A line that disagrees with its journal row
-lands in the report as mismatched or unmatched, and a balance that
+of the closing day. A line whose reference names no journal row
+but an outbound MT202 this ledger rendered is matched against the
+export record instead (LG-488): amount, currency and direction
+are compared, `EntryID` stays empty — the export posts no journal
+row — and `ExportReference` carries the `:20:`. A line that
+disagrees with its journal row (or its export record) lands in
+the report as mismatched or unmatched, and a balance that
 disagrees with the journal fold lands as a `MT950BalanceMismatch`
 (`reported_cents` vs `ledger_cents`); neither ever fails the
-import. The per-line `:86:` text and the trailing `:86:` owner info
-ride along in the report verbatim. Draft-only: the import writes
+import. The balance fold still reads the journal only, so a line
+matched to an outbound MT202 leaves a residual equal to its
+amount in the `:62F:` comparison. The export registry is
+in-memory (LG-470): after a restart, a statement arriving before
+the outbound MT202 is re-exported is unmatched; re-exporting the
+same `:20:` with the same terms re-registers it (a `Duplicate`),
+and a fresh statement document then matches — re-importing the
+same document returns the stored report. The per-line `:86:` text
+and the trailing `:86:` owner info ride along in the report
+verbatim. Draft-only: the import writes
 no journal rows, enters no hash chain, bumps no version, and never
 adjusts the ledger — a mismatch is evidence for the operator, and
 any adjustment stays a human decision. Re-importing the same
