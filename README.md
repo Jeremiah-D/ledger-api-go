@@ -8354,12 +8354,20 @@ CBPR+ 路线图把 MT190 与 MT290 一并配对到 camt.105。
 语义：通知只记证据、不记账——登记进 MT202 的费用通知列表
 （`GetMT202Charges` 按 MT202 ID 取），不贴分录、不改余额、不改
 MT202 状态；收费是代理行的费用，与 MT202 本身金额无关，不拿两
-者比对。币种须与原 MT202 一致（不一致进 repair queue，
+者比对。`:21:` 两档锚定（LG-484，沿 LG-482/LG-483 锚定档家族）：
+先查入站已应用 MT202（`mt202Applied`），再查我方出站 MT202
+（`mt202Exports`，`POST /exports/mt202` 登记的 `:20:`）；任一档
+命中即接受，币种校验取命中档的 `Request.Currency`，两档重叠时
+入站档优先。币种须与命中档的 MT202 一致（不一致进 repair queue，
 `invalid_format`，绝不静默换算）；金额须 > 0（解析层拒，非正金
 额不是可路由的报文）。未知 `:21:` fail-closed 进 repair
 queue（`unknown_route`，camt.055 形态：结果带 repair ID +
 422）。审计记一条 `mt290_charges_advised`（msg_id/mt202_ref/
-currency/amount_cents，`:71B:` 原文附后，无 value_date）。
+currency/amount_cents/anchored，`:71B:` 原文附后，无 value_date；
+`anchored` 为 `mt202` 或 `outbound-mt202`，记命中档，出站档的事件
+不带账户——导出不触账本账户）。出站登记在内存中，重启清空，恢复
+是重导出（`POST /exports/mt202` 同 `:20:` 同 terms 重放返回
+Duplicate）再重放同一 MT290。
 同 `:20:` 同 terms 复放幂等 no-op（不重复记审计事件、不重复登
 记），同 `:20:` 异 terms `422`。报文非法 `400`。计数器
 `ledger_mt290_applies_total`。

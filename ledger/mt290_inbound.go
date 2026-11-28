@@ -67,25 +67,30 @@ import (
 // line starting with `:` inside the :71B: run is an unknown
 // field, not a continuation.
 //
-// ApplyMT290 resolves the :21: against the applied MT202
-// instructions (mt202Applied, keyed by the MT202's :20:) and
-// records the advice under the MT202 in mt202Charges, with one
-// `mt290_charges_advised` audit event (details msg_id /
-// mt202_ref / currency / amount_cents, plus the :71B: text
-// verbatim) putting the :20: on the durable record. Registry
-// presence is the resolution test: a parked or failed MT202 is
-// still known to the ledger and still has terms — its currency
-// — to check the advice against, so the advice records against
-// the instruction reference either way. An unknown :21: is
-// fail-closed into the repair queue (RepairReasonUnknownRoute,
-// the camt.055 shape: the parked result carries the repair ID
-// alongside the ErrMT290MT202NotFound error); a :32B: currency
-// that disagrees with the MT202's currency is likewise parked
+// ApplyMT290 resolves the :21: in two tiers (LG-484, the
+// LG-482/LG-483 anchor-tier family): (a) the applied MT202
+// instructions (mt202Applied, keyed by the MT202's :20:), (b)
+// the ledger's own rendered MT202 exports (mt202Exports,
+// keyed by the export's :20:, LG-470) — a charge advice may
+// name a transfer the ledger sent, not only one it received.
+// It records the advice under the MT202 in mt202Charges, with
+// one `mt290_charges_advised` audit event (details msg_id /
+// mt202_ref / currency / amount_cents / anchored, plus the
+// :71B: text verbatim) putting the :20: on the durable record.
+// Registry presence is the resolution test: a parked or failed
+// MT202 is still known to the ledger and still has terms —
+// its currency — to check the advice against, so the advice
+// records against the instruction reference either way. An
+// unknown :21: is fail-closed into the repair queue
+// (RepairReasonUnknownRoute, the camt.055 shape: the parked
+// result carries the repair ID alongside the
+// ErrMT290MT202NotFound error); a :32B: currency that
+// disagrees with the MT202's currency is likewise parked
 // (RepairReasonInvalidFormat — the advice is well-formed but
 // disagrees with the ledger's fact about the instruction),
-// never silently converted. A non-positive amount is refused at
-// parse — it is a malformed document, not a routable one — and
-// at the apply gate for hand-built requests.
+// never silently converted. A non-positive amount is refused
+// at parse — it is a malformed document, not a routable one —
+// and at the apply gate for hand-built requests.
 //
 // Nothing moves: no journal entry, no balance change, no MT202
 // status change. A charge advice is evidence, not a debit
@@ -145,10 +150,11 @@ var (
 	ErrMT290CurrencyMismatch = errors.New("ledger: mt290 inbound: :32B: currency does not match the MT202's currency")
 	// ErrMT290MT202NotFound is returned by ApplyMT290 when the
 	// advice's :21: names no MT202 instruction the ledger ever
-	// applied: the advice points at a transfer the ledger does
-	// not know, so it is parked in the repair queue rather than
-	// recorded against nothing. It is a 422-class error.
-	ErrMT290MT202NotFound = errors.New("ledger: mt290 inbound: :21: names no applied MT202 instruction")
+	// applied or rendered: the advice points at a transfer the
+	// ledger does not know, so it is parked in the repair queue
+	// rather than recorded against nothing. It is a 422-class
+	// error.
+	ErrMT290MT202NotFound = errors.New("ledger: mt290 inbound: :21: names no applied or rendered MT202 instruction")
 )
 
 // MT290 line caps: :71B: is 6*35x, each line 1–35 SWIFT `x`
@@ -538,14 +544,23 @@ func (l *Ledger) parkMT290Advice(req MT290, reasonCode, actor string) (string, e
 // mt202Charges, with one `mt290_charges_advised` audit event.
 //
 // The MT202 must be known: its :20: must sit in mt202Applied
-// (:21: unknown is ErrMT290MT202NotFound), parked in the repair
+// or in mt202Exports — two tiers, in order (LG-484): (a) an
+// inbound MT202 the ledger applied, (b) an outbound MT202 the
+// ledger itself rendered. A :21: hitting either tier is
+// accepted, "accepted whichever tier hits" along LG-482/LG-483;
+// on an overlap the inbound tier wins: its currency is the
+// check and its legs anchor the audit event. A :21: unknown
+// in both tiers is ErrMT290MT202NotFound, parked in the repair
 // queue fail-closed (the camt.055 shape: the returned result
 // carries the repair ID alongside the error); the :32B:
-// currency must agree with the MT202's currency (a mismatch is
-// parked the same way, with ErrMT290CurrencyMismatch — never
-// silently converted). No journal entry is ever posted, no
-// balance is ever changed, and no MT202 state is ever changed:
-// an advice is evidence, not a debit instruction.
+// currency must agree with the hit tier's currency (a mismatch
+// is parked the same way, with ErrMT290CurrencyMismatch —
+// never silently converted). The audit event names the hit
+// tier in its `anchored` detail ("mt202" / "outbound-mt202",
+// the MT295AnchorKind vocabulary). No journal entry is ever
+// posted, no balance is ever changed, and no MT202 state is
+// ever changed: an advice is evidence, not a debit
+// instruction.
 //
 // Idempotency is the :20: with its terms (the pain.014
 // convention): a replay with the same MT202, currency, amount,
@@ -582,14 +597,21 @@ func (l *Ledger) ApplyMT290(req MT290, actor string) (MT290ApplyResult, error) {
 	l.mu.RUnlock()
 
 	// The MT202 itself: :21: names it, the original MT202's
-	// :20:. Unknown is parked fail-closed in the repair queue
-	// (the camt.055 shape) and reported as the instruction's
-	// error. The record is copied out under the read lock: its
-	// currency is the check, its legs anchor the audit event.
+	// :20:. Two tiers, read under one read lock (LG-484): (a)
+	// an inbound MT202 the ledger applied (mt202Applied), (b)
+	// an outbound MT202 the ledger itself rendered
+	// (mt202Exports, registration alone — no shape to check,
+	// an outbound MT202 :20: is caller-supplied, 1-16 `x`
+	// characters). Unknown in both tiers is parked fail-closed
+	// in the repair queue (the camt.055 shape) and reported as
+	// the instruction's error. The records are copied out under
+	// the read lock: the hit tier's currency is the check, the
+	// inbound tier's legs anchor the audit event.
 	l.mu.RLock()
-	mt202rec, ok := l.mt202Applied[req.RelatedReference]
+	mt202rec, inMT202 := l.mt202Applied[req.RelatedReference]
+	mt202exp, outMT202 := l.mt202Exports[req.RelatedReference]
 	l.mu.RUnlock()
-	if !ok {
+	if !inMT202 && !outMT202 {
 		repairID, parkErr := l.parkMT290Advice(req, RepairReasonUnknownRoute, actor)
 		if parkErr != nil {
 			return MT290ApplyResult{}, fmt.Errorf("%w: %q (repair parking failed: %v)", ErrMT290MT202NotFound, req.RelatedReference, parkErr)
@@ -598,16 +620,21 @@ func (l *Ledger) ApplyMT290(req MT290, actor string) (MT290ApplyResult, error) {
 			fmt.Errorf("%w: %q", ErrMT290MT202NotFound, req.RelatedReference)
 	}
 
-	// The :32B: currency must be the MT202's currency: a
-	// charge in another currency points at another
+	// The :32B: currency must be the MT202's currency, taken
+	// from whichever tier hit — the inbound tier on an overlap:
+	// a charge in another currency points at another
 	// instruction's fee, so it is parked rather than converted.
-	if req.Currency != mt202rec.Request.Currency {
+	mt202Currency := mt202exp.Request.Currency
+	if inMT202 {
+		mt202Currency = mt202rec.Request.Currency
+	}
+	if req.Currency != mt202Currency {
 		repairID, parkErr := l.parkMT290Advice(req, RepairReasonInvalidFormat, actor)
 		if parkErr != nil {
-			return MT290ApplyResult{}, fmt.Errorf("%w: advice holds %q, MT202 holds %q (repair parking failed: %v)", ErrMT290CurrencyMismatch, req.Currency, mt202rec.Request.Currency, parkErr)
+			return MT290ApplyResult{}, fmt.Errorf("%w: advice holds %q, MT202 holds %q (repair parking failed: %v)", ErrMT290CurrencyMismatch, req.Currency, mt202Currency, parkErr)
 		}
 		return MT290ApplyResult{Reference: req.Reference, MT202Ref: req.RelatedReference, RepairID: repairID},
-			fmt.Errorf("%w: advice holds %q, MT202 holds %q", ErrMT290CurrencyMismatch, req.Currency, mt202rec.Request.Currency)
+			fmt.Errorf("%w: advice holds %q, MT202 holds %q", ErrMT290CurrencyMismatch, req.Currency, mt202Currency)
 	}
 
 	// The advice, from the parsed fields only: the amount the
@@ -626,11 +653,20 @@ func (l *Ledger) ApplyMT290(req MT290, actor string) (MT290ApplyResult, error) {
 	// pair its `mt202_inbound_applied` event anchors: the
 	// charge was taken on that transfer. A failed MT202 leaves
 	// its legs empty, and the event carries none — the advice
-	// still records, against the instruction reference.
+	// still records, against the instruction reference. Only
+	// the inbound tier has legs: an outbound export touches
+	// no ledger account, so its event carries none. The event
+	// also names the hit tier in `anchored` (LG-484): "mt202"
+	// for an applied inbound MT202, "outbound-mt202" for a
+	// rendered outbound one — the MT295AnchorKind vocabulary.
 	var accounts []AccountID
-	for _, leg := range []AccountID{mt202rec.Result.From, mt202rec.Result.To} {
-		if leg != "" {
-			accounts = append(accounts, leg)
+	anchored := "outbound-mt202"
+	if inMT202 {
+		anchored = "mt202"
+		for _, leg := range []AccountID{mt202rec.Result.From, mt202rec.Result.To} {
+			if leg != "" {
+				accounts = append(accounts, leg)
+			}
 		}
 	}
 
@@ -668,6 +704,7 @@ func (l *Ledger) ApplyMT290(req MT290, actor string) (MT290ApplyResult, error) {
 			"currency":     req.Currency,
 			"amount_cents": req.AmountCents,
 			"details":      req.Details,
+			"anchored":     anchored,
 		},
 	})
 	l.mu.Unlock()

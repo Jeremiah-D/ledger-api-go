@@ -490,3 +490,190 @@ func TestMT290Advice_GetByMT202(t *testing.T) {
 		t.Error("GetMT202Charges = true for an uncharged MT202, want false")
 	}
 }
+
+// mt290OutboundLedger builds a bare ledger with one rendered
+// outbound MT202 (mt202Sample: :20: MT202-REF-1, USD 2,500.00):
+// the fixture for the tier-(b) MT290 tests (LG-484). No inbound
+// MT202 is applied, so the :21: can only anchor to the export
+// registry.
+func mt290OutboundLedger(t *testing.T, al *AuditLog) *Ledger {
+	t.Helper()
+	l := New(WithAuditLog(al))
+	if _, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT202Registered setup: %v", err)
+	}
+	return l
+}
+
+func TestApplyMT290_OutboundMT202Anchors(t *testing.T) {
+	al := mustAuditLog(t)
+	l := mt290OutboundLedger(t, al)
+
+	// The :21: names our own rendered MT202: tier (b) accepts
+	// it exactly like an applied inbound one.
+	res, err := applyMT290Doc(t, l, mt290Doc("MT290ADVICE00001", "MT202-REF-1", "USD15,00", "Correspondent handling fee"))
+	if err != nil {
+		t.Fatalf("ApplyMT290: %v", err)
+	}
+	if res.Duplicate {
+		t.Error("duplicate = true on first apply")
+	}
+	if res.Advice.MT202Ref != "MT202-REF-1" || res.Advice.Currency != "USD" || res.Advice.AmountCents != 1500 {
+		t.Errorf("advice = %+v, want the outbound MT202 charged USD15,00", res.Advice)
+	}
+	list, ok := l.GetMT202Charges("MT202-REF-1")
+	if !ok || len(list) != 1 || list[0].MsgID != "MT290ADVICE00001" {
+		t.Errorf("GetMT202Charges = %v/%v, want one advice MT290ADVICE00001", list, ok)
+	}
+	// The audit event names the outbound tier — and carries no
+	// accounts: an export touches no ledger account.
+	events := readAuditOps(t, al)
+	ev := findOp(events, "mt290_charges_advised")
+	if ev == nil {
+		t.Fatal("mt290_charges_advised event missing")
+	}
+	if ev.Details["anchored"] != "outbound-mt202" {
+		t.Errorf("anchored = %v, want outbound-mt202", ev.Details["anchored"])
+	}
+	if len(ev.Accounts) != 0 {
+		t.Errorf("accounts = %v, want none (an export has no legs)", ev.Accounts)
+	}
+}
+
+// TestApplyMT290_OutboundMT202CurrencyMismatchGoesToRepair pins
+// the tier-(b) currency check: the advice's :32B: is checked
+// against the exported MT202's Request.Currency, and a charge
+// in another currency parks, never converts.
+func TestApplyMT290_OutboundMT202CurrencyMismatchGoesToRepair(t *testing.T) {
+	al := mustAuditLog(t)
+	l := mt290OutboundLedger(t, al)
+
+	res, err := applyMT290Doc(t, l, mt290Doc("MT290ADVICE00001", "MT202-REF-1", "EUR15,00", "Correspondent handling fee"))
+	if !errors.Is(err, ErrMT290CurrencyMismatch) {
+		t.Errorf("err = %v, want ErrMT290CurrencyMismatch", err)
+	}
+	if res.RepairID == "" {
+		t.Error("repair_id empty, want the parked repair record")
+	}
+	rec, ok := l.GetRepair(res.RepairID)
+	if !ok {
+		t.Fatalf("GetRepair(%q) = false, want the parked record", res.RepairID)
+	}
+	if rec.ReasonCode != RepairReasonInvalidFormat {
+		t.Errorf("repair reason = %q, want invalid_format", rec.ReasonCode)
+	}
+	if _, ok := l.GetMT202Charges("MT202-REF-1"); ok {
+		t.Error("GetMT202Charges = true after a currency mismatch, want false")
+	}
+	events := readAuditOps(t, al)
+	if countOp(events, "mt290_charges_advised") != 0 {
+		t.Errorf("mt290_charges_advised count = %d, want 0", countOp(events, "mt290_charges_advised"))
+	}
+}
+
+// TestApplyMT290_UnregisteredReferenceGoesToRepair is the
+// negative control for tier (b): an export registry holding
+// MT202-REF-1 does not accept a :21: naming anything else —
+// the tier is consulted and missed, and the advice parks as an
+// unknown reference.
+func TestApplyMT290_UnregisteredReferenceGoesToRepair(t *testing.T) {
+	al := mustAuditLog(t)
+	l := mt290OutboundLedger(t, al)
+
+	res, err := applyMT290Doc(t, l, mt290Doc("MT290ADVICE00001", "MT202-REF-2", "USD15,00", "Correspondent handling fee"))
+	if !errors.Is(err, ErrMT290MT202NotFound) {
+		t.Errorf("err = %v, want ErrMT290MT202NotFound", err)
+	}
+	if res.RepairID == "" {
+		t.Error("repair_id empty, want the parked repair record")
+	}
+	rec, ok := l.GetRepair(res.RepairID)
+	if !ok {
+		t.Fatalf("GetRepair(%q) = false, want the parked record", res.RepairID)
+	}
+	if rec.ReasonCode != RepairReasonUnknownRoute {
+		t.Errorf("repair reason = %q, want unknown_route", rec.ReasonCode)
+	}
+	events := readAuditOps(t, al)
+	if countOp(events, "mt290_charges_advised") != 0 {
+		t.Errorf("mt290_charges_advised count = %d, want 0", countOp(events, "mt290_charges_advised"))
+	}
+}
+
+// TestApplyMT290_OverlappingTiersInboundWins pins the tier
+// order: the same :20: sits in both registries — applied
+// inbound (USD) and rendered outbound (EUR) — and the advice
+// anchors to the inbound tier: a USD charge records with
+// anchored "mt202", an EUR charge parks against the inbound
+// USD, never against the outbound EUR.
+func TestApplyMT290_OverlappingTiersInboundWins(t *testing.T) {
+	al := mustAuditLog(t)
+	l := mt290ApplyLedger(t, al)
+	out := mt202Sample()
+	out.TransactionReference = "MT202-REF-01"
+	out.Currency = "EUR"
+	if _, err := l.ExportMT202Registered(out, "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT202Registered setup: %v", err)
+	}
+
+	res, err := applyMT290Doc(t, l, mt290DocForMT202("MT290ADVICE00001"))
+	if err != nil {
+		t.Fatalf("ApplyMT290 USD: %v", err)
+	}
+	if res.Advice.MT202Ref != "MT202-REF-01" || res.Advice.Currency != "USD" {
+		t.Errorf("advice = %+v, want the inbound USD MT202 charged", res.Advice)
+	}
+	events := readAuditOps(t, al)
+	ev := findOp(events, "mt290_charges_advised")
+	if ev == nil {
+		t.Fatal("mt290_charges_advised event missing")
+	}
+	if ev.Details["anchored"] != "mt202" {
+		t.Errorf("anchored = %v, want mt202 (inbound tier wins the overlap)", ev.Details["anchored"])
+	}
+
+	// EUR disagrees with the inbound tier's USD: parked, even
+	// though the outbound tier holds an EUR MT202 under the
+	// same :20:.
+	if _, err := applyMT290Doc(t, l, mt290Doc("MT290ADVICE00002", "MT202-REF-01", "EUR15,00", "Correspondent handling fee")); !errors.Is(err, ErrMT290CurrencyMismatch) {
+		t.Errorf("err = %v, want ErrMT290CurrencyMismatch", err)
+	}
+}
+
+// TestApplyMT290_ReExportKeepsOutboundAnchor pins the recovery
+// path for the in-memory export registry: a restart clears
+// mt202Exports, and re-exporting the same :20: with the same
+// terms (a Duplicate replay) restores the registry entry —
+// after which the same MT290 anchors to the outbound tier
+// again. The test replays the export, then the advice.
+func TestApplyMT290_ReExportKeepsOutboundAnchor(t *testing.T) {
+	al := mustAuditLog(t)
+	l := New(WithAuditLog(al))
+	first, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT202Registered: %v", err)
+	}
+	second, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator")
+	if err != nil {
+		t.Fatalf("ExportMT202Registered re-export: %v", err)
+	}
+	if !second.Duplicate || second.Message != first.Message {
+		t.Errorf("re-export = %+v, want Duplicate with the first message", second)
+	}
+
+	res, err := applyMT290Doc(t, l, mt290Doc("MT290ADVICE00001", "MT202-REF-1", "USD15,00", "Correspondent handling fee"))
+	if err != nil {
+		t.Fatalf("ApplyMT290 after re-export: %v", err)
+	}
+	if res.Advice.MT202Ref != "MT202-REF-1" {
+		t.Errorf("advice mt202 = %q, want MT202-REF-1", res.Advice.MT202Ref)
+	}
+	events := readAuditOps(t, al)
+	ev := findOp(events, "mt290_charges_advised")
+	if ev == nil {
+		t.Fatal("mt290_charges_advised event missing")
+	}
+	if ev.Details["anchored"] != "outbound-mt202" {
+		t.Errorf("anchored = %v, want outbound-mt202", ev.Details["anchored"])
+	}
+}
