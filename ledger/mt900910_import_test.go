@@ -357,3 +357,163 @@ func TestImportMT900910BICAndInfo(t *testing.T) {
 		t.Errorf("match = %+v, want matched", rep.Match)
 	}
 }
+
+// An MT900 whose :21: names an outbound MT202 this ledger
+// rendered (fourth form, LG-486) matches against the export
+// registry: no journal row exists, so EntryID stays empty and
+// the :20: is carried as ExportReference, with the export's
+// amount and the credit leg in the report.
+func TestImportMT900910ExportMatch(t *testing.T) {
+	l := mt202ExportTestLedger(t, mustAuditLog(t))
+	mt900910Seed(t, l, "ex-e0", "bank", "acct1", "unrelated-key", 10000,
+		time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), false)
+	if _, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT202Registered: %v", err)
+	}
+	doc := mt900910Doc(t, "900", "CONF-EX", "MT202-REF-1", "acct1",
+		time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC), 250000)
+
+	rep, err := l.ImportMT900910("acct1", []byte(doc))
+	if err != nil {
+		t.Fatalf("ImportMT900910: %v", err)
+	}
+	if rep.Match.Status != CAMT053Matched {
+		t.Fatalf("match = %+v, want matched", rep.Match)
+	}
+	if rep.Match.EntryID != "" {
+		t.Errorf("entry_id = %q, want empty (the export posts no journal row)", rep.Match.EntryID)
+	}
+	if rep.Match.ExportReference != "MT202-REF-1" {
+		t.Errorf("export_reference = %q, want MT202-REF-1", rep.Match.ExportReference)
+	}
+	if rep.Match.EntryAmountCents != 250000 {
+		t.Errorf("entry amount = %d, want 250000 (the export's amount)", rep.Match.EntryAmountCents)
+	}
+	if rep.Match.EntryCredit {
+		t.Errorf("entry credit = true, want false (an outbound MT202 is the credit leg)")
+	}
+	if rep.Match.Reason != "" {
+		t.Errorf("reason = %q, want empty on a match", rep.Match.Reason)
+	}
+}
+
+// An MT900 citing an outbound MT202 whose amount disagrees is
+// mismatched, with both sides in the report and the :20: named.
+func TestImportMT900910ExportAmountMismatch(t *testing.T) {
+	l := mt202ExportTestLedger(t, mustAuditLog(t))
+	mt900910Seed(t, l, "ex-am0", "bank", "acct1", "unrelated-key", 10000,
+		time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), false)
+	if _, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT202Registered: %v", err)
+	}
+	doc := mt900910Doc(t, "900", "CONF-EXAM", "MT202-REF-1", "acct1",
+		time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC), 200000)
+
+	rep, err := l.ImportMT900910("acct1", []byte(doc))
+	if err != nil {
+		t.Fatalf("ImportMT900910: %v", err)
+	}
+	if rep.Match.Status != CAMT053Mismatched {
+		t.Fatalf("match = %+v, want mismatched", rep.Match)
+	}
+	if rep.Match.ExportReference != "MT202-REF-1" || rep.Match.EntryAmountCents != 250000 {
+		t.Errorf("match = %+v, want export MT202-REF-1 at 250000", rep.Match)
+	}
+	if rep.Match.Reason == "" {
+		t.Errorf("match = %+v, want a reason naming both amounts", rep.Match)
+	}
+}
+
+// An MT910 citing an outbound MT202 is a direction mismatch:
+// the export is the credit leg (money out), an MT910 credit
+// confirmation needs the debit leg.
+func TestImportMT900910ExportDirectionMismatch(t *testing.T) {
+	l := mt202ExportTestLedger(t, mustAuditLog(t))
+	mt900910Seed(t, l, "ex-dm0", "bank", "acct1", "unrelated-key", 10000,
+		time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), false)
+	if _, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT202Registered: %v", err)
+	}
+	doc := mt900910Doc(t, "910", "CONF-EXDM", "MT202-REF-1", "acct1",
+		time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC), 250000)
+
+	rep, err := l.ImportMT900910("acct1", []byte(doc))
+	if err != nil {
+		t.Fatalf("ImportMT900910: %v", err)
+	}
+	if rep.Match.Status != CAMT053Mismatched {
+		t.Fatalf("match = %+v, want mismatched", rep.Match)
+	}
+	if rep.Match.ExportReference != "MT202-REF-1" || rep.Match.EntryCredit {
+		t.Errorf("match = %+v, want export MT202-REF-1 with entry_credit false", rep.Match)
+	}
+	if rep.Match.Reason == "" {
+		t.Errorf("match = %+v, want a direction reason", rep.Match)
+	}
+}
+
+// Journal first (LG-486): a :21: that is both a journal key
+// (via the "mt202-" prefix strip) and an outbound MT202 :20:
+// matches the journal row — ExportReference stays empty.
+func TestImportMT900910JournalBeatsExport(t *testing.T) {
+	l := mt202ExportTestLedger(t, mustAuditLog(t))
+	mt900910Seed(t, l, "jb-e1", "bank", "acct1", "mt202-EXP-1", 10000,
+		time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), false)
+	m := mt202Sample()
+	m.TransactionReference = "EXP-1"
+	if _, err := l.ExportMT202Registered(m, "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT202Registered: %v", err)
+	}
+	doc := mt900910Doc(t, "900", "CONF-JB", "EXP-1", "acct1",
+		time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC), 10000)
+
+	rep, err := l.ImportMT900910("acct1", []byte(doc))
+	if err != nil {
+		t.Fatalf("ImportMT900910: %v", err)
+	}
+	if rep.Match.Status != CAMT053Matched || rep.Match.EntryID != "jb-e1" {
+		t.Fatalf("match = %+v, want matched jb-e1", rep.Match)
+	}
+	if rep.Match.ExportReference != "" {
+		t.Errorf("export_reference = %q, want empty (journal wins)", rep.Match.ExportReference)
+	}
+}
+
+// Restart recovery (LG-486): the export registry is in-memory,
+// so a confirmation arriving before the outbound MT202 is
+// re-exported is unmatched; re-exporting the same :20: with
+// the same terms restores it (a warm re-export is a Duplicate),
+// and a fresh confirmation document then matches.
+func TestImportMT900910ExportRestartRecovery(t *testing.T) {
+	l := mt202ExportTestLedger(t, mustAuditLog(t))
+	mt900910Seed(t, l, "rr-e0", "bank", "acct1", "unrelated-key", 10000,
+		time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), false)
+	vd := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+
+	first, err := l.ImportMT900910("acct1", []byte(mt900910Doc(t, "900", "CONF-R1", "MT202-REF-1", "acct1", vd, 250000)))
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	if first.Match.Status != CAMT053Unmatched {
+		t.Fatalf("first match = %+v, want unmatched (empty registry)", first.Match)
+	}
+
+	if _, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator"); err != nil {
+		t.Fatalf("re-export: %v", err)
+	}
+	again, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator")
+	if err != nil {
+		t.Fatalf("re-export again: %v", err)
+	}
+	if !again.Duplicate {
+		t.Errorf("re-export: duplicate = false, want true")
+	}
+
+	second, err := l.ImportMT900910("acct1", []byte(mt900910Doc(t, "900", "CONF-R2", "MT202-REF-1", "acct1", vd, 250000)))
+	if err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	if second.Match.Status != CAMT053Matched || second.Match.ExportReference != "MT202-REF-1" {
+		t.Fatalf("second match = %+v, want matched via export MT202-REF-1", second.Match)
+	}
+}

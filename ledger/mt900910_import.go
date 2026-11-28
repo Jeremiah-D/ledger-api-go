@@ -36,7 +36,7 @@ import (
 //
 // Matching follows mt942MatchLineLocked in form — reference, then
 // amount and direction — but :21: is an external reference, so the
-// match runs over a three-form key set, each truncated to 16x via
+// match runs over a four-form key set, each truncated to 16x via
 // mt940Truncate: (a) the entry's mt940LineRef (idempotency key,
 // else entry ID); (b) the same key with an "mt103-"/"mt202-"
 // prefix stripped — inbound MT103/MT202 post with
@@ -46,11 +46,22 @@ import (
 // when mt940LineRef is "payout/<id>/settle|clearing|fail" the
 // payout ID <id> is a key too, because the outbound MT103 :20:
 // is the payout ID, so a bank confirming that payout cites the
-// payout ID in :21:. Direction is account-centric, along
+// payout ID in :21:; (d) the outbound MT202 export registry —
+// when no journal row carries the :21:, a :20: registered in
+// mt202Exports (LG-470, LG-486) is the fourth form: the bank
+// confirms our own outbound MT202, which posts no journal row,
+// so the export record is compared on amount and direction
+// instead, with the :20: carried as ExportReference and EntryID
+// left empty. The journal is always consulted first: a :21:
+// that is both a journal key and an outbound :20: matches the
+// journal row. Direction is account-centric, along
 // mt942MatchLineLocked: the account as the debit leg reads C
 // (money in), as the credit leg D (money out). An MT900 debit
 // confirmation therefore requires the account to be the entry's
-// credit leg, an MT910 credit confirmation the debit leg.
+// credit leg, an MT910 credit confirmation the debit leg. An
+// outbound MT202 is the credit leg of its own account (money
+// out), so an MT900 agrees with it on direction and an MT910
+// does not.
 //
 // When :21: is "NONREF" — the export default when there is no
 // related reference to cite — there is no reference to match, and
@@ -167,14 +178,21 @@ func mt900910RefKeys(e JournalEntry) []string {
 // mt900910MatchLocked matches one MT900/MT910 confirmation against
 // the account's effective journal rows. In the reference path
 // (:21: other than "NONREF") candidates are the rows whose
-// three-form key set contains the :21:; in the NONREF fallback
-// candidates are the rows in the :32A: currency, on the expected
-// direction leg, whose effective value date falls on the :32A:
-// value date's calendar day. Pending-review rows never touched
-// balances and are excluded in both paths, like the export. The
-// :32A: value date is carried verbatim into the report in the
-// reference path and is not a match key there. Callers must hold
-// l.mu (either lock suffices).
+// three-form key set contains the :21:; when no row does, the
+// fourth form (LG-486) consults the outbound MT202 export
+// registry (mt202Exports, read directly under the held lock —
+// never via GetMT202Export, which would take the read lock
+// under this write lock and deadlock): a :20: registered there
+// is compared on amount and direction, with the :20: carried as
+// ExportReference and EntryID left empty — the export posts no
+// journal row, so there is no entry to name. In the NONREF
+// fallback candidates are the rows in the :32A: currency, on the
+// expected direction leg, whose effective value date falls on
+// the :32A: value date's calendar day. Pending-review rows never
+// touched balances and are excluded in both paths, like the
+// export. The :32A: value date is carried verbatim into the
+// report in the reference path and is not a match key there.
+// Callers must hold l.mu (either lock suffices).
 func (l *Ledger) mt900910MatchLocked(account AccountID, doc MT900910) MT942LineMatch {
 	// Direction is account-centric, mirroring the export: the
 	// account as the debit leg reads C (money in), as the credit
@@ -230,6 +248,33 @@ func (l *Ledger) mt900910MatchLocked(account AccountID, doc MT900910) MT942LineM
 		match.Status = CAMT053Unmatched
 		if doc.RelatedReference == "NONREF" {
 			match.Reason = "no journal entry matches this amount, currency, direction and value date"
+		} else if rec, ok := l.mt202Exports[doc.RelatedReference]; ok {
+			// Fourth form (LG-486): the :21: names an outbound
+			// MT202 this ledger rendered, registered in
+			// mt202Exports under its :20:. The export posts no
+			// journal row, so there is no entry to name —
+			// EntryID stays empty and ExportReference carries
+			// the :20:. The export is the credit leg of its
+			// own account (money out), so an MT900 debit
+			// confirmation agrees on direction and an MT910
+			// credit confirmation does not. Only amount and
+			// direction are compared — never currency (the
+			// journal path does not compare it either) and
+			// never the value date.
+			exportCredit := false
+			match.ExportReference = doc.RelatedReference
+			match.EntryAmountCents = rec.Request.AmountCents
+			match.EntryCredit = exportCredit
+			if rec.Request.AmountCents == doc.AmountCents && exportCredit == wantEntryCredit {
+				match.Status = CAMT053Matched
+			} else {
+				match.Status = CAMT053Mismatched
+				if rec.Request.AmountCents != doc.AmountCents {
+					match.Reason = fmt.Sprintf("amount differs: confirmation %d, export %d", doc.AmountCents, rec.Request.AmountCents)
+				} else {
+					match.Reason = "direction differs: confirmation and export disagree on the C/D mark"
+				}
+			}
 		} else {
 			match.Reason = "no journal entry carries this reference"
 		}

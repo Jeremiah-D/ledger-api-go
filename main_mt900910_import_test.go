@@ -118,3 +118,50 @@ func TestMT900910ImportEndpoint(t *testing.T) {
 		t.Errorf("metrics missing ledger_mt900910_imports_total 6")
 	}
 }
+
+// Full HTTP flow for the fourth match form (LG-486): export an
+// outbound MT202, then import an MT900 whose :21: cites the
+// export's :20: — the report matches via the registry, with
+// export_reference set and no journal entry named.
+func TestMT900910ImportEndpointExportMatch(t *testing.T) {
+	srv := httptest.NewServer(newRouter(ledger.New()))
+	defer srv.Close()
+	acct := "acct1"
+
+	code, _ := postJSON(t, srv.URL+"/entries",
+		`{"debit_account":"equity","credit_account":"`+acct+`","amount_cents":15000,"currency":"USD","memo":"seed","idempotency_key":"mt103-HTTP900X"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("post e1: status=%d", code)
+	}
+
+	code, _, _ = postTextResp(t, srv.URL+"/exports/mt202", mt202ValidBody)
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt202: status=%d", code)
+	}
+
+	raw, err := json.Marshal(map[string]string{"account": acct,
+		"mt900910": mt900910ImportDoc("HTTP-900-EX", "MT202REF1", acct, 250000)})
+	if err != nil {
+		t.Fatalf("marshal import body: %v", err)
+	}
+	code, body := postJSON(t, srv.URL+"/mt900910/import", string(raw))
+	if code != http.StatusOK {
+		t.Fatalf("POST /mt900910/import: status=%d body=%v", code, body)
+	}
+	match, _ := body["match"].(map[string]any)
+	if match == nil {
+		t.Fatalf("match missing from report: %v", body)
+	}
+	if s, _ := match["status"].(string); s != "matched" {
+		t.Errorf("match status = %q, want matched: %v", s, body)
+	}
+	if r, _ := match["export_reference"].(string); r != "MT202REF1" {
+		t.Errorf("export_reference = %q, want MT202REF1: %v", r, body)
+	}
+	if _, ok := match["entry_id"]; ok {
+		t.Errorf("entry_id present, want absent (no journal row): %v", body)
+	}
+	if n, _ := match["entry_amount_cents"].(float64); n != 250000 {
+		t.Errorf("entry_amount_cents = %v, want 250000: %v", match["entry_amount_cents"], body)
+	}
+}

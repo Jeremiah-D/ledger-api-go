@@ -100,7 +100,11 @@ var ErrMT942UnknownAccount = errors.New("ledger: mt942 inbound: account is unkno
 // unmatched (no journaled row carries this reference). EntryID
 // names the journaled row when one was found; Reason explains a
 // mismatch. Supplementary carries the line's :86: text verbatim
-// when the bank attached one.
+// when the bank attached one. ExportReference names the outbound
+// MT202 export (:20:) the reference hit instead of a journal row
+// (LG-486, MT900/MT910 import only): an outbound MT202 posts no
+// journal entry, so EntryID stays empty and the :20: is the
+// match's provenance. Other importers never set it.
 type MT942LineMatch struct {
 	Reference        string             `json:"reference"`
 	ValueDate        time.Time          `json:"value_date"`
@@ -112,6 +116,7 @@ type MT942LineMatch struct {
 	EntryAmountCents int64              `json:"entry_amount_cents,omitempty"`
 	EntryCredit      bool               `json:"entry_credit,omitempty"`
 	CandidateCount   int                `json:"candidate_count,omitempty"`
+	ExportReference  string             `json:"export_reference,omitempty"`
 	Reason           string             `json:"reason,omitempty"`
 }
 
