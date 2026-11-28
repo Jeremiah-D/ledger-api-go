@@ -397,3 +397,119 @@ func TestApplyMT999_GetterReturnsNarrativeVerbatim(t *testing.T) {
 		t.Errorf("getter returned a live slice, want a copy: %+v", again)
 	}
 }
+
+func TestApplyMT999_AnchorsInboundMT202(t *testing.T) {
+	al := mustAuditLog(t)
+	l := mt202ApplyLedger(t, al)
+	if _, err := l.ApplyMT202(mt202ApplyMsg("MT202-999-IN-1"), ""); err != nil {
+		t.Fatalf("ApplyMT202 setup: %v", err)
+	}
+
+	res, err := applyMT999Doc(t, l, mt999InboundDoc(t, "FREE-999-IN-10", "MT202-999-IN-1",
+		[]string{"CHARGES FOR TRANSFER MT202-999-IN-1"}))
+	if err != nil {
+		t.Fatalf("ApplyMT999: %v", err)
+	}
+	if res.MT202Ref != "MT202-999-IN-1" {
+		t.Errorf("mt202_ref = %q, want MT202-999-IN-1", res.MT202Ref)
+	}
+	if res.OutboundReference != "" || res.PayoutID != "" {
+		t.Errorf("outbound/payout = %q/%q, want both empty (MT202 anchor)", res.OutboundReference, res.PayoutID)
+	}
+	// The stored notification round-trips through the getter
+	// with the MT202 anchor attached.
+	stored, ok := l.GetMT999Received("FREE-999-IN-10")
+	if !ok {
+		t.Fatal("GetMT999Received = false, want the stored notification")
+	}
+	if stored.MT202Ref != "MT202-999-IN-1" {
+		t.Errorf("stored mt202_ref = %q, want MT202-999-IN-1", stored.MT202Ref)
+	}
+	// Exactly one received marker: the MT202 anchor reuses the
+	// mt999_received audit event, no new action.
+	if countOp(readAuditOps(t, al), "mt999_received") != 1 {
+		t.Error("mt999_received count != 1, want exactly one marker")
+	}
+}
+
+func TestApplyMT999_AnchorsOutboundMT202(t *testing.T) {
+	al := mustAuditLog(t)
+	l := mt202ExportTestLedger(t, al)
+	if _, err := l.ExportMT202Registered(mt202Sample(), "ledger-operator"); err != nil {
+		t.Fatalf("ExportMT202Registered setup: %v", err)
+	}
+
+	res, err := applyMT999Doc(t, l, mt999InboundDoc(t, "FREE-999-IN-11", "MT202-REF-1",
+		[]string{"CONFIRMING OUR TRANSFER MT202-REF-1"}))
+	if err != nil {
+		t.Fatalf("ApplyMT999: %v", err)
+	}
+	if res.MT202Ref != "MT202-REF-1" {
+		t.Errorf("mt202_ref = %q, want MT202-REF-1", res.MT202Ref)
+	}
+	if res.OutboundReference != "" || res.PayoutID != "" {
+		t.Errorf("outbound/payout = %q/%q, want both empty (MT202 anchor)", res.OutboundReference, res.PayoutID)
+	}
+	if countOp(readAuditOps(t, al), "mt999_received") != 1 {
+		t.Error("mt999_received count != 1, want exactly one marker")
+	}
+}
+
+func TestApplyMT999_UnregisteredMT202GoesToRepair(t *testing.T) {
+	al := mustAuditLog(t)
+	l := mt999InboundLedger(t, al)
+
+	// An MT202-shaped :21: with no registration in either
+	// tier is still unknown: the MT202 tier is a lookup, not
+	// a fallback that accepts any :21: shaped like a
+	// transfer reference.
+	res, err := applyMT999Doc(t, l, mt999InboundDoc(t, "FREE-999-IN-12", "MT202-UNKNOWN-1",
+		[]string{"ANSWER TO NOTHING WE SENT"}))
+	if !errors.Is(err, ErrMT999UnknownReference) {
+		t.Errorf("err = %v, want ErrMT999UnknownReference", err)
+	}
+	if res.RepairID == "" {
+		t.Error("repair_id empty, want the parked repair record")
+	}
+	if _, ok := l.GetMT999Received("FREE-999-IN-12"); ok {
+		t.Error("GetMT999Received = true for a parked notification, want false")
+	}
+}
+
+func TestApplyMT999_PayoutBeatsMT202(t *testing.T) {
+	al := mustAuditLog(t)
+	l := mt999InboundLedger(t, al)
+	// The MT202 apply needs the funded nostro accounts the
+	// payout fixture does not seed.
+	if _, _, err := l.Post(JournalEntry{ID: "fund-nostro", DebitAccount: "nostro-acct", CreditAccount: "bank", AmountCents: 1000000, Currency: "USD"}); err != nil {
+		t.Fatalf("fund Post: %v", err)
+	}
+	if _, err := l.RegisterNostroAccount("nostro-acct", "DEUTDEFF", NostroKindNostro); err != nil {
+		t.Fatalf("RegisterNostroAccount nostro: %v", err)
+	}
+	if _, err := l.RegisterNostroAccount("vostro-acct", "BNPAFRPP", NostroKindVostro); err != nil {
+		t.Fatalf("RegisterNostroAccount vostro: %v", err)
+	}
+	p := mt103SubmittedPayout(t, l, "po-mt999-both", 250_000)
+	// The same string names both a payout and an applied
+	// inbound MT202's :20:: the payout tier wins — the :21:
+	// is a payout anchor before it is a transfer anchor.
+	if _, err := l.ApplyMT202(mt202ApplyMsg(p.ID), ""); err != nil {
+		t.Fatalf("ApplyMT202 setup: %v", err)
+	}
+
+	res, err := applyMT999Doc(t, l, mt999InboundDoc(t, "FREE-999-IN-13", p.ID,
+		[]string{"CHARGES FOR PAYMENT"}))
+	if err != nil {
+		t.Fatalf("ApplyMT999: %v", err)
+	}
+	if res.PayoutID != p.ID {
+		t.Errorf("payout_id = %q, want %q", res.PayoutID, p.ID)
+	}
+	if res.MT202Ref != "" {
+		t.Errorf("mt202_ref = %q, want empty (payout tier wins)", res.MT202Ref)
+	}
+	if res.OutboundReference != "" {
+		t.Errorf("outbound_reference = %q, want empty (payout tier wins)", res.OutboundReference)
+	}
+}

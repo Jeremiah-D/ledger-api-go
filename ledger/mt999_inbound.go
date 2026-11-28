@@ -15,7 +15,7 @@ import (
 // return leg, the MT999 twin of the MT195/MT196 loop (LG-460 /
 // LG-462).
 //
-// The :21: anchors in two tiers, in order:
+// The :21: anchors in three tiers, in order:
 //
 //  1. Our outbound MT999: the :21: is our outbound message's
 //     :20:, looked up in mt999Exports — the correspondent
@@ -25,8 +25,19 @@ import (
 //     payouts — the :21: can also carry a transfer/payout ID
 //     (see the mt999.go header note), the ApplyMT190
 //     (mt190_inbound.go, LG-454) :21:→payout shape.
+//  3. An MT202 transfer: the :21: is an MT202 :20:, looked up
+//     in mt202Applied first (an inbound MT202 the ledger
+//     applied, LG-442), then in mt202Exports (our outbound
+//     MT202, LG-470) — the transfer half of the :21:'s
+//     "transfer/payout ID" note (see the mt999.go header note),
+//     the MT290 (LG-484) two-tier shape reused as the third
+//     tier here. Either tier hit accepts the notification;
+//     on an overlap the inbound tier wins, along the MT290
+//     (a)/(b) order. A pure lookup: no amount, currency, or
+//     date is checked — a free-format reply carries no
+//     amount to check against.
 //
-// A :21: that matches neither tier is fail-closed into the
+// A :21: that matches none of the three tiers is fail-closed into the
 // repair queue (RepairReasonUnknownRoute, the camt.055 shape,
 // along ApplyMT292 and ApplyCAMT058: the returned result carries
 // the repair ID alongside the ErrMT999UnknownReference error),
@@ -66,7 +77,8 @@ import (
 
 // ErrMT999UnknownReference is returned by ApplyMT999 when the
 // inbound notification's :21: names neither an outbound MT999
-// export nor a payout: the notification has no anchor, so it is
+// export, nor a payout, nor an MT202 (inbound applied or
+// outbound exported): the notification has no anchor, so it is
 // parked in the repair queue fail-closed rather than dropped.
 // It is a 422-class error.
 var ErrMT999UnknownReference = errors.New("ledger: mt999 inbound: unknown :21: related reference")
@@ -91,6 +103,13 @@ type MT999ApplyResult struct {
 	// notification answers an outbound MT999 instead, or
 	// carries no :21: at all.
 	PayoutID string `json:"payout_id,omitempty"`
+	// MT202Ref is the MT202 transfer the notification is about
+	// — the :21: resolved against mt202Applied (an inbound
+	// MT202 the ledger applied) or mt202Exports (our outbound
+	// MT202). Empty when the notification anchors to an
+	// outbound MT999 or a payout instead, or carries no :21:
+	// at all.
+	MT202Ref string `json:"mt202_ref,omitempty"`
 	// Narrative is the :79: narrative, verbatim.
 	Narrative []string `json:"narrative,omitempty"`
 	// RepairID is the repair queue record for a parked
@@ -172,7 +191,8 @@ func (l *Ledger) parkMT999Notification(m MT999, actor string) (string, error) {
 // ApplyMT999 applies one parsed inbound SWIFT FIN MT999
 // free-format notification: it registers the correspondent
 // bank's notification against what its :21: names — first our
-// outbound MT999's :20:, then a payout ID — verbatim, with the
+// outbound MT999's :20:, then a payout ID, then an MT202 :20:
+// (inbound applied, then outbound exported) — verbatim, with the
 // :79: narrative as received, never re-derived from live facts.
 //
 // An empty :21: registers a standalone notification with no
@@ -224,9 +244,11 @@ func (l *Ledger) ApplyMT999(m MT999, actor string) (MT999ApplyResult, error) {
 	}
 	l.mu.RUnlock()
 
-	// The :21: anchor, two tiers in order: our outbound MT999
-	// first, then a payout. An empty :21: needs no anchor at
-	// all — a standalone notification registers directly.
+	// The :21: anchor, three tiers in order: our outbound MT999
+	// first, then a payout, then an MT202 (inbound applied
+	// before outbound exported, along the MT290 (a)/(b) order).
+	// An empty :21: needs no anchor at all — a standalone
+	// notification registers directly.
 	res := MT999ApplyResult{
 		Reference:        m.TransactionReference,
 		RelatedReference: m.RelatedReference,
@@ -236,12 +258,16 @@ func (l *Ledger) ApplyMT999(m MT999, actor string) (MT999ApplyResult, error) {
 		l.mu.RLock()
 		_, outbound := l.mt999Exports[m.RelatedReference]
 		_, payout := l.payouts[m.RelatedReference]
+		_, inMT202 := l.mt202Applied[m.RelatedReference]
+		_, outMT202 := l.mt202Exports[m.RelatedReference]
 		l.mu.RUnlock()
 		switch {
 		case outbound:
 			res.OutboundReference = m.RelatedReference
 		case payout:
 			res.PayoutID = m.RelatedReference
+		case inMT202, outMT202:
+			res.MT202Ref = m.RelatedReference
 		default:
 			repairID, parkErr := l.parkMT999Notification(m, actor)
 			if parkErr != nil {

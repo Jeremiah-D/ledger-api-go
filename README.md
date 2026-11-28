@@ -8717,10 +8717,12 @@ Go: `ledger.MT999` / `ledger.ParseMT999` / `ledger.ExportMT999`（纯
 对方银行回一封 `MT999` 自由格式回音时，发 SWIFT FIN
 `MT999` 入站登记：报文形态与出站同形（block 1/2/3/4，`:20:` /
 `:21:` / `:79:`）。`:20:` 为回音自身引用（幂等键），`:21:` 为
-锚定分两档——先查我方出站 `MT999` 的 `:20:` 注册表（对方答复
+锚定分三档——先查我方出站 `MT999` 的 `:20:` 注册表（对方答复
 我方发出的 `MT999`，沿 `MT196` 的 `:21:` 回指），无匹配再查付
 款（`:21:` 亦可载 transfer/payout ID，沿 `ApplyMT190` 的
-`:21:→payout` 形态）；`:21:` 为空则无锚独立通知，直接登记——无
+`:21:→payout` 形态），再无匹配查 `MT202` 划转（`:21:` 命中已应
+用入站 `MT202` 或我方出站 `MT202` 的 `:20:`，入站先于出站，沿
+`MT290` 的两档顺序；纯查表、无形态可验）；`:21:` 为空则无锚独立通知，直接登记——无
 所指的自由格式通知仍是通知。HTTP 入站：`POST
 /exports/mt999/apply`，请求体为原始 FIN 文本（`text/plain`，
 `MaxBytesReader` 惯例），响应 200 写登记结果 JSON。
@@ -8728,9 +8730,12 @@ Go: `ledger.MT999` / `ledger.ParseMT999` / `ledger.ExportMT999`（纯
 语义：只登记、不记账——无分录、无余额/状态改动、无 version
 bump；回音按原样登记：`:79:` 逐字存入 `mt999Received` 注册表
 （键为 `:20:`，`:79:` 原文进登记记录、可经 getter 取回，不塞审
-计 details）。`:21:` 两档皆无时 fail-closed 进 repair queue
+计 details）。`:21:` 三档皆无时 fail-closed 进 repair queue
 （`unknown_route`，结果带 repair ID、错误为新哨兵
-`ErrMT999UnknownReference`），`422`；实施轮决断：不取 `404`——
+`ErrMT999UnknownReference`），`422`；注册表皆为内存态：重启后
+到的回音，在重应用入站 `MT202`（`POST /exports/mt202/apply`）
+或重导出出站 `MT202`（`POST /exports/mt202`）同一 `:20:` 重登
+记前，仍进 repair。实施轮决断：不取 `404`——
 入站的银行回音绝不能无记录地丢掉，且出站注册表是内存态、重启
 即空，重启后到的合法迟复若走 `404` 将无迹可查。同 `:20:` 同
 terms（同 `:21:`、同 `:79:` 正文逐字）复放幂等 no-op 回已登记回

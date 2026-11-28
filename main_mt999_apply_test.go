@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -162,5 +163,53 @@ func TestMT999ApplyEndpoint_RegistersNotification(t *testing.T) {
 	}
 	if !strings.Contains(metricsBody, "ledger_mt999_applies_total 7") {
 		t.Errorf("metrics exposition missing ledger_mt999_applies_total 7:\n%s", metricsBody)
+	}
+}
+
+// Full flow through HTTP: apply an inbound MT202, register the
+// correspondent's MT999 reply against its :20:, and verify an
+// unregistered MT202 :20: is a 422.
+func TestMT999ApplyEndpoint_AnchorsMT202(t *testing.T) {
+	l := mt202HTTPSetup(t)
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+	applyURL := srv.URL + "/exports/mt999/apply"
+
+	// The inbound MT202 lands first: its :20: is the anchor.
+	code, body := postMT202Text(t, srv.URL+"/exports/mt202/apply", mt202HTTPDoc("MT202-HTTP-99"), "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt202/apply: status=%d body=%v", code, body)
+	}
+	doc := mt999HTTPDoc("F999-HTTP-MT202", "MT202-HTTP-99",
+		[]string{"CHARGES FOR TRANSFER MT202-HTTP-99"})
+	code, body = postMT195Text(t, applyURL, doc, "ops")
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt999/apply: status=%d body=%v", code, body)
+	}
+	if body["mt202_ref"] != "MT202-HTTP-99" {
+		t.Errorf("mt202_ref = %v, want MT202-HTTP-99", body["mt202_ref"])
+	}
+	if body["outbound_reference"] != nil || body["payout_id"] != nil {
+		t.Errorf("outbound/payout = %v/%v, want both absent (MT202 anchor)", body["outbound_reference"], body["payout_id"])
+	}
+	// An unregistered MT202 :20: is a 422 (parked fail-closed
+	// in the repair queue), and the error body carries the
+	// repair record ID.
+	unknown := mt999HTTPDoc("F999-HTTP-MT2-2", "MT202-HTTP-404",
+		[]string{"ANSWER TO NOTHING WE SENT"})
+	code, body = postMT195Text(t, applyURL, unknown, "ops")
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown MT202 :21:: status=%d body=%v, want 422", code, body)
+	}
+	if body["repair_id"] == nil || body["repair_id"] == "" {
+		t.Errorf("repair_id = %v, want the parked repair record", body["repair_id"])
+	}
+	// The metrics counter counts every MT999 apply served.
+	code, _, metricsBody := getBody(t, srv.URL+"/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("GET /metrics: status=%d", code)
+	}
+	if !strings.Contains(metricsBody, "ledger_mt999_applies_total 2") {
+		t.Errorf("metrics exposition missing ledger_mt999_applies_total 2:\n%s", metricsBody)
 	}
 }

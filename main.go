@@ -10244,10 +10244,11 @@ func (s *server) handleMT999Export(w http.ResponseWriter, r *http.Request) {
 // registers a correspondent bank's SWIFT FIN MT999 free-format
 // notification — the inbound half of the MT999 lifecycle, closing
 // the half LG-458 opened. The body is the raw MT999 FIN text; its
-// :21: anchors the notification in two tiers — first to our
+// :21: anchors the notification in three tiers — first to our
 // outbound MT999's :20: (registered by POST /exports/mt999), then
-// to a payout ID — and an empty :21: registers a standalone
-// notification. Registering a notification moves nothing: no
+// to a payout ID, then to an MT202 :20: (an inbound MT202 the
+// ledger applied, or our outbound MT202) — and an empty :21:
+// registers a standalone notification. Registering a notification moves nothing: no
 // journal entry, no payout status change, no gpi advance, no
 // version bump. A re-sent :20: with the same terms is an
 // idempotent no-op returning the stored notification; a :20:
