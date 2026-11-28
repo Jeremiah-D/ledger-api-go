@@ -9650,8 +9650,18 @@ line by line: `POST /mt940/import` takes `{"account": "<id>",
 reconciliation report. Each `:61:` line is matched against the
 journal by its reference (the entry's idempotency key, else the
 journal entry ID, truncated to `16x`), with amount and direction
-compared per line; the `:62F:` closing balance is compared with
-the ledger balance folded at the end of the closing day. The
+compared per line; a line whose reference names no journal row
+but an outbound MT202 this ledger rendered is matched against
+the export record instead — amount, currency and direction
+compared, `entry_id` left empty and `export_reference` carrying
+the `:20:`. The export registry is in-memory, so after a restart
+a statement arriving before the MT202 is re-exported is still
+unmatched, and re-exporting the same `:20:` with the same terms
+restores the match (re-importing the same document still returns
+the stored report). The `:62F:` comparison still folds the
+journal only, so a line matched to an outbound MT202 leaves a
+balance residual equal to its amount in `balance_mismatches`.
+The `:62F:` closing balance is compared with the ledger balance folded at the end of the closing day. The
 parser is the strict inverse of `RenderMT940Statement` — the
 bare tag block `:20: :25: :28C: :60F: (:61: [:86:])* :62F: :64:`
 in canonical order, CRLF tolerated, no `:65:` (an MT940 statement

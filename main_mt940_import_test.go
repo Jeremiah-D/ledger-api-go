@@ -118,3 +118,63 @@ func TestMT940ImportEndpoint_ImportsAndReturnsReport(t *testing.T) {
 		t.Errorf("metrics missing ledger_mt940_imports_total 6")
 	}
 }
+
+// A :61: line citing an outbound MT202 this ledger rendered
+// (LG-487) matches through HTTP: POST /exports/mt202 registers
+// the transfer, POST /mt940/import matches the statement line
+// against the export record, with export_reference in the report
+// and no entry_id — the export posts no journal row. The :62F:
+// residual is expected (the balance fold reads the journal only)
+// and is not asserted here.
+func TestMT940ImportEndpoint_MatchesOutboundMT202Export(t *testing.T) {
+	l := ledger.New()
+	if err := l.SetExternalMapping("acct1", ledger.ExternalSystemMT940, "DE89370400440532013000", "test"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(newRouter(l))
+	defer srv.Close()
+
+	exportBody := `{"sender_lt":"BANKUS33","receiver_lt":"BANKDEFFXXXX","transaction_reference":"MT202-REF-1","related_reference":"ORIG-REF-9","value_date":"2026-10-22","currency":"USD","amount_cents":250000,"ordering_institution_bic":"BANKUS33","beneficiary_institution_bic":"BANKDEFF"}`
+	code, _, msg := postTextResp(t, srv.URL+"/exports/mt202", exportBody)
+	if code != http.StatusOK {
+		t.Fatalf("POST /exports/mt202: status=%d body=%s, want 200", code, msg)
+	}
+
+	doc := strings.Join([]string{
+		":20:HTTP-940-EX",
+		":25:DE89370400440532013000",
+		":28C:1/1",
+		":60F:C261005USD0,00",
+		":61:2610051005D2500,00NTRF//MT202-REF-1",
+		":62F:D261005USD2500,00",
+		":64:D261005USD2500,00",
+	}, "\n")
+	raw, err := json.Marshal(map[string]string{"account": "acct1", "mt940": doc})
+	if err != nil {
+		t.Fatalf("marshal import body: %v", err)
+	}
+	code, body := postJSON(t, srv.URL+"/mt940/import", string(raw))
+	if code != http.StatusOK {
+		t.Fatalf("POST /mt940/import: status=%d body=%v, want 200", code, body)
+	}
+	if n, _ := body["matched"].(float64); n != 1 {
+		t.Errorf("matched = %v, want 1", body["matched"])
+	}
+	if n, _ := body["unmatched"].(float64); n != 0 {
+		t.Errorf("unmatched = %v, want 0", body["unmatched"])
+	}
+	lines, _ := body["lines"].([]any)
+	if len(lines) != 1 {
+		t.Fatalf("lines = %v, want 1", body["lines"])
+	}
+	line, _ := lines[0].(map[string]any)
+	if line["status"] != "matched" {
+		t.Errorf("line status = %v, want matched", line["status"])
+	}
+	if line["export_reference"] != "MT202-REF-1" {
+		t.Errorf("export_reference = %v, want MT202-REF-1", line["export_reference"])
+	}
+	if _, hasEntry := line["entry_id"]; hasEntry {
+		t.Errorf("entry_id present = %v, want absent (the export posts no journal row)", line["entry_id"])
+	}
+}

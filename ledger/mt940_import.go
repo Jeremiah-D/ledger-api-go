@@ -15,8 +15,10 @@ import (
 // (LG-103). A bank hands us an MT940 customer statement; ParseMT940
 // parses it and ImportMT940 returns a pre-posting reconciliation
 // report: every :61: line is matched against the journal by its
-// reference, and the :62F: closing balance is compared with the
-// ledger balance folded at the end of the closing day.
+// reference — or, when no journal row carries it, against an
+// outbound MT202 this ledger rendered (LG-487) — and the :62F:
+// closing balance is compared with the ledger balance folded at
+// the end of the closing day.
 //
 // Like the camt.052 import (LG-408) and the MT941 import (LG-444),
 // this is deliberately a draft, not a posting: it writes no journal
@@ -89,8 +91,13 @@ type MT940BalanceMismatch struct {
 // reference, equal amount and direction), mismatched (one row with
 // this reference but a different amount or direction, or several
 // rows sharing the truncated reference), unmatched (no journaled
-// row carries this reference). EntryID names the journaled row
-// when one was found; Reason explains a mismatch.
+// row carries this reference). A line whose reference names no
+// journal row but an outbound MT202 this ledger rendered is
+// matched against the export record instead (LG-487): amount,
+// currency and direction are compared, EntryID stays empty — the
+// export posts no journal row — and ExportReference carries the
+// :20:. EntryID names the journaled row when one was found;
+// Reason explains a mismatch.
 type MT940LineMatch struct {
 	Reference        string             `json:"reference"`
 	ValueDate        time.Time          `json:"value_date"`
@@ -101,6 +108,7 @@ type MT940LineMatch struct {
 	EntryAmountCents int64              `json:"entry_amount_cents,omitempty"`
 	EntryCredit      bool               `json:"entry_credit,omitempty"`
 	CandidateCount   int                `json:"candidate_count,omitempty"`
+	ExportReference  string             `json:"export_reference,omitempty"`
 	Reason           string             `json:"reason,omitempty"`
 }
 
@@ -493,7 +501,19 @@ func (l *Ledger) mt940KnownAccountLocked(acct AccountID) bool {
 // mt940LineRef (idempotency key, else entry ID) the statement
 // truncates to 16x. Pending-review rows never touched balances and
 // are excluded, like the export. The :61: line carries no currency,
-// so candidates must be in the statement's currency. Callers must
+// so candidates must be in the statement's currency. When no
+// journal row carries the reference, the second form (LG-487)
+// consults the outbound MT202 export registry (mt202Exports, read
+// directly under the held lock — never via GetMT202Export, which
+// would take the read lock under this write lock and deadlock):
+// a :20: registered there, in the statement's currency, is
+// compared on amount and direction, with the :20: carried as
+// ExportReference and EntryID left empty — the export posts no
+// journal row, so there is no entry to name. The journal is
+// always consulted first: a reference that is both a journal key
+// and an outbound :20: matches the journal row. An outbound MT202
+// is the credit leg of its own account (money out), so a D line
+// agrees with it on direction and a C line does not. Callers must
 // hold l.mu (either lock suffices).
 func (l *Ledger) mt940MatchLineLocked(account AccountID, currency string, line MT940Line) MT940LineMatch {
 	match := MT940LineMatch{
@@ -515,8 +535,39 @@ func (l *Ledger) mt940MatchLineLocked(account AccountID, currency string, line M
 	}
 	switch len(cands) {
 	case 0:
-		match.Status = CAMT053Unmatched
-		match.Reason = "no journal entry carries this reference"
+		// Second form (LG-487): the reference names an outbound
+		// MT202 this ledger rendered, registered in mt202Exports
+		// under its :20:. The registry is read directly under
+		// the held lock — never via GetMT202Export, which would
+		// take the read lock under this write lock and deadlock.
+		// The export is a candidate only in the statement's
+		// currency, along the journal path's currency filter: a
+		// :20: registered in another currency leaves the line
+		// unmatched exactly as if it were unregistered. The
+		// export is the credit leg of its own account (money
+		// out), so a D line agrees on direction and a C line
+		// does not. Only amount and direction are compared —
+		// never the value date (the :61: family precedent of
+		// not comparing dates).
+		if rec, ok := l.mt202Exports[line.Reference]; ok && rec.Request.Currency == currency {
+			exportCredit := false
+			match.ExportReference = line.Reference
+			match.EntryAmountCents = rec.Request.AmountCents
+			match.EntryCredit = exportCredit
+			if rec.Request.AmountCents == line.AmountCents && exportCredit == line.Credit {
+				match.Status = CAMT053Matched
+			} else {
+				match.Status = CAMT053Mismatched
+				if rec.Request.AmountCents != line.AmountCents {
+					match.Reason = fmt.Sprintf("amount differs: statement %d, export %d", line.AmountCents, rec.Request.AmountCents)
+				} else {
+					match.Reason = "direction differs: statement and export disagree on the C/D mark"
+				}
+			}
+		} else {
+			match.Status = CAMT053Unmatched
+			match.Reason = "no journal entry carries this reference"
+		}
 	case 1:
 		e := cands[0]
 		// Direction is account-centric, mirroring the export:
@@ -555,11 +606,17 @@ func (l *Ledger) mt940MatchLineLocked(account AccountID, currency string, line M
 // draft for the operator to review.
 //
 // Line matches: a line whose reference names no journaled row is
-// unmatched; one whose row disagrees on amount or direction is
-// mismatched, with both sides in the report. Neither fails the
-// import — the report is evidence, not a booking. Balances: a
-// :62F: that disagrees with the ledger lands in
-// BalanceMismatches and never fails the import.
+// unmatched — unless it names an outbound MT202 this ledger
+// rendered, which is matched against the export record instead
+// (LG-487: amount, currency and direction compared, EntryID left
+// empty, ExportReference carrying the :20:); one whose row (or
+// export) disagrees on amount or direction is mismatched, with
+// both sides in the report. Neither fails the import — the report
+// is evidence, not a booking. Balances: a :62F: that disagrees
+// with the ledger lands in BalanceMismatches and never fails the
+// import — the balance fold still reads the journal only, so a
+// line matched to an outbound MT202 leaves a residual equal to
+// its amount there.
 //
 // Idempotency: the ledger keeps every import report keyed by the
 // document's SHA-256. Importing the same document twice returns
